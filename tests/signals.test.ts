@@ -21,6 +21,8 @@ const polymarket: PolymarketQuote = {
     endTime: "2026-03-30T19:45:00.000Z",
   },
   status: "open",
+  slotAligned: true,
+  availabilityReason: null,
   outcomes: {
     up: {
       outcome: "UP",
@@ -69,6 +71,8 @@ const kalshi: KalshiQuote = {
     endTime: "2026-03-30T19:45:00.000Z",
   },
   status: "active",
+  slotAligned: true,
+  availabilityReason: null,
   outcomes: {
     yes: {
       outcome: "YES",
@@ -122,5 +126,28 @@ describe("signal engine", () => {
 
     expect(signal.eligible).toBe(false);
     expect(signal.reason).toBe("Pas d'amélioration suffisante");
+  });
+
+  it("blocks entry when Kalshi is not aligned on the same slot", () => {
+    const [signal] = buildSignals({
+      polymarket,
+      kalshi: {
+        ...kalshi,
+        slotAligned: false,
+        availabilityReason: "Marché Kalshi du créneau courant indisponible",
+        ref: {
+          ...kalshi.ref,
+          startTime: "2026-03-30T19:45:00.000Z",
+          endTime: "2026-03-30T20:00:00.000Z",
+          slotKey: "1774899900000",
+        },
+      },
+      settings,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.grossCost).toBeNull();
+    expect(signal.reason).toBe("Marché Kalshi du créneau courant indisponible");
   });
 });

@@ -433,7 +433,7 @@ export function buildDashboardResponse(
   slot: MarketSlot,
 ): DashboardResponse {
   const settings = getSettings(db);
-  const latestSnapshot = getLatestSnapshotForSlot(db, slot.key) ?? getLatestSnapshot(db);
+  const latestSnapshot = getLatestSnapshotForSlot(db, slot.key);
   const openTrades = getOpenTrades(db);
 
   return {

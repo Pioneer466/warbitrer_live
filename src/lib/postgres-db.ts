@@ -426,7 +426,7 @@ export async function buildMetrics(pool: Pool, settings: PaperSettings): Promise
 
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
   const settings = await getSettings(pool);
-  const latestSnapshot = (await getLatestSnapshotForSlot(pool, slot.key)) ?? (await getLatestSnapshot(pool));
+  const latestSnapshot = await getLatestSnapshotForSlot(pool, slot.key);
   const openTrades = await getOpenTrades(pool);
 
   return {

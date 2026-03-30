@@ -20,6 +20,7 @@ export type VenueMarketRef = {
   id: string;
   seriesTicker?: string;
   title: string;
+  slotKey?: string;
   slug?: string;
   ticker?: string;
   url: string;
@@ -40,6 +41,8 @@ export type OutcomeQuote = {
 export type PolymarketQuote = {
   ref: VenueMarketRef;
   status: "open" | "closed";
+  slotAligned: boolean;
+  availabilityReason: string | null;
   outcomes: {
     up: OutcomeQuote;
     down: OutcomeQuote;
@@ -63,6 +66,8 @@ export type PolymarketQuote = {
 export type KalshiQuote = {
   ref: VenueMarketRef;
   status: string;
+  slotAligned: boolean;
+  availabilityReason: string | null;
   outcomes: {
     yes: OutcomeQuote;
     no: OutcomeQuote;

@@ -25,6 +25,14 @@ export function createTradeFromSignal({
   slotStartTs: number;
   slotEndTs: number;
 }): PaperTrade {
+  if (
+    !signal.eligible ||
+    signal.grossCost === null ||
+    signal.legs.some((leg) => leg.price === null || leg.depth === null)
+  ) {
+    throw new Error("Impossible de créer un trade paper sans deux jambes exécutables sur le même créneau");
+  }
+
   const tradeId = crypto.randomUUID();
   const [polyLegSignal, kalshiLegSignal] = signal.legs;
   const polyFeeUsd = signal.estimatedFees > 0 && polyLegSignal.price !== null

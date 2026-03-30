@@ -13,9 +13,8 @@
 html {
   min-height: 100%;
   background:
-    radial-gradient(circle at top left, rgba(143, 124, 255, 0.12), transparent 36%),
-    radial-gradient(circle at top right, rgba(28, 231, 207, 0.08), transparent 24%),
-    linear-gradient(180deg, #06070b 0%, #090b11 40%, #05060a 100%);
+    radial-gradient(circle at top left, rgba(143, 124, 255, 0.08), transparent 30%),
+    linear-gradient(180deg, #07090e 0%, #0a0d14 45%, #080a10 100%);
 }
 
 body {
@@ -23,8 +22,9 @@ body {
   min-height: 100vh;
   color: #f5f7ff;
   font-family: "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
-  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0);
-  background-size: 22px 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0)),
+    transparent;
 }
 
 a {

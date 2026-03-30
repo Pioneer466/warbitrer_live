@@ -8,10 +8,10 @@ type ShellProps = {
 export function Shell({ activePath, children }: ShellProps) {
   return (
     <div className="min-h-screen">
-      <header className="sticky top-0 z-20 border-b border-white/6 bg-[#0b0d14]/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4 sm:px-6">
+      <header className="sticky top-0 z-20 border-b border-white/8 bg-[#090c12]/90 backdrop-blur">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6">
           <div className="flex items-center gap-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-lilac to-[#4f8cff] text-xl font-semibold text-white shadow-glow">
+            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-lilac to-[#4f8cff] text-lg font-semibold text-white">
               PA
             </div>
             <div>
@@ -22,7 +22,7 @@ export function Shell({ activePath, children }: ShellProps) {
                 Paper BTC 15m
               </p>
             </div>
-            <nav className="hidden items-center gap-2 rounded-2xl border border-white/6 bg-white/3 p-1 sm:flex">
+            <nav className="hidden items-center gap-1 rounded-2xl border border-white/8 bg-white/[0.03] p-1 sm:flex">
               <Tab href="/" active={activePath === "/"}>
                 Dashboard
               </Tab>
@@ -38,7 +38,7 @@ export function Shell({ activePath, children }: ShellProps) {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">{children}</main>
+      <main className="mx-auto max-w-6xl px-4 py-6 sm:px-6 sm:py-8">{children}</main>
     </div>
   );
 }
@@ -56,7 +56,7 @@ function Tab({
     <Link
       href={href}
       className={`rounded-xl px-4 py-2 text-sm font-medium transition ${
-        active ? "bg-white/10 text-white" : "text-mist hover:bg-white/5 hover:text-white"
+        active ? "bg-white/10 text-white" : "text-mist hover:bg-white/[0.05] hover:text-white"
       }`}
     >
       {children}
@@ -73,9 +73,9 @@ function Badge({
 }) {
   const toneClass =
     tone === "cyan"
-      ? "border-cyan/20 bg-cyan/10 text-cyan shadow-glow"
+      ? "border-cyan/20 bg-cyan/10 text-cyan"
       : tone === "amber"
-        ? "border-amber/20 bg-amber/10 text-amber shadow-warm"
+        ? "border-amber/20 bg-amber/10 text-amber"
         : "border-white/8 bg-white/5 text-mist";
 
   return (

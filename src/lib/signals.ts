@@ -20,6 +20,8 @@ export function buildSignals({
   settings,
   lastEntryCosts,
 }: SignalContext): PairSignal[] {
+  const marketAlignmentReason = getMarketAlignmentReason(polymarket, kalshi);
+
   return [
     buildSignal({
       combination: "POLY_UP_KALSHI_NO",
@@ -34,6 +36,7 @@ export function buildSignals({
       kalshi,
       settings,
       lastEntryCosts,
+      marketAlignmentReason,
     }),
     buildSignal({
       combination: "POLY_DOWN_KALSHI_YES",
@@ -48,6 +51,7 @@ export function buildSignals({
       kalshi,
       settings,
       lastEntryCosts,
+      marketAlignmentReason,
     }),
   ];
 }
@@ -65,6 +69,7 @@ function buildSignal({
   kalshi,
   settings,
   lastEntryCosts,
+  marketAlignmentReason,
 }: {
   combination: PairCombination;
   label: string;
@@ -78,8 +83,10 @@ function buildSignal({
   kalshi: KalshiQuote;
   settings: PaperSettings;
   lastEntryCosts: Partial<Record<PairCombination, number>>;
+  marketAlignmentReason: string | null;
 }): PairSignal {
-  const missingReason = getMissingReason(polyPrice, kalshiPrice, polyDepth, kalshiDepth);
+  const missingReason =
+    marketAlignmentReason ?? getMissingReason(polyPrice, kalshiPrice, polyDepth, kalshiDepth);
   if (missingReason) {
     return {
       combination,
@@ -194,6 +201,26 @@ function getMissingReason(
 
   if (polyDepth === null || kalshiDepth === null) {
     return "Profondeur indisponible";
+  }
+
+  return null;
+}
+
+function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuote) {
+  if (!polymarket.slotAligned) {
+    return polymarket.availabilityReason ?? "Marché Polymarket du créneau courant indisponible";
+  }
+
+  if (!kalshi.slotAligned) {
+    return kalshi.availabilityReason ?? "Marché Kalshi du créneau courant indisponible";
+  }
+
+  if (
+    polymarket.ref.slotKey &&
+    kalshi.ref.slotKey &&
+    polymarket.ref.slotKey !== kalshi.ref.slotKey
+  ) {
+    return "Marchés non alignés sur le même créneau";
   }
 
   return null;

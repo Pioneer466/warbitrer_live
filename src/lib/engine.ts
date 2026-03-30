@@ -25,7 +25,7 @@ export async function processTick(now = new Date()) {
   try {
     const [polymarket, kalshi] = await Promise.all([
       fetchPolymarketQuote(slot),
-      fetchKalshiQuote(),
+      fetchKalshiQuote(slot),
     ]);
 
     const signals = buildSignals({

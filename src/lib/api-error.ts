@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 
 export function createApiErrorResponse(error: unknown) {
-  const message = error instanceof Error ? error.message : "Erreur interne";
+  const message = getErrorMessage(error);
   const status = isConnectivityError(error) ? 503 : 500;
+
+  console.error("[api] request failed", error);
 
   return NextResponse.json(
     {
@@ -15,14 +17,41 @@ export function createApiErrorResponse(error: unknown) {
 }
 
 function isConnectivityError(error: unknown) {
-  if (!(error instanceof Error)) {
-    return false;
-  }
+  const message = getErrorMessage(error);
 
   return (
-    error.message.includes("ECONNREFUSED") ||
-    error.message.includes("ENOTFOUND") ||
-    error.message.includes("DATABASE_URL") ||
-    error.message.includes("connect")
+    message.includes("ECONNREFUSED") ||
+    message.includes("ENOTFOUND") ||
+    message.includes("DATABASE_URL") ||
+    message.includes("password authentication failed") ||
+    message.includes("connect")
   );
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const nested: string[] = error.errors
+      .map((entry) => getErrorMessage(entry))
+      .filter((entry) => entry.length > 0);
+
+    if (nested.length > 0) {
+      return nested.join(" | ");
+    }
+  }
+
+  if (error instanceof Error) {
+    if (error.message.length > 0) {
+      return error.message;
+    }
+
+    if (error.name.length > 0) {
+      return error.name;
+    }
+  }
+
+  if (typeof error === "string" && error.length > 0) {
+    return error;
+  }
+
+  return "Erreur interne";
 }

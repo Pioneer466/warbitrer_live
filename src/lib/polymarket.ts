@@ -59,6 +59,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     ref: {
       venue: "polymarket",
       id: market.id,
+      slotKey: slot.key,
       slug: market.slug,
       title: market.question,
       url: `https://polymarket.com/event/${market.slug}`,
@@ -66,6 +67,8 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
       endTime: market.endDate,
     },
     status: market.closed ? "closed" : "open",
+    slotAligned: true,
+    availabilityReason: null,
     outcomes: {
       up: upQuote,
       down: downQuote,

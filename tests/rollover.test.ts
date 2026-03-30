@@ -8,6 +8,7 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
     ref: {
       venue: "polymarket",
       id: "poly-market",
+      slotKey: slotKey,
       slug: `btc-updown-15m-${Math.floor(slotStartTs / 1000)}`,
       title: "Poly BTC",
       url: "https://polymarket.com/event/test",
@@ -15,6 +16,8 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
       endTime: new Date(slotStartTs + 900_000).toISOString(),
     },
     status: "open",
+    slotAligned: true,
+    availabilityReason: null,
     outcomes: {
       up: { outcome: "UP", buyPrice: 0.4, sellPrice: 0.41, midPrice: 0.405, bestBid: 0.41, bestAsk: 0.4, depth: 100 },
       down: { outcome: "DOWN", buyPrice: 0.6, sellPrice: 0.61, midPrice: 0.605, bestBid: 0.61, bestAsk: 0.6, depth: 100 },
@@ -31,6 +34,7 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
     ref: {
       venue: "kalshi",
       id: "kalshi-market",
+      slotKey: slotKey,
       ticker: "kalshi-market",
       seriesTicker: "KXBTC15M",
       title: "Kalshi BTC",
@@ -39,6 +43,8 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
       endTime: new Date(slotStartTs + 900_000).toISOString(),
     },
     status: "active",
+    slotAligned: true,
+    availabilityReason: null,
     outcomes: {
       yes: { outcome: "YES", buyPrice: 0.34, sellPrice: 0.33, midPrice: 0.335, bestBid: 0.33, bestAsk: 0.34, depth: 120 },
       no: { outcome: "NO", buyPrice: 0.49, sellPrice: 0.48, midPrice: 0.485, bestBid: 0.48, bestAsk: 0.49, depth: 120 },
