@@ -1,3 +1,4 @@
+import { fetchBtcSlotResolution, toKalshiResolution } from "@/lib/btc-resolution";
 import { getCurrentSlot } from "@/lib/slot";
 import { fetchKalshiQuote, fetchKalshiResolution } from "@/lib/kalshi";
 import { fetchPolymarketQuote, fetchPolymarketResolution } from "@/lib/polymarket";
@@ -13,6 +14,8 @@ import {
 import { buildSignals } from "@/lib/signals";
 import { createTradeFromSignal, settleTrade } from "@/lib/settlement";
 
+const RESOLUTION_GRACE_MS = 5_000;
+
 export async function processTick(now = new Date()) {
   const settings = await readSettings();
   const slot = getCurrentSlot(now);
@@ -21,6 +24,8 @@ export async function processTick(now = new Date()) {
     lastTickAt: now.getTime(),
     lastError: null,
   });
+
+  const errors: string[] = [];
 
   try {
     const [polymarket, kalshi] = await Promise.all([
@@ -58,50 +63,100 @@ export async function processTick(now = new Date()) {
         }),
       );
     }
-
-    await settleResolvedTrades(now);
-    await writeWorkerState({
-      currentSlotKey: slot.key,
-      lastTickAt: now.getTime(),
-      lastError: null,
-    });
   } catch (error) {
-    await writeWorkerState({
-      currentSlotKey: slot.key,
-      lastTickAt: now.getTime(),
-      lastError: error instanceof Error ? error.message : "Erreur inconnue",
-    });
-    throw error;
+    errors.push(toErrorMessage(error));
+  }
+
+  try {
+    await settleResolvedTrades(now);
+  } catch (error) {
+    errors.push(toErrorMessage(error));
+  }
+
+  await writeWorkerState({
+    currentSlotKey: slot.key,
+    lastTickAt: now.getTime(),
+    lastError: errors[0] ?? null,
+  });
+
+  if (errors.length > 0) {
+    throw new Error(errors.join(" | "));
   }
 }
 
 export async function settleResolvedTrades(now = new Date()) {
-  const openTrades = (await readOpenTrades()).filter((trade) => trade.slotEndTs <= now.getTime());
+  const openTrades = (await readOpenTrades()).filter(
+    (trade) => trade.slotEndTs + RESOLUTION_GRACE_MS <= now.getTime(),
+  );
+  const resolutionCache = new Map<
+    string,
+    {
+      polyResolution: "UP" | "DOWN" | null;
+      kalshiResolution: "YES" | "NO" | null;
+    }
+  >();
 
   for (const trade of openTrades) {
-    const polyLeg = trade.legs.find((leg) => leg.venue === "polymarket");
-    const kalshiLeg = trade.legs.find((leg) => leg.venue === "kalshi");
+    try {
+      const polyLeg = trade.legs.find((leg) => leg.venue === "polymarket");
+      const kalshiLeg = trade.legs.find((leg) => leg.venue === "kalshi");
 
-    if (!polyLeg || !kalshiLeg) {
+      if (!polyLeg || !kalshiLeg) {
+        continue;
+      }
+
+      const resolutionKey = `${trade.slotStartTs}:${trade.slotEndTs}`;
+
+      if (!resolutionCache.has(resolutionKey)) {
+        let referenceResolution: "UP" | "DOWN" | null = null;
+
+        try {
+          referenceResolution = await fetchBtcSlotResolution(trade.slotStartTs, trade.slotEndTs);
+        } catch {
+          referenceResolution = null;
+        }
+
+        let polyResolution: "UP" | "DOWN" | null = referenceResolution;
+        let kalshiResolution: "YES" | "NO" | null =
+          referenceResolution === null ? null : toKalshiResolution(referenceResolution);
+
+        if (!polyResolution || !kalshiResolution) {
+          [polyResolution, kalshiResolution] = await Promise.all([
+            fetchPolymarketResolution(
+              trade.slotKey
+                ? `btc-updown-15m-${Math.floor(trade.slotStartTs / 1000)}`
+                : polyLeg.marketRef,
+            ),
+            fetchKalshiResolution(kalshiLeg.marketRef),
+          ]);
+        }
+
+        resolutionCache.set(resolutionKey, {
+          polyResolution,
+          kalshiResolution,
+        });
+      }
+
+      const { polyResolution, kalshiResolution } = resolutionCache.get(resolutionKey)!;
+
+      if (!polyResolution || !kalshiResolution) {
+        continue;
+      }
+
+      await resolveTrade(
+        settleTrade({
+          trade,
+          polyResolution,
+          kalshiResolution,
+          resolvedAt: now.getTime(),
+        }),
+      );
+    } catch {
       continue;
     }
-
-    const [polyResolution, kalshiResolution] = await Promise.all([
-      fetchPolymarketResolution(trade.slotKey ? `btc-updown-15m-${Math.floor(trade.slotStartTs / 1000)}` : polyLeg.marketRef),
-      fetchKalshiResolution(kalshiLeg.marketRef),
-    ]);
-
-    if (!polyResolution || !kalshiResolution) {
-      continue;
-    }
-
-    await resolveTrade(
-      settleTrade({
-        trade,
-        polyResolution,
-        kalshiResolution,
-        resolvedAt: now.getTime(),
-      }),
-    );
   }
+}
+
+function toErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Erreur inconnue";
 }

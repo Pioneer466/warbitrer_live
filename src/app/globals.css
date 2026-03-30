@@ -4,6 +4,10 @@
 
 :root {
   color-scheme: dark;
+  --bg-0: #080a0f;
+  --bg-1: #0d1119;
+  --text-0: #f4f6ff;
+  --text-1: #a3acc5;
 }
 
 * {
@@ -12,15 +16,20 @@
 
 html {
   min-height: 100%;
-  background: linear-gradient(180deg, #090b11 0%, #0b0e15 100%);
+  background:
+    radial-gradient(circle at top, rgba(78, 95, 171, 0.18), transparent 34%),
+    linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
-  color: #f5f7ff;
+  color: var(--text-0);
   font-family: "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
-  background: transparent;
+  background:
+    radial-gradient(rgba(255, 255, 255, 0.045) 0.7px, transparent 0.7px),
+    transparent;
+  background-size: 18px 18px;
 }
 
 a {

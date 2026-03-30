@@ -119,6 +119,14 @@ export async function readTrades(): Promise<TradesResponse> {
   return sqlite.buildTradesResponse(sqlite.getDb());
 }
 
+export async function resetPaperState() {
+  if (usePostgres()) {
+    return postgres.resetPaperState(await postgres.getPgDb());
+  }
+  const sqlite = await getSqlite();
+  return sqlite.resetPaperState(sqlite.getDb());
+}
+
 export async function readHistoryPoints(slot: MarketSlot): Promise<HistoryPoint[]> {
   if (usePostgres()) {
     return postgres.buildHistoryPoints(await postgres.getPgDb(), slot);

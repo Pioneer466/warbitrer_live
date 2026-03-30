@@ -112,10 +112,10 @@ describe("signal engine", () => {
     expect(signal.thresholdMet).toBe(true);
     expect(signal.eligible).toBe(true);
     expect(signal.units).toBe(1);
-    expect(signal.legs[0].stakeUsd).toBe(50);
-    expect(signal.legs[1].stakeUsd).toBe(50);
-    expect(signal.legs[0].units).toBeCloseTo(119.047619, 5);
-    expect(signal.legs[1].units).toBeCloseTo(102.040816, 5);
+    expect(signal.legs[0].stakeUsd).toBe(25);
+    expect(signal.legs[1].stakeUsd).toBe(25);
+    expect(signal.legs[0].units).toBeCloseTo(59.523809, 5);
+    expect(signal.legs[1].units).toBeCloseTo(51.020408, 5);
   });
 
   it("blocks re-entry when the improvement is below one cent", () => {

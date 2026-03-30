@@ -157,7 +157,7 @@ function buildSignal({
   if (!thresholdMet) {
     reason = "Seuil brut non atteint";
   } else if (!hasDepth) {
-    reason = "Liquidité insuffisante pour exécuter 50$ de chaque côté";
+    reason = "Liquidité insuffisante pour exécuter 25$ de chaque côté";
   } else if (!meetsImprovement) {
     reason = "Pas d'amélioration suffisante";
   }

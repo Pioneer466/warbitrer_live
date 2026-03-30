@@ -4,6 +4,7 @@ type Series = {
   key: string;
   label: string;
   color: string;
+  fill: string;
   values: Array<number | null>;
 };
 
@@ -21,6 +22,8 @@ export function LineChart({ series, labels }: LineChartProps) {
   const minValue = flatValues.length > 0 ? Math.min(...flatValues, 0) : 0;
   const maxValue = flatValues.length > 0 ? Math.max(...flatValues, 1) : 1;
   const range = Math.max(maxValue - minValue, 0.05);
+  const baselineY = HEIGHT - PADDING;
+  const labelStep = labels.length > 6 ? Math.ceil(labels.length / 6) : 1;
 
   function getX(index: number) {
     if (labels.length <= 1) {
@@ -34,7 +37,7 @@ export function LineChart({ series, labels }: LineChartProps) {
   }
 
   return (
-    <div className="overflow-hidden rounded-[28px] border border-white/8 bg-white/[0.02] p-4">
+    <div className="overflow-hidden rounded-[24px] border border-white/6 bg-[#0b0e15] p-4">
       <svg viewBox={`0 0 ${WIDTH} ${HEIGHT}`} className="h-[260px] w-full">
         {Array.from({ length: 5 }).map((_, index) => {
           const y = PADDING + (index / 4) * (HEIGHT - PADDING * 2);
@@ -51,54 +54,76 @@ export function LineChart({ series, labels }: LineChartProps) {
           );
         })}
 
+        {Array.from({ length: 6 }).map((_, index) => {
+          const x = PADDING + (index / 5) * (WIDTH - PADDING * 2);
+          return (
+            <line
+              key={`vertical-${index}`}
+              x1={x}
+              x2={x}
+              y1={PADDING}
+              y2={HEIGHT - PADDING}
+              stroke="rgba(255,255,255,0.04)"
+              strokeWidth="1"
+            />
+          );
+        })}
+
         {series.map((line) => {
           const points = line.values
-            .map((value, index) => (value === null ? null : `${getX(index)},${getY(value)}`))
-            .filter((value): value is string => value !== null)
-            .join(" ");
+            .map((value, index) =>
+              value === null ? null : { x: getX(index), y: getY(value) },
+            )
+            .filter((value): value is { x: number; y: number } => value !== null);
+
+          const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
+          const areaPoints =
+            points.length > 1
+              ? [
+                  `${points[0].x},${baselineY}`,
+                  ...points.map((point) => `${point.x},${point.y}`),
+                  `${points[points.length - 1].x},${baselineY}`,
+                ].join(" ")
+              : "";
+
+          if (points.length === 0) {
+            return null;
+          }
 
           return (
             <g key={line.key}>
+              {areaPoints ? <polygon points={areaPoints} fill={line.fill} /> : null}
               <polyline
                 fill="none"
-                points={points}
+                points={linePoints}
                 stroke={line.color}
                 strokeLinejoin="round"
                 strokeLinecap="round"
-                strokeWidth="3"
+                strokeWidth="2"
               />
-              {line.values.map((value, index) =>
-                value === null ? null : (
-                  <circle
-                    key={`${line.key}-${index}`}
-                    cx={getX(index)}
-                    cy={getY(value)}
-                    r="2.4"
-                    fill={line.color}
-                  />
-                ),
-              )}
             </g>
           );
         })}
 
-        {labels.map((label, index) => (
-          <text
-            key={`${label}-${index}`}
-            x={getX(index)}
-            y={HEIGHT - 4}
-            fill="rgba(143, 152, 179, 0.88)"
-            fontSize="11"
-            textAnchor="middle"
-          >
-            {label}
-          </text>
-        ))}
+        {labels.map((label, index) =>
+          index % labelStep === 0 || index === labels.length - 1 ? (
+            <text
+              key={`${label}-${index}`}
+              x={getX(index)}
+              y={HEIGHT - 4}
+              fill="rgba(143, 152, 179, 0.72)"
+              fontSize="11"
+              textAnchor="middle"
+            >
+              {label}
+            </text>
+          ) : null,
+        )}
       </svg>
       <div className="mt-3 flex flex-wrap gap-4">
         {series.map((line) => (
-          <div key={line.key} className="flex items-center gap-2 text-sm text-mist">
-            <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: line.color }} />
+          <div key={line.key} className="flex items-center gap-2 text-xs uppercase tracking-[0.16em] text-mist/70">
+            <span className="h-2 w-2 rounded-full" style={{ backgroundColor: line.color }} />
             {line.label}
           </div>
         ))}

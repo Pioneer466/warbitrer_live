@@ -455,6 +455,22 @@ export function buildTradesResponse(db: DatabaseSync): TradesResponse {
   };
 }
 
+export function resetPaperState(db: DatabaseSync) {
+  db.exec("BEGIN");
+  try {
+    db.prepare("DELETE FROM trade_legs").run();
+    db.prepare("DELETE FROM trades").run();
+    db.prepare("DELETE FROM snapshots").run();
+    db.prepare(
+      "UPDATE worker_state SET last_tick_at = NULL, current_slot_key = NULL, last_error = NULL WHERE id = 1",
+    ).run();
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 export function buildHistoryPoints(db: DatabaseSync, slot: MarketSlot): HistoryPoint[] {
   return getSnapshotsForSlot(db, slot.key).map((snapshot) => ({
     ts: snapshot.capturedAt,

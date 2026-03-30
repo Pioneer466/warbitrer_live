@@ -6,7 +6,8 @@ export const DEFAULT_DB_PATH =
 export const POLY_GAMMA_BASE = "https://gamma-api.polymarket.com";
 export const POLY_CLOB_BASE = "https://clob.polymarket.com";
 export const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
-export const FIXED_TRADE_NOTIONAL_USD = 100;
+export const COINBASE_EXCHANGE_BASE = "https://api.exchange.coinbase.com";
+export const FIXED_TRADE_NOTIONAL_USD = 50;
 export const FIXED_LEG_NOTIONAL_USD = FIXED_TRADE_NOTIONAL_USD / 2;
 
 export const DEFAULT_SETTINGS = {

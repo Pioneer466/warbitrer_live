@@ -454,6 +454,29 @@ export async function buildTradesResponse(pool: Pool): Promise<TradesResponse> {
   };
 }
 
+export async function resetPaperState(pool: Pool) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query("DELETE FROM trade_legs");
+    await client.query("DELETE FROM trades");
+    await client.query("DELETE FROM snapshots");
+    await client.query(
+      `
+        UPDATE worker_state
+        SET last_tick_at = NULL, current_slot_key = NULL, last_error = NULL
+        WHERE id = 1
+      `,
+    );
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<HistoryPoint[]> {
   const snapshots = await getSnapshotsForSlot(pool, slot.key);
   return snapshots.map((snapshot) => ({
