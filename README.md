@@ -42,6 +42,8 @@ Recommandé:
 
 - `DATABASE_URL`:
   - si défini, le stockage passe automatiquement sur Postgres.
+  - en local, une URL `localhost` est normale.
+  - sur Railway, il faut utiliser la variable injectée par le service Postgres Railway, pas `localhost`.
 - `PAPER_ARB_DB_PATH`:
   - optionnel en local si tu veux forcer un chemin SQLite.
 
