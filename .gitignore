@@ -1,0 +1,15 @@
+node_modules
+.next
+coverage
+dist
+npm-debug.log*
+*.log
+.env
+.env.*
+!.env.example
+data/*.db
+data/*.db-*
+data/*.sqlite
+data/*.sqlite-*
+tsconfig.tsbuildinfo
+.DS_Store
