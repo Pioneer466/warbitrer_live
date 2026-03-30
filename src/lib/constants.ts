@@ -9,6 +9,7 @@ export const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 export const COINBASE_EXCHANGE_BASE = "https://api.exchange.coinbase.com";
 export const FIXED_TRADE_NOTIONAL_USD = 50;
 export const FIXED_LEG_NOTIONAL_USD = FIXED_TRADE_NOTIONAL_USD / 2;
+export const ENTRY_CUTOFF_SECONDS = 20;
 
 export const DEFAULT_SETTINGS = {
   initialCapital: 10_000,

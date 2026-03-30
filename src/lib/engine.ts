@@ -38,6 +38,7 @@ export async function processTick(now = new Date()) {
       kalshi,
       settings,
       lastEntryCosts: await readLastEntryCosts(slot.key),
+      secondsRemaining: slot.secondsRemaining,
     });
 
     await writeSnapshot({

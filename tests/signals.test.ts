@@ -105,6 +105,7 @@ describe("signal engine", () => {
       kalshi,
       settings,
       lastEntryCosts: {},
+      secondsRemaining: 180,
     });
 
     expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
@@ -126,6 +127,7 @@ describe("signal engine", () => {
       lastEntryCosts: {
         POLY_UP_KALSHI_NO: 0.915,
       },
+      secondsRemaining: 180,
     });
 
     expect(signal.eligible).toBe(false);
@@ -148,10 +150,25 @@ describe("signal engine", () => {
       },
       settings,
       lastEntryCosts: {},
+      secondsRemaining: 180,
     });
 
     expect(signal.eligible).toBe(false);
     expect(signal.grossCost).toBeNull();
     expect(signal.reason).toBe("Marché Kalshi du créneau courant indisponible");
+  });
+
+  it("blocks entry in the last 20 seconds of the slot", () => {
+    const [signal] = buildSignals({
+      polymarket,
+      kalshi,
+      settings,
+      lastEntryCosts: {},
+      secondsRemaining: 20,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.grossCost).toBeNull();
+    expect(signal.reason).toBe("Entrée bloquée sur les 20 dernières secondes");
   });
 });

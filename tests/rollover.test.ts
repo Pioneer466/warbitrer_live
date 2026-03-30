@@ -62,6 +62,7 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
     kalshi,
     settings,
     lastEntryCosts: {},
+    secondsRemaining: 120,
   });
 
   return {
@@ -88,6 +89,7 @@ describe("rollover flow", () => {
       kalshi: firstSnapshot.kalshi,
       settings,
       lastEntryCosts: getLastEntryCosts(db, "slot-1"),
+      secondsRemaining: 120,
     })[0];
 
     const trade = createTradeFromSignal({

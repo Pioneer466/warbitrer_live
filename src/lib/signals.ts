@@ -1,4 +1,4 @@
-import { FIXED_LEG_NOTIONAL_USD } from "@/lib/constants";
+import { ENTRY_CUTOFF_SECONDS, FIXED_LEG_NOTIONAL_USD } from "@/lib/constants";
 import { calculateKalshiFee, calculatePolymarketFee } from "@/lib/fees";
 import type {
   KalshiQuote,
@@ -13,6 +13,7 @@ type SignalContext = {
   kalshi: KalshiQuote;
   settings: PaperSettings;
   lastEntryCosts: Partial<Record<PairCombination, number>>;
+  secondsRemaining?: number;
 };
 
 export function buildSignals({
@@ -20,8 +21,10 @@ export function buildSignals({
   kalshi,
   settings,
   lastEntryCosts,
+  secondsRemaining,
 }: SignalContext): PairSignal[] {
-  const marketAlignmentReason = getMarketAlignmentReason(polymarket, kalshi);
+  const marketAlignmentReason =
+    getLateEntryReason(secondsRemaining) ?? getMarketAlignmentReason(polymarket, kalshi);
 
   return [
     buildSignal({
@@ -230,6 +233,14 @@ function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuo
     polymarket.ref.slotKey !== kalshi.ref.slotKey
   ) {
     return "Marchés non alignés sur le même créneau";
+  }
+
+  return null;
+}
+
+function getLateEntryReason(secondsRemaining?: number) {
+  if (secondsRemaining !== undefined && secondsRemaining <= ENTRY_CUTOFF_SECONDS) {
+    return `Entrée bloquée sur les ${ENTRY_CUTOFF_SECONDS} dernières secondes`;
   }
 
   return null;
