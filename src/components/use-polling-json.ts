@@ -26,7 +26,7 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
           cache: "no-store",
         });
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
+          throw new Error(await readResponseError(response));
         }
         const payload = (await response.json()) as T;
         if (!mountedRef.current) {
@@ -68,4 +68,30 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
   }, [intervalMs, url]);
 
   return state;
+}
+
+async function readResponseError(response: Response) {
+  try {
+    const payload = (await response.json()) as {
+      error?: string;
+      message?: string;
+    };
+
+    if (payload.error) {
+      return payload.error;
+    }
+
+    if (payload.message) {
+      return payload.message;
+    }
+  } catch {
+    try {
+      const text = await response.text();
+      if (text) {
+        return text;
+      }
+    } catch {}
+  }
+
+  return `HTTP ${response.status}`;
 }
