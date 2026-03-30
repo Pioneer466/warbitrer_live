@@ -12,8 +12,10 @@ Dashboard paper-only pour suivre les opportunités BTC 15 minutes entre Polymark
 Pré-requis: **Node 22+**.
 
 1. `npm install`
-2. `npm run dev:all`
-3. Ouvrir `http://localhost:3000`
+2. Si tu veux utiliser Postgres en local, créer `.env.local` avec:
+   - `DATABASE_URL=postgres://postgres:postgres@localhost:5432/paper_arb`
+3. `npm run dev:all`
+4. Ouvrir `http://localhost:3000`
 
 Le web et le worker tournent en parallèle.
 
@@ -44,6 +46,7 @@ Recommandé:
   - si défini, le stockage passe automatiquement sur Postgres.
   - en local, une URL `localhost` est normale.
   - sur Railway, il faut utiliser la variable injectée par le service Postgres Railway, pas `localhost`.
+  - ne pas importer `DATABASE_URL` depuis `.env.example` dans Railway.
 - `PAPER_ARB_DB_PATH`:
   - optionnel en local si tu veux forcer un chemin SQLite.
 

@@ -1,4 +1,5 @@
 import { processTick } from "@/lib/engine";
+import { DEFAULT_SETTINGS } from "@/lib/constants";
 import { readSettings, storageMode } from "@/lib/storage";
 
 async function run() {
@@ -13,9 +14,9 @@ async function run() {
       console.error("[worker] tick error", error);
     }
 
-    const settings = await readSettings();
     const elapsed = Date.now() - startedAt;
-    const waitMs = Math.max(50, settings.pollingIntervalMs - elapsed);
+    const pollingIntervalMs = await readPollingIntervalMs();
+    const waitMs = Math.max(50, pollingIntervalMs - elapsed);
     await sleep(waitMs);
   }
 }
@@ -27,4 +28,14 @@ run().catch((error) => {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function readPollingIntervalMs() {
+  try {
+    const settings = await readSettings();
+    return settings.pollingIntervalMs;
+  } catch (error) {
+    console.error("[worker] settings read failed, using default polling interval", error);
+    return DEFAULT_SETTINGS.pollingIntervalMs;
+  }
 }
