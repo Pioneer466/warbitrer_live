@@ -2,167 +2,102 @@
 
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatDateTime, formatPercent, formatPrice } from "@/lib/format";
-import type { PaperTrade, PaperTradeLeg, TradesResponse } from "@/lib/types";
+import type { PaperTrade, TradesResponse } from "@/lib/types";
 
 export function TradesClient() {
   const { data, error, loading } = usePollingJson<TradesResponse>("/api/trades", 4_000);
 
   if (loading && !data) {
-    return (
-      <div className="rounded-[28px] border border-white/8 bg-panel/90 px-6 py-16 text-center">
-        <p className="text-sm uppercase tracking-[0.28em] text-mist/70">Trades</p>
-        <p className="mt-4 text-2xl font-semibold text-white">Chargement de l’historique</p>
-      </div>
-    );
+    return <PanelMessage title="Trades" message="Chargement de l’historique." />;
   }
 
   if (!data) {
-    return (
-      <div className="rounded-[28px] border border-rose/20 bg-rose/10 px-6 py-10 text-center text-rose">
-        {error ?? "Impossible de charger l’historique."}
-      </div>
-    );
+    return <PanelMessage title="Erreur" message={error ?? "Impossible de charger l’historique."} tone="rose" />;
   }
 
   return (
-    <div className="space-y-5">
-      <section className="rounded-[28px] border border-white/8 bg-panel/90 px-5 py-6 shadow-[0_18px_60px_rgba(0,0,0,0.24)] sm:px-6">
-        <p className="text-sm uppercase tracking-[0.28em] text-mist/70">Historique</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">Trades paper BTC 15m</h1>
-        <p className="mt-2 text-sm text-mist">
-          Chaque entrée liste explicitement les deux jambes, le coût d’entrée, les frais et le résultat final.
-        </p>
+    <div className="space-y-4">
+      <section className="rounded-2xl border border-white/8 bg-white/[0.02] px-4 py-3">
+        <div className="text-sm text-white">Historique des trades</div>
+        <div className="mt-1 text-xs text-mist">{data.trades.length} trade{data.trades.length > 1 ? "s" : ""}</div>
       </section>
 
-      {data.trades.length === 0 ? (
-        <section className="rounded-[28px] border border-white/8 bg-panel/90 px-6 py-16 text-center text-sm text-mist">
-          Aucun trade enregistré pour le moment.
-        </section>
-      ) : (
-        data.trades.map((trade) => <TradeCard key={trade.id} trade={trade} />)
-      )}
+      <section className="rounded-2xl border border-white/8 bg-white/[0.02]">
+        <div className="overflow-x-auto">
+          <table className="min-w-full border-collapse text-sm">
+            <thead>
+              <tr className="text-left text-[11px] uppercase tracking-[0.16em] text-mist/70">
+                <th className="px-4 py-3 font-normal">Date</th>
+                <th className="px-4 py-3 font-normal">Pair</th>
+                <th className="px-4 py-3 font-normal">Polymarket</th>
+                <th className="px-4 py-3 font-normal">Kalshi</th>
+                <th className="px-4 py-3 font-normal">Somme</th>
+                <th className="px-4 py-3 font-normal">Capital</th>
+                <th className="px-4 py-3 font-normal">Frais</th>
+                <th className="px-4 py-3 font-normal">P&L</th>
+                <th className="px-4 py-3 font-normal">ROI</th>
+                <th className="px-4 py-3 font-normal">Statut</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.trades.length === 0 ? (
+                <tr className="border-t border-white/6">
+                  <td colSpan={10} className="px-4 py-6 text-center text-mist">Aucun trade.</td>
+                </tr>
+              ) : (
+                data.trades.map((trade) => {
+                  const polyLeg = trade.legs.find((leg) => leg.venue === "polymarket");
+                  const kalshiLeg = trade.legs.find((leg) => leg.venue === "kalshi");
 
-      {error ? (
-        <div className="rounded-2xl border border-rose/20 bg-rose/10 px-4 py-3 text-sm text-rose">
-          {error}
+                  return (
+                    <tr key={trade.id} className="border-t border-white/6 text-mist">
+                      <td className="px-4 py-3">{formatDateTime(trade.enteredAt)}</td>
+                      <td className="px-4 py-3 text-white">{pairLabel(trade)}</td>
+                      <td className="px-4 py-3">{polyLeg ? legText(polyLeg.outcome, polyLeg.price, polyLeg.units) : "--"}</td>
+                      <td className="px-4 py-3">{kalshiLeg ? legText(kalshiLeg.outcome, kalshiLeg.price, kalshiLeg.units) : "--"}</td>
+                      <td className="px-4 py-3 font-mono text-white">{formatPrice(trade.grossPairCost, 3)}</td>
+                      <td className="px-4 py-3 text-white">{formatCurrency(trade.capitalDeployed)}</td>
+                      <td className="px-4 py-3">{formatCurrency(trade.feesTotal, 3)}</td>
+                      <td className={`px-4 py-3 ${trade.realizedPnl !== null && trade.realizedPnl < 0 ? "text-rose" : "text-white"}`}>
+                        {trade.realizedPnl === null ? "--" : formatCurrency(trade.realizedPnl)}
+                      </td>
+                      <td className="px-4 py-3">{trade.roi === null ? "--" : formatPercent(trade.roi)}</td>
+                      <td className="px-4 py-3">{trade.status}</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
         </div>
-      ) : null}
+      </section>
+
+      {error ? <PanelMessage title="Erreur" message={error} tone="rose" /> : null}
     </div>
   );
 }
 
-function TradeCard({ trade }: { trade: PaperTrade }) {
-  return (
-    <section className="rounded-[28px] border border-white/8 bg-panel/90 p-5 shadow-[0_18px_60px_rgba(0,0,0,0.2)] sm:p-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-lg font-semibold text-white">{formatCombinationLabel(trade.combination)}</p>
-            <StatusChip label={trade.status === "resolved" ? "Résolu" : "Ouvert"} tone={trade.status === "resolved" ? "cyan" : "amber"} />
-            <StatusChip label={trade.thresholdMet ? "≤ 0.93" : "> 0.93"} tone={trade.thresholdMet ? "cyan" : "default"} />
-          </div>
-          <p className="mt-2 text-sm text-mist">
-            Pris le {formatDateTime(trade.enteredAt)} · entrée {formatPrice(trade.grossPairCost, 3)} · {trade.units} unités
-          </p>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <MiniMetric label="Capital" value={formatCurrency(trade.capitalDeployed)} />
-          <MiniMetric label="Frais" value={formatCurrency(trade.feesTotal, 3)} />
-          <MiniMetric
-            label="P&L"
-            value={trade.realizedPnl === null ? "--" : formatCurrency(trade.realizedPnl)}
-            tone={trade.realizedPnl !== null && trade.realizedPnl < 0 ? "rose" : "default"}
-          />
-          <MiniMetric label="ROI" value={trade.roi === null ? "--" : formatPercent(trade.roi)} />
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        {trade.legs.map((leg) => (
-          <TradeLegCard key={leg.id} leg={leg} />
-        ))}
-      </div>
-
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <MiniMetric label="Quasi-arb théorique" value={formatCurrency(trade.theoreticalSameResolutionProfit)} />
-        <MiniMetric label="Résolution Poly" value={trade.polyResolution ?? "--"} />
-        <MiniMetric label="Résolution Kalshi" value={trade.kalshiResolution ?? "--"} />
-      </div>
-    </section>
-  );
-}
-
-function TradeLegCard({ leg }: { leg: PaperTradeLeg }) {
-  return (
-    <div className="rounded-[22px] border border-white/8 bg-[#0d1119] p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-white">
-            {leg.venue === "polymarket" ? "Polymarket" : "Kalshi"} {leg.outcome}
-          </p>
-          <p className="mt-1 text-xs uppercase tracking-[0.22em] text-mist/70">{leg.units} unités</p>
-        </div>
-        <StatusChip
-          label={leg.status === "open" ? "Ouvert" : leg.status === "won" ? "Win" : "Loss"}
-          tone={leg.status === "won" ? "cyan" : leg.status === "lost" ? "rose" : "amber"}
-        />
-      </div>
-
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <MiniMetric label="Prix" value={formatPrice(leg.price)} />
-        <MiniMetric label="Coût brut" value={formatCurrency(leg.grossCost)} />
-        <MiniMetric label="Fee USD" value={formatCurrency(leg.feeUsd, 3)} />
-        <MiniMetric label="Net shares" value={formatPrice(leg.netShares)} />
-      </div>
-    </div>
-  );
-}
-
-function MiniMetric({
-  label,
-  value,
+function PanelMessage({
+  title,
+  message,
   tone = "default",
 }: {
-  label: string;
-  value: string;
+  title: string;
+  message: string;
   tone?: "default" | "rose";
 }) {
   return (
-    <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-3">
-      <p className="text-xs uppercase tracking-[0.2em] text-mist/70">{label}</p>
-      <p className={`mt-2 text-sm font-medium ${tone === "rose" ? "text-rose" : "text-white"}`}>{value}</p>
+    <div className={`rounded-2xl border px-4 py-6 text-sm ${tone === "rose" ? "border-rose/20 bg-rose/10 text-rose" : "border-white/8 bg-white/[0.02] text-mist"}`}>
+      <div className="text-white">{title}</div>
+      <div className="mt-1">{message}</div>
     </div>
   );
 }
 
-function StatusChip({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: "cyan" | "amber" | "rose" | "default";
-}) {
-  const toneClass =
-    tone === "cyan"
-      ? "border-cyan/20 bg-cyan/10 text-cyan"
-      : tone === "amber"
-        ? "border-amber/20 bg-amber/10 text-amber"
-        : tone === "rose"
-          ? "border-rose/20 bg-rose/10 text-rose"
-          : "border-white/10 bg-white/[0.04] text-mist";
-
-  return (
-    <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] ${toneClass}`}>
-      {label}
-    </span>
-  );
+function pairLabel(trade: PaperTrade) {
+  return trade.combination === "POLY_UP_KALSHI_NO" ? "Up + No" : "Down + Yes";
 }
 
-function formatCombinationLabel(combination: PaperTrade["combination"]) {
-  if (combination === "POLY_UP_KALSHI_NO") {
-    return "Poly Up + Kalshi No";
-  }
-
-  return "Poly Down + Kalshi Yes";
+function legText(outcome: string, price: number, units: number) {
+  return `${outcome} · ${formatPrice(price, 3)} · ${formatPrice(units, 2)} u`;
 }

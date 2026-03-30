@@ -92,7 +92,7 @@ export function bootstrapDatabase(db: DatabaseSync) {
       outcome TEXT NOT NULL,
       market_ref TEXT NOT NULL,
       price REAL NOT NULL,
-      units INTEGER NOT NULL,
+      units REAL NOT NULL,
       gross_cost REAL NOT NULL,
       fee_usd REAL NOT NULL,
       fee_shares REAL NOT NULL,

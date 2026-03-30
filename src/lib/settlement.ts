@@ -1,4 +1,5 @@
-import { polymarketNetSharesBought } from "@/lib/fees";
+import { FIXED_TRADE_NOTIONAL_USD } from "@/lib/constants";
+import { calculateKalshiFee, calculatePolymarketFee, polymarketNetSharesBought } from "@/lib/fees";
 import type {
   PairSignal,
   PaperTrade,
@@ -28,18 +29,33 @@ export function createTradeFromSignal({
   if (
     !signal.eligible ||
     signal.grossCost === null ||
-    signal.legs.some((leg) => leg.price === null || leg.depth === null)
+    signal.legs.some((leg) => leg.price === null || leg.depth === null || leg.units <= 0)
   ) {
     throw new Error("Impossible de créer un trade paper sans deux jambes exécutables sur le même créneau");
   }
 
   const tradeId = crypto.randomUUID();
   const [polyLegSignal, kalshiLegSignal] = signal.legs;
-  const polyFeeUsd = signal.estimatedFees > 0 && polyLegSignal.price !== null
-    ? polymarketFeeUsd(signal, polyLegSignal.price, polymarket.feeRate, polymarket.feeExponent)
-    : 0;
-  const kalshiFeeUsd = signal.estimatedFees - polyFeeUsd;
-  const polyNetShares = polymarketNetSharesBought(signal.units, polyLegSignal.price ?? 0, polyFeeUsd);
+  const polyPrice = polyLegSignal.price as number;
+  const kalshiPrice = kalshiLegSignal.price as number;
+  const polyUnits = polyLegSignal.units;
+  const kalshiUnits = kalshiLegSignal.units;
+  const polyFeeUsd = round4(
+    calculatePolymarketFee({
+      shares: polyUnits,
+      price: polyPrice,
+      feeRate: polymarket.feeRate,
+      exponent: polymarket.feeExponent,
+    }),
+  );
+  const kalshiFeeUsd = round4(
+    calculateKalshiFee({
+      contracts: kalshiUnits,
+      price: kalshiPrice,
+      feeMultiplier: kalshi.feeMultiplier,
+    }),
+  );
+  const polyNetShares = polymarketNetSharesBought(polyUnits, polyPrice, polyFeeUsd);
 
   const polyLeg: PaperTradeLeg = {
     id: crypto.randomUUID(),
@@ -47,11 +63,11 @@ export function createTradeFromSignal({
     venue: "polymarket",
     outcome: polyLegSignal.outcome,
     marketRef: polyLegSignal.marketRef,
-    price: polyLegSignal.price ?? 0,
-    units: signal.units,
-    grossCost: round4((polyLegSignal.price ?? 0) * signal.units),
-    feeUsd: round4(polyFeeUsd),
-    feeShares: round4(polyLegSignal.price ? polyFeeUsd / polyLegSignal.price : 0),
+    price: polyPrice,
+    units: polyUnits,
+    grossCost: round4(polyLegSignal.stakeUsd),
+    feeUsd: polyFeeUsd,
+    feeShares: round4(polyPrice ? polyFeeUsd / polyPrice : 0),
     netShares: round4(polyNetShares),
     payout: null,
     resolvedOutcome: null,
@@ -64,12 +80,12 @@ export function createTradeFromSignal({
     venue: "kalshi",
     outcome: kalshiLegSignal.outcome,
     marketRef: kalshiLegSignal.marketRef,
-    price: kalshiLegSignal.price ?? 0,
-    units: signal.units,
-    grossCost: round4((kalshiLegSignal.price ?? 0) * signal.units),
-    feeUsd: round4(kalshiFeeUsd),
+    price: kalshiPrice,
+    units: kalshiUnits,
+    grossCost: round4(kalshiLegSignal.stakeUsd),
+    feeUsd: kalshiFeeUsd,
     feeShares: 0,
-    netShares: signal.units,
+    netShares: round4(kalshiUnits),
     payout: null,
     resolvedOutcome: null,
     status: "open",
@@ -89,8 +105,8 @@ export function createTradeFromSignal({
     status: "open",
     grossPairCost: signal.grossCost ?? 0,
     thresholdMet: signal.thresholdMet,
-    units: signal.units,
-    budgetAllocated: round4((signal.grossCost ?? 0) * signal.units),
+    units: 1,
+    budgetAllocated: FIXED_TRADE_NOTIONAL_USD,
     capitalDeployed,
     feesTotal: round4(polyLeg.feeUsd + kalshiLeg.feeUsd),
     realizedPnl: null,
@@ -145,21 +161,6 @@ function settleLeg(
     resolvedOutcome: winningResolution as Resolution,
     status: won ? "won" : "lost",
   };
-}
-
-function polymarketFeeUsd(
-  signal: PairSignal,
-  price: number,
-  feeRate: number,
-  feeExponent: number,
-) {
-  const polyEstimateShare = signal.legs[0].venue === "polymarket" ? signal.legs[0] : signal.legs[1];
-  if (polyEstimateShare.price === null) {
-    return 0;
-  }
-
-  const quantity = signal.units;
-  return round4(quantity * price * feeRate * Math.pow(price * (1 - price), feeExponent));
 }
 
 function round4(value: number) {

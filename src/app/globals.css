@@ -12,9 +12,7 @@
 
 html {
   min-height: 100%;
-  background:
-    radial-gradient(circle at top left, rgba(143, 124, 255, 0.08), transparent 30%),
-    linear-gradient(180deg, #07090e 0%, #0a0d14 45%, #080a10 100%);
+  background: linear-gradient(180deg, #090b11 0%, #0b0e15 100%);
 }
 
 body {
@@ -22,9 +20,7 @@ body {
   min-height: 100vh;
   color: #f5f7ff;
   font-family: "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.015), rgba(255, 255, 255, 0)),
-    transparent;
+  background: transparent;
 }
 
 a {

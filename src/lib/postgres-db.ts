@@ -93,7 +93,7 @@ async function bootstrapDatabase(pool: Pool) {
       outcome TEXT NOT NULL,
       market_ref TEXT NOT NULL,
       price DOUBLE PRECISION NOT NULL,
-      units INTEGER NOT NULL,
+      units DOUBLE PRECISION NOT NULL,
       gross_cost DOUBLE PRECISION NOT NULL,
       fee_usd DOUBLE PRECISION NOT NULL,
       fee_shares DOUBLE PRECISION NOT NULL,
@@ -103,6 +103,12 @@ async function bootstrapDatabase(pool: Pool) {
       status TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS trade_legs_trade_idx ON trade_legs(trade_id);
+  `);
+
+  await pool.query(`
+    ALTER TABLE trade_legs
+    ALTER COLUMN units TYPE DOUBLE PRECISION
+    USING units::double precision
   `);
 
   await pool.query(

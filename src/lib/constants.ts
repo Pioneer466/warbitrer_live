@@ -6,10 +6,12 @@ export const DEFAULT_DB_PATH =
 export const POLY_GAMMA_BASE = "https://gamma-api.polymarket.com";
 export const POLY_CLOB_BASE = "https://clob.polymarket.com";
 export const KALSHI_BASE = "https://api.elections.kalshi.com/trade-api/v2";
+export const FIXED_TRADE_NOTIONAL_USD = 100;
+export const FIXED_LEG_NOTIONAL_USD = FIXED_TRADE_NOTIONAL_USD / 2;
 
 export const DEFAULT_SETTINGS = {
   initialCapital: 10_000,
-  budgetPerTrade: 250,
+  budgetPerTrade: FIXED_TRADE_NOTIONAL_USD,
   grossEntryThreshold: 0.93,
   reentryImprovement: 0.01,
   pollingIntervalMs: 1_000,

@@ -7,8 +7,8 @@ export function formatCurrency(value: number, digits = 2) {
   }).format(value);
 }
 
-export function formatPrice(value: number | null, digits = 3) {
-  if (value === null || Number.isNaN(value)) {
+export function formatPrice(value: number | null | undefined, digits = 3) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
     return "--";
   }
 

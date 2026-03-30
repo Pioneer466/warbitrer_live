@@ -12,451 +12,274 @@ import {
   formatPercent,
   formatPrice,
 } from "@/lib/format";
-import type { DashboardResponse, HistoryResponse, PaperTrade, PairSignal, PaperTradeLeg } from "@/lib/types";
+import type { DashboardResponse, HistoryResponse, PairSignal, PaperTrade, PaperTradeLeg } from "@/lib/types";
 
 export function DashboardClient() {
   const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 2_000);
   const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 4_000);
 
   if (dashboard.loading && !dashboard.data) {
-    return (
-      <LoadingState
-        title="Dashboard"
-        description="Connexion au moteur paper et chargement du créneau courant."
-      />
-    );
+    return <MessagePanel title="Chargement" message="Connexion au moteur paper." />;
   }
 
   if (!dashboard.data) {
-    return <ErrorState message={dashboard.error ?? "Aucune donnée dashboard disponible."} />;
+    return <MessagePanel title="Erreur" message={dashboard.error ?? "Aucune donnée disponible."} tone="rose" />;
   }
 
-  const { metrics, latestSnapshot, signals, openTrades, slot, workerState, settings } = dashboard.data;
+  const { metrics, latestSnapshot, signals, openTrades, slot, workerState } = dashboard.data;
   const historyLabels = history.data?.points.map((point) => formatClock(point.ts).slice(0, 5)) ?? [];
   const historyPoints = history.data?.points ?? [];
 
   return (
-    <div className="space-y-6">
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard label="Capital disponible" value={formatCurrency(metrics.availableCapital)}>
-          Déployé: {formatCurrency(metrics.deployedCapital)}
-        </StatCard>
-        <StatCard label="P&L réalisé" value={formatCurrency(metrics.realizedPnl)}>
-          Frais payés: {formatCurrency(metrics.feesPaid)}
-        </StatCard>
-        <StatCard label="Trades" value={`${metrics.openTrades} / ${metrics.totalTrades}`}>
-          Ouverts / Total
-        </StatCard>
-        <StatCard label="Win rate" value={formatPercent(metrics.winRate)}>
-          Résolus: {metrics.resolvedTrades}
-        </StatCard>
-      </section>
-
-      <section className="rounded-[28px] border border-white/8 bg-panel/90 p-5 shadow-[0_18px_60px_rgba(0,0,0,0.28)] sm:p-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+    <div className="space-y-4">
+      <section className="rounded-2xl border border-white/8 bg-white/[0.02] p-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.28em] text-mist/70">Créneau en cours</p>
-            <h1 className="mt-2 text-3xl font-semibold tracking-tight text-white">Bitcoin Up or Down · 15 min</h1>
-            <p className="mt-2 text-sm text-mist">{slot.label}</p>
+            <div className="text-xs uppercase tracking-[0.18em] text-mist/70">BTC 15m</div>
+            <div className="mt-1 text-base text-white">Créneau courant</div>
+            <div className="mt-1 text-sm text-mist">{slot.label}</div>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.22em] text-mist/70">Temps restant</p>
-              <p className="mt-2 font-mono text-3xl font-semibold text-white">
-                {formatCountdown(slot.secondsRemaining)}
-              </p>
-            </div>
-            <div className="rounded-2xl border border-white/8 bg-white/[0.03] px-4 py-3">
-              <p className="text-xs uppercase tracking-[0.22em] text-mist/70">Worker</p>
-              <p className="mt-2 text-sm font-medium text-white">
-                {workerState.lastError ? "Dégradé" : "Actif"}
-              </p>
-              <p className="mt-1 text-xs text-mist">
-                Dernier tick: {workerState.lastTickAt ? formatDateTime(workerState.lastTickAt) : "--"}
-              </p>
-            </div>
+          <div className="grid gap-2 sm:grid-cols-4">
+            <TopMetric label="Restant" value={formatCountdown(slot.secondsRemaining)} />
+            <TopMetric label="Capital" value={formatCurrency(metrics.availableCapital)} />
+            <TopMetric label="P&L" value={formatCurrency(metrics.realizedPnl)} />
+            <TopMetric label="Win rate" value={formatPercent(metrics.winRate)} />
           </div>
         </div>
-
-        <div className="mt-5 grid gap-4 lg:grid-cols-2">
-          <VenuePanel
-            venue="Polymarket"
-            status={latestSnapshot?.polymarket.slotAligned ? "Aligné" : "En attente"}
-            reason={latestSnapshot?.polymarket.availabilityReason ?? null}
-            slotText={latestSnapshot?.polymarket.ref.slotKey === slot.key ? "Créneau courant" : "Hors créneau"}
-            rows={[
-              { label: "Up", value: latestSnapshot?.polymarket.outcomes.up.buyPrice ?? null },
-              { label: "Down", value: latestSnapshot?.polymarket.outcomes.down.buyPrice ?? null },
-            ]}
-          />
-          <VenuePanel
-            venue="Kalshi"
-            status={latestSnapshot?.kalshi.slotAligned ? "Aligné" : "En attente"}
-            reason={latestSnapshot?.kalshi.availabilityReason ?? null}
-            slotText={latestSnapshot?.kalshi.ref.slotKey === slot.key ? "Créneau courant" : "Créneau non trouvé"}
-            rows={[
-              { label: "Yes", value: latestSnapshot?.kalshi.outcomes.yes.buyPrice ?? null },
-              { label: "No", value: latestSnapshot?.kalshi.outcomes.no.buyPrice ?? null },
-            ]}
-          />
+        <div className="mt-3 text-xs text-mist">
+          Worker: {workerState.lastError ? workerState.lastError : "actif"} · dernier tick{" "}
+          {workerState.lastTickAt ? formatDateTime(workerState.lastTickAt) : "--"}
         </div>
       </section>
 
-      <section className="rounded-[28px] border border-white/8 bg-panel/90 shadow-[0_18px_60px_rgba(0,0,0,0.24)]">
-        <div className="border-b border-white/8 px-5 py-4 sm:px-6">
-          <SectionTitle
-            title="Opportunités"
-            subtitle={`Entrée paper seulement si les deux jambes du même créneau sont exécutables et Σ ≤ ${formatPrice(
-              settings.grossEntryThreshold,
-              2,
-            )}.`}
-          />
-        </div>
-        <div className="divide-y divide-white/6">
-          {signals.length === 0 ? (
-            <div className="px-5 py-8 text-sm text-mist sm:px-6">Aucun signal disponible pour le créneau courant.</div>
-          ) : (
-            signals.map((signal) => <SignalRow key={signal.combination} signal={signal} />)
-          )}
+      <section className="grid gap-4 lg:grid-cols-2">
+        <VenuePanel
+          title="Polymarket"
+          rows={[
+            ["Up", latestSnapshot?.polymarket.outcomes.up.buyPrice ?? null, latestSnapshot?.polymarket.outcomes.up.depth ?? null],
+            ["Down", latestSnapshot?.polymarket.outcomes.down.buyPrice ?? null, latestSnapshot?.polymarket.outcomes.down.depth ?? null],
+          ]}
+          footer={latestSnapshot?.polymarket.availabilityReason ?? "Créneau aligné"}
+        />
+        <VenuePanel
+          title="Kalshi"
+          rows={[
+            ["Yes", latestSnapshot?.kalshi.outcomes.yes.buyPrice ?? null, latestSnapshot?.kalshi.outcomes.yes.depth ?? null],
+            ["No", latestSnapshot?.kalshi.outcomes.no.buyPrice ?? null, latestSnapshot?.kalshi.outcomes.no.depth ?? null],
+          ]}
+          footer={latestSnapshot?.kalshi.availabilityReason ?? "Créneau aligné"}
+        />
+      </section>
+
+      <section className="rounded-2xl border border-white/8 bg-white/[0.02]">
+        <HeaderRow title="Opportunités" meta="50$ + 50$" />
+        <div className="overflow-x-auto">
+          <table className="min-w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-t border-white/6 text-left text-[11px] uppercase tracking-[0.16em] text-mist/70">
+                <th className="px-4 py-3 font-normal">Pair</th>
+                <th className="px-4 py-3 font-normal">Polymarket</th>
+                <th className="px-4 py-3 font-normal">Kalshi</th>
+                <th className="px-4 py-3 font-normal">Somme</th>
+                <th className="px-4 py-3 font-normal">Statut</th>
+              </tr>
+            </thead>
+            <tbody>
+              {signals.map((signal) => (
+                <tr key={signal.combination} className="border-t border-white/6 text-mist">
+                  <td className="px-4 py-3 text-white">{pairLabel(signal)}</td>
+                  <td className="px-4 py-3">{signalLegText(signal.legs[0])}</td>
+                  <td className="px-4 py-3">{signalLegText(signal.legs[1])}</td>
+                  <td className="px-4 py-3 font-mono text-white">
+                    {signal.grossCost === null ? "--" : formatPrice(signal.grossCost, 3)}
+                  </td>
+                  <td className="px-4 py-3">{signal.eligible ? "Prêt" : signal.reason ?? "--"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-2">
+      <section className="rounded-2xl border border-white/8 bg-white/[0.02]">
+        <HeaderRow title="Positions ouvertes" meta={<Link href="/trades" className="text-mist hover:text-white">Historique</Link>} />
+        <div className="overflow-x-auto">
+          <table className="min-w-full border-collapse text-sm">
+            <thead>
+              <tr className="border-t border-white/6 text-left text-[11px] uppercase tracking-[0.16em] text-mist/70">
+                <th className="px-4 py-3 font-normal">Heure</th>
+                <th className="px-4 py-3 font-normal">Pair</th>
+                <th className="px-4 py-3 font-normal">Polymarket</th>
+                <th className="px-4 py-3 font-normal">Kalshi</th>
+                <th className="px-4 py-3 font-normal">Capital</th>
+                <th className="px-4 py-3 font-normal">Frais</th>
+              </tr>
+            </thead>
+            <tbody>
+              {openTrades.length === 0 ? (
+                <tr className="border-t border-white/6">
+                  <td colSpan={6} className="px-4 py-6 text-center text-mist">Aucune position ouverte.</td>
+                </tr>
+              ) : (
+                openTrades.map((trade) => {
+                  const polyLeg = trade.legs.find((leg) => leg.venue === "polymarket");
+                  const kalshiLeg = trade.legs.find((leg) => leg.venue === "kalshi");
+
+                  return (
+                    <tr key={trade.id} className="border-t border-white/6 text-mist">
+                      <td className="px-4 py-3">{formatDateTime(trade.enteredAt)}</td>
+                      <td className="px-4 py-3 text-white">{pairLabel(trade)}</td>
+                      <td className="px-4 py-3">{polyLeg ? tradeLegText(polyLeg) : "--"}</td>
+                      <td className="px-4 py-3">{kalshiLeg ? tradeLegText(kalshiLeg) : "--"}</td>
+                      <td className="px-4 py-3 text-white">{formatCurrency(trade.capitalDeployed)}</td>
+                      <td className="px-4 py-3">{formatCurrency(trade.feesTotal, 3)}</td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section className="grid gap-4 lg:grid-cols-2">
         <ChartPanel
           title="Polymarket"
-          subtitle="Prix d'achat Up / Down sur le créneau courant."
           labels={historyLabels}
           series={[
-            {
-              key: "poly-up",
-              label: "Poly Up",
-              color: "#1ce7cf",
-              values: historyPoints.map((point) => point.polyUpBuy),
-            },
-            {
-              key: "poly-down",
-              label: "Poly Down",
-              color: "#ff627d",
-              values: historyPoints.map((point) => point.polyDownBuy),
-            },
+            { key: "poly-up", label: "Up", color: "#1ce7cf", values: historyPoints.map((point) => point.polyUpBuy) },
+            { key: "poly-down", label: "Down", color: "#ff627d", values: historyPoints.map((point) => point.polyDownBuy) },
           ]}
         />
         <ChartPanel
           title="Kalshi"
-          subtitle="Asks synthétiques Yes / No dérivés du carnet."
           labels={historyLabels}
           series={[
-            {
-              key: "kalshi-yes",
-              label: "Kalshi Yes",
-              color: "#ffb84f",
-              values: historyPoints.map((point) => point.kalshiYesAsk),
-            },
-            {
-              key: "kalshi-no",
-              label: "Kalshi No",
-              color: "#9ca8ff",
-              values: historyPoints.map((point) => point.kalshiNoAsk),
-            },
+            { key: "kalshi-yes", label: "Yes", color: "#ffb84f", values: historyPoints.map((point) => point.kalshiYesAsk) },
+            { key: "kalshi-no", label: "No", color: "#9ca8ff", values: historyPoints.map((point) => point.kalshiNoAsk) },
           ]}
         />
       </section>
 
-      <section className="rounded-[28px] border border-white/8 bg-panel/90 shadow-[0_18px_60px_rgba(0,0,0,0.24)]">
-        <div className="flex flex-col gap-3 border-b border-white/8 px-5 py-4 sm:flex-row sm:items-end sm:justify-between sm:px-6">
-          <SectionTitle
-            title="Positions ouvertes"
-            subtitle="Chaque entrée paper contient toujours les deux jambes du même créneau."
-          />
-          <Link
-            href="/trades"
-            className="inline-flex rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm font-medium text-white transition hover:bg-white/[0.08]"
-          >
-            Historique complet
-          </Link>
-        </div>
-
-        <div className="px-5 py-5 sm:px-6">
-          {openTrades.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-white/10 bg-white/[0.02] px-4 py-10 text-center text-sm text-mist">
-              Aucune position ouverte.
-            </div>
-          ) : (
-            <div className="space-y-3">
-              {openTrades.map((trade) => (
-                <OpenTradeRow key={trade.id} trade={trade} />
-              ))}
-            </div>
-          )}
-        </div>
-      </section>
-
-      {dashboard.error ? <ErrorBanner message={dashboard.error} /> : null}
-      {history.error ? <ErrorBanner message={`Historique: ${history.error}`} /> : null}
+      {dashboard.error ? <ErrorStrip message={dashboard.error} /> : null}
+      {history.error ? <ErrorStrip message={history.error} /> : null}
     </div>
   );
 }
 
-function StatCard({
-  label,
-  value,
-  children,
+function MessagePanel({
+  title,
+  message,
+  tone = "default",
 }: {
-  label: string;
-  value: string;
-  children: React.ReactNode;
+  title: string;
+  message: string;
+  tone?: "default" | "rose";
 }) {
   return (
-    <div className="rounded-[24px] border border-white/8 bg-panel/85 p-5">
-      <p className="text-xs uppercase tracking-[0.24em] text-mist/70">{label}</p>
-      <p className="mt-3 text-3xl font-semibold tracking-tight text-white">{value}</p>
-      <p className="mt-2 text-sm text-mist">{children}</p>
+    <div className={`rounded-2xl border px-4 py-6 text-sm ${tone === "rose" ? "border-rose/20 bg-rose/10 text-rose" : "border-white/8 bg-white/[0.02] text-mist"}`}>
+      <div className="text-white">{title}</div>
+      <div className="mt-1">{message}</div>
+    </div>
+  );
+}
+
+function TopMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-xl border border-white/8 px-3 py-2">
+      <div className="text-[11px] uppercase tracking-[0.14em] text-mist/70">{label}</div>
+      <div className="mt-1 text-sm text-white">{value}</div>
+    </div>
+  );
+}
+
+function HeaderRow({
+  title,
+  meta,
+}: {
+  title: string;
+  meta?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 px-4 py-3">
+      <div className="text-sm text-white">{title}</div>
+      {meta ? <div className="text-xs text-mist">{meta}</div> : null}
     </div>
   );
 }
 
 function VenuePanel({
-  venue,
-  status,
-  reason,
-  slotText,
+  title,
   rows,
+  footer,
 }: {
-  venue: string;
-  status: string;
-  reason: string | null;
-  slotText: string;
-  rows: Array<{ label: string; value: number | null }>;
+  title: string;
+  rows: Array<[string, number | null, number | null]>;
+  footer: string;
 }) {
   return (
-    <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-white">{venue}</p>
-          <p className="mt-1 text-xs uppercase tracking-[0.22em] text-mist/70">{slotText}</p>
-        </div>
-        <StatusChip label={status} tone={reason ? "amber" : "cyan"} />
+    <section className="rounded-2xl border border-white/8 bg-white/[0.02]">
+      <HeaderRow title={title} />
+      <div className="overflow-hidden">
+        <table className="min-w-full border-collapse text-sm">
+          <thead>
+            <tr className="border-t border-white/6 text-left text-[11px] uppercase tracking-[0.16em] text-mist/70">
+              <th className="px-4 py-3 font-normal">Côté</th>
+              <th className="px-4 py-3 font-normal">Prix</th>
+              <th className="px-4 py-3 font-normal">Depth</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(([label, price, depth]) => (
+              <tr key={label} className="border-t border-white/6 text-mist">
+                <td className="px-4 py-3 text-white">{label}</td>
+                <td className="px-4 py-3 font-mono">{formatPrice(price, 3)}</td>
+                <td className="px-4 py-3">{depth ?? "--"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="border-t border-white/6 px-4 py-3 text-xs text-mist">{footer}</div>
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        {rows.map((row) => (
-          <div key={row.label} className="rounded-2xl border border-white/8 bg-[#0d1119] px-3 py-3">
-            <p className="text-xs uppercase tracking-[0.22em] text-mist/70">{row.label}</p>
-            <p className="mt-2 font-mono text-2xl font-semibold text-white">{formatPrice(row.value)}</p>
-          </div>
-        ))}
-      </div>
-      <p className="mt-3 text-sm text-mist">{reason ?? "Marché synchronisé sur le créneau courant."}</p>
-    </div>
-  );
-}
-
-function SignalRow({ signal }: { signal: PairSignal }) {
-  const tone = signal.eligible
-    ? "cyan"
-    : signal.reason?.includes("indisponible") || signal.reason?.includes("alignés")
-      ? "amber"
-      : "default";
-  const label = signal.eligible
-    ? "Prêt"
-    : signal.reason?.includes("indisponible") || signal.reason?.includes("alignés")
-      ? "En attente"
-      : "Bloqué";
-
-  return (
-    <div className="px-5 py-4 sm:px-6">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-base font-semibold text-white">{formatCombinationLabel(signal.combination)}</p>
-            <StatusChip label={label} tone={tone} />
-          </div>
-          <p className="mt-2 text-sm text-mist">
-            {signal.reason ?? "Les deux jambes sont disponibles et alignées sur le créneau courant."}
-          </p>
-        </div>
-
-        <div className="grid gap-3 sm:grid-cols-3">
-          <MiniMetric label="Σ brut" value={signal.grossCost === null ? "--" : formatPrice(signal.grossCost, 3)} />
-          <MiniMetric label="Unités" value={String(signal.units)} />
-          <MiniMetric label="Frais est." value={formatCurrency(signal.estimatedFees, 3)} />
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        {signal.legs.map((leg) => (
-          <LegQuoteCard
-            key={`${signal.combination}-${leg.venue}-${leg.outcome}`}
-            label={`${formatVenueLabel(leg.venue)} ${leg.outcome}`}
-            price={leg.price}
-            depth={leg.depth}
-          />
-        ))}
-      </div>
-    </div>
+    </section>
   );
 }
 
 function ChartPanel({
   title,
-  subtitle,
   labels,
   series,
 }: {
   title: string;
-  subtitle: string;
   labels: string[];
   series: Array<{ key: string; label: string; color: string; values: Array<number | null> }>;
 }) {
   return (
-    <div className="rounded-[28px] border border-white/8 bg-panel/90 p-5 shadow-[0_18px_60px_rgba(0,0,0,0.22)]">
-      <SectionTitle title={title} subtitle={subtitle} />
-      <div className="mt-4">
+    <section className="rounded-2xl border border-white/8 bg-white/[0.02] p-4">
+      <div className="text-sm text-white">{title}</div>
+      <div className="mt-3">
         <LineChart labels={labels} series={series} />
       </div>
-    </div>
+    </section>
   );
 }
 
-function OpenTradeRow({ trade }: { trade: PaperTrade }) {
-  return (
-    <div className="rounded-[24px] border border-white/8 bg-white/[0.03] p-4">
-      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <p className="text-base font-semibold text-white">{formatCombinationLabel(trade.combination)}</p>
-            <StatusChip label="Ouvert" tone="cyan" />
-          </div>
-          <p className="mt-2 text-sm text-mist">
-            Pris le {formatDateTime(trade.enteredAt)} · entrée {formatPrice(trade.grossPairCost, 3)} · {trade.units} unités
-          </p>
-        </div>
-        <div className="grid gap-3 sm:grid-cols-3">
-          <MiniMetric label="Capital" value={formatCurrency(trade.capitalDeployed)} />
-          <MiniMetric label="Frais" value={formatCurrency(trade.feesTotal, 3)} />
-          <MiniMetric label="Quasi-arb" value={formatCurrency(trade.theoreticalSameResolutionProfit)} />
-        </div>
-      </div>
-
-      <div className="mt-4 grid gap-3 lg:grid-cols-2">
-        {trade.legs.map((leg) => (
-          <OpenLegCard key={leg.id} leg={leg} />
-        ))}
-      </div>
-    </div>
-  );
+function ErrorStrip({ message }: { message: string }) {
+  return <div className="rounded-xl border border-rose/20 bg-rose/10 px-4 py-3 text-sm text-rose">{message}</div>;
 }
 
-function LegQuoteCard({
-  label,
-  price,
-  depth,
-}: {
-  label: string;
-  price: number | null;
-  depth: number | null;
-}) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-[#0d1119] px-4 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium text-white">{label}</p>
-        <p className="text-xs uppercase tracking-[0.22em] text-mist/70">Profondeur {depth ?? "--"}</p>
-      </div>
-      <p className="mt-2 font-mono text-xl font-semibold text-white">{formatPrice(price)}</p>
-    </div>
-  );
+function pairLabel(source: Pick<PairSignal, "combination"> | Pick<PaperTrade, "combination">) {
+  return source.combination === "POLY_UP_KALSHI_NO" ? "Up + No" : "Down + Yes";
 }
 
-function OpenLegCard({ leg }: { leg: PaperTradeLeg }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-[#0d1119] px-4 py-3">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-sm font-medium text-white">
-          {formatVenueLabel(leg.venue)} {leg.outcome}
-        </p>
-        <p className="text-xs uppercase tracking-[0.22em] text-mist/70">{leg.units} unités</p>
-      </div>
-      <div className="mt-2 grid gap-2 sm:grid-cols-3">
-        <MiniMetric label="Prix" value={formatPrice(leg.price)} />
-        <MiniMetric label="Coût brut" value={formatCurrency(leg.grossCost)} />
-        <MiniMetric label="Net shares" value={formatPrice(leg.netShares)} />
-      </div>
-    </div>
-  );
-}
-
-function MiniMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-[#0d1119] px-3 py-3">
-      <p className="text-xs uppercase tracking-[0.2em] text-mist/70">{label}</p>
-      <p className="mt-2 text-sm font-medium text-white">{value}</p>
-    </div>
-  );
-}
-
-function StatusChip({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: "cyan" | "amber" | "default";
-}) {
-  const toneClass =
-    tone === "cyan"
-      ? "border-cyan/20 bg-cyan/10 text-cyan"
-      : tone === "amber"
-        ? "border-amber/20 bg-amber/10 text-amber"
-        : "border-white/10 bg-white/[0.04] text-mist";
-
-  return (
-    <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.22em] ${toneClass}`}>
-      {label}
-    </span>
-  );
-}
-
-function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) {
-  return (
-    <div>
-      <h2 className="text-xl font-semibold tracking-tight text-white">{title}</h2>
-      <p className="mt-1 text-sm text-mist">{subtitle}</p>
-    </div>
-  );
-}
-
-function LoadingState({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="rounded-[28px] border border-white/8 bg-panel/90 px-6 py-16 text-center">
-      <p className="text-sm uppercase tracking-[0.28em] text-mist/70">{title}</p>
-      <p className="mt-4 text-2xl font-semibold text-white">Initialisation</p>
-      <p className="mt-2 text-mist">{description}</p>
-    </div>
-  );
-}
-
-function ErrorState({ message }: { message: string }) {
-  return (
-    <div className="rounded-[28px] border border-rose/20 bg-rose/10 px-6 py-10 text-center text-rose">
-      {message}
-    </div>
-  );
-}
-
-function ErrorBanner({ message }: { message: string }) {
-  return (
-    <div className="rounded-2xl border border-rose/20 bg-rose/10 px-4 py-3 text-sm text-rose">
-      {message}
-    </div>
-  );
-}
-
-function formatCombinationLabel(combination: PairSignal["combination"] | PaperTrade["combination"]) {
-  if (combination === "POLY_UP_KALSHI_NO") {
-    return "Poly Up + Kalshi No";
+function signalLegText(leg: PairSignal["legs"][number]) {
+  if (leg.price === null) {
+    return "--";
   }
 
-  return "Poly Down + Kalshi Yes";
+  return `${formatPrice(leg.price, 3)} · ${formatPrice(leg.units, 2)} u`;
 }
 
-function formatVenueLabel(venue: PaperTradeLeg["venue"] | PairSignal["legs"][number]["venue"]) {
-  return venue === "polymarket" ? "Polymarket" : "Kalshi";
+function tradeLegText(leg: PaperTradeLeg) {
+  return `${leg.outcome} · ${formatPrice(leg.price, 3)} · ${formatPrice(leg.units, 2)} u`;
 }

@@ -19,8 +19,8 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
     slotAligned: true,
     availabilityReason: null,
     outcomes: {
-      up: { outcome: "UP", buyPrice: 0.4, sellPrice: 0.41, midPrice: 0.405, bestBid: 0.41, bestAsk: 0.4, depth: 100 },
-      down: { outcome: "DOWN", buyPrice: 0.6, sellPrice: 0.61, midPrice: 0.605, bestBid: 0.61, bestAsk: 0.6, depth: 100 },
+      up: { outcome: "UP", buyPrice: 0.4, sellPrice: 0.41, midPrice: 0.405, bestBid: 0.41, bestAsk: 0.4, depth: 200 },
+      down: { outcome: "DOWN", buyPrice: 0.6, sellPrice: 0.61, midPrice: 0.605, bestBid: 0.61, bestAsk: 0.6, depth: 200 },
     },
     feeRate: 0.25,
     feeExponent: 2,
@@ -46,8 +46,8 @@ function createSnapshot(slotKey: string, slotStartTs: number): SnapshotRecord {
     slotAligned: true,
     availabilityReason: null,
     outcomes: {
-      yes: { outcome: "YES", buyPrice: 0.34, sellPrice: 0.33, midPrice: 0.335, bestBid: 0.33, bestAsk: 0.34, depth: 120 },
-      no: { outcome: "NO", buyPrice: 0.49, sellPrice: 0.48, midPrice: 0.485, bestBid: 0.48, bestAsk: 0.49, depth: 120 },
+      yes: { outcome: "YES", buyPrice: 0.34, sellPrice: 0.33, midPrice: 0.335, bestBid: 0.33, bestAsk: 0.34, depth: 200 },
+      no: { outcome: "NO", buyPrice: 0.49, sellPrice: 0.48, midPrice: 0.485, bestBid: 0.48, bestAsk: 0.49, depth: 200 },
     },
     feeMultiplier: 1,
     feeType: "quadratic",

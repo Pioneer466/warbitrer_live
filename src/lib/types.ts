@@ -83,6 +83,8 @@ export type SignalLeg = {
   price: number | null;
   depth: number | null;
   marketRef: string;
+  stakeUsd: number;
+  units: number;
 };
 
 export type PairSignal = {

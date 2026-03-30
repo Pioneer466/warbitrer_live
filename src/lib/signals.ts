@@ -1,3 +1,4 @@
+import { FIXED_LEG_NOTIONAL_USD } from "@/lib/constants";
 import { calculateKalshiFee, calculatePolymarketFee } from "@/lib/fees";
 import type {
   KalshiQuote,
@@ -108,6 +109,8 @@ function buildSignal({
           price: polyPrice,
           depth: polyDepth,
           marketRef: polymarket.ref.id,
+          stakeUsd: FIXED_LEG_NOTIONAL_USD,
+          units: 0,
         },
         {
           venue: "kalshi",
@@ -115,6 +118,8 @@ function buildSignal({
           price: kalshiPrice,
           depth: kalshiDepth,
           marketRef: kalshi.ref.id,
+          stakeUsd: FIXED_LEG_NOTIONAL_USD,
+          units: 0,
         },
       ],
     };
@@ -125,19 +130,19 @@ function buildSignal({
   const safePolyDepth = polyDepth as number;
   const safeKalshiDepth = kalshiDepth as number;
   const grossCost = safePolyPrice + safeKalshiPrice;
-  const maxAffordableUnits = Math.floor(settings.budgetPerTrade / grossCost);
-  const maxDepthUnits = Math.floor(Math.min(safePolyDepth, safeKalshiDepth));
-  const units = Math.min(maxAffordableUnits, maxDepthUnits);
+  const polyUnits = round6(FIXED_LEG_NOTIONAL_USD / safePolyPrice);
+  const kalshiUnits = round6(FIXED_LEG_NOTIONAL_USD / safeKalshiPrice);
+  const hasDepth = safePolyDepth >= polyUnits && safeKalshiDepth >= kalshiUnits;
   const thresholdMet = grossCost <= settings.grossEntryThreshold;
   const estimatedFees =
     calculatePolymarketFee({
-      shares: units,
+      shares: polyUnits,
       price: safePolyPrice,
       feeRate: polymarket.feeRate,
       exponent: polymarket.feeExponent,
     }) +
     calculateKalshiFee({
-      contracts: units,
+      contracts: kalshiUnits,
       price: safeKalshiPrice,
       feeMultiplier: kalshi.feeMultiplier,
     });
@@ -151,8 +156,8 @@ function buildSignal({
   let reason: string | null = null;
   if (!thresholdMet) {
     reason = "Seuil brut non atteint";
-  } else if (units < settings.minOrderSize) {
-    reason = "Taille minimum non atteinte";
+  } else if (!hasDepth) {
+    reason = "Liquidité insuffisante pour exécuter 50$ de chaque côté";
   } else if (!meetsImprovement) {
     reason = "Pas d'amélioration suffisante";
   }
@@ -163,10 +168,10 @@ function buildSignal({
     grossCost: round4(grossCost),
     threshold: settings.grossEntryThreshold,
     thresholdMet,
-    eligible: thresholdMet && units >= settings.minOrderSize && meetsImprovement,
-    units,
-    maxAffordableUnits,
-    maxDepthUnits,
+    eligible: thresholdMet && hasDepth && meetsImprovement,
+    units: thresholdMet && hasDepth ? 1 : 0,
+    maxAffordableUnits: 1,
+    maxDepthUnits: hasDepth ? 1 : 0,
     estimatedFees: round4(estimatedFees),
     improvementFromLastEntry,
     reason,
@@ -177,6 +182,8 @@ function buildSignal({
         price: safePolyPrice,
         depth: safePolyDepth,
         marketRef: polymarket.ref.id,
+        stakeUsd: FIXED_LEG_NOTIONAL_USD,
+        units: polyUnits,
       },
       {
         venue: "kalshi",
@@ -184,6 +191,8 @@ function buildSignal({
         price: safeKalshiPrice,
         depth: safeKalshiDepth,
         marketRef: kalshi.ref.id,
+        stakeUsd: FIXED_LEG_NOTIONAL_USD,
+        units: kalshiUnits,
       },
     ],
   };
@@ -228,4 +237,8 @@ function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuo
 
 function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function round6(value: number) {
+  return Math.round(value * 1_000_000) / 1_000_000;
 }
