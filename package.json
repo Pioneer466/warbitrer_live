@@ -16,6 +16,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "poly:derive-api-key": "tsx scripts/polymarket-derive-api-key.ts",
     "worker": "tsx src/worker/index.ts",
     "worker:dev": "tsx watch src/worker/index.ts",
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""
