@@ -23,7 +23,7 @@ const envSchema = z.object({
 export type LiveEnv = z.infer<typeof envSchema>;
 
 export function readEnv(): LiveEnv {
-  return envSchema.parse(process.env);
+  return envSchema.parse(normalizeEnv(process.env));
 }
 
 export function hasKalshiCredentials(env = readEnv()) {
@@ -55,4 +55,13 @@ export function readSecretValue(options: {
   }
 
   throw new Error(`${options.label} missing`);
+}
+
+function normalizeEnv(env: NodeJS.ProcessEnv) {
+  return Object.fromEntries(
+    Object.entries(env).map(([key, value]) => [
+      key,
+      typeof value === "string" && value.trim() === "" ? undefined : value,
+    ]),
+  );
 }
