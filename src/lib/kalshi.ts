@@ -25,6 +25,7 @@ export type KalshiMarketSummary = {
   ticker: string;
   event_ticker: string;
   title: string;
+  updated_time?: string;
   open_time: string;
   close_time: string;
   status: string;
@@ -120,21 +121,25 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     );
   }
 
-  const derived = deriveKalshiOutcomeQuotesFromMarket(market);
+  const freshMarketResponse = await fetchJson<KalshiMarketResponse>(
+    `${getKalshiBaseUrl()}/markets/${market.ticker}`,
+  ).catch(() => null);
+  const freshMarket = freshMarketResponse?.market ?? market;
+  const derived = deriveKalshiOutcomeQuotesFromMarket(freshMarket);
 
   return {
     ref: {
       venue: "kalshi",
-      id: market.ticker,
-      slotKey: buildSlotKeyFromIso(market.open_time),
-      ticker: market.ticker,
-      eventTicker: market.event_ticker,
-      title: market.title,
-      url: `https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/${market.event_ticker.toLowerCase()}`,
-      startTime: market.open_time,
-      endTime: market.close_time,
+      id: freshMarket.ticker,
+      slotKey: buildSlotKeyFromIso(freshMarket.open_time),
+      ticker: freshMarket.ticker,
+      eventTicker: freshMarket.event_ticker,
+      title: freshMarket.title,
+      url: `https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/${freshMarket.event_ticker.toLowerCase()}`,
+      startTime: freshMarket.open_time,
+      endTime: freshMarket.close_time,
     },
-    status: market.status,
+    status: freshMarket.status,
     slotAligned: true,
     availabilityReason: null,
     outcomes: derived,
