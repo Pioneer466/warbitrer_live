@@ -10,6 +10,12 @@ export function RecoveryClient() {
   const recovery = usePollingJson<RecoveryResponse>("/api/recovery", 4_000);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [manualTx, setManualTx] = useState<{
+    to: string;
+    data: string;
+    conditionId: string;
+    indexSets: number[];
+  } | null>(null);
 
   if (recovery.loading && !recovery.data) {
     return <PanelMessage title="Recuperation" message="Chargement des positions reclaimables." />;
@@ -24,6 +30,7 @@ export function RecoveryClient() {
   async function toggleKillSwitch() {
     setBusy("kill-switch");
     setActionMessage(null);
+    setManualTx(null);
     try {
       const response = await fetch("/api/circuit-breakers", {
         method: "PUT",
@@ -52,6 +59,7 @@ export function RecoveryClient() {
   async function redeem(marketRef: string) {
     setBusy(marketRef);
     setActionMessage(null);
+    setManualTx(null);
     try {
       const response = await fetch("/api/recovery", {
         method: "POST",
@@ -69,6 +77,12 @@ export function RecoveryClient() {
         txHash?: string;
         reason?: string;
         error?: string;
+        tx?: {
+          to: string;
+          data: string;
+          conditionId: string;
+          indexSets: number[];
+        };
       };
 
       if (!response.ok) {
@@ -79,6 +93,9 @@ export function RecoveryClient() {
         setActionMessage(`Redeem envoye. Tx: ${payload.txHash}`);
       } else {
         setActionMessage(payload.reason ?? "Mode manuel requis pour ce wallet.");
+        if (payload.tx) {
+          setManualTx(payload.tx);
+        }
       }
     } catch (error) {
       setActionMessage(error instanceof Error ? error.message : "Redeem impossible");
@@ -123,6 +140,15 @@ export function RecoveryClient() {
         </div>
 
         {actionMessage ? <div className="mt-4 rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">{actionMessage}</div> : null}
+        {manualTx ? (
+          <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
+            <div className="text-white">Transaction manuelle preparee</div>
+            <div className="mt-2">to: {manualTx.to}</div>
+            <div className="mt-1">conditionId: {manualTx.conditionId}</div>
+            <div className="mt-1">indexSets: {manualTx.indexSets.join(", ")}</div>
+            <div className="mt-2 break-all font-mono text-xs text-mist/80">{manualTx.data}</div>
+          </div>
+        ) : null}
       </section>
 
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
