@@ -1,4 +1,4 @@
-import { deriveKalshiOutcomeQuotes, resolveKalshiMarketForSlot } from "@/lib/kalshi";
+import { deriveKalshiOutcomeQuotes, deriveKalshiOutcomeQuotesFromMarket, resolveKalshiMarketForSlot } from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
 
 describe("Kalshi quote derivation", () => {
@@ -75,5 +75,31 @@ describe("Kalshi quote derivation", () => {
     );
 
     expect(market?.ticker).toBe("KXBTC15M-CURRENT");
+  });
+
+  it("uses official yes/no ask fields from the market summary when available", () => {
+    const quotes = deriveKalshiOutcomeQuotesFromMarket({
+      ticker: "KXBTC15M-CURRENT",
+      event_ticker: "KXBTC15M-CURRENT",
+      title: "Current slot",
+      open_time: "2026-03-30T20:00:00.000Z",
+      close_time: "2026-03-30T20:15:00.000Z",
+      status: "open",
+      yes_bid_dollars: "0.1450",
+      yes_ask_dollars: "0.1600",
+      no_bid_dollars: "0.8400",
+      no_ask_dollars: "0.8550",
+      yes_bid_size_fp: "156.00",
+      yes_ask_size_fp: "156.00",
+      no_bid_size_fp: "29.00",
+      no_ask_size_fp: "29.00",
+    });
+
+    expect(quotes.yes.buyPrice).toBe(0.16);
+    expect(quotes.yes.sellPrice).toBe(0.145);
+    expect(quotes.yes.depth).toBe(156);
+    expect(quotes.no.buyPrice).toBe(0.855);
+    expect(quotes.no.sellPrice).toBe(0.84);
+    expect(quotes.no.depth).toBe(29);
   });
 });

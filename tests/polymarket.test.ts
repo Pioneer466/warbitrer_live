@@ -1,4 +1,4 @@
-import { derivePolymarketDepth, extractPolymarketResolution } from "@/lib/polymarket";
+import { derivePolymarketDepth, extractPolymarketResolution, microUsdcToUsd } from "@/lib/polymarket";
 
 describe("Polymarket helpers", () => {
   it("detects resolution from terminal outcome prices", () => {
@@ -23,5 +23,10 @@ describe("Polymarket helpers", () => {
     );
 
     expect(depth).toBe(774.5);
+  });
+
+  it("converts polymarket collateral balances from micro-USDC to USD", () => {
+    expect(microUsdcToUsd("9993384")).toBe(9.993384);
+    expect(microUsdcToUsd(1000000)).toBe(1);
   });
 });

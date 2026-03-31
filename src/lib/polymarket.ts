@@ -175,8 +175,8 @@ export function createPolymarketAdapter(): VenueAdapter {
         ).catch(() => ({ value: 0 })),
       ]);
 
-      const available = Number(collateral.balance);
-      const allowance = Number(collateral.allowance);
+      const available = microUsdcToUsd(collateral.balance);
+      const allowance = microUsdcToUsd(collateral.allowance);
       const positionsValue = "value" in value ? value.value : value.total;
       const notes: string[] = [];
       const status =
@@ -390,6 +390,10 @@ function normalizePolymarketOutcome(outcome: string) {
   }
 
   throw new Error(`Unexpected Polymarket outcome ${outcome}`);
+}
+
+export function microUsdcToUsd(value: string | number) {
+  return Number(value) / 1_000_000;
 }
 
 function mapPolymarketOrderStatus(order: OpenOrder): VenueOrderStatus {

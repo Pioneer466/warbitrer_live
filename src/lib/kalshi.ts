@@ -52,13 +52,6 @@ type KalshiSeriesResponse = {
   };
 };
 
-type KalshiOrderbook = {
-  orderbook_fp: {
-    yes_dollars: Array<[string, string]>;
-    no_dollars: Array<[string, string]>;
-  };
-};
-
 type KalshiMarketResponse = {
   market: KalshiMarketSummary;
 };
@@ -127,10 +120,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     );
   }
 
-  const orderbook = await fetchJson<KalshiOrderbook>(
-    `${getKalshiBaseUrl()}/markets/${market.ticker}/orderbook`,
-  );
-  const derived = deriveKalshiOutcomeQuotes(orderbook.orderbook_fp);
+  const derived = deriveKalshiOutcomeQuotesFromMarket(market);
 
   return {
     ref: {
@@ -185,14 +175,11 @@ export async function fetchKalshiResolution(ticker: string) {
   return response.market.result === "yes" ? ("YES" as const) : ("NO" as const);
 }
 
-export function deriveKalshiOutcomeQuotes(orderbook: KalshiOrderbook["orderbook_fp"]) {
-  const yesBidLevel = getBestLevel(orderbook.yes_dollars);
-  const noBidLevel = getBestLevel(orderbook.no_dollars);
-
-  const yesBid = yesBidLevel?.price ?? null;
-  const noBid = noBidLevel?.price ?? null;
-  const yesAsk = noBid === null ? null : round4(1 - noBid);
-  const noAsk = yesBid === null ? null : round4(1 - yesBid);
+export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary) {
+  const yesBid = parseMarketPrice(market.yes_bid_dollars);
+  const yesAsk = parseMarketPrice(market.yes_ask_dollars);
+  const noBid = parseMarketPrice(market.no_bid_dollars);
+  const noAsk = parseMarketPrice(market.no_ask_dollars);
 
   const yesOutcome: OutcomeQuote = {
     outcome: "YES",
@@ -201,7 +188,7 @@ export function deriveKalshiOutcomeQuotes(orderbook: KalshiOrderbook["orderbook_
     midPrice: yesAsk !== null && yesBid !== null ? round4((yesAsk + yesBid) / 2) : null,
     bestBid: yesBid,
     bestAsk: yesAsk,
-    depth: noBidLevel?.size ?? null,
+    depth: parseMarketSize(market.yes_ask_size_fp),
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
@@ -214,7 +201,7 @@ export function deriveKalshiOutcomeQuotes(orderbook: KalshiOrderbook["orderbook_
     midPrice: noAsk !== null && noBid !== null ? round4((noAsk + noBid) / 2) : null,
     bestBid: noBid,
     bestAsk: noAsk,
-    depth: yesBidLevel?.size ?? null,
+    depth: parseMarketSize(market.no_ask_size_fp),
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
@@ -223,6 +210,46 @@ export function deriveKalshiOutcomeQuotes(orderbook: KalshiOrderbook["orderbook_
   return {
     yes: yesOutcome,
     no: noOutcome,
+  };
+}
+
+export function deriveKalshiOutcomeQuotes(orderbook: {
+  yes_dollars: Array<[string, string]>;
+  no_dollars: Array<[string, string]>;
+}) {
+  const yesBidLevel = getBestLevel(orderbook.yes_dollars);
+  const noBidLevel = getBestLevel(orderbook.no_dollars);
+
+  const yesBid = yesBidLevel?.price ?? null;
+  const noBid = noBidLevel?.price ?? null;
+  const yesAsk = noBid === null ? null : round4(1 - noBid);
+  const noAsk = yesBid === null ? null : round4(1 - yesBid);
+
+  return {
+    yes: {
+      outcome: "YES" as const,
+      buyPrice: yesAsk,
+      sellPrice: yesBid,
+      midPrice: yesAsk !== null && yesBid !== null ? round4((yesAsk + yesBid) / 2) : null,
+      bestBid: yesBid,
+      bestAsk: yesAsk,
+      depth: noBidLevel?.size ?? null,
+      tickSize: 0.001,
+      minOrderSize: 1,
+      feeRateBps: null,
+    },
+    no: {
+      outcome: "NO" as const,
+      buyPrice: noAsk,
+      sellPrice: noBid,
+      midPrice: noAsk !== null && noBid !== null ? round4((noAsk + noBid) / 2) : null,
+      bestBid: noBid,
+      bestAsk: noAsk,
+      depth: yesBidLevel?.size ?? null,
+      tickSize: 0.001,
+      minOrderSize: 1,
+      feeRateBps: null,
+    },
   };
 }
 
@@ -466,6 +493,24 @@ function getBestLevel(levels: Array<[string, string]>) {
       size: Number(levelSize),
     }))
     .sort((left, right) => right.price - left.price)[0];
+}
+
+function parseMarketPrice(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseMarketSize(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function round4(value: number) {
