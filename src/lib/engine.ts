@@ -17,6 +17,7 @@ import {
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
 } from "@/lib/polymarket";
+import { autoRedeemPolymarketIfConfigured } from "@/lib/recovery";
 import { buildSignals } from "@/lib/signals";
 import { calculateWinningPayout, createIntentFromOpportunity, finalizeIntent, markIntentStatus } from "@/lib/settlement";
 import { getCurrentSlot } from "@/lib/slot";
@@ -231,6 +232,8 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         replaceVenuePositions("polymarket", polyPositions),
         replaceVenuePositions("kalshi", kalshiPositions),
       ]);
+
+      await autoRedeemPolymarketIfConfigured(polyPositions, now);
 
       await reconcileVenueOrders(now);
       await reconcileSettlements(now);

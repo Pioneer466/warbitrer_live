@@ -18,6 +18,7 @@ const envSchema = z.object({
   POLY_FUNDER_ADDRESS: z.string().min(1).optional(),
   POLY_SIGNATURE_TYPE: z.enum(POLY_SIGNATURE_TYPES).optional(),
   POLY_BRIDGE_LOW_WATER_USDC: z.string().optional(),
+  POLY_AUTO_REDEEM: z.string().optional(),
   POLYGON_RPC_URL: z.string().min(1).optional(),
 });
 
@@ -56,6 +57,15 @@ export function readSecretValue(options: {
   }
 
   throw new Error(`${options.label} missing`);
+}
+
+export function isTruthyEnv(value: string | undefined) {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
 }
 
 function normalizeEnv(env: NodeJS.ProcessEnv) {
