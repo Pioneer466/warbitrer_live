@@ -330,13 +330,20 @@ function createClobClient() {
     throw new Error("Polymarket credentials missing");
   }
 
-  const signer = new Wallet(
-    readSecretValue({
-      inline: env.POLY_PRIVATE_KEY,
-      path: env.POLY_PRIVATE_KEY_PATH,
-      label: "POLY_PRIVATE_KEY",
-    }),
-  );
+  const privateKey = readSecretValue({
+    inline: env.POLY_PRIVATE_KEY,
+    path: env.POLY_PRIVATE_KEY_PATH,
+    label: "POLY_PRIVATE_KEY",
+  });
+
+  let signer: Wallet;
+  try {
+    signer = new Wallet(privateKey);
+  } catch {
+    throw new Error(
+      "POLY_PRIVATE_KEY invalide. Attendu: une cle privee EOA hexadecimale 0x... sur une seule ligne. Avec POLY_PROXY, la cle est celle du signer EOA et POLY_FUNDER_ADDRESS est l'adresse du proxy/funder.",
+    );
+  }
   const creds: ApiKeyCreds = {
     key: env.POLY_API_KEY,
     secret: env.POLY_API_SECRET,

@@ -36,6 +36,7 @@ export function DashboardClient() {
   const historyPoints = history.data?.points ?? [];
   const historyLabels = historyPoints.map((point) => formatClock(point.ts).slice(0, 5));
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
+  const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
 
   return (
     <div className="space-y-5">
@@ -84,25 +85,51 @@ export function DashboardClient() {
 
       <section className="grid gap-4 xl:grid-cols-2">
         <ChartPanel
-          title="Coût Up/No"
+          title="Polymarket UP / DOWN"
           labels={historyLabels}
-          values={historyPoints.map((point) => point.grossCostUpNo)}
-          color="#1ce7cf"
-          fill="rgba(28,231,207,0.08)"
+          series={[
+            {
+              key: "poly-up",
+              label: "Poly UP",
+              color: "#1ce7cf",
+              fill: "rgba(28,231,207,0.08)",
+              values: historyPoints.map((point) => point.polyUpBuy),
+            },
+            {
+              key: "poly-down",
+              label: "Poly DOWN",
+              color: "#92a0ff",
+              fill: "rgba(146,160,255,0.08)",
+              values: historyPoints.map((point) => point.polyDownBuy),
+            },
+          ]}
         />
         <ChartPanel
-          title="Coût Down/Yes"
+          title="Kalshi YES / NO"
           labels={historyLabels}
-          values={historyPoints.map((point) => point.grossCostDownYes)}
-          color="#ffb84f"
-          fill="rgba(255,184,79,0.08)"
+          series={[
+            {
+              key: "kalshi-yes",
+              label: "Kalshi YES",
+              color: "#ffb84f",
+              fill: "rgba(255,184,79,0.08)",
+              values: historyPoints.map((point) => point.kalshiYesAsk),
+            },
+            {
+              key: "kalshi-no",
+              label: "Kalshi NO",
+              color: "#ff7a5c",
+              fill: "rgba(255,122,92,0.08)",
+              values: historyPoints.map((point) => point.kalshiNoAsk),
+            },
+          ]}
         />
       </section>
 
       <section className="rounded-[28px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
         <SectionHeader
           title="Opportunités"
-          meta={`Seuil ${formatPrice(config.grossEntryThreshold, 3)} · notionnel ${formatCurrency(config.maxPairNotionalUsd)}`}
+          meta={`Entree si cout total <= ${formatPrice(config.grossEntryThreshold, 3)} · prix max/jambe <= ${formatPrice(config.maxLegPrice, 2)} · ${formatCurrency(config.maxPairNotionalUsd)} total = ${formatCurrency(perLegNotionalUsd)} par jambe`}
         />
         <div className="mt-4 grid gap-4 xl:grid-cols-2">
           {opportunities.length === 0 ? (
@@ -238,7 +265,7 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
         <div>
           <div className="text-white">{opportunity.label}</div>
           <div className="mt-1 text-sm text-mist">
-            primaire {opportunity.primaryVenue ?? "--"} · coût {formatPrice(opportunity.grossCost, 3)}
+            primaire {opportunity.primaryVenue ?? "--"} · cout total {formatPrice(opportunity.grossCost, 3)}
           </div>
         </div>
         <StatusBadge tone={opportunity.eligible ? "cyan" : "amber"}>
@@ -252,7 +279,7 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
               {leg.venue} · {leg.outcome}
             </div>
             <div className="mt-2">
-              {formatPrice(leg.price, 4)} · size {formatPrice(leg.size, 2)} · fee {formatCurrency(leg.feeEstimateUsd)}
+              prix {formatPrice(leg.price, 4)} · notionnel {formatCurrency(leg.targetNotionalUsd)} · size {formatPrice(leg.size, 2)} · fee {formatCurrency(leg.feeEstimateUsd)}
             </div>
           </div>
         ))}
@@ -263,7 +290,13 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
       </div>
       {opportunity.reasons.length > 0 ? (
         <div className="mt-3 rounded-[18px] border border-amber/20 bg-amber/10 px-3 py-3 text-sm text-amber">
-          {opportunity.reasons.join(" | ")}
+          <div className="flex flex-wrap gap-2">
+            {opportunity.reasons.map((reason) => (
+              <span key={reason} className="rounded-full border border-amber/20 bg-black/10 px-2 py-1">
+                {reason}
+              </span>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>
@@ -341,30 +374,21 @@ function Panel({
 function ChartPanel({
   title,
   labels,
-  values,
-  color,
-  fill,
+  series,
 }: {
   title: string;
   labels: string[];
-  values: Array<number | null>;
-  color: string;
-  fill: string;
+  series: Array<{
+    key: string;
+    label: string;
+    color: string;
+    fill: string;
+    values: Array<number | null>;
+  }>;
 }) {
   return (
     <Panel title={title}>
-      <LineChart
-        labels={labels}
-        series={[
-          {
-            key: title,
-            label: title,
-            color,
-            fill,
-            values,
-          },
-        ]}
-      />
+      <LineChart labels={labels} series={series} />
     </Panel>
   );
 }
