@@ -104,6 +104,9 @@ Concrètement, mets les secrets soit:
 
 Le pack de déploiement prêt à copier est dans [`deploy/vps`](./deploy/vps).
 
+Important: l’interface n’a pas encore d’auth applicative native.
+Pour un VPS public, protège l’accès avec `basicauth` côté Caddy, un tunnel SSH, Tailscale, ou une restriction IP.
+
 ## Notes d’exploitation
 
 - le trading live reste désactivé tant que `enableTrading` est `false` dans la config

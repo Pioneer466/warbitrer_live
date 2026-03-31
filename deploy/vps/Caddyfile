@@ -1,4 +1,10 @@
 warbitrer.example.com {
+	basicauth {
+		# Replace with a real bcrypt hash from:
+		# caddy hash-password --plaintext 'CHANGE_ME'
+		ops-team JDJhJDE0JERFTU9IQVNIX1JFUExBQ0VfTUUuLi4=
+	}
+
 	reverse_proxy 127.0.0.1:3000
 
 	header {
