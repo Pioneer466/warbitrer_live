@@ -411,6 +411,35 @@ export type HistoryResponse = {
   points: HistoryPoint[];
 };
 
+export type RecoveryOutcome = {
+  outcome: Resolution;
+  size: number;
+  currentValueUsd: number;
+  redeemable: boolean;
+  mergeable: boolean;
+};
+
+export type RecoveryMarket = {
+  marketRef: string;
+  conditionId: string;
+  title: string;
+  url: string | null;
+  outcomes: RecoveryOutcome[];
+  redeemable: boolean;
+  mergeable: boolean;
+  directRedeemSupported: boolean;
+  notes: string[];
+};
+
+export type RecoveryResponse = {
+  fetchedAt: number;
+  globalKillSwitchActive: boolean;
+  signatureType: "EOA" | "POLY_PROXY" | "POLY_GNOSIS_SAFE" | "unknown";
+  funderAddress: string | null;
+  markets: RecoveryMarket[];
+  kalshiSettlementMode: "automatic";
+};
+
 export type VenueOrderRequest = {
   marketRef: string;
   tokenId?: string;

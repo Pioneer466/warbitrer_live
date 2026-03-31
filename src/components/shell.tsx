@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 type ShellProps = {
-  activePath: "/" | "/trades";
+  activePath: "/" | "/trades" | "/recovery";
   children: React.ReactNode;
 };
 
@@ -20,6 +20,9 @@ export function Shell({ activePath, children }: ShellProps) {
               </Tab>
               <Tab href="/trades" active={activePath === "/trades"}>
                 Trades
+              </Tab>
+              <Tab href="/recovery" active={activePath === "/recovery"}>
+                Recup
               </Tab>
             </nav>
           </div>

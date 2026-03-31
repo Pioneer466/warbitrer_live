@@ -37,6 +37,10 @@ export function DashboardClient() {
   const historyLabels = historyPoints.map((point) => formatClock(point.ts).slice(0, 5));
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
   const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
+  const kalshiDisplay = buildNormalizedBinaryDisplay(
+    historyPoints.map((point) => point.kalshiYesAsk),
+    historyPoints.map((point) => point.kalshiNoAsk),
+  );
 
   return (
     <div className="space-y-5">
@@ -106,6 +110,7 @@ export function DashboardClient() {
         />
         <ChartPanel
           title="Kalshi YES / NO"
+          meta="vue normalisee et lisse pour lisibilite ; execution sur asks bruts"
           labels={historyLabels}
           series={[
             {
@@ -113,14 +118,14 @@ export function DashboardClient() {
               label: "Kalshi YES",
               color: "#ffb84f",
               fill: "rgba(255,184,79,0.08)",
-              values: historyPoints.map((point) => point.kalshiYesAsk),
+              values: kalshiDisplay.yes,
             },
             {
               key: "kalshi-no",
               label: "Kalshi NO",
               color: "#ff7a5c",
               fill: "rgba(255,122,92,0.08)",
-              values: historyPoints.map((point) => point.kalshiNoAsk),
+              values: kalshiDisplay.no,
             },
           ]}
         />
@@ -373,10 +378,12 @@ function Panel({
 
 function ChartPanel({
   title,
+  meta,
   labels,
   series,
 }: {
   title: string;
+  meta?: string;
   labels: string[];
   series: Array<{
     key: string;
@@ -387,7 +394,7 @@ function ChartPanel({
   }>;
 }) {
   return (
-    <Panel title={title}>
+    <Panel title={title} meta={meta}>
       <LineChart labels={labels} series={series} />
     </Panel>
   );
@@ -478,4 +485,45 @@ function StatusBadge({
         : "border-rose/20 bg-rose/10 text-rose";
 
   return <span className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.16em] ${toneClass}`}>{children}</span>;
+}
+
+function buildNormalizedBinaryDisplay(
+  left: Array<number | null>,
+  right: Array<number | null>,
+) {
+  const normalized = left.map((leftValue, index) => {
+    const rightValue = right[index];
+    if (leftValue === null || rightValue === null) {
+      return null;
+    }
+
+    const total = leftValue + rightValue;
+    if (!Number.isFinite(total) || total <= 0) {
+      return null;
+    }
+
+    return {
+      left: leftValue / total,
+      right: rightValue / total,
+    };
+  });
+
+  return {
+    yes: smoothSeries(normalized.map((point) => point?.left ?? null)),
+    no: smoothSeries(normalized.map((point) => point?.right ?? null)),
+  };
+}
+
+function smoothSeries(values: Array<number | null>) {
+  return values.map((_, index) => {
+    const window = values
+      .slice(Math.max(0, index - 1), Math.min(values.length, index + 2))
+      .filter((value): value is number => value !== null);
+
+    if (window.length === 0) {
+      return null;
+    }
+
+    return window.reduce((sum, value) => sum + value, 0) / window.length;
+  });
 }
