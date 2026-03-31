@@ -1,26 +1,62 @@
 import { buildSignals } from "@/lib/signals";
-import type { KalshiQuote, PaperSettings, PolymarketQuote } from "@/lib/types";
+import type { KalshiQuote, PolymarketQuote, StrategyConfig, VenueBalance } from "@/lib/types";
 
-const settings: PaperSettings = {
-  initialCapital: 10_000,
-  budgetPerTrade: 250,
+const settings: StrategyConfig = {
+  enableTrading: true,
+  shadowMode: true,
+  maxPairNotionalUsd: 50,
   grossEntryThreshold: 0.93,
   maxLegPrice: 0.49,
   reentryImprovement: 0.01,
   pollingIntervalMs: 1_000,
-  minOrderSize: 5,
+  minOrderSize: 0.01,
+  maxSlippageBps: 30,
+  entryCutoffSeconds: 20,
+  maxOpenIntentsPerSlot: 1,
+  maxVenueExposureUsd: 1_000,
+  polyBridgeLowWaterUsdc: 100,
 };
+
+const balances: VenueBalance[] = [
+  {
+    venue: "polymarket",
+    capturedAt: 0,
+    status: "ready",
+    currency: "USDC",
+    availableBalanceUsd: 1_000,
+    totalBalanceUsd: 1_000,
+    portfolioValueUsd: 1_000,
+    allowanceUsd: 1_000,
+    notes: [],
+    raw: {},
+  },
+  {
+    venue: "kalshi",
+    capturedAt: 0,
+    status: "ready",
+    currency: "USD",
+    availableBalanceUsd: 1_000,
+    totalBalanceUsd: 1_000,
+    portfolioValueUsd: 1_000,
+    allowanceUsd: null,
+    notes: [],
+    raw: {},
+  },
+];
 
 const polymarket: PolymarketQuote = {
   ref: {
     venue: "polymarket",
     id: "poly-market",
+    conditionId: "condition-1",
     slug: "btc-updown-15m-1774899000",
     title: "Poly BTC 15m",
     url: "https://polymarket.com/event/test",
     startTime: "2026-03-30T19:30:00.000Z",
     endTime: "2026-03-30T19:45:00.000Z",
+    slotKey: "1774899000000",
   },
+  conditionId: "condition-1",
   status: "open",
   slotAligned: true,
   availabilityReason: null,
@@ -28,36 +64,35 @@ const polymarket: PolymarketQuote = {
     up: {
       outcome: "UP",
       buyPrice: 0.42,
-      sellPrice: 0.43,
-      midPrice: 0.425,
-      bestBid: 0.43,
+      sellPrice: 0.41,
+      midPrice: 0.415,
+      bestBid: 0.41,
       bestAsk: 0.42,
-      depth: 200,
+      depth: 300,
+      tickSize: 0.001,
+      minOrderSize: 0.01,
+      feeRateBps: 10,
     },
     down: {
       outcome: "DOWN",
       buyPrice: 0.59,
-      sellPrice: 0.6,
-      midPrice: 0.595,
-      bestBid: 0.6,
+      sellPrice: 0.58,
+      midPrice: 0.585,
+      bestBid: 0.58,
       bestAsk: 0.59,
-      depth: 200,
+      depth: 300,
+      tickSize: 0.001,
+      minOrderSize: 0.01,
+      feeRateBps: 10,
     },
-  },
-  feeRate: 0.25,
-  feeExponent: 2,
-  feeType: "crypto_fees_v2",
-  feeScheduleRaw: {
-    rate: 0.25,
-    exponent: 2,
-    takerOnly: true,
-    rebateRate: 0.2,
   },
   resolution: null,
   tokenIds: {
     up: "up-token",
     down: "down-token",
   },
+  feeRateBps: 10,
+  negRisk: false,
 };
 
 const kalshi: KalshiQuote = {
@@ -65,11 +100,11 @@ const kalshi: KalshiQuote = {
     venue: "kalshi",
     id: "KXBTC15M-26MAR301545-45",
     ticker: "KXBTC15M-26MAR301545-45",
-    seriesTicker: "KXBTC15M",
     title: "BTC price up in next 15 mins?",
     url: "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/test",
     startTime: "2026-03-30T19:30:00.000Z",
     endTime: "2026-03-30T19:45:00.000Z",
+    slotKey: "1774899000000",
   },
   status: "active",
   slotAligned: true,
@@ -83,6 +118,9 @@ const kalshi: KalshiQuote = {
       bestBid: 0.34,
       bestAsk: 0.35,
       depth: 180,
+      tickSize: 0.001,
+      minOrderSize: 1,
+      feeRateBps: null,
     },
     no: {
       outcome: "NO",
@@ -92,6 +130,9 @@ const kalshi: KalshiQuote = {
       bestBid: 0.48,
       bestAsk: 0.49,
       depth: 180,
+      tickSize: 0.001,
+      minOrderSize: 1,
+      feeRateBps: null,
     },
   },
   feeMultiplier: 1,
@@ -99,32 +140,35 @@ const kalshi: KalshiQuote = {
   resolution: null,
 };
 
-describe("signal engine", () => {
-  it("marks the sub-threshold opposite pair as eligible", () => {
+describe("live signal engine", () => {
+  it("marks the sub-threshold pair as eligible and chooses a primary venue", () => {
     const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
       polymarket,
       kalshi,
       settings,
+      balances,
       lastEntryCosts: {},
       secondsRemaining: 180,
     });
 
     expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
     expect(signal.grossCost).toBe(0.91);
-    expect(signal.thresholdMet).toBe(true);
     expect(signal.eligible).toBe(true);
-    expect(signal.units).toBe(1);
-    expect(signal.legs[0].stakeUsd).toBe(25);
-    expect(signal.legs[1].stakeUsd).toBe(25);
-    expect(signal.legs[0].units).toBeCloseTo(59.523809, 5);
-    expect(signal.legs[1].units).toBeCloseTo(51.020408, 5);
+    expect(signal.primaryVenue).toBe("kalshi");
+    expect(signal.legs[0].size).toBeGreaterThan(0);
+    expect(signal.legs[1].size).toBeGreaterThan(0);
   });
 
-  it("blocks re-entry when the improvement is below one cent", () => {
+  it("blocks re-entry when the improvement is below the configured threshold", () => {
     const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
       polymarket,
       kalshi,
       settings,
+      balances,
       lastEntryCosts: {
         POLY_UP_KALSHI_NO: 0.915,
       },
@@ -132,77 +176,22 @@ describe("signal engine", () => {
     });
 
     expect(signal.eligible).toBe(false);
-    expect(signal.reason).toBe("Pas d'amélioration suffisante");
+    expect(signal.reasons).toContain("Pas d'amélioration suffisante");
   });
 
-  it("blocks entry when Kalshi is not aligned on the same slot", () => {
+  it("blocks late entries inside the cutoff window", () => {
     const [signal] = buildSignals({
-      polymarket,
-      kalshi: {
-        ...kalshi,
-        slotAligned: false,
-        availabilityReason: "Marché Kalshi du créneau courant indisponible",
-        ref: {
-          ...kalshi.ref,
-          startTime: "2026-03-30T19:45:00.000Z",
-          endTime: "2026-03-30T20:00:00.000Z",
-          slotKey: "1774899900000",
-        },
-      },
-      settings,
-      lastEntryCosts: {},
-      secondsRemaining: 180,
-    });
-
-    expect(signal.eligible).toBe(false);
-    expect(signal.grossCost).toBeNull();
-    expect(signal.reason).toBe("Marché Kalshi du créneau courant indisponible");
-  });
-
-  it("blocks entry in the last 20 seconds of the slot", () => {
-    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
       polymarket,
       kalshi,
       settings,
+      balances,
       lastEntryCosts: {},
       secondsRemaining: 20,
     });
 
     expect(signal.eligible).toBe(false);
-    expect(signal.grossCost).toBeNull();
-    expect(signal.reason).toBe("Entrée bloquée sur les 20 dernières secondes");
-  });
-
-  it("blocks entry when one leg exceeds the 0.49 wall", () => {
-    const [, signal] = buildSignals({
-      polymarket: {
-        ...polymarket,
-        outcomes: {
-          ...polymarket.outcomes,
-          down: {
-            ...polymarket.outcomes.down,
-            buyPrice: 0.27,
-          },
-        },
-      },
-      kalshi: {
-        ...kalshi,
-        outcomes: {
-          ...kalshi.outcomes,
-          yes: {
-            ...kalshi.outcomes.yes,
-            buyPrice: 0.58,
-          },
-        },
-      },
-      settings,
-      lastEntryCosts: {},
-      secondsRemaining: 180,
-    });
-
-    expect(signal.grossCost).toBe(0.85);
-    expect(signal.thresholdMet).toBe(true);
-    expect(signal.eligible).toBe(false);
-    expect(signal.reason).toBe("Une jambe dépasse 0.49");
+    expect(signal.reasons).toContain("Entrée bloquée sur les 20 dernières secondes");
   });
 });

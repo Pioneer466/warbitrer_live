@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Paper BTC 15m Arb",
+  title: "Warbitrer Live BTC 15m",
   description:
-    "Dashboard paper-only pour suivre les opportunités cross-venue BTC 15 minutes entre Polymarket et Kalshi.",
+    "Cockpit live pour la stratégie d'arbitrage BTC 15 minutes entre Polymarket et Kalshi.",
 };
 
 export default function RootLayout({

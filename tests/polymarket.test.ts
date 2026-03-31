@@ -7,7 +7,7 @@ describe("Polymarket helpers", () => {
     expect(extractPolymarketResolution('["0.61","0.39"]')).toBeNull();
   });
 
-  it("selects the closest book level as heuristic depth for buy execution", () => {
+  it("uses the ask side depth closest to the targeted buy execution", () => {
     const depth = derivePolymarketDepth(
       {
         bids: [
@@ -22,6 +22,6 @@ describe("Polymarket helpers", () => {
       0.72,
     );
 
-    expect(depth).toBe(193.85);
+    expect(depth).toBe(774.5);
   });
 });

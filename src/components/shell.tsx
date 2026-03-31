@@ -26,7 +26,7 @@ export function Shell({ activePath, children }: ShellProps) {
           <div className="flex items-center gap-2">
             <Badge tone="amber">BTC 15m</Badge>
             <Badge tone="cyan">LIVE</Badge>
-            <Badge tone="default">PAPER</Badge>
+            <Badge tone="default">POSTGRES</Badge>
           </div>
         </div>
       </header>

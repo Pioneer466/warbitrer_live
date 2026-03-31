@@ -1,149 +1,167 @@
 import * as postgres from "@/lib/postgres-db";
 import type {
+  BridgeTransfer,
+  CircuitBreaker,
   DashboardResponse,
   HistoryPoint,
+  LiveFill,
+  LiveOrder,
   MarketSlot,
-  PairCombination,
-  PaperSettings,
-  PaperTrade,
-  SnapshotRecord,
+  OpportunitySnapshot,
+  OrderIntent,
+  PnlSnapshot,
+  PositionSnapshot,
+  RunEvent,
+  StrategyConfig,
   TradesResponse,
+  VenueBalance,
   WorkerState,
 } from "@/lib/types";
 
-function usePostgres() {
-  return Boolean(process.env.DATABASE_URL);
-}
-
-type SqliteModule = typeof import("@/lib/db");
-
-let sqliteModulePromise: Promise<SqliteModule> | null = null;
-
-async function getSqlite() {
-  if (!sqliteModulePromise) {
-    sqliteModulePromise = import("@/lib/db");
-  }
-
-  return sqliteModulePromise;
-}
-
 export function storageMode() {
-  return usePostgres() ? "postgres" : "sqlite";
+  return "postgres";
 }
 
-export async function readSettings(): Promise<PaperSettings> {
-  if (usePostgres()) {
-    return postgres.getSettings(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.getSettings(sqlite.getDb());
+async function db() {
+  return postgres.getPgDb();
 }
 
-export async function writeSettings(payload: PaperSettings) {
-  if (usePostgres()) {
-    return postgres.updateSettings(await postgres.getPgDb(), payload);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.updateSettings(sqlite.getDb(), payload);
+export async function readSettings(): Promise<StrategyConfig> {
+  return postgres.getStrategyConfig(await db());
+}
+
+export async function writeSettings(payload: StrategyConfig) {
+  return postgres.updateStrategyConfig(await db(), payload);
+}
+
+export async function readWorkerState(): Promise<WorkerState> {
+  return postgres.getWorkerState(await db());
 }
 
 export async function writeWorkerState(state: Partial<WorkerState>) {
-  if (usePostgres()) {
-    return postgres.updateWorkerState(await postgres.getPgDb(), state);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.updateWorkerState(sqlite.getDb(), state);
+  return postgres.updateWorkerState(await db(), state);
 }
 
-export async function readWorkerState() {
-  if (usePostgres()) {
-    return postgres.getWorkerState(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.getWorkerState(sqlite.getDb());
+export async function writeSnapshot(snapshot: {
+  slotKey: string;
+  slotStartTs: number;
+  slotEndTs: number;
+  capturedAt: number;
+  polymarket: unknown;
+  kalshi: unknown;
+  opportunities: any[];
+}) {
+  return postgres.insertOpportunitySnapshot(await db(), snapshot);
 }
 
-export async function writeSnapshot(snapshot: SnapshotRecord) {
-  if (usePostgres()) {
-    return postgres.insertSnapshot(await postgres.getPgDb(), snapshot);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.insertSnapshot(sqlite.getDb(), snapshot);
+export async function readLatestSnapshot(slotKey?: string): Promise<OpportunitySnapshot | null> {
+  return postgres.getLatestOpportunitySnapshot(await db(), slotKey);
 }
 
 export async function readLastEntryCosts(slotKey: string) {
-  if (usePostgres()) {
-    return postgres.getLastEntryCosts(await postgres.getPgDb(), slotKey);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.getLastEntryCosts(sqlite.getDb(), slotKey);
+  return postgres.getLastEntryCosts(await db(), slotKey);
 }
 
-export async function writeTrade(trade: PaperTrade) {
-  if (usePostgres()) {
-    return postgres.insertTrade(await postgres.getPgDb(), trade);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.insertTrade(sqlite.getDb(), trade);
+export async function writeVenueBalance(balance: VenueBalance) {
+  return postgres.upsertVenueBalance(await db(), balance);
 }
 
-export async function resolveTrade(trade: PaperTrade) {
-  if (usePostgres()) {
-    return postgres.updateTradeResolution(await postgres.getPgDb(), trade);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.updateTradeResolution(sqlite.getDb(), trade);
+export async function readVenueBalances() {
+  return postgres.listVenueBalances(await db());
 }
 
-export async function readOpenTrades(): Promise<PaperTrade[]> {
-  if (usePostgres()) {
-    return postgres.getOpenTrades(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.getOpenTrades(sqlite.getDb());
+export async function writeOrderIntent(intent: OrderIntent) {
+  return postgres.upsertOrderIntent(await db(), intent);
+}
+
+export async function readOpenOrderIntents() {
+  return postgres.listOpenOrderIntents(await db());
+}
+
+export async function readRecentOrderIntents(limit?: number) {
+  return postgres.listRecentOrderIntents(await db(), limit);
+}
+
+export async function findOrderIntent(intentId: string) {
+  return postgres.findOrderIntent(await db(), intentId);
+}
+
+export async function writeVenueOrder(order: LiveOrder) {
+  return postgres.upsertVenueOrder(await db(), order);
+}
+
+export async function readOpenVenueOrders() {
+  return postgres.listOpenVenueOrders(await db());
+}
+
+export async function readRecentVenueOrders(limit?: number) {
+  return postgres.listRecentVenueOrders(await db(), limit);
+}
+
+export async function findVenueOrder(venue: string, venueOrderId: string) {
+  return postgres.findVenueOrderByExchangeId(await db(), venue, venueOrderId);
+}
+
+export async function writeFill(fill: LiveFill) {
+  return postgres.upsertFill(await db(), fill);
+}
+
+export async function readRecentFills(limit?: number) {
+  return postgres.listRecentFills(await db(), limit);
+}
+
+export async function replaceVenuePositions(venue: "polymarket" | "kalshi", positions: PositionSnapshot[]) {
+  return postgres.replaceVenuePositions(await db(), venue, positions);
+}
+
+export async function readPositions() {
+  return postgres.listPositions(await db());
+}
+
+export async function writeSettlement(settlement: Parameters<typeof postgres.upsertSettlement>[1]) {
+  return postgres.upsertSettlement(await db(), settlement);
+}
+
+export async function writePnlSnapshot(snapshot: PnlSnapshot) {
+  return postgres.insertPnlSnapshot(await db(), snapshot);
+}
+
+export async function readLatestPnlSnapshot() {
+  return postgres.getLatestPnlSnapshot(await db());
+}
+
+export async function writeBridgeTransfer(transfer: BridgeTransfer) {
+  return postgres.upsertBridgeTransfer(await db(), transfer);
+}
+
+export async function readBridgeTransfers(limit?: number) {
+  return postgres.listRecentBridgeTransfers(await db(), limit);
+}
+
+export async function writeRunEvent(event: RunEvent) {
+  return postgres.insertRunEvent(await db(), event);
+}
+
+export async function readRunEvents(limit?: number) {
+  return postgres.listRecentRunEvents(await db(), limit);
+}
+
+export async function writeCircuitBreaker(breaker: CircuitBreaker) {
+  return postgres.upsertCircuitBreaker(await db(), breaker);
+}
+
+export async function readCircuitBreakers() {
+  return postgres.listCircuitBreakers(await db());
 }
 
 export async function readDashboard(slot: MarketSlot): Promise<DashboardResponse> {
-  if (usePostgres()) {
-    return postgres.buildDashboardResponse(await postgres.getPgDb(), slot);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.buildDashboardResponse(sqlite.getDb(), slot);
+  return postgres.buildDashboardResponse(await db(), slot);
 }
 
 export async function readTrades(): Promise<TradesResponse> {
-  if (usePostgres()) {
-    return postgres.buildTradesResponse(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.buildTradesResponse(sqlite.getDb());
-}
-
-export async function resetPaperState() {
-  if (usePostgres()) {
-    return postgres.resetPaperState(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.resetPaperState(sqlite.getDb());
+  return postgres.buildTradesResponse(await db());
 }
 
 export async function readHistoryPoints(slot: MarketSlot): Promise<HistoryPoint[]> {
-  if (usePostgres()) {
-    return postgres.buildHistoryPoints(await postgres.getPgDb(), slot);
-  }
-  const sqlite = await getSqlite();
-  return sqlite.buildHistoryPoints(sqlite.getDb(), slot);
-}
-
-export async function readAllTrades(): Promise<PaperTrade[]> {
-  if (usePostgres()) {
-    return postgres.getAllTrades(await postgres.getPgDb());
-  }
-  const sqlite = await getSqlite();
-  return sqlite.getAllTrades(sqlite.getDb());
-}
-
-export async function readLatestEntryCost(slotKey: string, combination: PairCombination) {
-  const costs = await readLastEntryCosts(slotKey);
-  return costs[combination];
+  return postgres.buildHistoryPoints(await db(), slot);
 }

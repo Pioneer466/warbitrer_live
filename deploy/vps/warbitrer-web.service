@@ -1,0 +1,22 @@
+[Unit]
+Description=Warbitrer Live Web
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warbitrer
+Group=warbitrer
+WorkingDirectory=/opt/warbitrer-live/app
+Environment=NODE_ENV=production
+Environment=PORT=3000
+EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStart=/usr/bin/npm run start:web
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+KillSignal=SIGINT
+SyslogIdentifier=warbitrer-web
+
+[Install]
+WantedBy=multi-user.target

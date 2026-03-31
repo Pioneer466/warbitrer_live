@@ -1,75 +1,112 @@
-# Paper BTC 15m Arb
+# Warbitrer Live BTC 15m
 
-Dashboard paper-only pour suivre les opportunités BTC 15 minutes entre Polymarket et Kalshi.
+Cockpit et worker live pour la stratégie d’arbitrage BTC 15 minutes entre Polymarket et Kalshi.
 
-## Stockage
+## Ce que fait le système
 
-- Si `DATABASE_URL` est défini, l'app utilise **Postgres**.
-- Sinon, elle retombe automatiquement sur **SQLite local** dans `data/paper-arb.db`.
+- scan du créneau BTC 15m courant sur Polymarket et Kalshi
+- calcul des opportunités `Poly Up + Kalshi No` et `Poly Down + Kalshi Yes`
+- exécution live `taker-only` avec jambe primaire puis hedge immédiat
+- reconciliation des ordres, fills, positions, P&L et settlements
+- suivi du funding Polymarket via le bridge officiel
+- circuit breakers stockés en base et exposés par API
+
+## Pré-requis
+
+- Node 22+
+- Postgres obligatoire
+- credentials Kalshi
+- wallet Polymarket déjà prêt, approvisionné et autorisé
+
+## Variables d’environnement
+
+Voir `.env.example`.
+
+Variables principales:
+
+- `DATABASE_URL`
+- `KALSHI_API_KEY_ID`
+- `KALSHI_PRIVATE_KEY_PEM`
+- `KALSHI_PRIVATE_KEY_PATH`
+- `KALSHI_ENV=demo|prod`
+- `POLY_PRIVATE_KEY`
+- `POLY_PRIVATE_KEY_PATH`
+- `POLY_API_KEY`
+- `POLY_API_SECRET`
+- `POLY_API_PASSPHRASE`
+- `POLY_FUNDER_ADDRESS`
+- `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
+- `POLY_BRIDGE_LOW_WATER_USDC`
+
+La config de stratégie est stockée en base via `strategy_config`, pas dans les variables d’environnement.
+Tu la pilotes via `GET /api/settings` et `PUT /api/settings`.
+
+Champs importants:
+
+- `enableTrading`
+- `shadowMode`
+- `maxPairNotionalUsd`
+- `maxSlippageBps`
+- `maxOpenIntentsPerSlot`
 
 ## Local
 
-Pré-requis: **Node 22+**.
-
 1. `npm install`
-2. Si tu veux utiliser Postgres en local, créer `.env.local` avec:
-   - `DATABASE_URL=postgres://postgres:postgres@localhost:5432/paper_arb`
-3. `npm run dev:all`
-4. Ouvrir `http://localhost:3000`
+2. créer `.env.local`
+3. démarrer Postgres
+4. `npm run dev:all`
+5. ouvrir `http://localhost:3000`
 
-Le web et le worker tournent en parallèle.
+Le web et le worker tournent ensemble. Le worker crée automatiquement le schéma Postgres au premier démarrage.
 
-## GitHub: commit + push
+## Vérification
 
-1. `git init` si le repo n'existe pas encore localement.
-2. `git add .`
-3. `git commit -m "Add BTC 15m paper arb dashboard"`
-4. Créer le repo distant sur GitHub.
-5. `git remote add origin <URL_DU_REPO_GITHUB>`
-6. `git branch -M main`
-7. `git push -u origin main`
+- `npm run typecheck`
+- `npm test`
+- `npm run build`
 
-## Railway
+## Endpoints utiles
 
-Le repo est prêt pour un déploiement Railway avec `railway.toml`.
+- `GET /api/dashboard`
+- `GET /api/trades`
+- `GET /api/history/current-slot`
+- `GET /api/health`
+- `GET /api/settings`
+- `PUT /api/settings`
+- `GET /api/circuit-breakers`
+- `PUT /api/circuit-breakers`
 
-Recommandé:
+## Shadow vs live
 
-1. Créer un projet Railway depuis le repo GitHub.
-2. Ajouter un service **Postgres** dans Railway.
-3. Vérifier que `DATABASE_URL` est bien injecté dans le service applicatif.
-4. Déployer.
+- `enableTrading=false` : aucune exécution
+- `enableTrading=true` et `shadowMode=true` : intents/ordres/fills synthétiques, même interface, aucune soumission aux venues
+- `enableTrading=true` et `shadowMode=false` : exécution live réelle
 
-## Variables d'environnement
+Le dashboard `/` et la page `/trades` restent les interfaces opérateur principales dans les trois modes.
 
-- `DATABASE_URL`:
-  - si défini, le stockage passe automatiquement sur Postgres.
-  - en local, une URL `localhost` est normale.
-  - sur Railway, il faut utiliser la variable injectée par le service Postgres Railway, pas `localhost`.
-  - ne pas importer `DATABASE_URL` depuis `.env.example` dans Railway.
-- `PAPER_ARB_DB_PATH`:
-  - optionnel en local si tu veux forcer un chemin SQLite.
+## Déploiement VPS
 
-## Railway: mise en place détaillée
+Si tu pars sur un VPS en Israël, le repo n’a plus besoin de Railway. Il te faudra côté infra:
 
-1. Push le repo sur GitHub.
-2. Dans Railway, cliquer sur `New Project`.
-3. Choisir `Deploy from GitHub repo`.
-4. Sélectionner ce repo.
-5. Dans le projet Railway, ajouter `Postgres` via `New > Database > Add PostgreSQL`.
-6. Ouvrir le service de l'app puis vérifier dans `Variables` que `DATABASE_URL` pointe bien vers la base Railway.
-7. Laisser Railway builder avec Nixpacks; `railway.toml` lance déjà:
-   - build: `npm run build`
-   - run: `npm run start:all`
-8. Déclencher un déploiement.
-9. Ouvrir le domaine Railway généré dans `Settings > Networking`.
+- Postgres persistant
+- un process manager pour le web + worker, typiquement `systemd`
+- un reverse proxy type Nginx ou Caddy pour HTTPS
+- NTP/horloge fiable
+- firewall restrictif et accès SSH par clé
+- variables d’environnement injectées au niveau du service système, pas dans le repo
 
-Le worker et le site tournent dans le même service en production. La persistance est donc portée par Postgres, pas par le filesystem du conteneur.
-Le projet déclare aussi `Node 22+` dans `package.json`, ce qui aide Railway à prendre une version compatible.
+Concrètement, mets les secrets soit:
 
-Le service web et le worker prod démarrent ensemble via `npm run start:all`.
+- dans `/etc/warbitrer/warbitrer.env` chargé par `systemd`
+- ou dans les variables d’environnement du conteneur si tu dockerises
 
-## Notes
+Évite de conserver les vraies clés dans `.env.local` sur le serveur.
 
-- L'endpoint healthcheck est `GET /api/health`.
-- Railway rendra l'app visible via son domaine public après le déploiement.
+Le pack de déploiement prêt à copier est dans [`deploy/vps`](./deploy/vps).
+
+## Notes d’exploitation
+
+- le trading live reste désactivé tant que `enableTrading` est `false` dans la config
+- le mode recommandé pour la montée en charge est d’abord `enableTrading=true` avec `shadowMode=true`
+- si une venue est non prête ou si un circuit breaker est actif, le worker refuse d’ouvrir de nouveaux intents
+- le rebalance automatique entre cash Kalshi et USDC Polygon n’est pas implémenté; le périmètre treasury est limité au bridge officiel Polymarket

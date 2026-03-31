@@ -8,12 +8,19 @@ type KalshiFeeInput = {
 type PolymarketFeeInput = {
   shares: number;
   price: number;
-  feeRate?: number;
-  exponent?: number;
+  feeRateBps?: number;
 };
 
 export function roundUpToCent(value: number) {
   return Math.ceil((value - Number.EPSILON) * 100) / 100;
+}
+
+export function roundToStep(value: number, step: number) {
+  if (step <= 0) {
+    return value;
+  }
+
+  return Math.floor(value / step) * step;
 }
 
 export function calculateKalshiFee({
@@ -29,21 +36,23 @@ export function calculateKalshiFee({
 export function calculatePolymarketFee({
   shares,
   price,
-  feeRate = 0.25,
-  exponent = 2,
+  feeRateBps = 0,
 }: PolymarketFeeInput) {
-  const curve = Math.pow(price * (1 - price), exponent);
-  return shares * price * feeRate * curve;
+  return roundUpToCent(shares * price * (feeRateBps / 10_000));
 }
 
-export function polymarketFeeShares(feeUsd: number, price: number) {
+export function calculateBinaryPositionPayout(shares: number, won: boolean) {
+  return won ? shares : 0;
+}
+
+export function deriveTargetShares(notionalUsd: number, price: number, minOrderSize: number) {
   if (price <= 0) {
     return 0;
   }
 
-  return feeUsd / price;
+  return Math.max(0, roundToStep(notionalUsd / price, minOrderSize));
 }
 
-export function polymarketNetSharesBought(shares: number, price: number, feeUsd: number) {
-  return Math.max(0, shares - polymarketFeeShares(feeUsd, price));
+export function applySlippage(price: number, maxSlippageBps: number) {
+  return price * (1 + maxSlippageBps / 10_000);
 }

@@ -1,165 +1,171 @@
-import { FIXED_TRADE_NOTIONAL_USD } from "@/lib/constants";
-import { calculateKalshiFee, calculatePolymarketFee, polymarketNetSharesBought } from "@/lib/fees";
 import type {
-  PairSignal,
-  PaperTrade,
-  PaperTradeLeg,
-  PolymarketQuote,
-  KalshiQuote,
+  LiveOpportunity,
+  OrderIntent,
+  OrderIntentLeg,
   Resolution,
+  Venue,
 } from "@/lib/types";
 
-export function createTradeFromSignal({
-  signal,
-  polymarket,
-  kalshi,
-  enteredAt,
-  slotKey,
+export function createIntentFromOpportunity({
+  opportunity,
   slotStartTs,
   slotEndTs,
+  now,
+  maxSlippageBps,
+  shadow,
 }: {
-  signal: PairSignal;
-  polymarket: PolymarketQuote;
-  kalshi: KalshiQuote;
-  enteredAt: number;
-  slotKey: string;
+  opportunity: LiveOpportunity;
   slotStartTs: number;
   slotEndTs: number;
-}): PaperTrade {
-  if (
-    !signal.eligible ||
-    signal.grossCost === null ||
-    signal.legs.some((leg) => leg.price === null || leg.depth === null || leg.units <= 0)
-  ) {
-    throw new Error("Impossible de créer un trade paper sans deux jambes exécutables sur le même créneau");
+  now: number;
+  maxSlippageBps: number;
+  shadow: boolean;
+}): OrderIntent {
+  if (!opportunity.primaryVenue || !opportunity.eligible || opportunity.grossCost === null) {
+    throw new Error("Impossible de créer une intention live sans opportunité exécutable");
   }
 
-  const tradeId = crypto.randomUUID();
-  const [polyLegSignal, kalshiLegSignal] = signal.legs;
-  const polyPrice = polyLegSignal.price as number;
-  const kalshiPrice = kalshiLegSignal.price as number;
-  const polyUnits = polyLegSignal.units;
-  const kalshiUnits = kalshiLegSignal.units;
-  const polyFeeUsd = round4(
-    calculatePolymarketFee({
-      shares: polyUnits,
-      price: polyPrice,
-      feeRate: polymarket.feeRate,
-      exponent: polymarket.feeExponent,
-    }),
-  );
-  const kalshiFeeUsd = round4(
-    calculateKalshiFee({
-      contracts: kalshiUnits,
-      price: kalshiPrice,
-      feeMultiplier: kalshi.feeMultiplier,
-    }),
-  );
-  const polyNetShares = polymarketNetSharesBought(polyUnits, polyPrice, polyFeeUsd);
-
-  const polyLeg: PaperTradeLeg = {
-    id: crypto.randomUUID(),
-    tradeId,
-    venue: "polymarket",
-    outcome: polyLegSignal.outcome,
-    marketRef: polyLegSignal.marketRef,
-    price: polyPrice,
-    units: polyUnits,
-    grossCost: round4(polyLegSignal.stakeUsd),
-    feeUsd: polyFeeUsd,
-    feeShares: round4(polyPrice ? polyFeeUsd / polyPrice : 0),
-    netShares: round4(polyNetShares),
-    payout: null,
-    resolvedOutcome: null,
-    status: "open",
-  };
-
-  const kalshiLeg: PaperTradeLeg = {
-    id: crypto.randomUUID(),
-    tradeId,
-    venue: "kalshi",
-    outcome: kalshiLegSignal.outcome,
-    marketRef: kalshiLegSignal.marketRef,
-    price: kalshiPrice,
-    units: kalshiUnits,
-    grossCost: round4(kalshiLegSignal.stakeUsd),
-    feeUsd: kalshiFeeUsd,
-    feeShares: 0,
-    netShares: round4(kalshiUnits),
-    payout: null,
-    resolvedOutcome: null,
-    status: "open",
-  };
-
-  const capitalDeployed = round4(polyLeg.grossCost + kalshiLeg.grossCost + kalshiLeg.feeUsd);
-  const theoreticalSameResolutionProfit = round4(Math.min(polyLeg.netShares, kalshiLeg.netShares) - capitalDeployed);
+  const [firstLeg, secondLeg] = opportunity.legs;
+  const primaryLeg = firstLeg.venue === opportunity.primaryVenue ? firstLeg : secondLeg;
+  const hedgeLeg = firstLeg.venue === opportunity.primaryVenue ? secondLeg : firstLeg;
+  const intentId = crypto.randomUUID();
 
   return {
-    id: tradeId,
-    slotKey,
+    id: intentId,
+    shadow,
+    slotKey: opportunity.slotKey,
     slotStartTs,
     slotEndTs,
-    enteredAt,
+    combination: opportunity.combination,
+    status: "pending",
+    createdAt: now,
+    updatedAt: now,
     resolvedAt: null,
-    combination: signal.combination,
-    status: "open",
-    grossPairCost: signal.grossCost ?? 0,
-    thresholdMet: signal.thresholdMet,
-    units: 1,
-    budgetAllocated: FIXED_TRADE_NOTIONAL_USD,
-    capitalDeployed,
-    feesTotal: round4(polyLeg.feeUsd + kalshiLeg.feeUsd),
-    realizedPnl: null,
+    primaryVenue: primaryLeg.venue,
+    hedgeVenue: hedgeLeg.venue,
+    grossCost: opportunity.grossCost,
+    targetNotionalUsd: primaryLeg.targetNotionalUsd + hedgeLeg.targetNotionalUsd,
+    maxSlippageBps,
+    failureReason: null,
+    projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
+    realizedPnlUsd: null,
     roi: null,
-    theoreticalSameResolutionProfit,
     polyResolution: null,
     kalshiResolution: null,
-    legs: [polyLeg, kalshiLeg],
+    legs: [
+      buildIntentLeg(intentId, firstLeg.venue, firstLeg.outcome, firstLeg.marketRef, firstLeg.tokenId, firstLeg.price, firstLeg.size, firstLeg.targetNotionalUsd),
+      buildIntentLeg(intentId, secondLeg.venue, secondLeg.outcome, secondLeg.marketRef, secondLeg.tokenId, secondLeg.price, secondLeg.size, secondLeg.targetNotionalUsd),
+    ],
   };
 }
 
-export function settleTrade({
-  trade,
+export function markIntentStatus(intent: OrderIntent, status: OrderIntent["status"], now: number, failureReason?: string | null): OrderIntent {
+  return {
+    ...intent,
+    status,
+    updatedAt: now,
+    failureReason: failureReason ?? intent.failureReason,
+  };
+}
+
+export function applyLegExecution(params: {
+  intent: OrderIntent;
+  venue: Venue;
+  venueOrderId: string;
+  filledSize: number;
+  averageFillPrice: number | null;
+  feeUsd: number;
+  status: OrderIntentLeg["status"];
+  now: number;
+}): OrderIntent {
+  const legs = params.intent.legs.map((leg) =>
+    leg.venue === params.venue
+      ? {
+          ...leg,
+          venueOrderId: params.venueOrderId,
+          filledSize: params.filledSize,
+          filledPrice: params.averageFillPrice ?? leg.filledPrice,
+          feeUsd: params.feeUsd,
+          status: params.status,
+        }
+      : leg,
+  ) as OrderIntent["legs"];
+
+  return {
+    ...params.intent,
+    legs,
+    updatedAt: params.now,
+  };
+}
+
+export function finalizeIntent({
+  intent,
   polyResolution,
   kalshiResolution,
-  resolvedAt,
+  payoutUsd,
+  now,
 }: {
-  trade: PaperTrade;
-  polyResolution: "UP" | "DOWN";
-  kalshiResolution: "YES" | "NO";
-  resolvedAt: number;
-}): PaperTrade {
-  const settledLegs = trade.legs.map((leg) => settleLeg(leg, polyResolution, kalshiResolution));
-  const payout = settledLegs.reduce((sum, leg) => sum + (leg.payout ?? 0), 0);
-  const realizedPnl = round4(payout - trade.capitalDeployed);
-  const roi = trade.capitalDeployed > 0 ? round4(realizedPnl / trade.capitalDeployed) : 0;
+  intent: OrderIntent;
+  polyResolution: "UP" | "DOWN" | null;
+  kalshiResolution: "YES" | "NO" | null;
+  payoutUsd: number;
+  now: number;
+}): OrderIntent {
+  const totalNotional = intent.legs.reduce((sum, leg) => sum + leg.requestedNotionalUsd + leg.feeUsd, 0);
+  const realizedPnlUsd = round4(payoutUsd - totalNotional);
 
   return {
-    ...trade,
-    status: "resolved",
-    resolvedAt,
+    ...intent,
+    status: "settled",
+    updatedAt: now,
+    resolvedAt: now,
     polyResolution,
     kalshiResolution,
-    realizedPnl,
-    roi,
-    legs: settledLegs,
+    realizedPnlUsd,
+    roi: totalNotional > 0 ? round4(realizedPnlUsd / totalNotional) : null,
   };
 }
 
-function settleLeg(
-  leg: PaperTradeLeg,
+export function calculateWinningPayout(
+  legs: OrderIntent["legs"],
   polyResolution: "UP" | "DOWN",
   kalshiResolution: "YES" | "NO",
-): PaperTradeLeg {
-  const winningResolution = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
-  const won = leg.outcome === winningResolution;
-  const payout = won ? leg.netShares : 0;
+) {
+  return legs.reduce((sum, leg) => {
+    const resolvedOutcome: Resolution = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
+    const won = leg.outcome === resolvedOutcome;
+    return sum + (won ? leg.filledSize : 0);
+  }, 0);
+}
 
+function buildIntentLeg(
+  intentId: string,
+  venue: Venue,
+  outcome: Resolution,
+  marketRef: string,
+  tokenId: string | undefined,
+  price: number | null,
+  size: number,
+  requestedNotionalUsd: number,
+): OrderIntentLeg {
   return {
-    ...leg,
-    payout: round4(payout),
-    resolvedOutcome: winningResolution as Resolution,
-    status: won ? "won" : "lost",
+    id: crypto.randomUUID(),
+    intentId,
+    venue,
+    outcome,
+    marketRef,
+    tokenId,
+    side: "BUY",
+    requestedPrice: price,
+    requestedSize: size,
+    requestedNotionalUsd,
+    filledPrice: null,
+    filledSize: 0,
+    feeUsd: 0,
+    status: "pending",
+    venueOrderId: null,
+    payoutUsd: null,
+    resolvedOutcome: null,
   };
 }
 

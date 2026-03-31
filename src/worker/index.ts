@@ -1,5 +1,5 @@
 import { processTick } from "@/lib/engine";
-import { DEFAULT_SETTINGS } from "@/lib/constants";
+import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { readSettings, storageMode } from "@/lib/storage";
 
 async function run() {
@@ -35,7 +35,7 @@ async function readPollingIntervalMs() {
     const settings = await readSettings();
     return settings.pollingIntervalMs;
   } catch (error) {
-    console.error("[worker] settings read failed, using default polling interval", error);
-    return DEFAULT_SETTINGS.pollingIntervalMs;
+    console.error("[worker] settings read failed, using default live polling interval", error);
+    return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;
   }
 }
