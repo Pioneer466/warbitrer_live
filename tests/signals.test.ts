@@ -5,6 +5,7 @@ const settings: PaperSettings = {
   initialCapital: 10_000,
   budgetPerTrade: 250,
   grossEntryThreshold: 0.93,
+  maxLegPrice: 0.49,
   reentryImprovement: 0.01,
   pollingIntervalMs: 1_000,
   minOrderSize: 5,
@@ -170,5 +171,38 @@ describe("signal engine", () => {
     expect(signal.eligible).toBe(false);
     expect(signal.grossCost).toBeNull();
     expect(signal.reason).toBe("Entrée bloquée sur les 20 dernières secondes");
+  });
+
+  it("blocks entry when one leg exceeds the 0.49 wall", () => {
+    const [, signal] = buildSignals({
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          down: {
+            ...polymarket.outcomes.down,
+            buyPrice: 0.27,
+          },
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          yes: {
+            ...kalshi.outcomes.yes,
+            buyPrice: 0.58,
+          },
+        },
+      },
+      settings,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.grossCost).toBe(0.85);
+    expect(signal.thresholdMet).toBe(true);
+    expect(signal.eligible).toBe(false);
+    expect(signal.reason).toBe("Une jambe dépasse 0.49");
   });
 });

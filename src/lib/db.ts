@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import { DEFAULT_DB_PATH, DEFAULT_SETTINGS } from "@/lib/constants";
+import { normalizeSettings } from "@/lib/settings-schema";
 import type {
   DashboardResponse,
   HistoryPoint,
@@ -127,7 +128,7 @@ export function getSettings(db: DatabaseSync): PaperSettings {
   const row = db.prepare("SELECT payload FROM settings WHERE id = 1").get() as {
     payload: string;
   };
-  return JSON.parse(row.payload) as PaperSettings;
+  return normalizeSettings(JSON.parse(row.payload) as Partial<PaperSettings>);
 }
 
 export function updateSettings(db: DatabaseSync, payload: PaperSettings) {

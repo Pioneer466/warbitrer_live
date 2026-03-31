@@ -118,6 +118,7 @@ export type PaperSettings = {
   initialCapital: number;
   budgetPerTrade: number;
   grossEntryThreshold: number;
+  maxLegPrice: number;
   reentryImprovement: number;
   pollingIntervalMs: number;
   minOrderSize: number;

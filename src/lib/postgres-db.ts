@@ -1,6 +1,7 @@
 import { Pool, types } from "pg";
 
 import { DEFAULT_SETTINGS } from "@/lib/constants";
+import { normalizeSettings } from "@/lib/settings-schema";
 import type {
   DashboardResponse,
   HistoryPoint,
@@ -131,7 +132,7 @@ async function bootstrapDatabase(pool: Pool) {
 
 export async function getSettings(pool: Pool): Promise<PaperSettings> {
   const result = await pool.query("SELECT payload FROM settings WHERE id = 1");
-  return result.rows[0].payload as PaperSettings;
+  return normalizeSettings(result.rows[0].payload as Partial<PaperSettings>);
 }
 
 export async function updateSettings(pool: Pool, payload: PaperSettings) {

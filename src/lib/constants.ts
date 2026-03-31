@@ -10,11 +10,13 @@ export const COINBASE_EXCHANGE_BASE = "https://api.exchange.coinbase.com";
 export const FIXED_TRADE_NOTIONAL_USD = 50;
 export const FIXED_LEG_NOTIONAL_USD = FIXED_TRADE_NOTIONAL_USD / 2;
 export const ENTRY_CUTOFF_SECONDS = 20;
+export const MAX_LEG_ENTRY_PRICE = 0.49;
 
 export const DEFAULT_SETTINGS = {
   initialCapital: 10_000,
   budgetPerTrade: FIXED_TRADE_NOTIONAL_USD,
   grossEntryThreshold: 0.93,
+  maxLegPrice: MAX_LEG_ENTRY_PRICE,
   reentryImprovement: 0.01,
   pollingIntervalMs: 1_000,
   minOrderSize: 5,

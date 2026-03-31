@@ -102,7 +102,7 @@ export function DashboardClient() {
             <div className="text-sm text-white">Polymarket et Kalshi en direct</div>
           </div>
           <div className="text-xs text-mist/70">
-            Seuil d’entrée {formatPrice(settings.grossEntryThreshold, 2)} · 25$ + 25$
+            Somme ≤ {formatPrice(settings.grossEntryThreshold, 2)} · jambe ≤ {formatPrice(settings.maxLegPrice, 2)} · 25$ + 25$
           </div>
         </div>
 

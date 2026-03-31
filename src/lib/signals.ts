@@ -135,6 +135,8 @@ function buildSignal({
   const grossCost = safePolyPrice + safeKalshiPrice;
   const polyUnits = round6(FIXED_LEG_NOTIONAL_USD / safePolyPrice);
   const kalshiUnits = round6(FIXED_LEG_NOTIONAL_USD / safeKalshiPrice);
+  const legPriceWallMet =
+    safePolyPrice <= settings.maxLegPrice && safeKalshiPrice <= settings.maxLegPrice;
   const hasDepth = safePolyDepth >= polyUnits && safeKalshiDepth >= kalshiUnits;
   const thresholdMet = grossCost <= settings.grossEntryThreshold;
   const estimatedFees =
@@ -159,6 +161,8 @@ function buildSignal({
   let reason: string | null = null;
   if (!thresholdMet) {
     reason = "Seuil brut non atteint";
+  } else if (!legPriceWallMet) {
+    reason = `Une jambe dépasse ${settings.maxLegPrice.toFixed(2)}`;
   } else if (!hasDepth) {
     reason = "Liquidité insuffisante pour exécuter 25$ de chaque côté";
   } else if (!meetsImprovement) {
@@ -171,8 +175,8 @@ function buildSignal({
     grossCost: round4(grossCost),
     threshold: settings.grossEntryThreshold,
     thresholdMet,
-    eligible: thresholdMet && hasDepth && meetsImprovement,
-    units: thresholdMet && hasDepth ? 1 : 0,
+    eligible: thresholdMet && legPriceWallMet && hasDepth && meetsImprovement,
+    units: thresholdMet && legPriceWallMet && hasDepth ? 1 : 0,
     maxAffordableUnits: 1,
     maxDepthUnits: hasDepth ? 1 : 0,
     estimatedFees: round4(estimatedFees),
