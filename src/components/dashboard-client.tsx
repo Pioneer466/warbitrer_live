@@ -113,14 +113,14 @@ export function DashboardClient() {
               label: "Kalshi YES",
               color: "#ffb84f",
               fill: "rgba(255,184,79,0.08)",
-              values: historyPoints.map((point) => point.kalshiYesAsk),
+              values: historyPoints.map((point) => point.kalshiYesLast),
             },
             {
               key: "kalshi-no",
               label: "Kalshi NO",
               color: "#ff7a5c",
               fill: "rgba(255,122,92,0.08)",
-              values: historyPoints.map((point) => point.kalshiNoAsk),
+              values: historyPoints.map((point) => point.kalshiNoLast),
             },
           ]}
         />

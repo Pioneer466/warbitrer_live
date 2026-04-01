@@ -988,8 +988,8 @@ export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<
       ts: snapshot.capturedAt,
       polyUpBuy: snapshot.polymarket.outcomes.up.buyPrice,
       polyDownBuy: snapshot.polymarket.outcomes.down.buyPrice,
-      kalshiYesAsk: snapshot.kalshi.outcomes.yes.buyPrice,
-      kalshiNoAsk: snapshot.kalshi.outcomes.no.buyPrice,
+      kalshiYesLast: snapshot.kalshi.lastTradeYesPrice ?? snapshot.kalshi.outcomes.yes.buyPrice,
+      kalshiNoLast: snapshot.kalshi.lastTradeNoPrice ?? snapshot.kalshi.outcomes.no.buyPrice,
       grossCostUpNo: first?.combination === "POLY_UP_KALSHI_NO" ? first.grossCost : second?.grossCost ?? null,
       grossCostDownYes:
         first?.combination === "POLY_DOWN_KALSHI_YES" ? first.grossCost : second?.grossCost ?? null,

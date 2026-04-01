@@ -110,6 +110,8 @@ export type KalshiQuote = {
   resolution: "YES" | "NO" | null;
   feeMultiplier: number;
   feeType: string;
+  lastTradeYesPrice: number | null;
+  lastTradeNoPrice: number | null;
 };
 
 export type StrategyConfig = {
@@ -399,8 +401,8 @@ export type HistoryPoint = {
   ts: number;
   polyUpBuy: number | null;
   polyDownBuy: number | null;
-  kalshiYesAsk: number | null;
-  kalshiNoAsk: number | null;
+  kalshiYesLast: number | null;
+  kalshiNoLast: number | null;
   grossCostUpNo: number | null;
   grossCostDownYes: number | null;
 };

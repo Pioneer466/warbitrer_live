@@ -137,6 +137,8 @@ const kalshi: KalshiQuote = {
   },
   feeMultiplier: 1,
   feeType: "quadratic",
+  lastTradeYesPrice: 0.35,
+  lastTradeNoPrice: 0.65,
   resolution: null,
 };
 

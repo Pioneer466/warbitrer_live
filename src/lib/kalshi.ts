@@ -34,6 +34,7 @@ export type KalshiMarketSummary = {
   yes_ask_dollars: string;
   no_bid_dollars: string;
   no_ask_dollars: string;
+  last_price_dollars?: string;
   yes_bid_size_fp: string;
   yes_ask_size_fp: string;
   no_bid_size_fp: string;
@@ -126,6 +127,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   ).catch(() => null);
   const freshMarket = freshMarketResponse?.market ?? market;
   const derived = deriveKalshiOutcomeQuotesFromMarket(freshMarket);
+  const lastTradeYesPrice = parseMarketPrice(freshMarket.last_price_dollars);
 
   return {
     ref: {
@@ -145,6 +147,8 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     outcomes: derived,
     feeMultiplier: series.series.fee_multiplier,
     feeType: series.series.fee_type,
+    lastTradeYesPrice,
+    lastTradeNoPrice: lastTradeYesPrice === null ? null : round4(1 - lastTradeYesPrice),
     resolution: null,
   };
 }
@@ -483,6 +487,8 @@ function createUnavailableKalshiQuote(
     },
     feeMultiplier: series.fee_multiplier,
     feeType: series.fee_type,
+    lastTradeYesPrice: null,
+    lastTradeNoPrice: null,
     resolution: null,
   };
 }
