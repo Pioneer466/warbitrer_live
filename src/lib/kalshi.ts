@@ -254,11 +254,21 @@ export async function fetchKalshiOrderbook(ticker: string) {
 }
 
 export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary) {
+  return deriveKalshiOutcomeQuotesFromMarketWithSource(market, "rest-bootstrap");
+}
+
+export function deriveKalshiOutcomeQuotesFromMarketWithSource(
+  market: KalshiMarketSummary,
+  source: ChartPriceSurface["source"] = "rest-bootstrap",
+  lastUpdatedAtOverride?: number | null,
+) {
   const yesBid = parseMarketPrice(market.yes_bid_dollars);
   const yesAsk = parseMarketPrice(market.yes_ask_dollars);
   const noBid = parseMarketPrice(market.no_bid_dollars);
   const noAsk = parseMarketPrice(market.no_ask_dollars);
-  const updatedAt = market.updated_time ? Date.parse(market.updated_time) || Date.now() : Date.now();
+  const updatedAt =
+    lastUpdatedAtOverride ??
+    (market.updated_time ? Date.parse(market.updated_time) || Date.now() : Date.now());
 
   const yesOutcome = createOutcomeQuote({
     outcome: "YES",
@@ -271,7 +281,7 @@ export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary)
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
-    source: "rest-bootstrap",
+    source,
     lastUpdatedAt: updatedAt,
   });
 
@@ -286,7 +296,7 @@ export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary)
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
-    source: "rest-bootstrap",
+    source,
     lastUpdatedAt: updatedAt,
   });
 

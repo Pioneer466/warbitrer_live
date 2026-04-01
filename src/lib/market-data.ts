@@ -8,6 +8,7 @@ import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValu
 import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
+  deriveKalshiOutcomeQuotesFromMarketWithSource,
   extractKalshiLastTradePrices,
   fetchKalshiMarket,
   fetchKalshiMarkets,
@@ -613,6 +614,7 @@ class KalshiRealtimeFeed {
   private lastError: string | null = null;
   private reconnectAttempt = 0;
   private subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
+  private nextSubscriptionId = 1;
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     if (this.slotKey !== slot.key) {
@@ -653,17 +655,22 @@ class KalshiRealtimeFeed {
       };
     }
 
-    const fallbackQuotes = deriveKalshiOutcomeQuotesFromMarket(this.market);
+    const marketQuotes = deriveKalshiOutcomeQuotesFromMarketWithSource(
+      this.market,
+      this.subscriptions[0]?.lastMessageAt !== null ? "ws" : "rest-bootstrap",
+      parseTimestamp(this.market.updated_time) ?? lastMessageAt,
+    );
     const orderbookQuotes = this.orderbook
       ? deriveKalshiOutcomeQuotes(
           {
             yes_dollars: serializeLevelMap(this.orderbook.yes, "desc"),
             no_dollars: serializeLevelMap(this.orderbook.no, "desc"),
           },
-          feedHealth.source,
+          this.isLiveOrderbook(now) ? "ws" : "rest-fallback",
           this.orderbook.lastUpdatedAt,
         )
       : null;
+    const activeQuotes = this.isLiveOrderbook(now) ? orderbookQuotes ?? marketQuotes : marketQuotes;
     const tradePrices = extractKalshiLastTradePrices(
       this.trades,
       parseNumeric(this.market.last_price_dollars) ?? null,
@@ -688,7 +695,7 @@ class KalshiRealtimeFeed {
       lastMessageAt,
       stalenessMs: feedHealth.stalenessMs,
       source: feedHealth.source,
-      outcomes: orderbookQuotes ?? fallbackQuotes,
+      outcomes: activeQuotes,
       feeMultiplier: this.series.fee_multiplier,
       feeType: this.series.fee_type,
       lastTradeYesPrice: tradePrices.yes,
@@ -773,9 +780,11 @@ class KalshiRealtimeFeed {
       return;
     }
 
-    const ws = new WebSocket(getKalshiWsUrl(), {
-      headers: buildKalshiWsHeaders(),
-    });
+    const ws = hasKalshiCredentials()
+      ? new WebSocket(getKalshiWsUrl(), {
+          headers: buildKalshiWsHeaders(),
+        })
+      : new WebSocket(getKalshiWsUrl());
     this.ws = ws;
     for (let index = 0; index < this.subscriptions.length; index += 1) {
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
@@ -791,16 +800,17 @@ class KalshiRealtimeFeed {
       }
 
       this.reconnectAttempt = 0;
-      ws.send(
-        JSON.stringify({
-          id: 1,
-          cmd: "subscribe",
-          params: {
-            channels: ["ticker", "orderbook_delta", "trade"],
-            market_tickers: [this.market.ticker],
-          },
-        }),
-      );
+      this.subscribe(ws, "ticker", this.market.ticker);
+      this.subscribe(ws, "trade", this.market.ticker);
+      if (hasKalshiCredentials()) {
+        this.subscribe(ws, "orderbook_delta", this.market.ticker);
+      } else {
+        this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
+          status: "idle",
+          source: "unavailable",
+          details: "orderbook delta reserve au flux authentifie",
+        });
+      }
     });
 
     ws.on("message", (buffer: Buffer) => {
@@ -827,6 +837,7 @@ class KalshiRealtimeFeed {
 
     ws.on("close", () => {
       this.ws = null;
+      this.nextSubscriptionId = 1;
       for (let index = 0; index < this.subscriptions.length; index += 1) {
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
           status: "closed",
@@ -847,6 +858,12 @@ class KalshiRealtimeFeed {
     const type = String(payload.type ?? payload.event_type ?? payload.cmd ?? "");
     const message = payload.msg ?? payload.message ?? payload.data ?? payload;
 
+    if (type === "error") {
+      const details = typeof message?.msg === "string" ? message.msg : JSON.stringify(message);
+      this.lastError = `Kalshi WS error: ${details}`;
+      return;
+    }
+
     if (type === "subscribed") {
       const channel = String(message.channel ?? "");
       const index = this.subscriptions.findIndex((subscription) => subscription.channel === channel);
@@ -863,18 +880,24 @@ class KalshiRealtimeFeed {
 
     if (type === "ticker") {
       if (this.market) {
+        const yesBid = String(message.yes_bid_dollars ?? message.yes_bid ?? this.market.yes_bid_dollars);
+        const yesAsk = String(message.yes_ask_dollars ?? message.yes_ask ?? this.market.yes_ask_dollars);
+        const derivedNoBid = deriveComplementPrice(yesAsk);
+        const derivedNoAsk = deriveComplementPrice(yesBid);
+        const updatedTime =
+          parseTimestamp(message.updated_time ?? message.created_time ?? message.ts ?? message.timestamp) ?? now;
         this.market = {
           ...this.market,
-          yes_bid_dollars: String(message.yes_bid_dollars ?? message.yes_bid ?? this.market.yes_bid_dollars),
-          yes_ask_dollars: String(message.yes_ask_dollars ?? message.yes_ask ?? this.market.yes_ask_dollars),
-          no_bid_dollars: String(message.no_bid_dollars ?? message.no_bid ?? this.market.no_bid_dollars),
-          no_ask_dollars: String(message.no_ask_dollars ?? message.no_ask ?? this.market.no_ask_dollars),
-          last_price_dollars: String(message.last_price_dollars ?? message.last_price ?? this.market.last_price_dollars ?? ""),
+          yes_bid_dollars: yesBid,
+          yes_ask_dollars: yesAsk,
+          no_bid_dollars: String(message.no_bid_dollars ?? message.no_bid ?? derivedNoBid ?? this.market.no_bid_dollars),
+          no_ask_dollars: String(message.no_ask_dollars ?? message.no_ask ?? derivedNoAsk ?? this.market.no_ask_dollars),
+          last_price_dollars: String(message.last_price_dollars ?? message.last_price ?? message.price_dollars ?? this.market.last_price_dollars ?? ""),
           yes_bid_size_fp: String(message.yes_bid_size_fp ?? this.market.yes_bid_size_fp),
           yes_ask_size_fp: String(message.yes_ask_size_fp ?? this.market.yes_ask_size_fp),
-          no_bid_size_fp: String(message.no_bid_size_fp ?? this.market.no_bid_size_fp),
-          no_ask_size_fp: String(message.no_ask_size_fp ?? this.market.no_ask_size_fp),
-          updated_time: new Date(now).toISOString(),
+          no_bid_size_fp: String(message.no_bid_size_fp ?? message.yes_ask_size_fp ?? this.market.no_bid_size_fp),
+          no_ask_size_fp: String(message.no_ask_size_fp ?? message.yes_bid_size_fp ?? this.market.no_ask_size_fp),
+          updated_time: new Date(updatedTime).toISOString(),
         };
       }
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
@@ -940,15 +963,28 @@ class KalshiRealtimeFeed {
 
     const side = String(message.side ?? message.book_side ?? "").toLowerCase();
     const price = message.price_dollars ?? message.price ?? message.level;
-    const size = message.size ?? message.count ?? message.quantity ?? message.remaining ?? 0;
+    const delta = parseNumeric(message.delta_fp ?? message.delta ?? message.size ?? message.count ?? message.quantity ?? message.remaining ?? 0) ?? 0;
     if (side === "yes") {
-      applyLevelDelta(this.orderbook.yes, price, size);
+      applyKalshiDeltaLevel(this.orderbook.yes, price, delta);
     } else if (side === "no") {
-      applyLevelDelta(this.orderbook.no, price, size);
+      applyKalshiDeltaLevel(this.orderbook.no, price, delta);
     }
 
     this.orderbook.seq = nextSeq ?? this.orderbook.seq;
     this.orderbook.lastUpdatedAt = now;
+  }
+
+  private subscribe(ws: WebSocket, channel: string, marketTicker: string) {
+    ws.send(
+      JSON.stringify({
+        id: this.nextSubscriptionId++,
+        cmd: "subscribe",
+        params: {
+          channels: [channel],
+          market_ticker: marketTicker,
+        },
+      }),
+    );
   }
 
   private async reset() {
@@ -962,7 +998,21 @@ class KalshiRealtimeFeed {
     this.lastWsMessageAt = null;
     this.lastError = null;
     this.reconnectAttempt = 0;
+    this.nextSubscriptionId = 1;
     this.subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
+  }
+
+  private isLiveOrderbook(now: number) {
+    if (!this.orderbook) {
+      return false;
+    }
+
+    const subscription = this.subscriptions[1];
+    if (subscription.status !== "subscribed" || subscription.lastMessageAt === null) {
+      return false;
+    }
+
+    return now - subscription.lastMessageAt <= FEED_BLOCKED_MS;
   }
 }
 
@@ -1061,11 +1111,13 @@ function normalizeKalshiWsOrderbook(message: any): KalshiOrderbook | null {
     }
 
     const yes =
+      candidate.yes_dollars_fp ??
       candidate.yes_dollars ??
       candidate.yes ??
       candidate.orderbook_yes ??
       candidate.yes_book;
     const no =
+      candidate.no_dollars_fp ??
       candidate.no_dollars ??
       candidate.no ??
       candidate.orderbook_no ??
@@ -1143,27 +1195,19 @@ function createBlockedKalshiQuote(
 }
 
 function buildKalshiWsHeaders() {
-  if (!hasKalshiCredentials()) {
-    return undefined;
-  }
-
-  try {
-    const env = readEnv();
-    const timestamp = Date.now().toString();
-    const privateKey = readSecretValue({
-      inline: env.KALSHI_PRIVATE_KEY_PEM,
-      path: env.KALSHI_PRIVATE_KEY_PATH,
-      label: "KALSHI_PRIVATE_KEY",
-    });
-    const signature = signKalshiWsRequest(privateKey, timestamp);
-    return {
-      "KALSHI-ACCESS-KEY": env.KALSHI_API_KEY_ID!,
-      "KALSHI-ACCESS-SIGNATURE": signature,
-      "KALSHI-ACCESS-TIMESTAMP": timestamp,
-    };
-  } catch {
-    return undefined;
-  }
+  const env = readEnv();
+  const timestamp = Date.now().toString();
+  const privateKey = readSecretValue({
+    inline: env.KALSHI_PRIVATE_KEY_PEM,
+    path: env.KALSHI_PRIVATE_KEY_PATH,
+    label: "KALSHI_PRIVATE_KEY",
+  });
+  const signature = signKalshiWsRequest(privateKey, timestamp);
+  return {
+    "KALSHI-ACCESS-KEY": env.KALSHI_API_KEY_ID!,
+    "KALSHI-ACCESS-SIGNATURE": signature,
+    "KALSHI-ACCESS-TIMESTAMP": timestamp,
+  };
 }
 
 function signKalshiWsRequest(privateKeyPem: string, timestamp: string) {
@@ -1188,4 +1232,29 @@ function safeJsonParse(raw: string) {
   } catch {
     return null;
   }
+}
+
+function round4(value: number) {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+function applyKalshiDeltaLevel(levels: LevelMap, price: string | number, deltaFp: number) {
+  const normalizedPrice = String(price);
+  const current = levels.get(normalizedPrice) ?? 0;
+  const next = round4(current + deltaFp);
+
+  if (!Number.isFinite(next) || next <= 0) {
+    levels.delete(normalizedPrice);
+    return;
+  }
+
+  levels.set(normalizedPrice, next);
+}
+
+function deriveComplementPrice(value: string | number | null) {
+  const numeric = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return round4(1 - numeric);
 }
