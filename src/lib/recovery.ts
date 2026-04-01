@@ -17,6 +17,7 @@ export async function buildRecoveryResponse(): Promise<RecoveryResponse> {
     globalKillSwitchActive: breakers.some((breaker) => breaker.key === "global" && breaker.active),
     signatureType: env.POLY_SIGNATURE_TYPE ?? "unknown",
     funderAddress: env.POLY_FUNDER_ADDRESS ?? null,
+    eoaValidation: buildEoaValidation(env),
     markets,
     kalshiSettlementMode: "automatic",
   };
@@ -153,6 +154,88 @@ function buildRecoveryMarkets(
     const rightRank = Number(right.redeemable) * 2 + Number(right.mergeable);
     return rightRank - leftRank || left.title.localeCompare(right.title);
   });
+}
+
+function buildEoaValidation(env = readEnv()): RecoveryResponse["eoaValidation"] {
+  const checks: RecoveryResponse["eoaValidation"]["checks"] = [];
+  let signerAddress: string | null = null;
+
+  try {
+    const privateKey = readSecretValue({
+      inline: env.POLY_PRIVATE_KEY,
+      path: env.POLY_PRIVATE_KEY_PATH,
+      label: "POLY_PRIVATE_KEY",
+    });
+    signerAddress = new Wallet(privateKey).address;
+    checks.push({
+      key: "poly:eoa-private-key",
+      label: "EOA private key",
+      status: "ready",
+      details: `Signer detecte: ${signerAddress}`,
+      checkedAt: Date.now(),
+    });
+  } catch (error) {
+    checks.push({
+      key: "poly:eoa-private-key",
+      label: "EOA private key",
+      status: "blocked",
+      details: error instanceof Error ? error.message : "Cle privee EOA illisible",
+      checkedAt: Date.now(),
+    });
+  }
+
+  const addressMatches =
+    signerAddress !== null &&
+    Boolean(env.POLY_FUNDER_ADDRESS) &&
+    signerAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
+  checks.push({
+    key: "poly:eoa-funder",
+    label: "EOA funder address",
+    status: addressMatches ? "ready" : "blocked",
+    details: addressMatches
+      ? "POLY_FUNDER_ADDRESS correspond au signer"
+      : "POLY_FUNDER_ADDRESS doit etre la meme adresse publique que le signer EOA",
+    checkedAt: Date.now(),
+  });
+
+  checks.push({
+    key: "poly:eoa-signature-type",
+    label: "EOA signature type",
+    status: env.POLY_SIGNATURE_TYPE === "EOA" ? "ready" : "degraded",
+    details:
+      env.POLY_SIGNATURE_TYPE === "EOA"
+        ? "POLY_SIGNATURE_TYPE=EOA"
+        : `Actuel: ${env.POLY_SIGNATURE_TYPE ?? "unset"} · garder POLY_PROXY tant que la migration n'est pas faite`,
+    checkedAt: Date.now(),
+  });
+
+  checks.push({
+    key: "poly:eoa-rpc",
+    label: "EOA Polygon RPC",
+    status: env.POLYGON_RPC_URL ? "ready" : "degraded",
+    details: env.POLYGON_RPC_URL
+      ? `RPC configure: ${env.POLYGON_RPC_URL}`
+      : "POLYGON_RPC_URL manquant pour le redeem direct",
+    checkedAt: Date.now(),
+  });
+
+  checks.push({
+    key: "poly:eoa-l2-creds",
+    label: "EOA L2 credentials",
+    status:
+      env.POLY_API_KEY && env.POLY_API_SECRET && env.POLY_API_PASSPHRASE ? "ready" : "blocked",
+    details:
+      env.POLY_API_KEY && env.POLY_API_SECRET && env.POLY_API_PASSPHRASE
+        ? "POLY_API_KEY / SECRET / PASSPHRASE presents"
+        : "Deriver les credentials via npm run poly:derive-api-key puis les copier dans warbitrer.env",
+    checkedAt: Date.now(),
+  });
+
+  const canDirectRedeem = checks.every((check) => check.status === "ready");
+  return {
+    canDirectRedeem,
+    checks,
+  };
 }
 
 async function redeemPolymarketCondition(conditionId: string, marketRef: string) {

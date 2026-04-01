@@ -4,6 +4,8 @@ export type Resolution = "UP" | "DOWN" | "YES" | "NO";
 export type OrderSide = "BUY" | "SELL";
 export type WorkerPhase = "idle" | "scan" | "execute" | "reconcile";
 export type ReadinessStatus = "ready" | "degraded" | "blocked";
+export type FeedSource = "ws" | "rest-bootstrap" | "rest-fallback" | "unavailable";
+export type SubscriptionStatus = "idle" | "connecting" | "subscribed" | "error" | "closed";
 export type OrderIntentStatus =
   | "pending"
   | "executing_primary"
@@ -66,8 +68,7 @@ export type VenueMarketRef = {
   tokenId?: string;
 };
 
-export type OutcomeQuote = {
-  outcome: Resolution;
+export type ExecutionPriceSurface = {
   buyPrice: number | null;
   sellPrice: number | null;
   midPrice: number | null;
@@ -79,11 +80,55 @@ export type OutcomeQuote = {
   feeRateBps: number | null;
 };
 
+export type ChartPriceSurface = {
+  label: "best_ask_live";
+  price: number | null;
+  source: FeedSource;
+  lastUpdatedAt: number | null;
+};
+
+export type OutcomeQuote = {
+  outcome: Resolution;
+  buyPrice: number | null;
+  sellPrice: number | null;
+  midPrice: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  depth: number | null;
+  tickSize: number | null;
+  minOrderSize: number | null;
+  feeRateBps: number | null;
+  execution: ExecutionPriceSurface;
+  chart: ChartPriceSurface;
+};
+
+export type VenueSubscriptionState = {
+  channel: string;
+  status: SubscriptionStatus;
+  source: FeedSource;
+  lastMessageAt: number | null;
+  details: string | null;
+};
+
+export type VenueFeedHealth = {
+  venue: Venue;
+  feedStatus: ReadinessStatus;
+  source: FeedSource;
+  lastMessageAt: number | null;
+  stalenessMs: number | null;
+  details: string[];
+  subscriptions: VenueSubscriptionState[];
+};
+
 export type PolymarketQuote = {
   ref: VenueMarketRef;
   status: "open" | "closed";
   slotAligned: boolean;
   availabilityReason: string | null;
+  feedHealth: VenueFeedHealth;
+  lastMessageAt: number | null;
+  stalenessMs: number | null;
+  source: FeedSource;
   conditionId: string;
   outcomes: {
     up: OutcomeQuote;
@@ -103,6 +148,10 @@ export type KalshiQuote = {
   status: string;
   slotAligned: boolean;
   availabilityReason: string | null;
+  feedHealth: VenueFeedHealth;
+  lastMessageAt: number | null;
+  stalenessMs: number | null;
+  source: FeedSource;
   outcomes: {
     yes: OutcomeQuote;
     no: OutcomeQuote;
@@ -378,6 +427,7 @@ export type DashboardResponse = {
   config: StrategyConfig;
   workerState: WorkerState;
   latestSnapshot: OpportunitySnapshot | null;
+  feedHealth: VenueFeedHealth[];
   opportunities: LiveOpportunity[];
   venueBalances: VenueBalance[];
   openIntents: OrderIntent[];
@@ -410,6 +460,7 @@ export type HistoryPoint = {
 export type HistoryResponse = {
   fetchedAt: number;
   slot: MarketSlot;
+  feedHealth: VenueFeedHealth[];
   points: HistoryPoint[];
 };
 
@@ -438,6 +489,10 @@ export type RecoveryResponse = {
   globalKillSwitchActive: boolean;
   signatureType: "EOA" | "POLY_PROXY" | "POLY_GNOSIS_SAFE" | "unknown";
   funderAddress: string | null;
+  eoaValidation: {
+    canDirectRedeem: boolean;
+    checks: ReadinessCheck[];
+  };
   markets: RecoveryMarket[];
   kalshiSettlementMode: "automatic";
 };
@@ -463,6 +518,15 @@ export type VenueOrderResult = {
   averageFillPrice: number | null;
   feeUsd: number;
   raw: Record<string, unknown>;
+};
+
+export type LiveMarketState<TQuote extends PolymarketQuote | KalshiQuote = PolymarketQuote | KalshiQuote> = {
+  venue: Venue;
+  slotKey: string;
+  marketRef: string | null;
+  quote: TQuote;
+  lastBootstrapAt: number | null;
+  lastSyncAt: number | null;
 };
 
 export type VenueQuoteBundle = {

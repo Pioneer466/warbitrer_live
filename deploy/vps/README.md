@@ -44,6 +44,11 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
    - `sudo systemctl enable --now warbitrer-web`
    - `sudo systemctl enable --now warbitrer-worker`
 9. Configurer Caddy avec `deploy/vps/Caddyfile`
+10. Générer le mot de passe Caddy:
+   - `caddy hash-password --plaintext 'CHANGE_ME'`
+11. Remplacer le domaine `warbitrer.example.com` et le hash dans `/etc/caddy/Caddyfile`
+12. Ouvrir `80/tcp` et `443/tcp`, puis:
+   - `sudo systemctl reload caddy`
 
 ## Important sécurité
 
@@ -56,6 +61,15 @@ Ne l’expose pas publiquement sans au minimum:
 - ou une règle IP très restrictive
 
 Le template `Caddyfile` fourni contient déjà un bloc `basicauth` à remplacer.
+
+## Temps réel
+
+Le worker maintient maintenant une couche market data persistante:
+
+- `Polymarket`: market channel WebSocket + resync REST
+- `Kalshi`: WebSocket quand disponible + resync orderbook/trades REST
+- les snapshots affichés par le dashboard sont compactés en base chaque seconde
+- aucune opportunité n’est exécutable si un feed est `degraded` ou `blocked`
 
 ## Upgrade
 
@@ -81,3 +95,20 @@ Après un `git pull`, lancer:
 - Postgres opérationnel
 - aucune erreur dans `/api/health`
 - aucun circuit breaker actif
+
+## Migration future vers EOA
+
+Voir aussi `deploy/vps/EOA_RUNBOOK.md`.
+
+En mode `POLY_PROXY` actuel:
+
+- `POLY_PRIVATE_KEY_PATH` = clé privée du signer EOA `0x...`
+- `POLY_FUNDER_ADDRESS` = adresse du proxy/funder Polymarket
+- `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE` = dérivés via `npm run poly:derive-api-key`
+
+En mode `EOA` futur:
+
+- `POLY_SIGNATURE_TYPE=EOA`
+- `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
+- `POLYGON_RPC_URL` doit être renseigné pour le redeem direct
+- la page `/recovery` vérifie déjà si la migration EOA est techniquement prête

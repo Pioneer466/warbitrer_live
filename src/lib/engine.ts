@@ -5,13 +5,12 @@ import {
   createKalshiAdapter,
   fetchKalshiFills,
   fetchKalshiOrders,
-  fetchKalshiQuote,
   fetchKalshiResolution,
 } from "@/lib/kalshi";
+import { getMarketDataSupervisor } from "@/lib/market-data";
 import {
   createPolymarketAdapter,
   fetchPolymarketOpenOrders,
-  fetchPolymarketQuote,
   fetchPolymarketResolution,
   fetchPolymarketTrades,
   mapPolymarketOrder,
@@ -50,11 +49,13 @@ import type {
   LiveOpportunity,
   LiveOrder,
   MarketSlot,
+  OpportunitySnapshot,
   OrderIntent,
   PositionSnapshot,
   StrategyConfig,
   VenueAdapter,
   VenueBalance,
+  VenueFeedHealth,
   VenueOrderRequest,
   WorkerState,
 } from "@/lib/types";
@@ -64,6 +65,7 @@ const POLYMARKET_SETTLEMENT_LOOKBACK = 50;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
+const marketDataSupervisor = getMarketDataSupervisor();
 
 export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
@@ -120,13 +122,14 @@ export async function processTick(now = new Date()) {
 }
 
 export function createExecutionCoordinator(settings: StrategyConfig): ExecutionCoordinator {
+  let latestScanSnapshot: OpportunitySnapshot | null = null;
+
   return {
     async scan(slot, now) {
       const balances = await refreshBalances(settings, now);
-      const [polymarket, kalshi] = await Promise.all([
-        fetchPolymarketQuote(slot),
-        fetchKalshiQuote(slot),
-      ]);
+      const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+      const polymarket = polymarketState.quote;
+      const kalshi = kalshiState.quote;
 
       const opportunities = buildSignals({
         slotKey: slot.key,
@@ -149,7 +152,9 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         opportunities,
       });
 
-      return {
+      await syncFeedCircuitBreaker(slot, [polymarket.feedHealth, kalshi.feedHealth], now);
+
+      latestScanSnapshot = {
         slotKey: slot.key,
         slotStartTs: slot.startTs,
         slotEndTs: slot.endTs,
@@ -158,10 +163,13 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         kalshi,
         opportunities,
       };
+
+      return latestScanSnapshot;
     },
 
     async execute(slot, now) {
-      const readiness = await computeReadiness(now);
+      const snapshot = latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
+      const readiness = await computeReadiness(snapshot, now);
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
 
       await writeWorkerState({
@@ -177,7 +185,6 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         return [];
       }
 
-      const snapshot = await refreshLatestSnapshot(slot);
       if (!snapshot) {
         return [];
       }
@@ -283,7 +290,10 @@ async function refreshBalances(settings: StrategyConfig, now: number): Promise<V
   return mapped;
 }
 
-async function computeReadiness(now: number): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
+async function computeReadiness(
+  snapshot: OpportunitySnapshot | null,
+  now: number,
+): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
   const balances = await readVenueBalances();
   const breakers = await readCircuitBreakers();
   const checks = balances.map((balance) => ({
@@ -293,6 +303,20 @@ async function computeReadiness(now: number): Promise<{ state: Partial<WorkerSta
     details: balance.notes.join(" | ") || "Venue ready",
     checkedAt: now,
   }));
+  const feedHealth = snapshot ? [snapshot.polymarket.feedHealth, snapshot.kalshi.feedHealth] : [];
+  checks.push(
+    ...feedHealth.map((feed) => ({
+      key: `${feed.venue}:market-data`,
+      label: `${feed.venue} market data`,
+      status: feed.feedStatus,
+      details: [
+        `source=${feed.source}`,
+        feed.stalenessMs === null ? "staleness=na" : `staleness=${feed.stalenessMs}ms`,
+        ...feed.details,
+      ].join(" | "),
+      checkedAt: now,
+    })),
+  );
   const activeBreakers = breakers.filter((breaker) => breaker.active);
   if (activeBreakers.length > 0) {
     checks.push({
@@ -315,6 +339,37 @@ async function computeReadiness(now: number): Promise<{ state: Partial<WorkerSta
     },
     breakers,
   };
+}
+
+async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
+  const key = `slot:${slot.key}` as const;
+  const blockedFeeds = feedHealth.filter((feed) => feed.feedStatus === "blocked");
+
+  if (blockedFeeds.length === 0) {
+    await writeCircuitBreaker({
+      key,
+      active: false,
+      reason: null,
+      triggeredAt: null,
+      payload: null,
+    });
+    return;
+  }
+
+  await writeCircuitBreaker({
+    key,
+    active: true,
+    reason: "venue_error",
+    triggeredAt: now,
+    payload: {
+      feeds: blockedFeeds.map((feed) => ({
+        venue: feed.venue,
+        source: feed.source,
+        stalenessMs: feed.stalenessMs,
+        details: feed.details,
+      })),
+    },
+  });
 }
 
 async function executeIntent(intent: OrderIntent, settings: StrategyConfig, now: number) {

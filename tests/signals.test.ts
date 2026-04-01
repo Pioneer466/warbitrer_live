@@ -1,5 +1,15 @@
 import { buildSignals } from "@/lib/signals";
-import type { KalshiQuote, PolymarketQuote, StrategyConfig, VenueBalance } from "@/lib/types";
+import type { KalshiQuote, PolymarketQuote, StrategyConfig, VenueBalance, VenueFeedHealth } from "@/lib/types";
+
+const readyFeed = (venue: "polymarket" | "kalshi"): VenueFeedHealth => ({
+  venue,
+  feedStatus: "ready",
+  source: "ws",
+  lastMessageAt: 1774899060000,
+  stalenessMs: 0,
+  details: ["feed ok"],
+  subscriptions: [],
+});
 
 const settings: StrategyConfig = {
   enableTrading: true,
@@ -60,6 +70,10 @@ const polymarket: PolymarketQuote = {
   status: "open",
   slotAligned: true,
   availabilityReason: null,
+  feedHealth: readyFeed("polymarket"),
+  lastMessageAt: 1774899060000,
+  stalenessMs: 0,
+  source: "ws",
   outcomes: {
     up: {
       outcome: "UP",
@@ -72,6 +86,23 @@ const polymarket: PolymarketQuote = {
       tickSize: 0.001,
       minOrderSize: 0.01,
       feeRateBps: 10,
+      execution: {
+        buyPrice: 0.42,
+        sellPrice: 0.41,
+        midPrice: 0.415,
+        bestBid: 0.41,
+        bestAsk: 0.42,
+        depth: 300,
+        tickSize: 0.001,
+        minOrderSize: 0.01,
+        feeRateBps: 10,
+      },
+      chart: {
+        label: "best_ask_live",
+        price: 0.42,
+        source: "ws",
+        lastUpdatedAt: 1774899060000,
+      },
     },
     down: {
       outcome: "DOWN",
@@ -84,6 +115,23 @@ const polymarket: PolymarketQuote = {
       tickSize: 0.001,
       minOrderSize: 0.01,
       feeRateBps: 10,
+      execution: {
+        buyPrice: 0.59,
+        sellPrice: 0.58,
+        midPrice: 0.585,
+        bestBid: 0.58,
+        bestAsk: 0.59,
+        depth: 300,
+        tickSize: 0.001,
+        minOrderSize: 0.01,
+        feeRateBps: 10,
+      },
+      chart: {
+        label: "best_ask_live",
+        price: 0.59,
+        source: "ws",
+        lastUpdatedAt: 1774899060000,
+      },
     },
   },
   resolution: null,
@@ -109,6 +157,10 @@ const kalshi: KalshiQuote = {
   status: "active",
   slotAligned: true,
   availabilityReason: null,
+  feedHealth: readyFeed("kalshi"),
+  lastMessageAt: 1774899060000,
+  stalenessMs: 0,
+  source: "ws",
   outcomes: {
     yes: {
       outcome: "YES",
@@ -121,6 +173,23 @@ const kalshi: KalshiQuote = {
       tickSize: 0.001,
       minOrderSize: 1,
       feeRateBps: null,
+      execution: {
+        buyPrice: 0.35,
+        sellPrice: 0.34,
+        midPrice: 0.345,
+        bestBid: 0.34,
+        bestAsk: 0.35,
+        depth: 180,
+        tickSize: 0.001,
+        minOrderSize: 1,
+        feeRateBps: null,
+      },
+      chart: {
+        label: "best_ask_live",
+        price: 0.35,
+        source: "ws",
+        lastUpdatedAt: 1774899060000,
+      },
     },
     no: {
       outcome: "NO",
@@ -133,6 +202,23 @@ const kalshi: KalshiQuote = {
       tickSize: 0.001,
       minOrderSize: 1,
       feeRateBps: null,
+      execution: {
+        buyPrice: 0.49,
+        sellPrice: 0.48,
+        midPrice: 0.485,
+        bestBid: 0.48,
+        bestAsk: 0.49,
+        depth: 180,
+        tickSize: 0.001,
+        minOrderSize: 1,
+        feeRateBps: null,
+      },
+      chart: {
+        label: "best_ask_live",
+        price: 0.49,
+        source: "ws",
+        lastUpdatedAt: 1774899060000,
+      },
     },
   },
   feeMultiplier: 1,
@@ -195,5 +281,28 @@ describe("live signal engine", () => {
 
     expect(signal.eligible).toBe(false);
     expect(signal.reasons).toContain("Entrée bloquée sur les 20 dernières secondes");
+  });
+
+  it("blocks entries when a venue feed is stale", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        feedHealth: {
+          ...polymarket.feedHealth,
+          feedStatus: "degraded",
+          stalenessMs: 2_800,
+        },
+      },
+      kalshi,
+      settings,
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Feed Polymarket stale");
   });
 });

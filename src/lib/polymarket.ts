@@ -6,6 +6,8 @@ import { DEFAULT_POLY_CHAIN_ID, POLY_CLOB_BASE, POLY_DATA_BASE, POLY_GAMMA_BASE 
 import { hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
 import type {
+  ChartPriceSurface,
+  ExecutionPriceSurface,
   LiveOrder,
   MarketSlot,
   OutcomeQuote,
@@ -98,6 +100,18 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     status: market.closed ? "closed" : "open",
     slotAligned: true,
     availabilityReason: null,
+    feedHealth: createVenueFeedHealth({
+      venue: "polymarket",
+      feedStatus: "ready",
+      source: "rest-bootstrap",
+      lastMessageAt: Date.now(),
+      stalenessMs: 0,
+      details: ["Quote bootstrap via REST"],
+      subscriptions: [],
+    }),
+    lastMessageAt: Date.now(),
+    stalenessMs: 0,
+    source: "rest-bootstrap",
     outcomes: {
       up: upQuote,
       down: downQuote,
@@ -106,6 +120,51 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     tokenIds: {
       up: upTokenId,
       down: downTokenId,
+    },
+    feeRateBps: 0,
+    negRisk: false,
+  };
+}
+
+export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityReason: string): PolymarketQuote {
+  const feedHealth = createVenueFeedHealth({
+    venue: "polymarket",
+    feedStatus: "blocked",
+    source: "unavailable",
+    lastMessageAt: null,
+    stalenessMs: null,
+    details: [availabilityReason],
+    subscriptions: [],
+  });
+
+  return {
+    ref: {
+      venue: "polymarket",
+      id: slot.polymarketSlug,
+      conditionId: slot.polymarketSlug,
+      slug: slot.polymarketSlug,
+      title: "Polymarket BTC 15m",
+      url: `https://polymarket.com/event/${slot.polymarketSlug}`,
+      startTime: slot.startIso,
+      endTime: slot.endIso,
+      slotKey: slot.key,
+    },
+    conditionId: slot.polymarketSlug,
+    status: "open",
+    slotAligned: false,
+    availabilityReason,
+    feedHealth,
+    lastMessageAt: null,
+    stalenessMs: null,
+    source: "unavailable",
+    outcomes: {
+      up: emptyOutcomeQuote("UP", "unavailable", null),
+      down: emptyOutcomeQuote("DOWN", "unavailable", null),
+    },
+    resolution: null,
+    tokenIds: {
+      up: "",
+      down: "",
     },
     feeRateBps: 0,
     negRisk: false,
@@ -298,7 +357,7 @@ async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promi
   const tickSize = book.tick_size ? Number(book.tick_size) : 0.001;
   const minOrderSize = book.min_order_size ? Number(book.min_order_size) : 1;
 
-  return {
+  return createOutcomeQuote({
     outcome,
     buyPrice,
     sellPrice,
@@ -309,12 +368,156 @@ async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promi
     tickSize,
     minOrderSize,
     feeRateBps: 0,
+    source: "rest-bootstrap",
+    lastUpdatedAt: Date.now(),
+  });
+}
+
+export async function fetchPolymarketBook(tokenId: string) {
+  return fetchJson<CLOBBook>(`${POLY_CLOB_BASE}/book?token_id=${tokenId}`);
+}
+
+export async function fetchPolymarketMarket(slug: string) {
+  const markets = await fetchJson<GammaMarketResponse>(`${POLY_GAMMA_BASE}/markets?slug=${slug}`);
+  return markets[0] ?? null;
+}
+
+export function derivePolymarketOutcomeTokens(market: NonNullable<Awaited<ReturnType<typeof fetchPolymarketMarket>>>) {
+  const outcomes = JSON.parse(market.outcomes) as Array<"Up" | "Down">;
+  const tokenIds = JSON.parse(market.clobTokenIds) as [string, string];
+
+  return {
+    up: tokenIds[outcomes.indexOf("Up")],
+    down: tokenIds[outcomes.indexOf("Down")],
   };
 }
 
-async function fetchPolymarketMarket(slug: string) {
-  const markets = await fetchJson<GammaMarketResponse>(`${POLY_GAMMA_BASE}/markets?slug=${slug}`);
-  return markets[0] ?? null;
+export function buildPolymarketOutcomeQuoteFromBook(
+  outcome: "UP" | "DOWN",
+  book: Pick<CLOBBook, "bids" | "asks" | "tick_size" | "min_order_size">,
+  source: OutcomeQuote["chart"]["source"],
+  lastUpdatedAt: number | null,
+  fallbackMidpoint?: number | null,
+): OutcomeQuote {
+  const bestBid = getBestBookLevel(book.bids, "desc");
+  const bestAsk = getBestBookLevel(book.asks, "asc");
+  const buyPrice = bestAsk?.price ?? null;
+  const sellPrice = bestBid?.price ?? null;
+  const midPrice =
+    buyPrice !== null && sellPrice !== null
+      ? round4((buyPrice + sellPrice) / 2)
+      : fallbackMidpoint ?? null;
+
+  return createOutcomeQuote({
+    outcome,
+    buyPrice,
+    sellPrice,
+    midPrice,
+    bestBid: sellPrice,
+    bestAsk: buyPrice,
+    depth: bestAsk?.size ?? null,
+    tickSize: book.tick_size ? Number(book.tick_size) : 0.001,
+    minOrderSize: book.min_order_size ? Number(book.min_order_size) : 1,
+    feeRateBps: 0,
+    source,
+    lastUpdatedAt,
+  });
+}
+
+export function createOutcomeQuote(input: {
+  outcome: "UP" | "DOWN";
+  buyPrice: number | null;
+  sellPrice: number | null;
+  midPrice: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  depth: number | null;
+  tickSize: number | null;
+  minOrderSize: number | null;
+  feeRateBps: number | null;
+  source: ChartPriceSurface["source"];
+  lastUpdatedAt: number | null;
+}): OutcomeQuote {
+  const execution: ExecutionPriceSurface = {
+    buyPrice: input.buyPrice,
+    sellPrice: input.sellPrice,
+    midPrice: input.midPrice,
+    bestBid: input.bestBid,
+    bestAsk: input.bestAsk,
+    depth: input.depth,
+    tickSize: input.tickSize,
+    minOrderSize: input.minOrderSize,
+    feeRateBps: input.feeRateBps,
+  };
+
+  const chart: ChartPriceSurface = {
+    label: "best_ask_live",
+    price: input.buyPrice,
+    source: input.source,
+    lastUpdatedAt: input.lastUpdatedAt,
+  };
+
+  return {
+    outcome: input.outcome,
+    buyPrice: input.buyPrice,
+    sellPrice: input.sellPrice,
+    midPrice: input.midPrice,
+    bestBid: input.bestBid,
+    bestAsk: input.bestAsk,
+    depth: input.depth,
+    tickSize: input.tickSize,
+    minOrderSize: input.minOrderSize,
+    feeRateBps: input.feeRateBps,
+    execution,
+    chart,
+  };
+}
+
+export function emptyOutcomeQuote(
+  outcome: "UP" | "DOWN",
+  source: ChartPriceSurface["source"],
+  lastUpdatedAt: number | null,
+) {
+  return createOutcomeQuote({
+    outcome,
+    buyPrice: null,
+    sellPrice: null,
+    midPrice: null,
+    bestBid: null,
+    bestAsk: null,
+    depth: null,
+    tickSize: 0.001,
+    minOrderSize: 1,
+    feeRateBps: 0,
+    source,
+    lastUpdatedAt,
+  });
+}
+
+function getBestBookLevel(levels: Array<{ price: string; size: string }>, direction: "asc" | "desc") {
+  if (levels.length === 0) {
+    return null;
+  }
+
+  const sorted = levels
+    .map((level) => ({
+      price: Number(level.price),
+      size: Number(level.size),
+    }))
+    .filter((level) => Number.isFinite(level.price) && Number.isFinite(level.size))
+    .sort((left, right) => (direction === "asc" ? left.price - right.price : right.price - left.price));
+
+  return sorted[0] ?? null;
+}
+
+function round4(value: number) {
+  return Math.round(value * 10_000) / 10_000;
+}
+
+function createVenueFeedHealth(
+  feed: PolymarketQuote["feedHealth"],
+): PolymarketQuote["feedHealth"] {
+  return feed;
 }
 
 function createClobClient() {

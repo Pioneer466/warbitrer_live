@@ -10,11 +10,18 @@ import {
   formatPercent,
   formatPrice,
 } from "@/lib/format";
-import type { DashboardResponse, HistoryResponse, LiveOpportunity, OrderIntent, PositionSnapshot } from "@/lib/types";
+import type {
+  DashboardResponse,
+  HistoryResponse,
+  LiveOpportunity,
+  OrderIntent,
+  PositionSnapshot,
+  VenueFeedHealth,
+} from "@/lib/types";
 
 export function DashboardClient() {
-  const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 2_000);
-  const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 4_000);
+  const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 1_000);
+  const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 1_000);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -30,13 +37,16 @@ export function DashboardClient() {
     );
   }
 
-  const { config, workerState, slot, venueBalances, opportunities, openIntents, positions, pnl, recentFills, circuitBreakers, runEvents } =
+  const { config, workerState, latestSnapshot, feedHealth, slot, venueBalances, opportunities, openIntents, positions, pnl, recentFills, circuitBreakers, runEvents } =
     dashboard.data;
 
   const historyPoints = history.data?.points ?? [];
+  const historyFeedHealth = history.data?.feedHealth ?? feedHealth;
   const historyLabels = historyPoints.map((point) => formatClock(point.ts).slice(0, 5));
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
   const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
+  const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
+  const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
 
   return (
     <div className="space-y-5">
@@ -79,13 +89,18 @@ export function DashboardClient() {
 
       <section className="grid gap-4 xl:grid-cols-2">
         {venueBalances.map((balance) => (
-          <VenueBalanceCard key={balance.venue} balance={balance} />
+          <VenueBalanceCard
+            key={balance.venue}
+            balance={balance}
+            feedHealth={(balance.venue === "polymarket" ? polyFeed : kalshiFeed) ?? null}
+          />
         ))}
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
         <ChartPanel
           title="Polymarket UP / DOWN"
+          meta={formatFeedMeta(polyFeed)}
           labels={historyLabels}
           series={[
             {
@@ -106,6 +121,7 @@ export function DashboardClient() {
         />
         <ChartPanel
           title="Kalshi YES / NO"
+          meta={formatFeedMeta(kalshiFeed)}
           labels={historyLabels}
           series={[
             {
@@ -232,7 +248,13 @@ export function DashboardClient() {
   );
 }
 
-function VenueBalanceCard({ balance }: { balance: DashboardResponse["venueBalances"][number] }) {
+function VenueBalanceCard({
+  balance,
+  feedHealth,
+}: {
+  balance: DashboardResponse["venueBalances"][number];
+  feedHealth: VenueFeedHealth | null;
+}) {
   return (
     <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
       <div className="flex items-center justify-between gap-3 border-b border-white/6 pb-4">
@@ -249,6 +271,13 @@ function VenueBalanceCard({ balance }: { balance: DashboardResponse["venueBalanc
         <MetricCell label="Portfolio" value={formatCurrency(balance.portfolioValueUsd)} compact />
         <MetricCell label="Allowance" value={balance.allowanceUsd === null ? "--" : formatCurrency(balance.allowanceUsd)} compact />
       </div>
+      {feedHealth ? (
+        <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
+          data {feedHealth.feedStatus} · {feedHealth.source}
+          {feedHealth.lastMessageAt ? ` · last ${formatClock(feedHealth.lastMessageAt)}` : ""}
+          {feedHealth.stalenessMs === null ? "" : ` · ${feedHealth.stalenessMs} ms`}
+        </div>
+      ) : null}
       {balance.notes.length > 0 ? (
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
           {balance.notes.join(" | ")}
@@ -480,4 +509,14 @@ function StatusBadge({
         : "border-rose/20 bg-rose/10 text-rose";
 
   return <span className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.16em] ${toneClass}`}>{children}</span>;
+}
+
+function formatFeedMeta(feedHealth: VenueFeedHealth | null) {
+  if (!feedHealth) {
+    return "best ask live";
+  }
+
+  const freshness = feedHealth.stalenessMs === null ? "staleness n/a" : `${feedHealth.stalenessMs} ms`;
+  const last = feedHealth.lastMessageAt ? ` · last ${formatClock(feedHealth.lastMessageAt)}` : "";
+  return `best ask live · ${feedHealth.source} · ${freshness}${last}`;
 }

@@ -4,6 +4,7 @@ Cockpit et worker live pour la stratégie d’arbitrage BTC 15 minutes entre Pol
 
 ## Ce que fait le système
 
+- market data live `WS-first` avec resync REST de secours sur Polymarket et Kalshi
 - scan du créneau BTC 15m courant sur Polymarket et Kalshi
 - calcul des opportunités `Poly Up + Kalshi No` et `Poly Down + Kalshi Yes`
 - exécution live `taker-only` avec jambe primaire puis hedge immédiat
@@ -38,6 +39,13 @@ Variables principales:
 - `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
 - `POLY_BRIDGE_LOW_WATER_USDC`
 
+Pour Polymarket:
+
+- `POLY_PRIVATE_KEY_PATH` contient la private key du signer `0x...`
+- `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE` sont dérivés via `npm run poly:derive-api-key`
+- en `POLY_PROXY`, `POLY_FUNDER_ADDRESS` est l’adresse du funder/proxy
+- en `EOA`, `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
+
 La config de stratégie est stockée en base via `strategy_config`, pas dans les variables d’environnement.
 Tu la pilotes via `GET /api/settings` et `PUT /api/settings`.
 
@@ -71,6 +79,7 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `GET /api/trades`
 - `GET /api/history/current-slot`
 - `GET /api/health`
+- `GET /api/recovery`
 - `GET /api/settings`
 - `PUT /api/settings`
 - `GET /api/circuit-breakers`
@@ -83,6 +92,7 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `enableTrading=true` et `shadowMode=false` : exécution live réelle
 
 Le dashboard `/` et la page `/trades` restent les interfaces opérateur principales dans les trois modes.
+La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation future de la migration `EOA`.
 
 ## Déploiement VPS
 
@@ -104,8 +114,13 @@ Concrètement, mets les secrets soit:
 
 Le pack de déploiement prêt à copier est dans [`deploy/vps`](./deploy/vps).
 
-Important: l’interface n’a pas encore d’auth applicative native.
-Pour un VPS public, protège l’accès avec `basicauth` côté Caddy, un tunnel SSH, Tailscale, ou une restriction IP.
+Pour un VPS public, le mode recommandé est:
+
+- `Caddy` devant `127.0.0.1:3000`
+- `BasicAuth` côté Caddy
+- exposition seulement de `80/443`
+
+Le template est dans [`deploy/vps/Caddyfile`](./deploy/vps/Caddyfile).
 
 ## Notes d’exploitation
 

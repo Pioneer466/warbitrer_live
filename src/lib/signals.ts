@@ -187,6 +187,12 @@ function buildSignal({
   if (polyBalance?.status === "blocked" || kalshiBalance?.status === "blocked") {
     reasons.push("Une venue n’est pas prête pour le live");
   }
+  if (polymarket.feedHealth.feedStatus !== "ready") {
+    reasons.push("Feed Polymarket stale");
+  }
+  if (kalshi.feedHealth.feedStatus !== "ready") {
+    reasons.push("Feed Kalshi stale");
+  }
 
   const previousCost = lastEntryCosts[combination];
   const improvementFromLastEntry =

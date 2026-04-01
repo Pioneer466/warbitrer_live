@@ -9,6 +9,8 @@ import {
 import { hasKalshiCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
 import type {
+  ChartPriceSurface,
+  ExecutionPriceSurface,
   KalshiQuote,
   LiveOrder,
   MarketSlot,
@@ -56,6 +58,35 @@ type KalshiSeriesResponse = {
 
 type KalshiMarketResponse = {
   market: KalshiMarketSummary;
+};
+
+export type KalshiOrderbook = {
+  yes_dollars: Array<[string, string]>;
+  no_dollars: Array<[string, string]>;
+  seq?: number | string;
+};
+
+type KalshiOrderbookResponse = {
+  orderbook?: KalshiOrderbook;
+  orderbook_fp?: KalshiOrderbook;
+  yes_dollars?: Array<[string, string]>;
+  no_dollars?: Array<[string, string]>;
+  seq?: number | string;
+};
+
+export type KalshiTrade = {
+  trade_id?: string;
+  ticker?: string;
+  market_ticker?: string;
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
+  price_dollars?: string;
+  created_time?: string;
+  ts?: number;
+};
+
+type KalshiTradesResponse = {
+  trades: KalshiTrade[];
 };
 
 type KalshiBalanceResponse = {
@@ -144,6 +175,18 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     status: freshMarket.status,
     slotAligned: true,
     availabilityReason: null,
+    feedHealth: createVenueFeedHealth({
+      venue: "kalshi",
+      feedStatus: "ready",
+      source: "rest-bootstrap",
+      lastMessageAt: Date.now(),
+      stalenessMs: 0,
+      details: ["Quote bootstrap via REST market summary"],
+      subscriptions: [],
+    }),
+    lastMessageAt: Date.now(),
+    stalenessMs: 0,
+    source: "rest-bootstrap",
     outcomes: derived,
     feeMultiplier: series.series.fee_multiplier,
     feeType: series.series.fee_type,
@@ -184,13 +227,40 @@ export async function fetchKalshiResolution(ticker: string) {
   return response.market.result === "yes" ? ("YES" as const) : ("NO" as const);
 }
 
+export async function fetchKalshiSeries() {
+  return fetchJson<KalshiSeriesResponse>(`${getKalshiBaseUrl()}/series/KXBTC15M`);
+}
+
+export async function fetchKalshiMarkets() {
+  return fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M&status=open`);
+}
+
+export async function fetchKalshiMarket(ticker: string) {
+  return fetchJson<KalshiMarketResponse>(`${getKalshiBaseUrl()}/markets/${ticker}`);
+}
+
+export async function fetchKalshiTrades(ticker: string) {
+  const params = new URLSearchParams({
+    ticker,
+    limit: "20",
+  });
+
+  return kalshiMarketDataFetch<KalshiTradesResponse>(`/markets/trades?${params.toString()}`);
+}
+
+export async function fetchKalshiOrderbook(ticker: string) {
+  const response = await kalshiMarketDataFetch<KalshiOrderbookResponse>(`/markets/${ticker}/orderbook`);
+  return normalizeKalshiOrderbookResponse(response);
+}
+
 export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary) {
   const yesBid = parseMarketPrice(market.yes_bid_dollars);
   const yesAsk = parseMarketPrice(market.yes_ask_dollars);
   const noBid = parseMarketPrice(market.no_bid_dollars);
   const noAsk = parseMarketPrice(market.no_ask_dollars);
+  const updatedAt = market.updated_time ? Date.parse(market.updated_time) || Date.now() : Date.now();
 
-  const yesOutcome: OutcomeQuote = {
+  const yesOutcome = createOutcomeQuote({
     outcome: "YES",
     buyPrice: yesAsk,
     sellPrice: yesBid,
@@ -201,9 +271,11 @@ export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary)
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
-  };
+    source: "rest-bootstrap",
+    lastUpdatedAt: updatedAt,
+  });
 
-  const noOutcome: OutcomeQuote = {
+  const noOutcome = createOutcomeQuote({
     outcome: "NO",
     buyPrice: noAsk,
     sellPrice: noBid,
@@ -214,7 +286,9 @@ export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary)
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
-  };
+    source: "rest-bootstrap",
+    lastUpdatedAt: updatedAt,
+  });
 
   return {
     yes: yesOutcome,
@@ -222,10 +296,14 @@ export function deriveKalshiOutcomeQuotesFromMarket(market: KalshiMarketSummary)
   };
 }
 
-export function deriveKalshiOutcomeQuotes(orderbook: {
-  yes_dollars: Array<[string, string]>;
-  no_dollars: Array<[string, string]>;
-}) {
+export function deriveKalshiOutcomeQuotes(
+  orderbook: {
+    yes_dollars: Array<[string, string]>;
+    no_dollars: Array<[string, string]>;
+  },
+  source: ChartPriceSurface["source"] = "rest-fallback",
+  lastUpdatedAt: number | null = null,
+) {
   const yesBidLevel = getBestLevel(orderbook.yes_dollars);
   const noBidLevel = getBestLevel(orderbook.no_dollars);
 
@@ -235,7 +313,7 @@ export function deriveKalshiOutcomeQuotes(orderbook: {
   const noAsk = yesBid === null ? null : round4(1 - yesBid);
 
   return {
-    yes: {
+    yes: createOutcomeQuote({
       outcome: "YES" as const,
       buyPrice: yesAsk,
       sellPrice: yesBid,
@@ -246,8 +324,10 @@ export function deriveKalshiOutcomeQuotes(orderbook: {
       tickSize: 0.001,
       minOrderSize: 1,
       feeRateBps: null,
-    },
-    no: {
+      source,
+      lastUpdatedAt,
+    }),
+    no: createOutcomeQuote({
       outcome: "NO" as const,
       buyPrice: noAsk,
       sellPrice: noBid,
@@ -258,7 +338,35 @@ export function deriveKalshiOutcomeQuotes(orderbook: {
       tickSize: 0.001,
       minOrderSize: 1,
       feeRateBps: null,
-    },
+      source,
+      lastUpdatedAt,
+    }),
+  };
+}
+
+export function extractKalshiLastTradePrices(
+  trades: KalshiTrade[],
+  fallbackLastPrice?: number | null,
+) {
+  const latestTrade = [...trades]
+    .sort((left, right) => getTradeTimestamp(right) - getTradeTimestamp(left))[0];
+
+  if (!latestTrade) {
+    return {
+      yes: fallbackLastPrice ?? null,
+      no: fallbackLastPrice === null || fallbackLastPrice === undefined ? null : round4(1 - fallbackLastPrice),
+      lastUpdatedAt: null,
+    };
+  }
+
+  const yesPrice =
+    parseMarketPrice(latestTrade.yes_price_dollars) ??
+    (parseMarketPrice(latestTrade.price_dollars) ?? fallbackLastPrice ?? null);
+
+  return {
+    yes: yesPrice,
+    no: yesPrice === null ? null : round4(1 - yesPrice),
+    lastUpdatedAt: getTradeTimestamp(latestTrade),
   };
 }
 
@@ -467,6 +575,16 @@ function createUnavailableKalshiQuote(
   series: KalshiSeriesResponse["series"],
   availabilityReason: string,
 ): KalshiQuote {
+  const feedHealth = createVenueFeedHealth({
+    venue: "kalshi",
+    feedStatus: "blocked",
+    source: "unavailable",
+    lastMessageAt: null,
+    stalenessMs: null,
+    details: [availabilityReason],
+    subscriptions: [],
+  });
+
   return {
     ref: {
       venue: "kalshi",
@@ -481,9 +599,13 @@ function createUnavailableKalshiQuote(
     status: "pending",
     slotAligned: false,
     availabilityReason,
+    feedHealth,
+    lastMessageAt: null,
+    stalenessMs: null,
+    source: "unavailable",
     outcomes: {
-      yes: emptyOutcome("YES"),
-      no: emptyOutcome("NO"),
+      yes: emptyOutcome("YES", "unavailable", null),
+      no: emptyOutcome("NO", "unavailable", null),
     },
     feeMultiplier: series.fee_multiplier,
     feeType: series.fee_type,
@@ -528,12 +650,103 @@ function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
 }
 
+function createOutcomeQuote(input: {
+  outcome: "YES" | "NO";
+  buyPrice: number | null;
+  sellPrice: number | null;
+  midPrice: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  depth: number | null;
+  tickSize: number | null;
+  minOrderSize: number | null;
+  feeRateBps: number | null;
+  source: ChartPriceSurface["source"];
+  lastUpdatedAt: number | null;
+}): OutcomeQuote {
+  const execution: ExecutionPriceSurface = {
+    buyPrice: input.buyPrice,
+    sellPrice: input.sellPrice,
+    midPrice: input.midPrice,
+    bestBid: input.bestBid,
+    bestAsk: input.bestAsk,
+    depth: input.depth,
+    tickSize: input.tickSize,
+    minOrderSize: input.minOrderSize,
+    feeRateBps: input.feeRateBps,
+  };
+
+  const chart: ChartPriceSurface = {
+    label: "best_ask_live",
+    price: input.buyPrice,
+    source: input.source,
+    lastUpdatedAt: input.lastUpdatedAt,
+  };
+
+  return {
+    outcome: input.outcome,
+    buyPrice: input.buyPrice,
+    sellPrice: input.sellPrice,
+    midPrice: input.midPrice,
+    bestBid: input.bestBid,
+    bestAsk: input.bestAsk,
+    depth: input.depth,
+    tickSize: input.tickSize,
+    minOrderSize: input.minOrderSize,
+    feeRateBps: input.feeRateBps,
+    execution,
+    chart,
+  };
+}
+
+function getTradeTimestamp(trade: KalshiTrade) {
+  if (typeof trade.ts === "number" && Number.isFinite(trade.ts)) {
+    return trade.ts > 10_000_000_000 ? trade.ts : trade.ts * 1000;
+  }
+
+  return trade.created_time ? Date.parse(trade.created_time) || 0 : 0;
+}
+
+function normalizeKalshiOrderbookResponse(response: KalshiOrderbookResponse): KalshiOrderbook {
+  if (response.orderbook_fp) {
+    return response.orderbook_fp;
+  }
+
+  if (response.orderbook) {
+    return response.orderbook;
+  }
+
+  return {
+    yes_dollars: response.yes_dollars ?? [],
+    no_dollars: response.no_dollars ?? [],
+    seq: response.seq,
+  };
+}
+
+async function kalshiMarketDataFetch<T>(path: string) {
+  try {
+    if (hasKalshiCredentials()) {
+      return await kalshiFetch<T>(path);
+    }
+  } catch {}
+
+  return fetchJson<T>(`${getKalshiBaseUrl()}${path}`);
+}
+
+function createVenueFeedHealth(feed: KalshiQuote["feedHealth"]): KalshiQuote["feedHealth"] {
+  return feed;
+}
+
 function buildSlotKeyFromIso(value: string) {
   return String(Date.parse(value));
 }
 
-function emptyOutcome(outcome: "YES" | "NO"): OutcomeQuote {
-  return {
+function emptyOutcome(
+  outcome: "YES" | "NO",
+  source: ChartPriceSurface["source"],
+  lastUpdatedAt: number | null,
+): OutcomeQuote {
+  return createOutcomeQuote({
     outcome,
     buyPrice: null,
     sellPrice: null,
@@ -544,7 +757,9 @@ function emptyOutcome(outcome: "YES" | "NO"): OutcomeQuote {
     tickSize: 0.001,
     minOrderSize: 1,
     feeRateBps: null,
-  };
+    source,
+    lastUpdatedAt,
+  });
 }
 
 function withinTolerance(left: number, right: number) {

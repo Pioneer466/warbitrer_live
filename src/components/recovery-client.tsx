@@ -153,6 +153,35 @@ export function RecoveryClient() {
 
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
         <div className="border-b border-white/6 pb-4">
+          <div className="text-sm text-white">Validation EOA</div>
+          <div className="mt-1 text-xs text-mist/70">
+            Preparation de la migration future POLY_PROXY -&gt; EOA pour le redeem direct et l’auto-redeem.
+          </div>
+        </div>
+
+        <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
+          {recovery.data.eoaValidation.canDirectRedeem
+            ? "Configuration EOA complete pour un redeem direct."
+            : "Configuration EOA incomplete. Le mode actuel POLY_PROXY reste recommande tant que le data plane n'est pas stabilise."}
+        </div>
+
+        <div className="mt-4 grid gap-3">
+          {recovery.data.eoaValidation.checks.map((check) => (
+            <div key={check.key} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-white">{check.label}</div>
+                <Badge tone={check.status === "ready" ? "cyan" : check.status === "degraded" ? "amber" : "default"}>
+                  {check.status}
+                </Badge>
+              </div>
+              <div className="mt-2">{check.details}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
+        <div className="border-b border-white/6 pb-4">
           <div className="text-sm text-white">Recup Polymarket</div>
           <div className="mt-1 text-xs text-mist/70">
             Gains resolus a redeem en USDC.e, ou paires YES/NO a merge si presentes.

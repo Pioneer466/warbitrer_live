@@ -949,13 +949,15 @@ export async function listCircuitBreakers(pool: Pool): Promise<CircuitBreaker[]>
 }
 
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
+  const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.key);
   return {
     fetchedAt: Date.now(),
     slot,
     config: await getStrategyConfig(pool),
     workerState: await getWorkerState(pool),
-    latestSnapshot: await getLatestOpportunitySnapshot(pool, slot.key),
-    opportunities: (await getLatestOpportunitySnapshot(pool, slot.key))?.opportunities ?? [],
+    latestSnapshot,
+    feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
+    opportunities: latestSnapshot?.opportunities ?? [],
     venueBalances: await listVenueBalances(pool),
     openIntents: await listOpenOrderIntents(pool),
     recentOrders: await listRecentVenueOrders(pool, 20),
@@ -986,10 +988,10 @@ export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<
 
     return {
       ts: snapshot.capturedAt,
-      polyUpBuy: snapshot.polymarket.outcomes.up.buyPrice,
-      polyDownBuy: snapshot.polymarket.outcomes.down.buyPrice,
-      kalshiYesLast: snapshot.kalshi.lastTradeYesPrice ?? snapshot.kalshi.outcomes.yes.buyPrice,
-      kalshiNoLast: snapshot.kalshi.lastTradeNoPrice ?? snapshot.kalshi.outcomes.no.buyPrice,
+      polyUpBuy: snapshot.polymarket.outcomes.up.chart.price,
+      polyDownBuy: snapshot.polymarket.outcomes.down.chart.price,
+      kalshiYesLast: snapshot.kalshi.outcomes.yes.chart.price,
+      kalshiNoLast: snapshot.kalshi.outcomes.no.chart.price,
       grossCostUpNo: first?.combination === "POLY_UP_KALSHI_NO" ? first.grossCost : second?.grossCost ?? null,
       grossCostDownYes:
         first?.combination === "POLY_DOWN_KALSHI_YES" ? first.grossCost : second?.grossCost ?? null,
