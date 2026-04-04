@@ -278,6 +278,9 @@ function VenueBalanceCard({
           {feedHealth.stalenessMs === null ? "" : ` · ${feedHealth.stalenessMs} ms`}
         </div>
       ) : null}
+      <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
+        balance refresh {formatClock(balance.capturedAt)}
+      </div>
       {balance.notes.length > 0 ? (
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
           {balance.notes.join(" | ")}

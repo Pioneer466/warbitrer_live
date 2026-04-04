@@ -670,7 +670,7 @@ class KalshiRealtimeFeed {
           this.orderbook.lastUpdatedAt,
         )
       : null;
-    const activeQuotes = this.isLiveOrderbook(now) ? orderbookQuotes ?? marketQuotes : marketQuotes;
+    const activeQuotes = this.hasFreshOrderbook(now) ? orderbookQuotes ?? marketQuotes : marketQuotes;
     const tradePrices = extractKalshiLastTradePrices(
       this.trades,
       parseNumeric(this.market.last_price_dollars) ?? null,
@@ -776,15 +776,30 @@ class KalshiRealtimeFeed {
   }
 
   private ensureWs() {
-    if (!this.market || this.ws) {
+    if (!this.market || this.ws || !hasKalshiCredentials()) {
+      if (!hasKalshiCredentials()) {
+        this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
+          status: "idle",
+          source: "rest-fallback",
+          details: "ticker websocket non actif sans credentials Kalshi",
+        });
+        this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
+          status: "idle",
+          source: "rest-fallback",
+          details: "orderbook via REST fallback",
+        });
+        this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+          status: "idle",
+          source: "rest-fallback",
+          details: "trade tape via REST fallback",
+        });
+      }
       return;
     }
 
-    const ws = hasKalshiCredentials()
-      ? new WebSocket(getKalshiWsUrl(), {
-          headers: buildKalshiWsHeaders(),
-        })
-      : new WebSocket(getKalshiWsUrl());
+    const ws = new WebSocket(getKalshiWsUrl(), {
+      headers: buildKalshiWsHeaders(),
+    });
     this.ws = ws;
     for (let index = 0; index < this.subscriptions.length; index += 1) {
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
@@ -802,15 +817,7 @@ class KalshiRealtimeFeed {
       this.reconnectAttempt = 0;
       this.subscribe(ws, "ticker", this.market.ticker);
       this.subscribe(ws, "trade", this.market.ticker);
-      if (hasKalshiCredentials()) {
-        this.subscribe(ws, "orderbook_delta", this.market.ticker);
-      } else {
-        this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
-          status: "idle",
-          source: "unavailable",
-          details: "orderbook delta reserve au flux authentifie",
-        });
-      }
+      this.subscribe(ws, "orderbook_delta", this.market.ticker);
     });
 
     ws.on("message", (buffer: Buffer) => {
@@ -829,7 +836,7 @@ class KalshiRealtimeFeed {
       for (let index = 0; index < this.subscriptions.length; index += 1) {
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
           status: "error",
-          source: "ws",
+          source: this.lastRestSyncAt === null ? "unavailable" : "rest-fallback",
           details: this.lastError,
         });
       }
@@ -841,8 +848,11 @@ class KalshiRealtimeFeed {
       for (let index = 0; index < this.subscriptions.length; index += 1) {
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
           status: "closed",
-          source: "ws",
-          details: "connexion fermee, retry programme",
+          source: this.lastRestSyncAt === null ? "unavailable" : "rest-fallback",
+          details:
+            this.lastRestSyncAt === null
+              ? "connexion fermee"
+              : "connexion fermee, REST fallback conserve",
         });
       }
       const delay = nextReconnectDelay(this.reconnectAttempt++);
@@ -1013,6 +1023,18 @@ class KalshiRealtimeFeed {
     }
 
     return now - subscription.lastMessageAt <= FEED_BLOCKED_MS;
+  }
+
+  private hasFreshOrderbook(now: number) {
+    if (!this.orderbook || this.orderbook.lastUpdatedAt === null) {
+      return false;
+    }
+
+    if (this.isLiveOrderbook(now)) {
+      return true;
+    }
+
+    return now - this.orderbook.lastUpdatedAt <= FEED_BLOCKED_MS;
   }
 }
 

@@ -14,13 +14,31 @@ export async function GET() {
       readHistoryPoints(slot),
       readLatestSnapshot(slot.key),
     ]);
+    const fallbackPoints =
+      points.length > 0 || !latestSnapshot
+        ? points
+        : [
+            {
+              ts: latestSnapshot.capturedAt,
+              polyUpBuy: latestSnapshot.polymarket.outcomes.up.chart.price,
+              polyDownBuy: latestSnapshot.polymarket.outcomes.down.chart.price,
+              kalshiYesLast: latestSnapshot.kalshi.outcomes.yes.chart.price,
+              kalshiNoLast: latestSnapshot.kalshi.outcomes.no.chart.price,
+              grossCostUpNo:
+                latestSnapshot.opportunities.find((item) => item.combination === "POLY_UP_KALSHI_NO")?.grossCost ??
+                null,
+              grossCostDownYes:
+                latestSnapshot.opportunities.find((item) => item.combination === "POLY_DOWN_KALSHI_YES")?.grossCost ??
+                null,
+            },
+          ];
 
     return NextResponse.json(
       {
         fetchedAt: Date.now(),
         slot,
         feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
-        points,
+        points: fallbackPoints,
       },
       {
         headers: {

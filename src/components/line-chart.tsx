@@ -19,6 +19,7 @@ const PADDING = 22;
 
 export function LineChart({ series, labels }: LineChartProps) {
   const flatValues = series.flatMap((line) => line.values.filter((value): value is number => value !== null));
+  const hasData = flatValues.length > 0;
   const minValue = flatValues.length > 0 ? Math.min(...flatValues, 0) : 0;
   const maxValue = flatValues.length > 0 ? Math.max(...flatValues, 1) : 1;
   const range = Math.max(maxValue - minValue, 0.05);
@@ -101,9 +102,22 @@ export function LineChart({ series, labels }: LineChartProps) {
                 strokeLinecap="round"
                 strokeWidth="2"
               />
+              {points.length === 1 ? <circle cx={points[0].x} cy={points[0].y} r="4" fill={line.color} /> : null}
             </g>
           );
         })}
+
+        {!hasData ? (
+          <text
+            x={WIDTH / 2}
+            y={HEIGHT / 2}
+            fill="rgba(143, 152, 179, 0.72)"
+            fontSize="14"
+            textAnchor="middle"
+          >
+            Pas encore de points pour ce créneau.
+          </text>
+        ) : null}
 
         {labels.map((label, index) =>
           index % labelStep === 0 || index === labels.length - 1 ? (
