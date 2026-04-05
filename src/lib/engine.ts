@@ -1,4 +1,3 @@
-import { fetchPolymarketDepositAddresses } from "@/lib/bridge";
 import { fetchBtcSlotResolution, toKalshiResolution } from "@/lib/btc-resolution";
 import { applySlippage } from "@/lib/fees";
 import {
@@ -6,9 +5,12 @@ import {
   fetchKalshiFills,
   fetchKalshiOrders,
   fetchKalshiResolution,
+  getKalshiFillFeeUsd,
+  getKalshiFillPriceUsd,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
 import {
+  confirmPolymarketOrderExecution,
   createPolymarketAdapter,
   fetchPolymarketOpenOrders,
   fetchPolymarketResolution,
@@ -17,23 +19,30 @@ import {
   mapPolymarketTradeToFill,
 } from "@/lib/polymarket";
 import { autoRedeemPolymarketIfConfigured } from "@/lib/recovery";
+import { calculateVenueExposureUsd } from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
-import { calculateWinningPayout, createIntentFromOpportunity, finalizeIntent, markIntentStatus } from "@/lib/settlement";
+import {
+  calculateWinningPayout,
+  createIntentFromOpportunity,
+  finalizeIntent,
+  markIntentStatus,
+  summarizeVenueFills,
+} from "@/lib/settlement";
 import { getCurrentSlot } from "@/lib/slot";
 import {
   findOrderIntent,
   findVenueOrder,
-  readBridgeTransfers,
   readCircuitBreakers,
+  readFillsForIntentVenue,
   readLastEntryCosts,
   readLatestSnapshot,
   readOpenOrderIntents,
+  readPositions,
   readRecentFills,
   readRecentVenueOrders,
   readSettings,
   readVenueBalances,
   replaceVenuePositions,
-  writeBridgeTransfer,
   writeCircuitBreaker,
   writeFill,
   writeOrderIntent,
@@ -61,7 +70,7 @@ import type {
 } from "@/lib/types";
 
 const RESOLUTION_GRACE_MS = 5_000;
-const POLYMARKET_SETTLEMENT_LOOKBACK = 50;
+const IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS = 3_000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -71,6 +80,9 @@ export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
   const settings = await readSettings();
   const slot = getCurrentSlot(now);
+  let scanSucceeded = false;
+  let executeSucceeded = false;
+  let reconcileSucceeded = false;
 
   await writeWorkerState({
     phase: "scan",
@@ -83,6 +95,7 @@ export async function processTick(now = new Date()) {
 
   try {
     await coordinator.scan(slot, nowTs);
+    scanSucceeded = true;
   } catch (error) {
     errors.push(toErrorMessage(error));
   }
@@ -93,6 +106,7 @@ export async function processTick(now = new Date()) {
       currentSlotKey: slot.key,
     });
     await coordinator.execute(slot, nowTs);
+    executeSucceeded = true;
   } catch (error) {
     errors.push(toErrorMessage(error));
   }
@@ -103,6 +117,7 @@ export async function processTick(now = new Date()) {
       currentSlotKey: slot.key,
     });
     await coordinator.reconcile(slot, nowTs);
+    reconcileSucceeded = true;
   } catch (error) {
     errors.push(toErrorMessage(error));
   }
@@ -110,9 +125,9 @@ export async function processTick(now = new Date()) {
   await writeWorkerState({
     phase: "idle",
     currentSlotKey: slot.key,
-    lastScanAt: nowTs,
-    lastExecuteAt: nowTs,
-    lastReconcileAt: nowTs,
+    lastScanAt: scanSucceeded ? nowTs : undefined,
+    lastExecuteAt: executeSucceeded ? nowTs : undefined,
+    lastReconcileAt: reconcileSucceeded ? nowTs : undefined,
     lastError: errors[0] ?? null,
   });
 
@@ -197,6 +212,8 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
       const created: OrderIntent[] = [];
+      const positions = await readPositions();
+      const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
 
       for (const opportunity of eligible.slice(0, settings.maxOpenIntentsPerSlot - openForSlot.length)) {
         const intent = createIntentFromOpportunity({
@@ -207,6 +224,25 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
           maxSlippageBps: settings.maxSlippageBps,
           shadow: settings.shadowMode,
         });
+
+        if (wouldExceedVenueExposure(intent, exposureUsd, settings.maxVenueExposureUsd)) {
+          await writeRunEvent({
+            level: "warn",
+            eventType: "intent.skipped.exposure_limit",
+            message: `Intent ${intent.id} exceeds venue exposure limit`,
+            payload: {
+              slotKey: intent.slotKey,
+              limitUsd: settings.maxVenueExposureUsd,
+              exposureUsd,
+            },
+            createdAt: now,
+          });
+          continue;
+        }
+
+        for (const leg of intent.legs) {
+          exposureUsd[leg.venue] += leg.requestedNotionalUsd;
+        }
 
         await writeOrderIntent(intent);
         await writeRunEvent({
@@ -245,13 +281,6 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       await reconcileVenueOrders(now);
       await reconcileSettlements(now);
       await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
-
-      if ((await readBridgeTransfers(1)).length === 0) {
-        const depositAddresses = await fetchPolymarketDepositAddresses().catch(() => null);
-        if (depositAddresses) {
-          await writeBridgeTransfer(depositAddresses);
-        }
-      }
     },
   };
 }
@@ -263,7 +292,6 @@ async function refreshBalances(settings: StrategyConfig, now: number): Promise<V
     if (result.status === "fulfilled") {
       const balance = result.value;
       if (venue === "polymarket" && balance.availableBalanceUsd < settings.polyBridgeLowWaterUsdc) {
-        balance.status = balance.status === "ready" ? "degraded" : balance.status;
         balance.notes = [...balance.notes, "USDC disponible sous le seuil bridge configuré."];
       }
       return balance;
@@ -383,7 +411,8 @@ async function executeIntent(intent: OrderIntent, settings: StrategyConfig, now:
   await writeOrderIntent(currentIntent);
 
   const primaryRequest = buildVenueOrderRequest(primaryLeg, settings.maxSlippageBps, "FOK", false);
-  const primaryResult = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
+  const primarySubmission = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
+  const primaryResult = await confirmImmediateOrderExecution(currentIntent.primaryVenue, primaryRequest, primarySubmission);
   const primaryOrder = buildLiveOrderRecord(currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
   await writeVenueOrder(primaryOrder);
   await writeRunEvent({
@@ -398,30 +427,49 @@ async function executeIntent(intent: OrderIntent, settings: StrategyConfig, now:
   });
 
   currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
-  if (primaryResult.status !== "filled") {
-    currentIntent = markIntentStatus(currentIntent, "failed", now, "Primary order not filled");
-    await writeOrderIntent(currentIntent);
-    return currentIntent;
-  }
-
   if (currentIntent.primaryVenue === "polymarket") {
     currentIntent = await attachRecentPolymarketFills(currentIntent);
+  }
+
+  if (primaryResult.status !== "filled" || primaryOrder.filledSize <= 0) {
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "failed",
+      now,
+      `Primary order not authoritatively filled (${primaryResult.status})`,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeCircuitBreaker({
+      key: `slot:${currentIntent.slotKey}`,
+      active: true,
+      reason: "venue_error",
+      triggeredAt: now,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.primaryVenue,
+        stage: "primary_confirmation",
+        orderId: primaryOrder.venueOrderId,
+      },
+    });
+    return currentIntent;
   }
 
   currentIntent = markIntentStatus(currentIntent, "hedging", Date.now());
   await writeOrderIntent(currentIntent);
 
   const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
-  const hedgeResult = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
+  const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
+  const hedgeResult = await confirmImmediateOrderExecution(currentIntent.hedgeVenue, hedgeRequest, hedgeSubmission);
   const hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, Date.now());
   await writeVenueOrder(hedgeOrder);
 
-  if (hedgeResult.status === "filled") {
+  if (currentIntent.hedgeVenue === "polymarket") {
+    currentIntent = await attachRecentPolymarketFills(currentIntent);
+  }
+
+  if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", Date.now());
     currentIntent = markIntentStatus(currentIntent, "hedged", Date.now());
-    if (currentIntent.hedgeVenue === "polymarket") {
-      currentIntent = await attachRecentPolymarketFills(currentIntent);
-    }
     await writeOrderIntent(currentIntent);
     return currentIntent;
   }
@@ -485,19 +533,21 @@ async function executeShadowIntent(intent: OrderIntent, now: number) {
 
 async function attachRecentPolymarketFills(intent: OrderIntent) {
   const trades = await fetchPolymarketTrades();
-  const matching = trades.filter((trade) => intent.legs.some((leg) => leg.venueOrderId === trade.taker_order_id));
+  const orderIds = new Set(
+    intent.legs
+      .filter((leg) => leg.venue === "polymarket" && leg.venueOrderId)
+      .map((leg) => leg.venueOrderId as string),
+  );
+  const matching = trades.filter(
+    (trade) =>
+      orderIds.has(trade.taker_order_id) || trade.maker_orders.some((makerOrder) => orderIds.has(makerOrder.order_id)),
+  );
 
   for (const trade of matching) {
-    const leg = intent.legs.find((candidate) => candidate.venueOrderId === trade.taker_order_id);
-    if (!leg) {
-      continue;
-    }
-
     await writeFill(mapPolymarketTradeToFill(trade, intent.id));
-    const weightedPrice = Number(trade.price);
-    intent = updateIntentLegWithFill(intent, leg.venue, Number(trade.size), weightedPrice, Number(trade.price) * Number(trade.size) * (Number(trade.fee_rate_bps) / 10_000));
   }
 
+  intent = (await syncIntentFromStoredVenueFills(intent.id, "polymarket", intent)) ?? intent;
   await writeOrderIntent(intent);
   return intent;
 }
@@ -521,7 +571,8 @@ async function unwindPrimaryLeg(intent: OrderIntent, maxSlippageBps: number) {
     primaryLeg.venue === "polymarket" ? "FAK" : "IOC",
     true,
   );
-  const result = await adapterFor(primaryLeg.venue).placeOrder(request);
+  const submission = await adapterFor(primaryLeg.venue).placeOrder(request);
+  const result = await confirmImmediateOrderExecution(primaryLeg.venue, request, submission);
   return buildLiveOrderRecord(intent.id, { ...primaryLeg, side: "SELL" }, request, result, Date.now());
 }
 
@@ -533,6 +584,7 @@ async function reconcileVenueOrders(now: number) {
     fetchPolymarketTrades().catch(() => []),
     fetchKalshiFills().catch(() => []),
   ]);
+  const touchedIntentLegs = new Set<string>();
 
   for (const order of polyOpenOrders) {
     const existing = await findVenueOrder("polymarket", order.id);
@@ -564,25 +616,17 @@ async function reconcileVenueOrders(now: number) {
 
   for (const trade of polyTrades) {
     const existingOrder = recentOrders.find(
-      (order) => order.venue === "polymarket" && order.venueOrderId === trade.taker_order_id,
+      (order) =>
+        order.venue === "polymarket" &&
+        (order.venueOrderId === trade.taker_order_id ||
+          trade.maker_orders.some((makerOrder) => makerOrder.order_id === order.venueOrderId)),
     );
     if (!existingOrder) {
       continue;
     }
 
     await writeFill(mapPolymarketTradeToFill(trade, existingOrder.intentId));
-    const intent = await findOrderIntent(existingOrder.intentId);
-    if (!intent) {
-      continue;
-    }
-    const updatedIntent = updateIntentLegWithFill(
-      intent,
-      "polymarket",
-      Number(trade.size),
-      Number(trade.price),
-      Number(trade.price) * Number(trade.size) * (Number(trade.fee_rate_bps) / 10_000),
-    );
-    await writeOrderIntent(updatedIntent);
+    touchedIntentLegs.add(`${existingOrder.intentId}:polymarket`);
   }
 
   for (const fill of kalshiFills) {
@@ -603,26 +647,19 @@ async function reconcileVenueOrders(now: number) {
       marketRef: fill.market_ticker,
       side: fill.action === "sell" ? "SELL" : "BUY",
       outcome: fill.side === "yes" ? "YES" : "NO",
-      price: Number(fill.yes_price_dollars),
+      price: getKalshiFillPriceUsd(fill) ?? 0,
       size: Number(fill.count_fp),
-      feeUsd: 0,
+      feeUsd: getKalshiFillFeeUsd(fill),
       liquidity: fill.is_taker ? "TAKER" : "MAKER",
       filledAt: fill.created_time ? Date.parse(fill.created_time) : now,
       raw: fill as unknown as Record<string, unknown>,
     });
+    touchedIntentLegs.add(`${existingOrder.intentId}:kalshi`);
+  }
 
-    const intent = await findOrderIntent(existingOrder.intentId);
-    if (!intent) {
-      continue;
-    }
-    const updatedIntent = updateIntentLegWithFill(
-      intent,
-      "kalshi",
-      Number(fill.count_fp),
-      Number(fill.yes_price_dollars),
-      0,
-    );
-    await writeOrderIntent(updatedIntent);
+  for (const entry of touchedIntentLegs) {
+    const [intentId, venue] = entry.split(":") as [string, "polymarket" | "kalshi"];
+    await syncIntentFromStoredVenueFills(intentId, venue);
   }
 }
 
@@ -828,32 +865,120 @@ function updateIntentLeg(
   };
 }
 
-function updateIntentLegWithFill(
+function updateIntentLegFromFillSummary(
   intent: OrderIntent,
   venue: OrderIntent["legs"][number]["venue"],
-  fillSize: number,
-  fillPrice: number,
-  feeUsd: number,
+  summary: ReturnType<typeof summarizeVenueFills>,
+  now: number,
 ) {
   return {
     ...intent,
-    updatedAt: Date.now(),
+    updatedAt: now,
     legs: intent.legs.map((leg) =>
       leg.venue === venue
         ? {
             ...leg,
-            filledSize: round4(leg.filledSize + fillSize),
-            filledPrice: fillPrice,
-            feeUsd: round4(leg.feeUsd + feeUsd),
-            status: leg.status === "unwound" ? "unwound" : "filled",
+            venueOrderId: summary.venueOrderId ?? leg.venueOrderId,
+            filledSize: summary.filledSize,
+            filledPrice: summary.averageFillPrice,
+            feeUsd: summary.feeUsd,
+            status:
+              leg.status === "unwound"
+                ? "unwound"
+                : leg.status === "hedged"
+                  ? "hedged"
+                  : summary.filledSize > 0
+                    ? "filled"
+                    : leg.status,
           }
         : leg,
     ) as OrderIntent["legs"],
   };
 }
 
+async function syncIntentFromStoredVenueFills(
+  intentId: string,
+  venue: OrderIntent["legs"][number]["venue"],
+  currentIntent?: OrderIntent,
+) {
+  const intent = currentIntent ?? (await findOrderIntent(intentId));
+  if (!intent) {
+    return currentIntent ?? null;
+  }
+
+  const fills = await readFillsForIntentVenue(intentId, venue);
+  if (fills.length === 0) {
+    return intent;
+  }
+
+  const updatedIntent = updateIntentLegFromFillSummary(intent, venue, summarizeVenueFills(fills), Date.now());
+  await writeOrderIntent(updatedIntent);
+  return updatedIntent;
+}
+
+async function confirmImmediateOrderExecution(
+  venue: OrderIntent["primaryVenue"],
+  request: VenueOrderRequest,
+  submission: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
+) {
+  if (submission.status === "rejected" || submission.status === "canceled" || submission.status === "expired") {
+    return submission;
+  }
+
+  if (venue === "polymarket") {
+    const confirmation = await confirmPolymarketOrderExecution({
+      orderId: submission.venueOrderId,
+      expectedSize: request.size,
+      timeoutMs: IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS,
+    });
+    return confirmation.result;
+  }
+
+  if (submission.status !== "live" && submission.status !== "pending" && submission.status !== "partially_filled") {
+    return submission;
+  }
+
+  const deadline = Date.now() + IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS;
+  let latest = submission;
+  while (Date.now() <= deadline) {
+    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId).catch(() => null);
+    if (liveOrder) {
+      latest = normalizeOrderResultFromLiveOrder(liveOrder, submission.raw);
+      if (latest.status !== "live" && latest.status !== "pending") {
+        return latest;
+      }
+    }
+    await sleep(200);
+  }
+
+  return latest;
+}
+
+function normalizeOrderResultFromLiveOrder(
+  order: LiveOrder,
+  fallbackRaw: Record<string, unknown>,
+): Awaited<ReturnType<VenueAdapter["placeOrder"]>> {
+  return {
+    venue: order.venue,
+    venueOrderId: order.venueOrderId,
+    status: order.status,
+    filledSize: order.filledSize,
+    averageFillPrice: order.averageFillPrice,
+    feeUsd: order.feeUsd ?? 0,
+    raw: order.raw ?? fallbackRaw,
+  };
+}
+
 function adapterFor(venue: OrderIntent["primaryVenue"]) {
   return venue === "polymarket" ? polymarketAdapter : kalshiAdapter;
+}
+
+function wouldExceedVenueExposure(
+  intent: OrderIntent,
+  exposureUsd: Record<"polymarket" | "kalshi", number>,
+  maxVenueExposureUsd: number,
+) {
+  return intent.legs.some((leg) => exposureUsd[leg.venue] + leg.requestedNotionalUsd > maxVenueExposureUsd + 1e-9);
 }
 
 async function refreshLatestSnapshot(slot: MarketSlot) {
@@ -866,4 +991,8 @@ function toErrorMessage(error: unknown) {
 
 function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

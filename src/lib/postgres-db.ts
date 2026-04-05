@@ -18,6 +18,7 @@ import type {
   RunEvent,
   StrategyConfig,
   TradesResponse,
+  Venue,
   VenueBalance,
   WorkerState,
 } from "@/lib/types";
@@ -697,6 +698,19 @@ export async function listRecentFills(pool: Pool, limit = 100): Promise<LiveFill
       LIMIT $1
     `,
     [limit],
+  );
+  return result.rows.map(mapFillRow);
+}
+
+export async function listFillsForIntentVenue(pool: Pool, intentId: string, venue: Venue): Promise<LiveFill[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM fills
+      WHERE intent_id = $1 AND venue = $2
+      ORDER BY filled_at ASC, trade_id ASC
+    `,
+    [intentId, venue],
   );
   return result.rows.map(mapFillRow);
 }

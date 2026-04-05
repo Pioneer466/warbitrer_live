@@ -483,14 +483,42 @@ export async function fetchKalshiFills() {
       is_taker: boolean;
       side: "yes" | "no";
       action: "buy" | "sell";
-      yes_price_dollars: string;
+      yes_price_dollars?: string;
+      no_price_dollars?: string;
       count_fp: string;
+      taker_fees_dollars?: string;
+      maker_fees_dollars?: string;
       created_time?: string;
       ts?: number;
     }>;
   }>("/portfolio/fills");
 
   return response.fills;
+}
+
+export function getKalshiFillPriceUsd(fill: {
+  side: "yes" | "no";
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
+}) {
+  const directPrice = fill.side === "yes" ? fill.yes_price_dollars : fill.no_price_dollars;
+  if (directPrice !== undefined) {
+    return Number(directPrice);
+  }
+
+  const complementSource = fill.side === "yes" ? fill.no_price_dollars : fill.yes_price_dollars;
+  if (complementSource !== undefined) {
+    return round4(1 - Number(complementSource));
+  }
+
+  return null;
+}
+
+export function getKalshiFillFeeUsd(fill: {
+  taker_fees_dollars?: string;
+  maker_fees_dollars?: string;
+}) {
+  return Number(fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
 }
 
 async function createKalshiOrder(order: VenueOrderRequest) {

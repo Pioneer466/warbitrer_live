@@ -1,4 +1,4 @@
-import { calculateWinningPayout, createIntentFromOpportunity, finalizeIntent } from "@/lib/settlement";
+import { calculateWinningPayout, createIntentFromOpportunity, finalizeIntent, summarizeVenueFills } from "@/lib/settlement";
 import type { LiveOpportunity } from "@/lib/types";
 
 const opportunity: LiveOpportunity = {
@@ -87,8 +87,10 @@ describe("live intent settlement", () => {
       shadow: false,
     });
     intent.legs[0].filledSize = 58.9;
+    intent.legs[0].filledPrice = 0.423;
     intent.legs[0].feeUsd = 0.15;
     intent.legs[1].filledSize = 51;
+    intent.legs[1].filledPrice = 0.487;
     intent.legs[1].feeUsd = 0.72;
 
     const settled = finalizeIntent({
@@ -100,7 +102,32 @@ describe("live intent settlement", () => {
     });
 
     expect(settled.status).toBe("settled");
+    expect(settled.realizedPnlUsd).toBeCloseTo(8.2783, 4);
     expect(settled.realizedPnlUsd).not.toBeNull();
     expect(settled.polyResolution).toBe("UP");
+  });
+
+  it("aggregates fills idempotently with a weighted average price", () => {
+    const summary = summarizeVenueFills([
+      {
+        venueOrderId: "order-1",
+        size: 10,
+        price: 0.4,
+        feeUsd: 0.04,
+        filledAt: 10,
+      },
+      {
+        venueOrderId: "order-1",
+        size: 5,
+        price: 0.5,
+        feeUsd: 0.03,
+        filledAt: 11,
+      },
+    ]);
+
+    expect(summary.filledSize).toBe(15);
+    expect(summary.averageFillPrice).toBeCloseTo(0.4333, 4);
+    expect(summary.feeUsd).toBe(0.07);
+    expect(summary.venueOrderId).toBe("order-1");
   });
 });

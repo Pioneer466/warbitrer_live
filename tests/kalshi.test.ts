@@ -1,4 +1,10 @@
-import { deriveKalshiOutcomeQuotes, deriveKalshiOutcomeQuotesFromMarket, resolveKalshiMarketForSlot } from "@/lib/kalshi";
+import {
+  deriveKalshiOutcomeQuotes,
+  deriveKalshiOutcomeQuotesFromMarket,
+  getKalshiFillFeeUsd,
+  getKalshiFillPriceUsd,
+  resolveKalshiMarketForSlot,
+} from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
 
 describe("Kalshi quote derivation", () => {
@@ -101,5 +107,27 @@ describe("Kalshi quote derivation", () => {
     expect(quotes.no.buyPrice).toBe(0.855);
     expect(quotes.no.sellPrice).toBe(0.84);
     expect(quotes.no.depth).toBe(29);
+  });
+
+  it("maps Kalshi NO fills using the direct or complementary fill price", () => {
+    expect(
+      getKalshiFillPriceUsd({
+        side: "no",
+        no_price_dollars: "0.65",
+      }),
+    ).toBe(0.65);
+
+    expect(
+      getKalshiFillPriceUsd({
+        side: "no",
+        yes_price_dollars: "0.35",
+      }),
+    ).toBe(0.65);
+
+    expect(
+      getKalshiFillFeeUsd({
+        taker_fees_dollars: "0.27",
+      }),
+    ).toBe(0.27);
   });
 });

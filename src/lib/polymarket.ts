@@ -303,11 +303,7 @@ export function createPolymarketAdapter(): VenueAdapter {
       return {
         venue: "polymarket",
         venueOrderId: response.orderID,
-        status: response.success
-          ? response.status === "filled"
-            ? "filled"
-            : "live"
-          : "rejected",
+        status: response.success ? "live" : "rejected",
         filledSize: 0,
         averageFillPrice: null,
         feeUsd: 0,
@@ -342,6 +338,85 @@ export async function fetchPolymarketTrades(after?: string) {
 
   const client = createClobClient();
   return client.getTrades(after ? { after } : undefined);
+}
+
+export async function confirmPolymarketOrderExecution(params: {
+  orderId: string;
+  expectedSize: number;
+  timeoutMs?: number;
+}): Promise<{ result: VenueOrderResult; order: OpenOrder | null; trades: Trade[] }> {
+  const deadline = Date.now() + (params.timeoutMs ?? 3_000);
+  let latestOrder: OpenOrder | null = null;
+  let latestTrades: Trade[] = [];
+
+  while (Date.now() <= deadline) {
+    const [order, trades] = await Promise.all([
+      safeGetPolymarketOrder(params.orderId),
+      fetchPolymarketTrades().catch(() => []),
+    ]);
+    latestOrder = order;
+    latestTrades = extractPolymarketTradesForOrder(trades, params.orderId);
+
+    const aggregatedTrades = summarizePolymarketTrades(latestTrades);
+    if (aggregatedTrades.filledSize > 0) {
+      return {
+        result: {
+          venue: "polymarket" as const,
+          venueOrderId: params.orderId,
+          status:
+            aggregatedTrades.filledSize + 1e-6 >= params.expectedSize ? "filled" : "partially_filled",
+          filledSize: aggregatedTrades.filledSize,
+          averageFillPrice: aggregatedTrades.averageFillPrice,
+          feeUsd: aggregatedTrades.feeUsd,
+          raw: {
+            order,
+            trades: latestTrades,
+          },
+        },
+        order,
+        trades: latestTrades,
+      };
+    }
+
+    if (order) {
+      const mappedOrder = mapPolymarketOrder(order, "unknown");
+      if (mappedOrder.status === "canceled" || mappedOrder.status === "expired" || mappedOrder.status === "rejected") {
+        return {
+          result: {
+            venue: "polymarket" as const,
+            venueOrderId: params.orderId,
+            status: mappedOrder.status,
+            filledSize: mappedOrder.filledSize,
+            averageFillPrice: mappedOrder.averageFillPrice,
+            feeUsd: 0,
+            raw: order as unknown as Record<string, unknown>,
+          },
+          order,
+          trades: [],
+        };
+      }
+    }
+
+    await sleep(200);
+  }
+
+  const fallbackOrder = latestOrder ? mapPolymarketOrder(latestOrder, "unknown") : null;
+  return {
+    result: {
+      venue: "polymarket" as const,
+      venueOrderId: params.orderId,
+      status: fallbackOrder?.status ?? "live",
+      filledSize: fallbackOrder?.filledSize ?? 0,
+      averageFillPrice: fallbackOrder?.averageFillPrice ?? null,
+      feeUsd: 0,
+      raw: {
+        order: latestOrder,
+        trades: latestTrades,
+      },
+    },
+    order: latestOrder,
+    trades: latestTrades,
+  };
 }
 
 async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promise<OutcomeQuote> {
@@ -659,4 +734,43 @@ export function mapPolymarketTradeToFill(trade: Trade, intentId: string) {
     filledAt: Date.parse(trade.match_time),
     raw: trade as unknown as Record<string, unknown>,
   };
+}
+
+export function summarizePolymarketTrades(trades: Trade[]) {
+  const filtered = trades.filter((trade) => trade.status !== "FAILED");
+  const filledSize = round4(filtered.reduce((sum, trade) => sum + Number(trade.size), 0));
+  const grossCostUsd = filtered.reduce((sum, trade) => sum + Number(trade.size) * Number(trade.price), 0);
+  const feeUsd = round4(
+    filtered.reduce(
+      (sum, trade) => sum + Number(trade.price) * Number(trade.size) * (Number(trade.fee_rate_bps) / 10_000),
+      0,
+    ),
+  );
+
+  return {
+    filledSize,
+    averageFillPrice: filledSize > 0 ? round4(grossCostUsd / filledSize) : null,
+    feeUsd,
+  };
+}
+
+export function extractPolymarketTradesForOrder(trades: Trade[], orderId: string) {
+  return trades.filter(
+    (trade) =>
+      trade.taker_order_id === orderId ||
+      trade.maker_orders.some((makerOrder) => makerOrder.order_id === orderId),
+  );
+}
+
+async function safeGetPolymarketOrder(orderId: string) {
+  try {
+    const client = createClobClient();
+    return await client.getOrder(orderId);
+  } catch {
+    return null;
+  }
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

@@ -14,6 +14,7 @@ import type {
   RunEvent,
   StrategyConfig,
   TradesResponse,
+  Venue,
   VenueBalance,
   WorkerState,
 } from "@/lib/types";
@@ -108,6 +109,10 @@ export async function writeFill(fill: LiveFill) {
 
 export async function readRecentFills(limit?: number) {
   return postgres.listRecentFills(await db(), limit);
+}
+
+export async function readFillsForIntentVenue(intentId: string, venue: Venue) {
+  return postgres.listFillsForIntentVenue(await db(), intentId, venue);
 }
 
 export async function replaceVenuePositions(venue: "polymarket" | "kalshi", positions: PositionSnapshot[]) {

@@ -6,6 +6,8 @@ import { POLY_SIGNATURE_TYPES } from "@/lib/constants";
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
+  APP_BASIC_AUTH_USER: z.string().min(1).optional(),
+  APP_BASIC_AUTH_PASSWORD: z.string().min(1).optional(),
   KALSHI_API_KEY_ID: z.string().min(1).optional(),
   KALSHI_PRIVATE_KEY_PEM: z.string().min(1).optional(),
   KALSHI_PRIVATE_KEY_PATH: z.string().min(1).optional(),

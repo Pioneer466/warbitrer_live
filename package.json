@@ -12,7 +12,7 @@
     "start": "next start --hostname 0.0.0.0",
     "start:web": "next start --hostname 127.0.0.1",
     "start:worker": "tsx src/worker/index.ts",
-    "start:all": "concurrently -k -n web,worker -c cyan,magenta \"npm run start\" \"npm run worker\"",
+    "start:all": "concurrently -k -n web,worker -c cyan,magenta \"npm run start:web\" \"npm run start:worker\"",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "vitest run",
     "test:watch": "vitest",

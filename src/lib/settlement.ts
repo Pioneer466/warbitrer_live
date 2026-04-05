@@ -1,4 +1,5 @@
 import type {
+  LiveFill,
   LiveOpportunity,
   OrderIntent,
   OrderIntentLeg,
@@ -111,7 +112,7 @@ export function finalizeIntent({
   payoutUsd: number;
   now: number;
 }): OrderIntent {
-  const totalNotional = intent.legs.reduce((sum, leg) => sum + leg.requestedNotionalUsd + leg.feeUsd, 0);
+  const totalNotional = intent.legs.reduce((sum, leg) => sum + calculateLegSpentUsd(leg), 0);
   const realizedPnlUsd = round4(payoutUsd - totalNotional);
 
   return {
@@ -136,6 +137,27 @@ export function calculateWinningPayout(
     const won = leg.outcome === resolvedOutcome;
     return sum + (won ? leg.filledSize : 0);
   }, 0);
+}
+
+export function summarizeVenueFills(
+  fills: Array<Pick<LiveFill, "venueOrderId" | "size" | "price" | "feeUsd" | "filledAt">>,
+) {
+  const sorted = [...fills].sort((left, right) => left.filledAt - right.filledAt);
+  const filledSize = round4(sorted.reduce((sum, fill) => sum + fill.size, 0));
+  const grossCostUsd = sorted.reduce((sum, fill) => sum + fill.size * fill.price, 0);
+  const feeUsd = round4(sorted.reduce((sum, fill) => sum + fill.feeUsd, 0));
+
+  return {
+    filledSize,
+    averageFillPrice: filledSize > 0 ? round4(grossCostUsd / filledSize) : null,
+    feeUsd,
+    venueOrderId: sorted.at(-1)?.venueOrderId ?? null,
+  };
+}
+
+export function calculateLegSpentUsd(leg: Pick<OrderIntentLeg, "filledSize" | "filledPrice" | "requestedNotionalUsd" | "feeUsd">) {
+  const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
+  return round4(tradedNotional + leg.feeUsd);
 }
 
 function buildIntentLeg(
