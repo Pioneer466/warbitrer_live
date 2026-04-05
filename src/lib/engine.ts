@@ -19,7 +19,7 @@ import {
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
 } from "@/lib/polymarket";
-import { autoRedeemPolymarketIfConfigured } from "@/lib/recovery";
+import { autoConvertPolymarketIfConfigured } from "@/lib/recovery";
 import { calculateVenueExposureUsd } from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
 import {
@@ -280,7 +280,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         replaceVenuePositions("kalshi", kalshiPositions),
       ]);
 
-      await autoRedeemPolymarketIfConfigured(polyPositions, now);
+      await autoConvertPolymarketIfConfigured(polyPositions, now);
 
       await reconcileVenueOrders(now);
       await reconcileSettlements(now);

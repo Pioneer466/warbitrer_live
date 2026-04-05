@@ -507,7 +507,9 @@ export type RecoveryMarket = {
   outcomes: RecoveryOutcome[];
   redeemable: boolean;
   mergeable: boolean;
-  directRedeemSupported: boolean;
+  conversionAction: "redeem" | "merge" | null;
+  mergeableSize: number | null;
+  directConversionSupported: boolean;
   notes: string[];
 };
 
@@ -517,7 +519,7 @@ export type RecoveryResponse = {
   signatureType: "EOA" | "POLY_PROXY" | "POLY_GNOSIS_SAFE" | "unknown";
   funderAddress: string | null;
   eoaValidation: {
-    canDirectRedeem: boolean;
+    canDirectConversion: boolean;
     checks: ReadinessCheck[];
   };
   markets: RecoveryMarket[];

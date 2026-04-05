@@ -37,6 +37,7 @@ Variables principales:
 - `POLY_API_PASSPHRASE`
 - `POLY_FUNDER_ADDRESS`
 - `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
+- `POLY_AUTO_CONVERT`
 - `POLY_BRIDGE_LOW_WATER_USDC`
 
 Pour Polymarket:
@@ -92,7 +93,7 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `enableTrading=true` et `shadowMode=false` : exécution live réelle
 
 Le dashboard `/` et la page `/trades` restent les interfaces opérateur principales dans les trois modes.
-La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation future de la migration `EOA`.
+La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation de la migration `EOA`.
 
 ## Déploiement VPS
 

@@ -15,6 +15,8 @@ export function RecoveryClient() {
     data: string;
     conditionId: string;
     indexSets: number[];
+    amount?: string;
+    operation?: "redeem" | "merge";
   } | null>(null);
 
   if (recovery.loading && !recovery.data) {
@@ -56,7 +58,7 @@ export function RecoveryClient() {
     }
   }
 
-  async function redeem(marketRef: string) {
+  async function convert(marketRef: string) {
     setBusy(marketRef);
     setActionMessage(null);
     setManualTx(null);
@@ -67,7 +69,7 @@ export function RecoveryClient() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          action: "redeem",
+          action: "convert",
           marketRef,
         }),
       });
@@ -75,6 +77,8 @@ export function RecoveryClient() {
         ok?: boolean;
         mode?: "direct" | "manual";
         txHash?: string;
+        action?: "redeem" | "merge";
+        amount?: string;
         reason?: string;
         error?: string;
         tx?: {
@@ -82,15 +86,22 @@ export function RecoveryClient() {
           data: string;
           conditionId: string;
           indexSets: number[];
+          amount?: string;
+          operation?: "redeem" | "merge";
         };
       };
 
       if (!response.ok) {
-        throw new Error(payload.error ?? "Redeem impossible");
+        throw new Error(payload.error ?? "Conversion impossible");
       }
 
       if (payload.mode === "direct" && payload.txHash) {
-        setActionMessage(`Redeem envoye. Tx: ${payload.txHash}`);
+        const verb = payload.action === "merge" ? "Merge" : "Redeem";
+        setActionMessage(
+          payload.action === "merge" && payload.amount
+            ? `${verb} envoye pour ${payload.amount}. Tx: ${payload.txHash}`
+            : `${verb} envoye. Tx: ${payload.txHash}`,
+        );
       } else {
         setActionMessage(payload.reason ?? "Mode manuel requis pour ce wallet.");
         if (payload.tx) {
@@ -98,7 +109,7 @@ export function RecoveryClient() {
         }
       }
     } catch (error) {
-      setActionMessage(error instanceof Error ? error.message : "Redeem impossible");
+      setActionMessage(error instanceof Error ? error.message : "Conversion impossible");
     } finally {
       setBusy(null);
     }
@@ -133,7 +144,7 @@ export function RecoveryClient() {
 
           <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4 text-sm text-mist">
             <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">Settlement</div>
-            <div className="mt-3 text-white">Polymarket: reclaim manuel/direct selon le wallet.</div>
+            <div className="mt-3 text-white">Polymarket: redeem ou merge manuel/direct selon le wallet.</div>
             <div className="mt-2">Signature type: {recovery.data.signatureType}</div>
             <div className="mt-1">Kalshi: settlement automatique, aucun claim manuel requis.</div>
           </div>
@@ -143,6 +154,8 @@ export function RecoveryClient() {
         {manualTx ? (
           <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
             <div className="text-white">Transaction manuelle preparee</div>
+            <div className="mt-2">operation: {manualTx.operation ?? "redeem"}</div>
+            {manualTx.amount ? <div className="mt-1">amount: {manualTx.amount}</div> : null}
             <div className="mt-2">to: {manualTx.to}</div>
             <div className="mt-1">conditionId: {manualTx.conditionId}</div>
             <div className="mt-1">indexSets: {manualTx.indexSets.join(", ")}</div>
@@ -155,14 +168,14 @@ export function RecoveryClient() {
         <div className="border-b border-white/6 pb-4">
           <div className="text-sm text-white">Validation EOA</div>
           <div className="mt-1 text-xs text-mist/70">
-            Preparation de la migration future POLY_PROXY -&gt; EOA pour le redeem direct et l’auto-redeem.
+            Verification du mode EOA pour le redeem direct, le merge direct et l’auto-conversion Polymarket.
           </div>
         </div>
 
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          {recovery.data.eoaValidation.canDirectRedeem
-            ? "Configuration EOA complete pour un redeem direct."
-            : "Configuration EOA incomplete. Le mode actuel POLY_PROXY reste recommande tant que le data plane n'est pas stabilise."}
+          {recovery.data.eoaValidation.canDirectConversion
+            ? "Configuration EOA complete pour une conversion directe."
+            : "Configuration EOA incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
         </div>
 
         <div className="mt-4 grid gap-3">
@@ -204,8 +217,8 @@ export function RecoveryClient() {
                   <div className="flex flex-wrap gap-2">
                     {market.redeemable ? <Badge tone="cyan">redeemable</Badge> : null}
                     {market.mergeable ? <Badge tone="amber">mergeable</Badge> : null}
-                    <Badge tone={market.directRedeemSupported ? "cyan" : "default"}>
-                      {market.directRedeemSupported ? "direct" : "manual"}
+                    <Badge tone={market.directConversionSupported ? "cyan" : "default"}>
+                      {market.directConversionSupported ? "direct" : "manual"}
                     </Badge>
                   </div>
                 </div>
@@ -232,14 +245,14 @@ export function RecoveryClient() {
                 ) : null}
 
                 <div className="mt-4 flex flex-wrap gap-3">
-                  {market.redeemable ? (
+                  {market.conversionAction ? (
                     <button
                       type="button"
-                      onClick={() => redeem(market.marketRef)}
+                      onClick={() => convert(market.marketRef)}
                       disabled={busy === market.marketRef}
                       className="rounded-full border border-cyan/20 bg-cyan/10 px-4 py-2 text-xs uppercase tracking-[0.16em] text-cyan transition disabled:opacity-50"
                     >
-                      {market.directRedeemSupported ? "redeem now" : "prepare redeem"}
+                      {formatConversionLabel(market)}
                     </button>
                   ) : null}
                   {market.url ? (
@@ -260,6 +273,14 @@ export function RecoveryClient() {
       </section>
     </div>
   );
+}
+
+function formatConversionLabel(market: RecoveryResponse["markets"][number]) {
+  if (market.conversionAction === "merge") {
+    return market.directConversionSupported ? "merge now" : "prepare merge";
+  }
+
+  return market.directConversionSupported ? "redeem now" : "prepare redeem";
 }
 
 function PanelMessage({

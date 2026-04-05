@@ -7,7 +7,8 @@ Ce runbook prepare la migration future `POLY_PROXY -> EOA`.
 Permettre:
 
 - redeem direct Polymarket depuis l’app
-- auto-redeem futur
+- merge direct des full sets YES/NO depuis l’app
+- auto-conversion future `redeem + merge`
 - réutilisation rapide du collateral après resolution
 
 ## Variables requises
@@ -16,6 +17,7 @@ Permettre:
 POLY_SIGNATURE_TYPE=EOA
 POLY_PRIVATE_KEY_PATH=/etc/warbitrer/polymarket-private-key.txt
 POLY_FUNDER_ADDRESS=0xTON_ADRESSE_PUBLIQUE_EOA
+POLY_AUTO_CONVERT=true
 POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/...
 ```
 
@@ -53,3 +55,4 @@ Changer `POLY_PROXY` en `EOA` dans l’env ne déplace pas les positions existan
 - si tes fonds/positions actuels sont sur le proxy Polymarket, ils y restent
 - la migration EOA doit être faite avec un wallet de trading/funding cohérent
 - la page `/recovery` affiche déjà les checks bloquants avant toute bascule
+- `POLY_AUTO_CONVERT=true` active la conversion automatique vers `USDC.e` quand une position est `redeemable` ou `mergeable`

@@ -29,6 +29,7 @@ const envSchema = z.object({
   POLY_FUNDER_ADDRESS: z.string().min(1).optional(),
   POLY_SIGNATURE_TYPE: z.enum(POLY_SIGNATURE_TYPES).optional(),
   POLY_BRIDGE_LOW_WATER_USDC: z.string().optional(),
+  POLY_AUTO_CONVERT: z.string().optional(),
   POLY_AUTO_REDEEM: z.string().optional(),
   POLYGON_RPC_URL: z.string().min(1).optional(),
 });

@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { buildRecoveryResponse, redeemPolymarketMarket } from "@/lib/recovery";
+import { buildRecoveryResponse, convertPolymarketMarket } from "@/lib/recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,15 +21,15 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as {
-      action?: "redeem";
+      action?: "redeem" | "convert";
       marketRef?: string;
     };
 
-    if (body.action !== "redeem" || !body.marketRef) {
-      return NextResponse.json({ error: "action=redeem and marketRef are required" }, { status: 400 });
+    if ((body.action !== "redeem" && body.action !== "convert") || !body.marketRef) {
+      return NextResponse.json({ error: "action=convert|redeem and marketRef are required" }, { status: 400 });
     }
 
-    return NextResponse.json(await redeemPolymarketMarket(body.marketRef));
+    return NextResponse.json(await convertPolymarketMarket(body.marketRef));
   } catch (error) {
     return createApiErrorResponse(error);
   }

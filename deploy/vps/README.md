@@ -201,6 +201,7 @@ En mode `POLY_PROXY` actuel:
 En mode `EOA` futur:
 
 - `POLY_SIGNATURE_TYPE=EOA`
+- `POLY_AUTO_CONVERT=true` pour activer la conversion automatique `redeem + merge`
 - `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
-- `POLYGON_RPC_URL` doit être renseigné pour le redeem direct
+- `POLYGON_RPC_URL` doit être renseigné pour le redeem/merge direct
 - la page `/recovery` vérifie déjà si la migration EOA est techniquement prête

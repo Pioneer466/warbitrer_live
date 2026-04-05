@@ -5,38 +5,45 @@ import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
 import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from "@/lib/storage";
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
 
-const AUTO_REDEEM_COOLDOWN_MS = 15 * 60 * 1000;
+const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
 
 export async function buildRecoveryResponse(): Promise<RecoveryResponse> {
-  const [positions, breakers] = await Promise.all([readPositions(), readCircuitBreakers()]);
   const env = readEnv();
-  const markets = buildRecoveryMarkets(positions, env);
+  const [positions, breakers] = await Promise.all([readPositions(), readCircuitBreakers()]);
+  const eoaValidation = buildEoaValidation(env);
+  const markets = buildRecoveryMarkets(positions, env, eoaValidation.canDirectConversion);
 
   return {
     fetchedAt: Date.now(),
     globalKillSwitchActive: breakers.some((breaker) => breaker.key === "global" && breaker.active),
     signatureType: env.POLY_SIGNATURE_TYPE ?? "unknown",
     funderAddress: env.POLY_FUNDER_ADDRESS ?? null,
-    eoaValidation: buildEoaValidation(env),
+    eoaValidation,
     markets,
     kalshiSettlementMode: "automatic",
   };
 }
 
-export async function redeemPolymarketMarket(marketRef: string) {
+export async function convertPolymarketMarket(marketRef: string) {
   const recovery = await buildRecoveryResponse();
   const market = recovery.markets.find((candidate) => candidate.marketRef === marketRef);
 
-  if (!market || !market.redeemable) {
-    throw new Error("No redeemable Polymarket position for this market");
+  if (!market || !market.conversionAction) {
+    throw new Error("No directly convertible Polymarket position for this market");
   }
 
-  return redeemPolymarketCondition(market.conditionId, market.marketRef);
+  return executePolymarketConversion(market);
 }
 
-export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
+export async function redeemPolymarketMarket(marketRef: string) {
+  return convertPolymarketMarket(marketRef);
+}
+
+export async function autoConvertPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
   const env = readEnv();
-  if (!isTruthyEnv(env.POLY_AUTO_REDEEM) || env.POLY_SIGNATURE_TYPE !== "EOA") {
+  const eoaValidation = buildEoaValidation(env);
+
+  if (!isTruthyEnv(env.POLY_AUTO_CONVERT ?? env.POLY_AUTO_REDEEM) || !eoaValidation.canDirectConversion) {
     return [];
   }
 
@@ -46,16 +53,20 @@ export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapsh
   }
 
   const recentEvents = await readRunEvents(200);
-  const markets = buildRecoveryMarkets(positions, env).filter((market) => market.redeemable && market.directRedeemSupported);
+  const markets = buildRecoveryMarkets(positions, env, eoaValidation.canDirectConversion).filter(
+    (market) => market.conversionAction !== null && market.directConversionSupported,
+  );
   const submitted: string[] = [];
 
   for (const market of markets) {
     const recentlySubmitted = recentEvents.some(
       (event) =>
-        event.eventType === "polymarket.redeem.submitted" &&
+        (event.eventType === "polymarket.convert.submitted" ||
+          event.eventType === "polymarket.redeem.submitted" ||
+          event.eventType === "polymarket.merge.submitted") &&
         typeof event.payload?.marketRef === "string" &&
         event.payload.marketRef === market.marketRef &&
-        now - event.createdAt < AUTO_REDEEM_COOLDOWN_MS,
+        now - event.createdAt < AUTO_CONVERT_COOLDOWN_MS,
     );
 
     if (recentlySubmitted) {
@@ -63,18 +74,19 @@ export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapsh
     }
 
     try {
-      const result = await redeemPolymarketCondition(market.conditionId, market.marketRef);
+      const result = await executePolymarketConversion(market);
       if (result.mode === "direct") {
         submitted.push(result.txHash);
       }
     } catch (error) {
       await writeRunEvent({
         level: "warn",
-        eventType: "polymarket.redeem.failed",
-        message: error instanceof Error ? error.message : "Polymarket redeem failed",
+        eventType: "polymarket.convert.failed",
+        message: error instanceof Error ? error.message : "Polymarket convert failed",
         payload: {
           marketRef: market.marketRef,
           conditionId: market.conditionId,
+          action: market.conversionAction,
         },
         createdAt: now,
       });
@@ -82,6 +94,10 @@ export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapsh
   }
 
   return submitted;
+}
+
+export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
+  return autoConvertPolymarketIfConfigured(positions, now);
 }
 
 export function buildRedeemTxData(conditionId: string) {
@@ -97,9 +113,24 @@ export function buildRedeemTxData(conditionId: string) {
   ]);
 }
 
+export function buildMergeTxData(conditionId: string, amount: string) {
+  const ctfInterface = new utils.Interface([
+    "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)",
+  ]);
+
+  return ctfInterface.encodeFunctionData("mergePositions", [
+    POLY_USDCE_ADDRESS,
+    ethersConstants.HashZero,
+    conditionId,
+    [1, 2],
+    amount,
+  ]);
+}
+
 function buildRecoveryMarkets(
   positions: PositionSnapshot[],
   env = readEnv(),
+  directConversionSupported = buildEoaValidation(env).canDirectConversion,
 ): RecoveryMarket[] {
   const polymarketPositions = positions.filter((position) => position.venue === "polymarket");
   const marketsByRef = new Map<string, RecoveryMarket>();
@@ -120,7 +151,9 @@ function buildRecoveryMarkets(
         outcomes: [],
         redeemable: false,
         mergeable: false,
-        directRedeemSupported: env.POLY_SIGNATURE_TYPE === "EOA",
+        conversionAction: null,
+        mergeableSize: null,
+        directConversionSupported,
         notes: [],
       });
     }
@@ -138,11 +171,17 @@ function buildRecoveryMarkets(
   }
 
   for (const market of marketsByRef.values()) {
+    market.conversionAction = deriveRecoveryAction(market);
+    market.mergeableSize = market.mergeable ? deriveMergeableSize(market) : null;
+
     if (market.redeemable) {
       market.notes.push("Gains Polymarket reclaimables vers USDC.e.");
     }
     if (market.mergeable) {
       market.notes.push("Paire complete mergeable vers USDC.e.");
+      if (market.mergeableSize !== null) {
+        market.notes.push(`Full sets mergeables: ${market.mergeableSize.toFixed(6)}`);
+      }
     }
     if (env.POLY_SIGNATURE_TYPE !== "EOA" && (market.redeemable || market.mergeable)) {
       market.notes.push("Proxy/Gnosis: preparation manuelle depuis cette page, execution directe non activee.");
@@ -205,7 +244,7 @@ function buildEoaValidation(env = readEnv()): RecoveryResponse["eoaValidation"] 
     details:
       env.POLY_SIGNATURE_TYPE === "EOA"
         ? "POLY_SIGNATURE_TYPE=EOA"
-        : `Actuel: ${env.POLY_SIGNATURE_TYPE ?? "unset"} · garder POLY_PROXY tant que la migration n'est pas faite`,
+        : `Actuel: ${env.POLY_SIGNATURE_TYPE ?? "unset"} · definir POLY_SIGNATURE_TYPE=EOA pour la conversion directe`,
     checkedAt: Date.now(),
   });
 
@@ -215,7 +254,7 @@ function buildEoaValidation(env = readEnv()): RecoveryResponse["eoaValidation"] 
     status: env.POLYGON_RPC_URL ? "ready" : "degraded",
     details: env.POLYGON_RPC_URL
       ? `RPC configure: ${env.POLYGON_RPC_URL}`
-      : "POLYGON_RPC_URL manquant pour le redeem direct",
+      : "POLYGON_RPC_URL manquant pour la conversion directe",
     checkedAt: Date.now(),
   });
 
@@ -231,11 +270,23 @@ function buildEoaValidation(env = readEnv()): RecoveryResponse["eoaValidation"] 
     checkedAt: Date.now(),
   });
 
-  const canDirectRedeem = checks.every((check) => check.status === "ready");
+  const canDirectConversion = checks.every((check) => check.status === "ready");
   return {
-    canDirectRedeem,
+    canDirectConversion,
     checks,
   };
+}
+
+async function executePolymarketConversion(market: RecoveryMarket) {
+  if (market.conversionAction === "redeem") {
+    return redeemPolymarketCondition(market.conditionId, market.marketRef);
+  }
+
+  if (market.conversionAction === "merge") {
+    return mergePolymarketCondition(market);
+  }
+
+  throw new Error("No convertible action available for this market");
 }
 
 async function redeemPolymarketCondition(conditionId: string, marketRef: string) {
@@ -253,6 +304,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
         value: "0",
         conditionId,
         indexSets: [1, 2],
+        operation: "redeem" as const,
       },
     };
   }
@@ -289,11 +341,145 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
     createdAt: Date.now(),
   });
 
+  await writeRunEvent({
+    level: "info",
+    eventType: "polymarket.convert.submitted",
+    message: `Redeem submitted for ${marketRef}`,
+    payload: {
+      marketRef,
+      conditionId,
+      txHash: tx.hash,
+      action: "redeem",
+    },
+    createdAt: Date.now(),
+  });
+
+  return {
+      ok: true as const,
+      mode: "direct" as const,
+      txHash: tx.hash,
+      marketRef,
+      conditionId,
+      action: "redeem" as const,
+    };
+}
+
+async function mergePolymarketCondition(market: RecoveryMarket) {
+  if (market.mergeableSize === null || market.mergeableSize <= 0) {
+    throw new Error("No mergeable full set size available for this market");
+  }
+
+  const env = readEnv();
+  const amount = toRawCollateralAmount(market.mergeableSize);
+  const txData = buildMergeTxData(market.conditionId, amount);
+
+  if (env.POLY_SIGNATURE_TYPE !== "EOA") {
+    return {
+      ok: false as const,
+      mode: "manual" as const,
+      reason: `Direct merge is not supported in-app for ${env.POLY_SIGNATURE_TYPE}. Use the Polymarket UI or a relayer-compatible wallet.`,
+      tx: {
+        to: POLY_CTF_ADDRESS,
+        data: txData,
+        value: "0",
+        conditionId: market.conditionId,
+        indexSets: [1, 2],
+        amount,
+        operation: "merge" as const,
+      },
+    };
+  }
+
+  const privateKey = readSecretValue({
+    inline: env.POLY_PRIVATE_KEY,
+    path: env.POLY_PRIVATE_KEY_PATH,
+    label: "POLY_PRIVATE_KEY",
+  });
+  const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-rpc.com");
+  const signer = new Wallet(privateKey, provider);
+
+  if (!env.POLY_FUNDER_ADDRESS || signer.address.toLowerCase() !== env.POLY_FUNDER_ADDRESS.toLowerCase()) {
+    throw new Error(
+      "Direct merge only supported when POLY_SIGNATURE_TYPE=EOA and POLY_FUNDER_ADDRESS matches the signer wallet address.",
+    );
+  }
+
+  const tx = await signer.sendTransaction({
+    to: POLY_CTF_ADDRESS,
+    data: txData,
+    value: 0,
+  });
+
+  await writeRunEvent({
+    level: "info",
+    eventType: "polymarket.merge.submitted",
+    message: `Merge submitted for ${market.marketRef}`,
+    payload: {
+      marketRef: market.marketRef,
+      conditionId: market.conditionId,
+      txHash: tx.hash,
+      amount,
+    },
+    createdAt: Date.now(),
+  });
+
+  await writeRunEvent({
+    level: "info",
+    eventType: "polymarket.convert.submitted",
+    message: `Merge submitted for ${market.marketRef}`,
+    payload: {
+      marketRef: market.marketRef,
+      conditionId: market.conditionId,
+      txHash: tx.hash,
+      action: "merge",
+      amount,
+    },
+    createdAt: Date.now(),
+  });
+
   return {
     ok: true as const,
     mode: "direct" as const,
     txHash: tx.hash,
-    marketRef,
-    conditionId,
+    marketRef: market.marketRef,
+    conditionId: market.conditionId,
+    amount,
+    action: "merge" as const,
   };
+}
+
+function deriveRecoveryAction(market: RecoveryMarket): RecoveryMarket["conversionAction"] {
+  if (market.redeemable) {
+    return "redeem";
+  }
+
+  if (market.mergeable) {
+    return "merge";
+  }
+
+  return null;
+}
+
+function deriveMergeableSize(market: RecoveryMarket) {
+  const mergeableOutcomes = market.outcomes.filter((outcome) => outcome.size > 0);
+  if (mergeableOutcomes.length < 2) {
+    return null;
+  }
+
+  const size = Math.min(...mergeableOutcomes.map((outcome) => outcome.size));
+  return floorToTokenPrecision(size);
+}
+
+function floorToTokenPrecision(value: number) {
+  return Math.floor(value * 1_000_000) / 1_000_000;
+}
+
+function toRawCollateralAmount(value: number) {
+  const normalized = floorToTokenPrecision(value).toFixed(6);
+  const raw = utils.parseUnits(normalized, 6);
+  if (raw.lte(0)) {
+    throw new Error("Merge amount is too small after 6-decimal normalization");
+  }
+
+  return raw.toString();
 }
