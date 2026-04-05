@@ -56,6 +56,10 @@ type PolymarketBookState = {
   asks: LevelMap;
   tickSize: number | null;
   minOrderSize: number | null;
+  bestBidPrice: number | null;
+  bestBidSize: number | null;
+  bestAskPrice: number | null;
+  bestAskSize: number | null;
   lastTradePrice: number | null;
   lastUpdatedAt: number | null;
 };
@@ -271,11 +275,23 @@ class PolymarketRealtimeFeed {
 
     const upOutcome =
       upBook
-        ? buildPolymarketOutcomeQuoteFromBook("UP", serializePolymarketBook(upBook), feedHealth.source, upBook.lastUpdatedAt)
+        ? buildPolymarketOutcomeQuoteFromBook(
+            "UP",
+            serializePolymarketBook(upBook),
+            feedHealth.source,
+            upBook.lastUpdatedAt,
+            upBook.lastTradePrice,
+          )
         : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.up;
     const downOutcome =
       downBook
-        ? buildPolymarketOutcomeQuoteFromBook("DOWN", serializePolymarketBook(downBook), feedHealth.source, downBook.lastUpdatedAt)
+        ? buildPolymarketOutcomeQuoteFromBook(
+            "DOWN",
+            serializePolymarketBook(downBook),
+            feedHealth.source,
+            downBook.lastUpdatedAt,
+            downBook.lastTradePrice,
+          )
         : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.down;
 
     const quote: PolymarketQuote = {
@@ -412,6 +428,7 @@ class PolymarketRealtimeFeed {
         JSON.stringify({
           type: "market",
           assets_ids: [this.tokenIds.up, this.tokenIds.down],
+          custom_feature_enabled: true,
         }),
       );
     });
@@ -533,50 +550,92 @@ class PolymarketRealtimeFeed {
   }
 
   private applyMarketEvent(event: any, now: number) {
-    const tokenId = String(event.asset_id ?? event.assetId ?? "");
-    const bookState = this.books.get(tokenId);
-    if (!bookState) {
-      return;
-    }
-
     const eventType = String(event.event_type ?? event.type ?? "");
 
     if (eventType === "book") {
+      const tokenId = String(event.asset_id ?? event.assetId ?? "");
+      const bookState = this.books.get(tokenId);
+      if (!bookState) {
+        return;
+      }
+
       replaceLevelMap(bookState.bids, normalizePolymarketLevels(event.bids));
       replaceLevelMap(bookState.asks, normalizePolymarketLevels(event.asks));
       bookState.tickSize = parseNumeric(event.tick_size) ?? bookState.tickSize;
       bookState.minOrderSize = parseNumeric(event.min_order_size) ?? bookState.minOrderSize;
+      syncPolymarketTopOfBook(bookState);
       bookState.lastUpdatedAt = parseTimestamp(event.timestamp) ?? now;
       return;
     }
 
     if (eventType === "price_change") {
-      const side = String(event.side ?? "").toLowerCase();
-      const price = event.price ?? event.level ?? event.changed_price;
-      const size = event.size ?? event.remaining_size ?? event.new_size ?? event.quantity ?? 0;
-      if (side === "buy" || side === "bid") {
-        applyLevelDelta(bookState.bids, price, size);
-      } else if (side === "sell" || side === "ask") {
-        applyLevelDelta(bookState.asks, price, size);
+      const changes = Array.isArray(event.price_changes) ? event.price_changes : [event];
+
+      for (const change of changes) {
+        const tokenId = String(change.asset_id ?? change.assetId ?? event.asset_id ?? event.assetId ?? "");
+        const bookState = this.books.get(tokenId);
+        if (!bookState) {
+          continue;
+        }
+
+        const side = String(change.side ?? event.side ?? "").toLowerCase();
+        const price = change.price ?? change.level ?? change.changed_price ?? event.price ?? event.level ?? event.changed_price;
+        const size = change.size ?? change.remaining_size ?? change.new_size ?? change.quantity ?? event.size ?? 0;
+        if (side === "buy" || side === "bid") {
+          applyLevelDelta(bookState.bids, price, size);
+        } else if (side === "sell" || side === "ask") {
+          applyLevelDelta(bookState.asks, price, size);
+        }
+
+        const bestBid = parseNumeric(change.best_bid ?? event.best_bid ?? event.bid);
+        const bestAsk = parseNumeric(change.best_ask ?? event.best_ask ?? event.ask);
+        if (bestBid !== null) {
+          bookState.bestBidPrice = bestBid;
+          bookState.bestBidSize = parseNumeric(change.bid_size ?? event.bid_size ?? size) ?? bookState.bestBidSize;
+        }
+        if (bestAsk !== null) {
+          bookState.bestAskPrice = bestAsk;
+          bookState.bestAskSize = parseNumeric(change.ask_size ?? event.ask_size ?? size) ?? bookState.bestAskSize;
+        }
+        if (bestBid === null || bestAsk === null) {
+          syncPolymarketTopOfBook(bookState);
+        }
+        bookState.lastUpdatedAt = parseTimestamp(change.timestamp ?? event.timestamp) ?? now;
       }
-      bookState.lastUpdatedAt = parseTimestamp(event.timestamp) ?? now;
+
       return;
     }
 
     if (eventType === "best_bid_ask") {
+      const tokenId = String(event.asset_id ?? event.assetId ?? "");
+      const bookState = this.books.get(tokenId);
+      if (!bookState) {
+        return;
+      }
+
       const bid = parseNumeric(event.best_bid ?? event.bid);
       const ask = parseNumeric(event.best_ask ?? event.ask);
       if (bid !== null) {
-        applyLevelDelta(bookState.bids, bid.toFixed(3), highestKnownSize(bookState.bids));
+        bookState.bestBidPrice = bid;
+        bookState.bestBidSize =
+          parseNumeric(event.bid_size ?? event.size) ?? bookState.bestBidSize ?? highestKnownSize(bookState.bids);
       }
       if (ask !== null) {
-        applyLevelDelta(bookState.asks, ask.toFixed(3), highestKnownSize(bookState.asks));
+        bookState.bestAskPrice = ask;
+        bookState.bestAskSize =
+          parseNumeric(event.ask_size ?? event.size) ?? bookState.bestAskSize ?? highestKnownSize(bookState.asks);
       }
       bookState.lastUpdatedAt = parseTimestamp(event.timestamp) ?? now;
       return;
     }
 
     if (eventType === "last_trade_price") {
+      const tokenId = String(event.asset_id ?? event.assetId ?? "");
+      const bookState = this.books.get(tokenId);
+      if (!bookState) {
+        return;
+      }
+
       bookState.lastTradePrice = parseNumeric(event.price);
       bookState.lastUpdatedAt = parseTimestamp(event.timestamp) ?? now;
     }
@@ -1078,12 +1137,17 @@ function createPolymarketBookState(
     asks: new Map(),
     tickSize: parseNumeric(book.tick_size),
     minOrderSize: parseNumeric(book.min_order_size),
+    bestBidPrice: null,
+    bestBidSize: null,
+    bestAskPrice: null,
+    bestAskSize: null,
     lastTradePrice: null,
     lastUpdatedAt: now,
   };
 
   replaceLevelMap(state.bids, normalizePolymarketLevels(book.bids));
   replaceLevelMap(state.asks, normalizePolymarketLevels(book.asks));
+  syncPolymarketTopOfBook(state);
   return state;
 }
 
@@ -1094,12 +1158,43 @@ function normalizePolymarketLevels(levels: Array<{ price: string; size: string }
 }
 
 function serializePolymarketBook(state: PolymarketBookState) {
+  const bids = serializeLevelMap(state.bids, "desc")
+    .filter(([price]) => state.bestBidPrice === null || Number(price) <= state.bestBidPrice + 1e-9)
+    .filter(([price]) => state.bestBidPrice === null || Math.abs(Number(price) - state.bestBidPrice) > 1e-9);
+  const asks = serializeLevelMap(state.asks, "asc")
+    .filter(([price]) => state.bestAskPrice === null || Number(price) >= state.bestAskPrice - 1e-9)
+    .filter(([price]) => state.bestAskPrice === null || Math.abs(Number(price) - state.bestAskPrice) > 1e-9);
+
+  if (state.bestBidPrice !== null) {
+    bids.unshift([
+      String(round4(state.bestBidPrice)),
+      String(state.bestBidSize ?? highestKnownSize(state.bids)),
+    ]);
+  }
+
+  if (state.bestAskPrice !== null) {
+    asks.unshift([
+      String(round4(state.bestAskPrice)),
+      String(state.bestAskSize ?? highestKnownSize(state.asks)),
+    ]);
+  }
+
   return {
-    bids: serializeLevelMap(state.bids, "desc").map(([price, size]) => ({ price, size })),
-    asks: serializeLevelMap(state.asks, "asc").map(([price, size]) => ({ price, size })),
+    bids: bids.map(([price, size]) => ({ price, size })),
+    asks: asks.map(([price, size]) => ({ price, size })),
     tick_size: state.tickSize === null ? undefined : String(state.tickSize),
     min_order_size: state.minOrderSize === null ? undefined : String(state.minOrderSize),
   };
+}
+
+function syncPolymarketTopOfBook(state: PolymarketBookState) {
+  const bestBid = serializeLevelMap(state.bids, "desc")[0];
+  const bestAsk = serializeLevelMap(state.asks, "asc")[0];
+
+  state.bestBidPrice = bestBid ? Number(bestBid[0]) : null;
+  state.bestBidSize = bestBid ? Number(bestBid[1]) : null;
+  state.bestAskPrice = bestAsk ? Number(bestAsk[0]) : null;
+  state.bestAskSize = bestAsk ? Number(bestAsk[1]) : null;
 }
 
 function highestKnownSize(levels: LevelMap) {

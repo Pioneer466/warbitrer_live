@@ -1,13 +1,30 @@
 import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
+  fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
+import { vi } from "vitest";
 
 describe("Kalshi quote derivation", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      DATABASE_URL: "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live",
+      KALSHI_ENV: "prod",
+    };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
   it("builds yes/no asks from the reciprocal bid-only orderbook", () => {
     const quotes = deriveKalshiOutcomeQuotes({
       yes_dollars: [
@@ -129,5 +146,68 @@ describe("Kalshi quote derivation", () => {
         taker_fees_dollars: "0.27",
       }),
     ).toBe(0.27);
+  });
+
+  it("paginates Kalshi markets so the current slot is not lost after the first page", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          markets: [
+            {
+              ticker: "KXBTC15M-PAGE-1",
+              event_ticker: "KXBTC15M-PAGE-1",
+              title: "Older slot",
+              open_time: "2026-03-30T19:45:00.000Z",
+              close_time: "2026-03-30T20:00:00.000Z",
+              status: "finalized",
+              yes_bid_dollars: "0.40",
+              yes_ask_dollars: "0.41",
+              no_bid_dollars: "0.58",
+              no_ask_dollars: "0.59",
+              yes_bid_size_fp: "10",
+              yes_ask_size_fp: "10",
+              no_bid_size_fp: "10",
+              no_ask_size_fp: "10",
+            },
+          ],
+          cursor: "next-page",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          markets: [
+            {
+              ticker: "KXBTC15M-PAGE-2",
+              event_ticker: "KXBTC15M-PAGE-2",
+              title: "Current slot",
+              open_time: "2026-03-30T20:00:00.000Z",
+              close_time: "2026-03-30T20:15:00.000Z",
+              status: "active",
+              yes_bid_dollars: "0.40",
+              yes_ask_dollars: "0.41",
+              no_bid_dollars: "0.58",
+              no_ask_dollars: "0.59",
+              yes_bid_size_fp: "10",
+              yes_ask_size_fp: "10",
+              no_bid_size_fp: "10",
+              no_ask_size_fp: "10",
+            },
+          ],
+          cursor: null,
+        }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    const response = await fetchKalshiMarkets();
+
+    expect(response.markets.map((market) => market.ticker)).toEqual([
+      "KXBTC15M-PAGE-1",
+      "KXBTC15M-PAGE-2",
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=next-page");
   });
 });

@@ -45,6 +45,7 @@ export type KalshiMarketSummary = {
 
 type KalshiMarketList = {
   markets: KalshiMarketSummary[];
+  cursor?: string | null;
 };
 
 type KalshiSeriesResponse = {
@@ -126,10 +127,21 @@ type KalshiOrderResponse = {
   };
 };
 
-const SLOT_TOLERANCE_MS = 1_000;
+const SLOT_TOLERANCE_MS = 60_000;
+const KALSHI_MARKETS_PAGE_LIMIT = 1_000;
+const KALSHI_MARKETS_MAX_PAGES = 10;
 
 export function getKalshiBaseUrl() {
   const env = readEnv();
+  return env.KALSHI_ENV === "demo" ? KALSHI_DEMO_BASE : KALSHI_PROD_BASE;
+}
+
+export function getKalshiMarketDataBaseUrl() {
+  const env = readEnv();
+  if (!hasKalshiCredentials(env)) {
+    return KALSHI_PROD_BASE;
+  }
+
   return env.KALSHI_ENV === "demo" ? KALSHI_DEMO_BASE : KALSHI_PROD_BASE;
 }
 
@@ -140,8 +152,8 @@ export function getKalshiWsUrl() {
 
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   const [list, series] = await Promise.all([
-    fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M`),
-    fetchJson<KalshiSeriesResponse>(`${getKalshiBaseUrl()}/series/KXBTC15M`),
+    fetchKalshiMarkets(),
+    fetchKalshiSeries(),
   ]);
 
   const market = resolveKalshiMarketForSlot(list.markets, slot);
@@ -154,7 +166,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   }
 
   const freshMarketResponse = await fetchJson<KalshiMarketResponse>(
-    `${getKalshiBaseUrl()}/markets/${market.ticker}`,
+    `${getKalshiMarketDataBaseUrl()}/markets/${market.ticker}`,
   ).catch(() => null);
   const freshMarket = freshMarketResponse?.market ?? market;
   const derived = deriveKalshiOutcomeQuotesFromMarket(freshMarket);
@@ -219,7 +231,7 @@ export function resolveKalshiMarketForSlot(
 }
 
 export async function fetchKalshiResolution(ticker: string) {
-  const response = await fetchJson<KalshiMarketResponse>(`${getKalshiBaseUrl()}/markets/${ticker}`);
+  const response = await fetchJson<KalshiMarketResponse>(`${getKalshiMarketDataBaseUrl()}/markets/${ticker}`);
   if (response.market.status !== "finalized" || !response.market.result) {
     return null;
   }
@@ -228,15 +240,44 @@ export async function fetchKalshiResolution(ticker: string) {
 }
 
 export async function fetchKalshiSeries() {
-  return fetchJson<KalshiSeriesResponse>(`${getKalshiBaseUrl()}/series/KXBTC15M`);
+  return fetchJson<KalshiSeriesResponse>(`${getKalshiMarketDataBaseUrl()}/series/KXBTC15M`);
 }
 
 export async function fetchKalshiMarkets() {
-  return fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M`);
+  const markets: KalshiMarketSummary[] = [];
+  const seenTickers = new Set<string>();
+  let cursor: string | null | undefined = null;
+
+  for (let page = 0; page < KALSHI_MARKETS_MAX_PAGES; page += 1) {
+    const params = new URLSearchParams({
+      series_ticker: "KXBTC15M",
+      limit: String(KALSHI_MARKETS_PAGE_LIMIT),
+    });
+
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+
+    const response = await fetchJson<KalshiMarketList>(`${getKalshiMarketDataBaseUrl()}/markets?${params.toString()}`);
+    for (const market of response.markets ?? []) {
+      if (seenTickers.has(market.ticker)) {
+        continue;
+      }
+      seenTickers.add(market.ticker);
+      markets.push(market);
+    }
+
+    cursor = response.cursor;
+    if (!cursor || response.markets.length === 0) {
+      break;
+    }
+  }
+
+  return { markets };
 }
 
 export async function fetchKalshiMarket(ticker: string) {
-  return fetchJson<KalshiMarketResponse>(`${getKalshiBaseUrl()}/markets/${ticker}`);
+  return fetchJson<KalshiMarketResponse>(`${getKalshiMarketDataBaseUrl()}/markets/${ticker}`);
 }
 
 export async function fetchKalshiTrades(ticker: string) {
@@ -768,7 +809,7 @@ async function kalshiMarketDataFetch<T>(path: string) {
     }
   } catch {}
 
-  return fetchJson<T>(`${getKalshiBaseUrl()}${path}`);
+  return fetchJson<T>(`${getKalshiMarketDataBaseUrl()}${path}`);
 }
 
 function createVenueFeedHealth(feed: KalshiQuote["feedHealth"]): KalshiQuote["feedHealth"] {
