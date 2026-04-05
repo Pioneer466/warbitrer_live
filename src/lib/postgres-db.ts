@@ -964,6 +964,10 @@ export async function listCircuitBreakers(pool: Pool): Promise<CircuitBreaker[]>
 
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
   const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.key);
+  const allBreakers = await listCircuitBreakers(pool);
+  const relevantBreakers = allBreakers.filter(
+    (breaker) => breaker.key === "global" || breaker.key === `slot:${slot.key}`,
+  );
   return {
     fetchedAt: Date.now(),
     slot,
@@ -979,7 +983,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     positions: await listPositions(pool),
     pnl: await getLatestPnlSnapshot(pool),
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
-    circuitBreakers: await listCircuitBreakers(pool),
+    circuitBreakers: relevantBreakers,
     runEvents: await listRecentRunEvents(pool, 10),
   };
 }

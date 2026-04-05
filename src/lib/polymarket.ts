@@ -269,22 +269,24 @@ export function createPolymarketAdapter(): VenueAdapter {
         `${POLY_DATA_BASE}/positions?user=${encodeURIComponent(env.POLY_FUNDER_ADDRESS!)}&sizeThreshold=0`,
       );
 
-      return positions.map((position) => ({
-        id: `polymarket:${position.asset}`,
-        venue: "polymarket",
-        marketRef: position.conditionId,
-        outcome: normalizePolymarketOutcome(position.outcome),
-        size: Number(position.size),
-        averagePrice: Number(position.avgPrice),
-        currentPrice: Number(position.curPrice),
-        currentValueUsd: Number(position.currentValue),
-        realizedPnlUsd: Number(position.realizedPnl),
-        unrealizedPnlUsd: Number(position.cashPnl) - Number(position.realizedPnl),
-        redeemable: position.redeemable,
-        mergeable: position.mergeable,
-        updatedAt: now,
-        raw: position as unknown as Record<string, unknown>,
-      }));
+      return positions
+        .filter(isStrategyScopedPolymarketPosition)
+        .map((position) => ({
+          id: `polymarket:${position.asset}`,
+          venue: "polymarket",
+          marketRef: position.conditionId,
+          outcome: normalizePolymarketOutcome(position.outcome),
+          size: Number(position.size),
+          averagePrice: Number(position.avgPrice),
+          currentPrice: Number(position.curPrice),
+          currentValueUsd: Number(position.currentValue),
+          realizedPnlUsd: Number(position.realizedPnl),
+          unrealizedPnlUsd: Number(position.cashPnl) - Number(position.realizedPnl),
+          redeemable: position.redeemable,
+          mergeable: position.mergeable,
+          updatedAt: now,
+          raw: position as unknown as Record<string, unknown>,
+        }));
     },
     async placeOrder(order) {
       const client = createClobClient();
@@ -769,6 +771,18 @@ async function safeGetPolymarketOrder(orderId: string) {
   } catch {
     return null;
   }
+}
+
+function isStrategyScopedPolymarketPosition(position: DataPosition) {
+  const title = position.title.toLowerCase();
+  const mentionsBitcoin = title.includes("bitcoin") || title.includes("btc");
+  const mentions15m =
+    title.includes("15m") ||
+    title.includes("15 minute") ||
+    title.includes("15-minute") ||
+    title.includes("fifteen minute");
+
+  return mentionsBitcoin && mentions15m;
 }
 
 function sleep(ms: number) {

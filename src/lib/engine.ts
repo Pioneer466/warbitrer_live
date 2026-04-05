@@ -323,7 +323,10 @@ async function computeReadiness(
   now: number,
 ): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
   const balances = await readVenueBalances();
-  const breakers = await readCircuitBreakers();
+  const slotKey = snapshot?.slotKey ?? null;
+  const breakers = (await readCircuitBreakers()).filter(
+    (breaker) => breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`),
+  );
   const checks = balances.map((balance) => ({
     key: `${balance.venue}:balance`,
     label: `${balance.venue} readiness`,
@@ -371,6 +374,18 @@ async function computeReadiness(
 
 async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
   const key = `slot:${slot.key}` as const;
+  const breakers = await readCircuitBreakers();
+  for (const breaker of breakers) {
+    if (breaker.active && breaker.key.startsWith("slot:") && breaker.key !== key) {
+      await writeCircuitBreaker({
+        key: breaker.key,
+        active: false,
+        reason: null,
+        triggeredAt: null,
+        payload: null,
+      });
+    }
+  }
   const blockedFeeds = feedHealth.filter((feed) => feed.feedStatus === "blocked");
 
   if (blockedFeeds.length === 0) {
