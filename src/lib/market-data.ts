@@ -1043,7 +1043,7 @@ export class MarketDataSupervisor {
   private kalshi = new KalshiRealtimeFeed();
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
-    await Promise.all([
+    await Promise.allSettled([
       this.polymarket.ensureSlot(slot, now),
       this.kalshi.ensureSlot(slot, now),
     ]);
