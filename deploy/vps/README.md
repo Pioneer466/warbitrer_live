@@ -50,6 +50,45 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 12. Ouvrir `80/tcp` et `443/tcp`, puis:
    - `sudo systemctl reload caddy`
 
+## Exposition directe par IP publique
+
+Si tu n'as pas encore de domaine, tu peux exposer le cockpit directement via l'IP publique du VPS.
+
+Mode recommandé pour ce cas:
+
+- web Warbitrer toujours sur `127.0.0.1:3000`
+- worker séparé via `systemd`
+- Caddy en reverse proxy sur `80/tcp`
+- pas d'exposition directe du port `3000`
+
+Fichier dédié:
+
+- `deploy/vps/Caddyfile.public-ip`
+
+Procédure:
+
+1. copier le template:
+   `sudo cp deploy/vps/Caddyfile.public-ip /etc/caddy/Caddyfile`
+2. remplacer `YOUR_SERVER_IP` par l'IP publique réelle du VPS
+3. générer un hash de mot de passe:
+   `caddy hash-password --plaintext 'CHANGE_ME'`
+4. remplacer le hash placeholder dans `/etc/caddy/Caddyfile`
+5. vérifier que le web Warbitrer écoute seulement en local:
+   `sudo ss -ltnp | grep 3000`
+6. ouvrir seulement `80/tcp` au firewall
+7. garder `3000/tcp` fermé publiquement
+8. recharger Caddy:
+   `sudo systemctl reload caddy`
+9. ouvrir:
+   `http://IP_DU_VPS`
+
+Notes importantes:
+
+- ce mode est en HTTP, pas en HTTPS
+- l'auth Basic sur HTTP protège l'accès casual mais ne protège pas la confidentialité du mot de passe sur le réseau
+- si tu veux un accès distant plus sûr sans domaine, préfère `Tailscale` ou un tunnel SSH
+- si tu acceptes l'exposition HTTP temporaire, utilise un mot de passe long et unique
+
 ## Important sécurité
 
 L’interface n’a pas encore d’auth applicative native.
@@ -61,6 +100,8 @@ Ne l’expose pas publiquement sans au minimum:
 - ou une règle IP très restrictive
 
 Le template `Caddyfile` fourni contient déjà un bloc `basicauth` à remplacer.
+
+Pour un accès par IP publique sans domaine, utiliser `deploy/vps/Caddyfile.public-ip` au lieu du template domaine.
 
 ## Temps réel
 

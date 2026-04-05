@@ -1,0 +1,24 @@
+http://YOUR_SERVER_IP {
+	# Replace with a real bcrypt hash from:
+	# caddy hash-password --plaintext 'CHANGE_ME'
+	basicauth {
+		ops-team JDJhJDE0JERFTU9IQVNIX1JFUExBQ0VfTUUuLi4=
+	}
+
+	reverse_proxy 127.0.0.1:3000 {
+		health_uri /api/health
+	}
+
+	encode zstd gzip
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Robots-Tag "noindex, nofollow, noarchive"
+	}
+
+	log {
+		output file /var/log/caddy/warbitrer-access.log
+	}
+}

@@ -122,6 +122,39 @@ Pour un VPS public, le mode recommandé est:
 
 Le template est dans [`deploy/vps/Caddyfile`](./deploy/vps/Caddyfile).
 
+## Preview gratuit en ligne
+
+Si tu veux surtout ouvrir le cockpit depuis n'importe où pour vérifier l'état, le repo inclut maintenant un blueprint [`render.yaml`](./render.yaml) pour Render.
+
+Ce mode lance:
+
+- le web public Next.js
+- le worker live dans le même service
+- un Postgres managé séparé
+
+Points importants:
+
+- c'est adapté à une preview distante, pas à une exploitation live fiable
+- un service web `free` Render se met en veille sans trafic entrant, donc le worker s'arrête aussi
+- le Postgres `free` Render est limité par le plan du provider; l'app n'implémente aucune purge automatique d'historique
+- garde `APP_BASIC_AUTH_USER` et `APP_BASIC_AUTH_PASSWORD` renseignés avant exposition publique
+
+Déploiement:
+
+1. pousser le repo
+2. créer un nouveau Blueprint Render depuis ce repo
+3. laisser Render créer le service web `warbitrer-live-preview` et la base `warbitrer-live-db`
+4. remplir les variables sensibles dans l'UI Render
+5. ouvrir l'URL Render générée
+
+Pour ce mode, le démarrage passe par `npm run start:render`.
+
+Pourquoi pas Vercel seul:
+
+- le site dépend d'un worker Node long-running qui tourne en continu
+- Vercel convient au web Next.js, mais pas comme hébergement unique de ce worker live
+- si tu veux du vrai live accessible partout, il faut soit un petit VPS, soit un provider qui héberge web + worker + Postgres ensemble
+
 ## Notes d’exploitation
 
 - le trading live reste désactivé tant que `enableTrading` est `false` dans la config
