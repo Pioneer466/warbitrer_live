@@ -271,6 +271,7 @@ export function createPolymarketAdapter(): VenueAdapter {
 
       return positions
         .filter(isStrategyScopedPolymarketPosition)
+        .filter(isLiveRelevantPolymarketPosition)
         .map((position) => ({
           id: `polymarket:${position.asset}`,
           venue: "polymarket",
@@ -783,6 +784,12 @@ function isStrategyScopedPolymarketPosition(position: DataPosition) {
     title.includes("fifteen minute");
 
   return mentionsBitcoin && mentions15m;
+}
+
+function isLiveRelevantPolymarketPosition(position: DataPosition) {
+  const size = Number(position.size);
+  const currentValueUsd = Number(position.currentValue);
+  return size > 0 || currentValueUsd > 0 || position.redeemable || position.mergeable;
 }
 
 function sleep(ms: number) {

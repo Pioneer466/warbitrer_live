@@ -140,7 +140,7 @@ export function getKalshiWsUrl() {
 
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   const [list, series] = await Promise.all([
-    fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M&status=open`),
+    fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M`),
     fetchJson<KalshiSeriesResponse>(`${getKalshiBaseUrl()}/series/KXBTC15M`),
   ]);
 
@@ -232,7 +232,7 @@ export async function fetchKalshiSeries() {
 }
 
 export async function fetchKalshiMarkets() {
-  return fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M&status=open`);
+  return fetchJson<KalshiMarketList>(`${getKalshiBaseUrl()}/markets?series_ticker=KXBTC15M`);
 }
 
 export async function fetchKalshiMarket(ticker: string) {
