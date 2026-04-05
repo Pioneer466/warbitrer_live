@@ -16,8 +16,12 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 
 - `warbitrer-web.service`
 - `warbitrer-worker.service`
+- `warbitrer-postgres-backup.service`
+- `warbitrer-postgres-backup.timer`
 - `Caddyfile`
+- `Caddyfile.public-ip`
 - `warbitrer.env.example`
+- `backup-postgres.sh`
 - `deploy.sh`
 
 ## Installation
@@ -39,10 +43,13 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 7. Copier les services:
    - `sudo cp deploy/vps/warbitrer-web.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-worker.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-postgres-backup.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-postgres-backup.timer /etc/systemd/system/`
 8. Recharger et activer:
    - `sudo systemctl daemon-reload`
    - `sudo systemctl enable --now warbitrer-web`
    - `sudo systemctl enable --now warbitrer-worker`
+   - `sudo systemctl enable --now warbitrer-postgres-backup.timer`
 9. Configurer Caddy avec `deploy/vps/Caddyfile`
 10. Générer le mot de passe Caddy:
    - `caddy hash-password --plaintext 'CHANGE_ME'`
@@ -88,6 +95,50 @@ Notes importantes:
 - l'auth Basic sur HTTP protège l'accès casual mais ne protège pas la confidentialité du mot de passe sur le réseau
 - si tu veux un accès distant plus sûr sans domaine, préfère `Tailscale` ou un tunnel SSH
 - si tu acceptes l'exposition HTTP temporaire, utilise un mot de passe long et unique
+
+## Robustesse DB
+
+Le repo inclut maintenant deux garde-fous côté DB:
+
+- rétention automatique exécutée par le worker
+- backup Postgres quotidien via `systemd timer`
+
+Variables utiles dans `/etc/warbitrer/warbitrer.env`:
+
+- `DB_MAINTENANCE_INTERVAL_MINUTES`
+- `DB_RETENTION_SNAPSHOTS_HOURS`
+- `DB_RETENTION_PNL_DAYS`
+- `DB_RETENTION_RUN_EVENTS_DAYS`
+- `DB_RETENTION_FILLS_DAYS`
+- `DB_RETENTION_ORDERS_DAYS`
+- `DB_RETENTION_CLOSED_INTENTS_DAYS`
+- `DB_RETENTION_SETTLEMENTS_DAYS`
+- `DB_RETENTION_BRIDGE_TRANSFERS_DAYS`
+
+Valeur `0` sur une rétention = désactivation du nettoyage pour cette table.
+
+Backup:
+
+1. copier les unités:
+   - `sudo cp deploy/vps/warbitrer-postgres-backup.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-postgres-backup.timer /etc/systemd/system/`
+2. recharger:
+   - `sudo systemctl daemon-reload`
+3. activer le timer:
+   - `sudo systemctl enable --now warbitrer-postgres-backup.timer`
+4. test manuel:
+   - `sudo systemctl start warbitrer-postgres-backup.service`
+5. vérifier:
+   - `sudo systemctl status warbitrer-postgres-backup.timer --no-pager`
+
+Le script écrit par défaut dans:
+
+- `/opt/warbitrer-live/backups/postgres`
+
+Variables optionnelles:
+
+- `BACKUP_DIR`
+- `BACKUP_RETENTION_DAYS`
 
 ## Important sécurité
 

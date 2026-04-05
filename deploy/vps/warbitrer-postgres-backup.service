@@ -1,0 +1,12 @@
+[Unit]
+Description=Warbitrer Postgres Backup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=warbitrer
+Group=warbitrer
+WorkingDirectory=/opt/warbitrer-live/app
+EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStart=/bin/bash /opt/warbitrer-live/app/deploy/vps/backup-postgres.sh

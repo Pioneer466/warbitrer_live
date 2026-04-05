@@ -1,4 +1,5 @@
 import { fetchBtcSlotResolution, toKalshiResolution } from "@/lib/btc-resolution";
+import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { applySlippage } from "@/lib/fees";
 import {
   createKalshiAdapter,
@@ -43,11 +44,13 @@ import {
   readSettings,
   readVenueBalances,
   replaceVenuePositions,
+  runDatabaseMaintenance,
   writeCircuitBreaker,
   writeFill,
   writeOrderIntent,
   writePnlSnapshot,
   writeRunEvent,
+  writeSettlement,
   writeSnapshot,
   writeVenueBalance,
   writeVenueOrder,
@@ -75,6 +78,7 @@ const IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS = 3_000;
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
 const marketDataSupervisor = getMarketDataSupervisor();
+let lastDatabaseMaintenanceAttemptAt: number | null = null;
 
 export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
@@ -281,6 +285,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       await reconcileVenueOrders(now);
       await reconcileSettlements(now);
       await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
+      await maybeRunDatabaseMaintenance(now);
     },
   };
 }
@@ -716,6 +721,26 @@ async function reconcileSettlements(now: number) {
       now,
     });
     await writeOrderIntent(settled);
+    for (const leg of settled.legs) {
+      const resolvedOutcome = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
+      await writeSettlement({
+        id: `${settled.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
+        intentId: settled.id,
+        venue: leg.venue,
+        marketRef: leg.marketRef,
+        outcome: leg.outcome,
+        resolvedOutcome,
+        payoutUsd: leg.outcome === resolvedOutcome ? leg.filledSize : 0,
+        settledAt: now,
+        raw: {
+          slotKey: settled.slotKey,
+          filledSize: leg.filledSize,
+          filledPrice: leg.filledPrice,
+          polyResolution,
+          kalshiResolution,
+        },
+      });
+    }
   }
 }
 
@@ -1010,4 +1035,44 @@ function round4(value: number) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function maybeRunDatabaseMaintenance(now: number) {
+  const config = readDatabaseMaintenanceConfig();
+  if (
+    lastDatabaseMaintenanceAttemptAt !== null &&
+    now - lastDatabaseMaintenanceAttemptAt < config.intervalMs
+  ) {
+    return;
+  }
+
+  lastDatabaseMaintenanceAttemptAt = now;
+
+  try {
+    const summary = await runDatabaseMaintenance(config, now);
+    const deletedEntries = Object.entries(summary.deleted).filter(([, count]) => count > 0);
+    if (deletedEntries.length === 0) {
+      return;
+    }
+
+    await writeRunEvent({
+      level: "info",
+      eventType: "db.maintenance.completed",
+      message: `Database retention cleanup deleted ${deletedEntries.reduce((sum, [, count]) => sum + count, 0)} rows`,
+      payload: {
+        deleted: Object.fromEntries(deletedEntries),
+        startedAt: summary.startedAt,
+        finishedAt: summary.finishedAt,
+      },
+      createdAt: Date.now(),
+    });
+  } catch (error) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "db.maintenance.failed",
+      message: error instanceof Error ? error.message : "Database retention cleanup failed",
+      payload: null,
+      createdAt: Date.now(),
+    }).catch(() => undefined);
+  }
 }

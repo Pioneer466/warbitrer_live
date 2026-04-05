@@ -1,8 +1,11 @@
 import { Pool, types } from "pg";
 
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { normalizeSettings } from "@/lib/settings-schema";
 import type {
+  DatabaseMaintenanceSummary,
+  DatabaseMetrics,
   BridgeTransfer,
   CircuitBreaker,
   DashboardResponse,
@@ -37,11 +40,16 @@ export async function getPgDb() {
     poolSingleton = new Pool({
       connectionString: process.env.DATABASE_URL,
       max: 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 10_000,
     });
   }
 
   if (!bootstrapPromise) {
-    bootstrapPromise = bootstrapDatabase(poolSingleton);
+    bootstrapPromise = bootstrapDatabase(poolSingleton).catch((error) => {
+      bootstrapPromise = null;
+      throw error;
+    });
   }
 
   await bootstrapPromise;
@@ -80,6 +88,8 @@ async function bootstrapDatabase(pool: Pool) {
     );
     CREATE INDEX IF NOT EXISTS opportunity_snapshots_slot_idx
       ON opportunity_snapshots(slot_key, captured_at DESC);
+    CREATE INDEX IF NOT EXISTS opportunity_snapshots_captured_idx
+      ON opportunity_snapshots(captured_at DESC);
 
     CREATE TABLE IF NOT EXISTS venue_balances (
       venue TEXT PRIMARY KEY,
@@ -119,6 +129,9 @@ async function bootstrapDatabase(pool: Pool) {
       legs_json JSONB NOT NULL
     );
     CREATE INDEX IF NOT EXISTS order_intents_slot_idx ON order_intents(slot_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS order_intents_created_idx ON order_intents(created_at DESC);
+    CREATE INDEX IF NOT EXISTS order_intents_resolved_idx ON order_intents(resolved_at DESC)
+      WHERE resolved_at IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS venue_orders (
       id TEXT PRIMARY KEY,
@@ -144,6 +157,8 @@ async function bootstrapDatabase(pool: Pool) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS venue_orders_exchange_idx
       ON venue_orders(venue, venue_order_id);
+    CREATE INDEX IF NOT EXISTS venue_orders_updated_idx
+      ON venue_orders(updated_at DESC);
 
     CREATE TABLE IF NOT EXISTS fills (
       id TEXT PRIMARY KEY,
@@ -165,6 +180,7 @@ async function bootstrapDatabase(pool: Pool) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS fills_exchange_trade_idx ON fills(venue, trade_id);
     CREATE INDEX IF NOT EXISTS fills_intent_idx ON fills(intent_id, filled_at DESC);
+    CREATE INDEX IF NOT EXISTS fills_filled_idx ON fills(filled_at DESC);
 
     CREATE TABLE IF NOT EXISTS positions (
       id TEXT PRIMARY KEY,
@@ -195,6 +211,7 @@ async function bootstrapDatabase(pool: Pool) {
       settled_at BIGINT NOT NULL,
       raw_json JSONB NOT NULL
     );
+    CREATE INDEX IF NOT EXISTS settlements_settled_idx ON settlements(settled_at DESC);
 
     CREATE TABLE IF NOT EXISTS pnl_snapshots (
       id BIGSERIAL PRIMARY KEY,
@@ -881,6 +898,99 @@ export async function upsertBridgeTransfer(pool: Pool, transfer: BridgeTransfer)
   );
 }
 
+export async function getDatabaseMetrics(pool: Pool): Promise<DatabaseMetrics> {
+  const [sizeResult, tablesResult] = await Promise.all([
+    pool.query<{ size_bytes: number }>("SELECT pg_database_size(current_database()) AS size_bytes"),
+    pool.query<{ table_name: string; total_bytes: number }>(`
+      SELECT
+        c.relname AS table_name,
+        pg_total_relation_size(c.oid) AS total_bytes
+      FROM pg_class c
+      INNER JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relkind = 'r'
+      ORDER BY total_bytes DESC, table_name ASC
+      LIMIT 8
+    `),
+  ]);
+
+  return {
+    capturedAt: Date.now(),
+    storageMode: "postgres",
+    databaseSizeBytes: sizeResult.rows[0]?.size_bytes ?? 0,
+    largestTables: tablesResult.rows.map((row) => ({
+      tableName: row.table_name,
+      totalBytes: row.total_bytes,
+    })),
+  };
+}
+
+export async function runDatabaseMaintenance(
+  pool: Pool,
+  config: DatabaseMaintenanceConfig,
+  now = Date.now(),
+): Promise<DatabaseMaintenanceSummary> {
+  const startedAt = Date.now();
+  const deleted: DatabaseMaintenanceSummary["deleted"] = {
+    snapshots: 0,
+    pnlSnapshots: 0,
+    runEvents: 0,
+    fills: 0,
+    venueOrders: 0,
+    closedIntents: 0,
+    settlements: 0,
+    bridgeTransfers: 0,
+  };
+
+  deleted.fills = await deleteBefore(pool, config.retention.fillsMs, now, `
+    DELETE FROM fills
+    WHERE filled_at < $1
+  `);
+
+  deleted.venueOrders = await deleteBefore(pool, config.retention.venueOrdersMs, now, `
+    DELETE FROM venue_orders
+    WHERE status IN ('filled', 'canceled', 'rejected', 'expired')
+      AND updated_at < $1
+  `);
+
+  deleted.closedIntents = await deleteBefore(pool, config.retention.closedIntentsMs, now, `
+    DELETE FROM order_intents
+    WHERE status IN ('settled', 'failed', 'canceled', 'unwound')
+      AND COALESCE(resolved_at, updated_at, created_at) < $1
+  `);
+
+  deleted.settlements = await deleteBefore(pool, config.retention.settlementsMs, now, `
+    DELETE FROM settlements
+    WHERE settled_at < $1
+  `);
+
+  deleted.bridgeTransfers = await deleteBefore(pool, config.retention.bridgeTransfersMs, now, `
+    DELETE FROM bridge_transfers
+    WHERE updated_at < $1
+  `);
+
+  deleted.runEvents = await deleteBefore(pool, config.retention.runEventsMs, now, `
+    DELETE FROM run_events
+    WHERE created_at < $1
+  `);
+
+  deleted.pnlSnapshots = await deleteBefore(pool, config.retention.pnlSnapshotsMs, now, `
+    DELETE FROM pnl_snapshots
+    WHERE captured_at < $1
+  `);
+
+  deleted.snapshots = await deleteBefore(pool, config.retention.snapshotsMs, now, `
+    DELETE FROM opportunity_snapshots
+    WHERE captured_at < $1
+  `);
+
+  return {
+    startedAt,
+    finishedAt: Date.now(),
+    deleted,
+  };
+}
+
 export async function listRecentBridgeTransfers(pool: Pool, limit = 10): Promise<BridgeTransfer[]> {
   const result = await pool.query(
     `
@@ -1154,4 +1264,19 @@ function mapBridgeTransferRow(row: any): BridgeTransfer {
     depositAddresses: row.deposit_addresses_json,
     raw: row.raw_json ?? {},
   };
+}
+
+async function deleteBefore(
+  pool: Pool,
+  retentionMs: number | null,
+  now: number,
+  sql: string,
+) {
+  if (retentionMs === null) {
+    return 0;
+  }
+
+  const cutoff = now - retentionMs;
+  const result = await pool.query(sql, [cutoff]);
+  return result.rowCount ?? 0;
 }

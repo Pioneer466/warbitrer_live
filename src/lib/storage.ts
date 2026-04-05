@@ -2,6 +2,8 @@ import * as postgres from "@/lib/postgres-db";
 import type {
   BridgeTransfer,
   CircuitBreaker,
+  DatabaseMaintenanceSummary,
+  DatabaseMetrics,
   DashboardResponse,
   HistoryPoint,
   LiveFill,
@@ -149,6 +151,17 @@ export async function writeRunEvent(event: RunEvent) {
 
 export async function readRunEvents(limit?: number) {
   return postgres.listRecentRunEvents(await db(), limit);
+}
+
+export async function readDatabaseMetrics(): Promise<DatabaseMetrics> {
+  return postgres.getDatabaseMetrics(await db());
+}
+
+export async function runDatabaseMaintenance(
+  config: Parameters<typeof postgres.runDatabaseMaintenance>[1],
+  now?: number,
+): Promise<DatabaseMaintenanceSummary> {
+  return postgres.runDatabaseMaintenance(await db(), config, now);
 }
 
 export async function writeCircuitBreaker(breaker: CircuitBreaker) {

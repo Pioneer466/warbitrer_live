@@ -402,6 +402,33 @@ export type RunEvent = {
   createdAt: number;
 };
 
+export type DatabaseTableMetric = {
+  tableName: string;
+  totalBytes: number;
+};
+
+export type DatabaseMetrics = {
+  capturedAt: number;
+  storageMode: "postgres";
+  databaseSizeBytes: number;
+  largestTables: DatabaseTableMetric[];
+};
+
+export type DatabaseMaintenanceSummary = {
+  startedAt: number;
+  finishedAt: number;
+  deleted: {
+    snapshots: number;
+    pnlSnapshots: number;
+    runEvents: number;
+    fills: number;
+    venueOrders: number;
+    closedIntents: number;
+    settlements: number;
+    bridgeTransfers: number;
+  };
+};
+
 export type CircuitBreaker = {
   key: CircuitBreakerKey;
   active: boolean;
