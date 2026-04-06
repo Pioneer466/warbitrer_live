@@ -1044,14 +1044,22 @@ class KalshiRealtimeFeed {
   }
 
   private subscribe(ws: WebSocket, channel: string, marketTicker: string) {
+    const params =
+      channel === "ticker"
+        ? {
+            channels: [channel],
+            market_ticker: marketTicker,
+          }
+        : {
+            channels: [channel],
+            market_tickers: [marketTicker],
+          };
+
     ws.send(
       JSON.stringify({
         id: this.nextSubscriptionId++,
         cmd: "subscribe",
-        params: {
-          channels: [channel],
-          market_ticker: marketTicker,
-        },
+        params,
       }),
     );
   }
@@ -1321,6 +1329,7 @@ function buildKalshiWsHeaders() {
   });
   const signature = signKalshiWsRequest(privateKey, timestamp);
   return {
+    "Content-Type": "application/json",
     "KALSHI-ACCESS-KEY": env.KALSHI_API_KEY_ID!,
     "KALSHI-ACCESS-SIGNATURE": signature,
     "KALSHI-ACCESS-TIMESTAMP": timestamp,

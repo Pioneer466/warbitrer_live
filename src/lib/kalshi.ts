@@ -602,13 +602,14 @@ async function kalshiFetch<T>(path: string, init?: RequestInit): Promise<T> {
 
   const method = init?.method?.toUpperCase() ?? "GET";
   const timestamp = Date.now().toString();
+  const baseUrl = getKalshiBaseUrl();
   const privateKey = readSecretValue({
     inline: env.KALSHI_PRIVATE_KEY_PEM,
     path: env.KALSHI_PRIVATE_KEY_PATH,
     label: "KALSHI_PRIVATE_KEY",
   });
-  const signature = signKalshiRequest(privateKey, timestamp, method, path);
-  const response = await fetch(`${getKalshiBaseUrl()}${path}`, {
+  const signature = signKalshiRequest(privateKey, timestamp, method, buildKalshiSigningPath(baseUrl, path));
+  const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     headers: {
       Accept: "application/json",
@@ -647,6 +648,10 @@ function signKalshiRequest(privateKeyPem: string, timestamp: string, method: str
       saltLength: crypto.constants.RSA_PSS_SALTLEN_DIGEST,
     })
     .toString("base64");
+}
+
+export function buildKalshiSigningPath(baseUrl: string, path: string) {
+  return new URL(`${baseUrl}${path}`).pathname;
 }
 
 function createUnavailableKalshiQuote(

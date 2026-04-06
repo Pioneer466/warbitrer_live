@@ -1,4 +1,5 @@
 import {
+  buildKalshiSigningPath,
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
   fetchKalshiMarkets,
@@ -209,5 +210,21 @@ describe("Kalshi quote derivation", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=next-page");
+  });
+
+  it("signs Kalshi authenticated requests with the full trade-api path", () => {
+    expect(
+      buildKalshiSigningPath(
+        "https://api.elections.kalshi.com/trade-api/v2",
+        "/portfolio/balance",
+      ),
+    ).toBe("/trade-api/v2/portfolio/balance");
+
+    expect(
+      buildKalshiSigningPath(
+        "https://demo-api.kalshi.co/trade-api/v2",
+        "/portfolio/orders",
+      ),
+    ).toBe("/trade-api/v2/portfolio/orders");
   });
 });
