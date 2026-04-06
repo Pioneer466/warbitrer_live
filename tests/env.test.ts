@@ -22,6 +22,8 @@ describe("env parsing", () => {
     process.env.POLY_API_KEY = "";
     process.env.POLY_API_SECRET = "";
     process.env.POLY_API_PASSPHRASE = "";
+    process.env.POLY_RELAYER_API_KEY = "";
+    process.env.POLY_RELAYER_URL = "";
     process.env.POLY_FUNDER_ADDRESS = "";
     process.env.POLY_SIGNATURE_TYPE = "";
 
@@ -34,6 +36,8 @@ describe("env parsing", () => {
     expect(env.POLY_API_KEY).toBeUndefined();
     expect(env.POLY_API_SECRET).toBeUndefined();
     expect(env.POLY_API_PASSPHRASE).toBeUndefined();
+    expect(env.POLY_RELAYER_API_KEY).toBeUndefined();
+    expect(env.POLY_RELAYER_URL).toBeUndefined();
     expect(env.POLY_FUNDER_ADDRESS).toBeUndefined();
     expect(env.POLY_SIGNATURE_TYPE).toBeUndefined();
   });
@@ -45,6 +49,8 @@ describe("env parsing", () => {
     process.env.POLY_API_KEY = "";
     process.env.POLY_API_SECRET = "";
     process.env.POLY_API_PASSPHRASE = "";
+    process.env.POLY_RELAYER_API_KEY = "";
+    process.env.POLY_RELAYER_URL = "";
     process.env.POLY_FUNDER_ADDRESS = "";
     process.env.POLY_SIGNATURE_TYPE = "";
 

@@ -35,6 +35,8 @@ Variables principales:
 - `POLY_API_KEY`
 - `POLY_API_SECRET`
 - `POLY_API_PASSPHRASE`
+- `POLY_RELAYER_API_KEY`
+- `POLY_RELAYER_URL`
 - `POLY_FUNDER_ADDRESS`
 - `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
 - `POLY_AUTO_CONVERT`
@@ -44,8 +46,9 @@ Pour Polymarket:
 
 - `POLY_PRIVATE_KEY_PATH` contient la private key du signer `0x...`
 - `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE` sont dérivés via `npm run poly:derive-api-key`
-- en `POLY_PROXY`, `POLY_FUNDER_ADDRESS` est l’adresse du funder/proxy
+- en `POLY_PROXY`, `POLY_FUNDER_ADDRESS` est l’adresse du wallet proxy affiche sur Polymarket, et `POLY_RELAYER_API_KEY` active la conversion gasless `redeem + merge`
 - en `EOA`, `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
+- `POLY_RELAYER_URL` peut rester sur `https://relayer-v2.polymarket.com`
 
 La config de stratégie est stockée en base via `strategy_config`, pas dans les variables d’environnement.
 Tu la pilotes via `GET /api/settings` et `PUT /api/settings`.

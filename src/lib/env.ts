@@ -26,6 +26,8 @@ const envSchema = z.object({
   POLY_API_KEY: z.string().min(1).optional(),
   POLY_API_SECRET: z.string().min(1).optional(),
   POLY_API_PASSPHRASE: z.string().min(1).optional(),
+  POLY_RELAYER_API_KEY: z.string().min(1).optional(),
+  POLY_RELAYER_URL: z.string().min(1).optional(),
   POLY_FUNDER_ADDRESS: z.string().min(1).optional(),
   POLY_SIGNATURE_TYPE: z.enum(POLY_SIGNATURE_TYPES).optional(),
   POLY_BRIDGE_LOW_WATER_USDC: z.string().optional(),

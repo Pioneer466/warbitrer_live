@@ -2,6 +2,8 @@
 
 Ce runbook prepare la migration future `POLY_PROXY -> EOA`.
 
+Si ton compte Polymarket principal est en `Google / Magic Link`, garde d'abord `POLY_SIGNATURE_TYPE=POLY_PROXY` et utilise une `POLY_RELAYER_API_KEY` pour la conversion gasless.
+
 ## Objectif
 
 Permettre:
@@ -17,6 +19,18 @@ Permettre:
 POLY_SIGNATURE_TYPE=EOA
 POLY_PRIVATE_KEY_PATH=/etc/warbitrer/polymarket-private-key.txt
 POLY_FUNDER_ADDRESS=0xTON_ADRESSE_PUBLIQUE_EOA
+POLY_AUTO_CONVERT=true
+POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/...
+```
+
+En mode `POLY_PROXY` actuel, la variante minimale est:
+
+```env
+POLY_SIGNATURE_TYPE=POLY_PROXY
+POLY_PRIVATE_KEY_PATH=/etc/warbitrer/polymarket-private-key.txt
+POLY_FUNDER_ADDRESS=0xTON_PROXY_WALLET_POLYMARKET
+POLY_RELAYER_API_KEY=...
+POLY_RELAYER_URL=https://relayer-v2.polymarket.com
 POLY_AUTO_CONVERT=true
 POLYGON_RPC_URL=https://polygon-mainnet.g.alchemy.com/v2/...
 ```

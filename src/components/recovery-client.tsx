@@ -76,7 +76,9 @@ export function RecoveryClient() {
       const payload = (await response.json()) as {
         ok?: boolean;
         mode?: "direct" | "manual";
-        txHash?: string;
+        txHash?: string | null;
+        relayerTransactionId?: string;
+        relayerState?: string;
         action?: "redeem" | "merge";
         amount?: string;
         reason?: string;
@@ -102,6 +104,11 @@ export function RecoveryClient() {
             ? `${verb} envoye pour ${payload.amount}. Tx: ${payload.txHash}`
             : `${verb} envoye. Tx: ${payload.txHash}`,
         );
+      } else if (payload.mode === "direct" && payload.relayerTransactionId) {
+        const verb = payload.action === "merge" ? "Merge" : "Redeem";
+        const amountSuffix = payload.action === "merge" && payload.amount ? ` pour ${payload.amount}` : "";
+        const stateSuffix = payload.relayerState ? ` · ${payload.relayerState}` : "";
+        setActionMessage(`${verb} envoye via relayer${amountSuffix}. Id: ${payload.relayerTransactionId}${stateSuffix}`);
       } else {
         setActionMessage(payload.reason ?? "Mode manuel requis pour ce wallet.");
         if (payload.tx) {
@@ -166,20 +173,20 @@ export function RecoveryClient() {
 
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
         <div className="border-b border-white/6 pb-4">
-          <div className="text-sm text-white">Validation EOA</div>
+          <div className="text-sm text-white">Validation Wallet</div>
           <div className="mt-1 text-xs text-mist/70">
-            Verification du mode EOA pour le redeem direct, le merge direct et l’auto-conversion Polymarket.
+            Verification du wallet Polymarket pour la conversion directe, en EOA on-chain ou en proxy via relayer gasless.
           </div>
         </div>
 
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          {recovery.data.eoaValidation.canDirectConversion
-            ? "Configuration EOA complete pour une conversion directe."
-            : "Configuration EOA incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
+          {recovery.data.walletValidation.canDirectConversion
+            ? "Configuration wallet complete pour une conversion directe."
+            : "Configuration wallet incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
         </div>
 
         <div className="mt-4 grid gap-3">
-          {recovery.data.eoaValidation.checks.map((check) => (
+          {recovery.data.walletValidation.checks.map((check) => (
             <div key={check.key} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-white">{check.label}</div>

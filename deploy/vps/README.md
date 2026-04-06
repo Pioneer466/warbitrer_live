@@ -188,7 +188,7 @@ Après un `git pull`, lancer:
 - aucune erreur dans `/api/health`
 - aucun circuit breaker actif
 
-## Migration future vers EOA
+## Wallet Polymarket
 
 Voir aussi `deploy/vps/EOA_RUNBOOK.md`.
 
@@ -197,6 +197,9 @@ En mode `POLY_PROXY` actuel:
 - `POLY_PRIVATE_KEY_PATH` = clé privée du signer EOA `0x...`
 - `POLY_FUNDER_ADDRESS` = adresse du proxy/funder Polymarket
 - `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE` = dérivés via `npm run poly:derive-api-key`
+- `POLY_RELAYER_API_KEY` = relayer API key créée depuis Polymarket > Settings > API Keys
+- `POLY_RELAYER_URL` = `https://relayer-v2.polymarket.com`
+- `POLY_AUTO_CONVERT=true` active la conversion automatique `redeem + merge` via le relayer gasless
 
 En mode `EOA` futur:
 

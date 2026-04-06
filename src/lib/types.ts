@@ -518,7 +518,7 @@ export type RecoveryResponse = {
   globalKillSwitchActive: boolean;
   signatureType: "EOA" | "POLY_PROXY" | "POLY_GNOSIS_SAFE" | "unknown";
   funderAddress: string | null;
-  eoaValidation: {
+  walletValidation: {
     canDirectConversion: boolean;
     checks: ReadinessCheck[];
   };

@@ -2,6 +2,12 @@ import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
 import { POLY_CTF_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
+import {
+  derivePolymarketProxyAddress,
+  readPolymarketSignerAddress,
+  submitPolymarketProxyTransactions,
+  waitForPolymarketRelayerTransaction,
+} from "@/lib/polymarket-relayer";
 import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from "@/lib/storage";
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
 
@@ -10,15 +16,15 @@ const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
 export async function buildRecoveryResponse(): Promise<RecoveryResponse> {
   const env = readEnv();
   const [positions, breakers] = await Promise.all([readPositions(), readCircuitBreakers()]);
-  const eoaValidation = buildEoaValidation(env);
-  const markets = buildRecoveryMarkets(positions, env, eoaValidation.canDirectConversion);
+  const walletValidation = buildWalletValidation(env);
+  const markets = buildRecoveryMarkets(positions, env, walletValidation.canDirectConversion);
 
   return {
     fetchedAt: Date.now(),
     globalKillSwitchActive: breakers.some((breaker) => breaker.key === "global" && breaker.active),
     signatureType: env.POLY_SIGNATURE_TYPE ?? "unknown",
     funderAddress: env.POLY_FUNDER_ADDRESS ?? null,
-    eoaValidation,
+    walletValidation,
     markets,
     kalshiSettlementMode: "automatic",
   };
@@ -41,9 +47,9 @@ export async function redeemPolymarketMarket(marketRef: string) {
 
 export async function autoConvertPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
   const env = readEnv();
-  const eoaValidation = buildEoaValidation(env);
+  const walletValidation = buildWalletValidation(env);
 
-  if (!isTruthyEnv(env.POLY_AUTO_CONVERT ?? env.POLY_AUTO_REDEEM) || !eoaValidation.canDirectConversion) {
+  if (!isTruthyEnv(env.POLY_AUTO_CONVERT ?? env.POLY_AUTO_REDEEM) || !walletValidation.canDirectConversion) {
     return [];
   }
 
@@ -53,7 +59,7 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
   }
 
   const recentEvents = await readRunEvents(200);
-  const markets = buildRecoveryMarkets(positions, env, eoaValidation.canDirectConversion).filter(
+  const markets = buildRecoveryMarkets(positions, env, walletValidation.canDirectConversion).filter(
     (market) => market.conversionAction !== null && market.directConversionSupported,
   );
   const submitted: string[] = [];
@@ -76,7 +82,7 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
     try {
       const result = await executePolymarketConversion(market);
       if (result.mode === "direct") {
-        submitted.push(result.txHash);
+        submitted.push(result.txHash ?? result.relayerTransactionId ?? market.marketRef);
       }
     } catch (error) {
       await writeRunEvent({
@@ -130,7 +136,7 @@ export function buildMergeTxData(conditionId: string, amount: string) {
 function buildRecoveryMarkets(
   positions: PositionSnapshot[],
   env = readEnv(),
-  directConversionSupported = buildEoaValidation(env).canDirectConversion,
+  directConversionSupported = buildWalletValidation(env).canDirectConversion,
 ): RecoveryMarket[] {
   const polymarketPositions = positions.filter((position) => position.venue === "polymarket");
   const marketsByRef = new Map<string, RecoveryMarket>();
@@ -183,8 +189,11 @@ function buildRecoveryMarkets(
         market.notes.push(`Full sets mergeables: ${market.mergeableSize.toFixed(6)}`);
       }
     }
-    if (env.POLY_SIGNATURE_TYPE !== "EOA" && (market.redeemable || market.mergeable)) {
-      market.notes.push("Proxy/Gnosis: preparation manuelle depuis cette page, execution directe non activee.");
+    if (directConversionSupported && env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && (market.redeemable || market.mergeable)) {
+      market.notes.push("Proxy wallet: conversion gasless via relayer Polymarket.");
+    }
+    if (!directConversionSupported && (market.redeemable || market.mergeable)) {
+      market.notes.push("Conversion directe non prete: preparation manuelle ou UI Polymarket.");
     }
   }
 
@@ -195,82 +204,145 @@ function buildRecoveryMarkets(
   });
 }
 
-function buildEoaValidation(env = readEnv()): RecoveryResponse["eoaValidation"] {
-  const checks: RecoveryResponse["eoaValidation"]["checks"] = [];
+function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidation"] {
+  const checks: RecoveryResponse["walletValidation"]["checks"] = [];
+  const requiredReady: boolean[] = [];
   let signerAddress: string | null = null;
+  let derivedProxyAddress: string | null = null;
+
+  const pushCheck = (check: RecoveryResponse["walletValidation"]["checks"][number], required = false) => {
+    checks.push(check);
+    if (required) {
+      requiredReady.push(check.status === "ready");
+    }
+  };
 
   try {
-    const privateKey = readSecretValue({
-      inline: env.POLY_PRIVATE_KEY,
-      path: env.POLY_PRIVATE_KEY_PATH,
-      label: "POLY_PRIVATE_KEY",
-    });
-    signerAddress = new Wallet(privateKey).address;
-    checks.push({
-      key: "poly:eoa-private-key",
-      label: "EOA private key",
+    signerAddress = readPolymarketSignerAddress(env);
+    derivedProxyAddress = derivePolymarketProxyAddress(signerAddress);
+    pushCheck({
+      key: "poly:signer-private-key",
+      label: "Signer private key",
       status: "ready",
       details: `Signer detecte: ${signerAddress}`,
       checkedAt: Date.now(),
-    });
+    }, true);
   } catch (error) {
-    checks.push({
-      key: "poly:eoa-private-key",
-      label: "EOA private key",
+    pushCheck({
+      key: "poly:signer-private-key",
+      label: "Signer private key",
       status: "blocked",
-      details: error instanceof Error ? error.message : "Cle privee EOA illisible",
+      details: error instanceof Error ? error.message : "Cle privee illisible",
       checkedAt: Date.now(),
-    });
+    }, true);
   }
 
-  const addressMatches =
-    signerAddress !== null &&
-    Boolean(env.POLY_FUNDER_ADDRESS) &&
-    signerAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
-  checks.push({
-    key: "poly:eoa-funder",
-    label: "EOA funder address",
-    status: addressMatches ? "ready" : "blocked",
-    details: addressMatches
-      ? "POLY_FUNDER_ADDRESS correspond au signer"
-      : "POLY_FUNDER_ADDRESS doit etre la meme adresse publique que le signer EOA",
-    checkedAt: Date.now(),
-  });
+  if (env.POLY_SIGNATURE_TYPE === "EOA") {
+    pushCheck({
+      key: "poly:signature-type",
+      label: "Wallet signature type",
+      status: "ready",
+      details: "POLY_SIGNATURE_TYPE=EOA",
+      checkedAt: Date.now(),
+    }, true);
 
-  checks.push({
-    key: "poly:eoa-signature-type",
-    label: "EOA signature type",
-    status: env.POLY_SIGNATURE_TYPE === "EOA" ? "ready" : "degraded",
-    details:
-      env.POLY_SIGNATURE_TYPE === "EOA"
-        ? "POLY_SIGNATURE_TYPE=EOA"
-        : `Actuel: ${env.POLY_SIGNATURE_TYPE ?? "unset"} · definir POLY_SIGNATURE_TYPE=EOA pour la conversion directe`,
-    checkedAt: Date.now(),
-  });
+    const addressMatches =
+      signerAddress !== null &&
+      Boolean(env.POLY_FUNDER_ADDRESS) &&
+      signerAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
+    pushCheck({
+      key: "poly:eoa-funder",
+      label: "EOA funder address",
+      status: addressMatches ? "ready" : "blocked",
+      details: addressMatches
+        ? "POLY_FUNDER_ADDRESS correspond au signer EOA"
+        : "POLY_FUNDER_ADDRESS doit etre la meme adresse publique que le signer EOA",
+      checkedAt: Date.now(),
+    }, true);
 
-  checks.push({
-    key: "poly:eoa-rpc",
-    label: "EOA Polygon RPC",
-    status: env.POLYGON_RPC_URL ? "ready" : "degraded",
-    details: env.POLYGON_RPC_URL
-      ? `RPC configure: ${env.POLYGON_RPC_URL}`
-      : "POLYGON_RPC_URL manquant pour la conversion directe",
-    checkedAt: Date.now(),
-  });
+    pushCheck({
+      key: "poly:eoa-rpc",
+      label: "Polygon RPC",
+      status: env.POLYGON_RPC_URL ? "ready" : "blocked",
+      details: env.POLYGON_RPC_URL
+        ? `RPC configure: ${env.POLYGON_RPC_URL}`
+        : "POLYGON_RPC_URL manquant pour envoyer la transaction on-chain",
+      checkedAt: Date.now(),
+    }, true);
+  } else if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY") {
+    pushCheck({
+      key: "poly:signature-type",
+      label: "Wallet signature type",
+      status: "ready",
+      details: "POLY_SIGNATURE_TYPE=POLY_PROXY",
+      checkedAt: Date.now(),
+    }, true);
 
-  checks.push({
-    key: "poly:eoa-l2-creds",
-    label: "EOA L2 credentials",
-    status:
-      env.POLY_API_KEY && env.POLY_API_SECRET && env.POLY_API_PASSPHRASE ? "ready" : "blocked",
+    const proxyMatches =
+      derivedProxyAddress !== null &&
+      Boolean(env.POLY_FUNDER_ADDRESS) &&
+      derivedProxyAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
+    pushCheck({
+      key: "poly:proxy-funder",
+      label: "Proxy funder address",
+      status: proxyMatches ? "ready" : "blocked",
+      details: proxyMatches
+        ? `POLY_FUNDER_ADDRESS correspond au proxy derive: ${derivedProxyAddress}`
+        : derivedProxyAddress
+          ? `POLY_FUNDER_ADDRESS doit etre le proxy wallet derive du signer: ${derivedProxyAddress}`
+          : "Impossible de deriver l'adresse proxy sans signer valide",
+      checkedAt: Date.now(),
+    }, true);
+
+    pushCheck({
+      key: "poly:proxy-relayer-key",
+      label: "Relayer API key",
+      status: env.POLY_RELAYER_API_KEY ? "ready" : "blocked",
+      details: env.POLY_RELAYER_API_KEY
+        ? "RELAYER_API_KEY present pour le relayer gasless"
+        : "Creer une relayer API key dans Polymarket > Settings > API Keys",
+      checkedAt: Date.now(),
+    }, true);
+
+    pushCheck({
+      key: "poly:proxy-rpc",
+      label: "Polygon RPC",
+      status: env.POLYGON_RPC_URL ? "ready" : "degraded",
+      details: env.POLYGON_RPC_URL
+        ? `RPC configure: ${env.POLYGON_RPC_URL}`
+        : "POLYGON_RPC_URL absent: le relayer peut encore fonctionner, mais sans estimation de gas precise",
+      checkedAt: Date.now(),
+    });
+  } else if (env.POLY_SIGNATURE_TYPE === "POLY_GNOSIS_SAFE") {
+    pushCheck({
+      key: "poly:signature-type",
+      label: "Wallet signature type",
+      status: "degraded",
+      details: "POLY_GNOSIS_SAFE detecte: la conversion in-app n'est pas encore cablee pour ce mode",
+      checkedAt: Date.now(),
+    }, true);
+  } else {
+    pushCheck({
+      key: "poly:signature-type",
+      label: "Wallet signature type",
+      status: "blocked",
+      details: "POLY_SIGNATURE_TYPE manquant ou invalide",
+      checkedAt: Date.now(),
+    }, true);
+  }
+
+  pushCheck({
+    key: "poly:l2-creds",
+    label: "CLOB API credentials",
+    status: env.POLY_API_KEY && env.POLY_API_SECRET && env.POLY_API_PASSPHRASE ? "ready" : "degraded",
     details:
       env.POLY_API_KEY && env.POLY_API_SECRET && env.POLY_API_PASSPHRASE
         ? "POLY_API_KEY / SECRET / PASSPHRASE presents"
-        : "Deriver les credentials via npm run poly:derive-api-key puis les copier dans warbitrer.env",
+        : "Deriver les credentials via npm run poly:derive-api-key pour le trading CLOB",
     checkedAt: Date.now(),
   });
 
-  const canDirectConversion = checks.every((check) => check.status === "ready");
+  const canDirectConversion = requiredReady.length > 0 && requiredReady.every(Boolean);
   return {
     canDirectConversion,
     checks,
@@ -291,13 +363,71 @@ async function executePolymarketConversion(market: RecoveryMarket) {
 
 async function redeemPolymarketCondition(conditionId: string, marketRef: string) {
   const env = readEnv();
+  const walletValidation = buildWalletValidation(env);
   const txData = buildRedeemTxData(conditionId);
 
-  if (env.POLY_SIGNATURE_TYPE !== "EOA") {
+  if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && walletValidation.canDirectConversion) {
+    const submitted = await submitPolymarketProxyTransactions(
+      [
+        {
+          to: POLY_CTF_ADDRESS,
+          data: txData,
+          value: "0",
+        },
+      ],
+      `redeem:${marketRef}`,
+      env,
+    );
+    const mined = await waitForPolymarketRelayerTransaction(submitted.transactionId, env);
+    const txHash = mined?.transactionHash ?? submitted.transactionHash;
+    const relayerState = mined?.state ?? submitted.state;
+
+    await writeRunEvent({
+      level: "info",
+      eventType: "polymarket.redeem.submitted",
+      message: `Redeem submitted for ${marketRef} via proxy relayer`,
+      payload: {
+        marketRef,
+        conditionId,
+        txHash,
+        relayerTransactionId: submitted.transactionId,
+        relayerState,
+      },
+      createdAt: Date.now(),
+    });
+
+    await writeRunEvent({
+      level: "info",
+      eventType: "polymarket.convert.submitted",
+      message: `Redeem submitted for ${marketRef} via proxy relayer`,
+      payload: {
+        marketRef,
+        conditionId,
+        txHash,
+        relayerTransactionId: submitted.transactionId,
+        relayerState,
+        action: "redeem",
+      },
+      createdAt: Date.now(),
+    });
+
+    return {
+      ok: true as const,
+      mode: "direct" as const,
+      txHash,
+      relayerTransactionId: submitted.transactionId,
+      relayerState,
+      marketRef,
+      conditionId,
+      action: "redeem" as const,
+    };
+  }
+
+  if (env.POLY_SIGNATURE_TYPE !== "EOA" || !walletValidation.canDirectConversion) {
     return {
       ok: false as const,
       mode: "manual" as const,
-      reason: `Direct redeem is not supported in-app for ${env.POLY_SIGNATURE_TYPE}. Use the Polymarket UI or a relayer-compatible wallet.`,
+      reason: buildManualConversionReason(env.POLY_SIGNATURE_TYPE ?? "unknown", "redeem"),
       tx: {
         to: POLY_CTF_ADDRESS,
         data: txData,
@@ -355,13 +485,13 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
   });
 
   return {
-      ok: true as const,
-      mode: "direct" as const,
-      txHash: tx.hash,
-      marketRef,
-      conditionId,
-      action: "redeem" as const,
-    };
+    ok: true as const,
+    mode: "direct" as const,
+    txHash: tx.hash,
+    marketRef,
+    conditionId,
+    action: "redeem" as const,
+  };
 }
 
 async function mergePolymarketCondition(market: RecoveryMarket) {
@@ -370,14 +500,75 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
   }
 
   const env = readEnv();
+  const walletValidation = buildWalletValidation(env);
   const amount = toRawCollateralAmount(market.mergeableSize);
   const txData = buildMergeTxData(market.conditionId, amount);
 
-  if (env.POLY_SIGNATURE_TYPE !== "EOA") {
+  if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && walletValidation.canDirectConversion) {
+    const submitted = await submitPolymarketProxyTransactions(
+      [
+        {
+          to: POLY_CTF_ADDRESS,
+          data: txData,
+          value: "0",
+        },
+      ],
+      `merge:${market.marketRef}`,
+      env,
+    );
+    const mined = await waitForPolymarketRelayerTransaction(submitted.transactionId, env);
+    const txHash = mined?.transactionHash ?? submitted.transactionHash;
+    const relayerState = mined?.state ?? submitted.state;
+
+    await writeRunEvent({
+      level: "info",
+      eventType: "polymarket.merge.submitted",
+      message: `Merge submitted for ${market.marketRef} via proxy relayer`,
+      payload: {
+        marketRef: market.marketRef,
+        conditionId: market.conditionId,
+        txHash,
+        relayerTransactionId: submitted.transactionId,
+        relayerState,
+        amount,
+      },
+      createdAt: Date.now(),
+    });
+
+    await writeRunEvent({
+      level: "info",
+      eventType: "polymarket.convert.submitted",
+      message: `Merge submitted for ${market.marketRef} via proxy relayer`,
+      payload: {
+        marketRef: market.marketRef,
+        conditionId: market.conditionId,
+        txHash,
+        relayerTransactionId: submitted.transactionId,
+        relayerState,
+        action: "merge",
+        amount,
+      },
+      createdAt: Date.now(),
+    });
+
+    return {
+      ok: true as const,
+      mode: "direct" as const,
+      txHash,
+      relayerTransactionId: submitted.transactionId,
+      relayerState,
+      marketRef: market.marketRef,
+      conditionId: market.conditionId,
+      amount,
+      action: "merge" as const,
+    };
+  }
+
+  if (env.POLY_SIGNATURE_TYPE !== "EOA" || !walletValidation.canDirectConversion) {
     return {
       ok: false as const,
       mode: "manual" as const,
-      reason: `Direct merge is not supported in-app for ${env.POLY_SIGNATURE_TYPE}. Use the Polymarket UI or a relayer-compatible wallet.`,
+      reason: buildManualConversionReason(env.POLY_SIGNATURE_TYPE ?? "unknown", "merge"),
       tx: {
         to: POLY_CTF_ADDRESS,
         data: txData,
@@ -482,4 +673,16 @@ function toRawCollateralAmount(value: number) {
   }
 
   return raw.toString();
+}
+
+function buildManualConversionReason(signatureType: RecoveryResponse["signatureType"], action: "redeem" | "merge") {
+  if (signatureType === "POLY_PROXY") {
+    return `Direct ${action} via proxy requires a valid Magic Link signer export, a matching POLY_FUNDER_ADDRESS, and POLY_RELAYER_API_KEY.`;
+  }
+
+  if (signatureType === "EOA") {
+    return `Direct ${action} via EOA requires a signer private key, a matching POLY_FUNDER_ADDRESS, and a working Polygon RPC URL.`;
+  }
+
+  return `Direct ${action} is not supported in-app for ${signatureType}. Use the Polymarket UI or a relayer-compatible wallet.`;
 }
