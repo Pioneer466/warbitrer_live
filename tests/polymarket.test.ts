@@ -2,6 +2,7 @@ import { Side } from "@polymarket/clob-client";
 
 import {
   derivePolymarketDepth,
+  extractPolymarketCollateralAllowanceInfo,
   extractPolymarketCollateralAllowanceUsd,
   extractPolymarketPositionValueUsd,
   extractPolymarketResolution,
@@ -68,6 +69,21 @@ describe("Polymarket helpers", () => {
         "POLY_PROXY",
       ),
     ).toBe(5);
+  });
+
+  it("marks effectively unlimited allowances without surfacing a nonsense usd amount", () => {
+    expect(
+      extractPolymarketCollateralAllowanceInfo(
+        {
+          allowance:
+            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+        },
+        "EOA",
+      ),
+    ).toEqual({
+      allowanceUsd: null,
+      unlimited: true,
+    });
   });
 
   it("parses polymarket position value responses across documented shapes", () => {

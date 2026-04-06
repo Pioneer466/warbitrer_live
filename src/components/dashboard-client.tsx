@@ -255,6 +255,13 @@ function VenueBalanceCard({
   balance: DashboardResponse["venueBalances"][number];
   feedHealth: VenueFeedHealth | null;
 }) {
+  const allowanceDisplay =
+    balance.raw["allowanceUnlimited"] === true
+      ? "Illimitée"
+      : balance.allowanceUsd === null
+        ? "--"
+        : formatCurrency(balance.allowanceUsd);
+
   return (
     <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
       <div className="flex items-center justify-between gap-3 border-b border-white/6 pb-4">
@@ -269,7 +276,7 @@ function VenueBalanceCard({
       <div className="mt-4 grid gap-3 sm:grid-cols-3">
         <MetricCell label="Disponible" value={formatCurrency(balance.availableBalanceUsd)} compact />
         <MetricCell label="Portfolio" value={formatCurrency(balance.portfolioValueUsd)} compact />
-        <MetricCell label="Allowance" value={balance.allowanceUsd === null ? "--" : formatCurrency(balance.allowanceUsd)} compact />
+        <MetricCell label="Allowance" value={allowanceDisplay} compact />
       </div>
       {feedHealth ? (
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">

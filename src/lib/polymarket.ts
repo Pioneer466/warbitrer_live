@@ -84,6 +84,7 @@ type DataPosition = {
 };
 
 const POLY_BALANCE_ALLOWANCE_REFRESH_INTERVAL_MS = 30_000;
+const POLY_EFFECTIVE_UNLIMITED_ALLOWANCE_RAW = 10n ** 24n;
 let lastPolymarketBalanceAllowanceRefreshAt = 0;
 
 export async function fetchPolymarketQuote(slot: MarketSlot): Promise<PolymarketQuote> {
@@ -254,10 +255,14 @@ export function createPolymarketAdapter(): VenueAdapter {
       ]);
 
       const available = microUsdcToUsd(collateral.balance);
-      const allowance = extractPolymarketCollateralAllowanceUsd(collateral, env.POLY_SIGNATURE_TYPE);
+      const allowanceInfo = extractPolymarketCollateralAllowanceInfo(collateral, env.POLY_SIGNATURE_TYPE);
+      const allowance = allowanceInfo.unlimited ? available : allowanceInfo.allowanceUsd;
       const notes: string[] = [];
       if (refreshError) {
         notes.push(`Balance cache refresh Polymarket échoué: ${refreshError}`);
+      }
+      if (allowanceInfo.unlimited) {
+        notes.push("Allowance CLOB illimitée détectée.");
       }
 
       let positionsValueSource = "value";
@@ -273,9 +278,9 @@ export function createPolymarketAdapter(): VenueAdapter {
       const requiresAllowanceCheck =
         env.POLY_SIGNATURE_TYPE === "EOA" || env.POLY_SIGNATURE_TYPE === "POLY_GNOSIS_SAFE";
       const status =
-        requiresAllowanceCheck && available > 0 && allowance === null
+        requiresAllowanceCheck && available > 0 && !allowanceInfo.unlimited && allowance === null
           ? (notes.push("Allowance CLOB introuvable pour ce wallet Polymarket."), "degraded")
-          : requiresAllowanceCheck && allowance !== null && allowance + 1e-9 < available
+          : requiresAllowanceCheck && !allowanceInfo.unlimited && allowance !== null && allowance + 1e-9 < available
             ? (notes.push("Allowance CLOB insuffisante pour le solde USDC disponible."), "degraded")
             : "ready";
 
@@ -291,6 +296,7 @@ export function createPolymarketAdapter(): VenueAdapter {
         notes,
         raw: {
           collateral,
+          allowanceUnlimited: allowanceInfo.unlimited,
           value,
           positionsValueSource,
         },
@@ -756,33 +762,40 @@ export function microUsdcToUsd(value: string | number) {
   return Number(value) / 1_000_000;
 }
 
-export function extractPolymarketCollateralAllowanceUsd(
+export function extractPolymarketCollateralAllowanceInfo(
   collateral: PolymarketCollateralLike,
   signatureType?: string,
 ) {
-  const directAllowance = getNumericCandidate(collateral.allowance ?? null);
-  if (directAllowance !== null) {
-    return microUsdcToUsd(directAllowance);
+  const directAllowanceRaw = getRawAllowanceCandidate(collateral.allowance ?? null);
+  if (directAllowanceRaw !== null) {
+    return normalizePolymarketAllowanceCandidate(directAllowanceRaw);
   }
 
   if (!collateral.allowances || typeof collateral.allowances !== "object") {
-    return null;
+    return { allowanceUsd: null, unlimited: false };
   }
 
   const allowanceValues = Object.values(collateral.allowances)
-    .map((value) => getNumericCandidate(value))
-    .filter((value): value is number => value !== null);
+    .map((value) => getRawAllowanceCandidate(value))
+    .filter((value): value is bigint => value !== null);
 
   if (allowanceValues.length === 0) {
-    return null;
+    return { allowanceUsd: null, unlimited: false };
   }
 
   const effectiveAllowance =
     signatureType === "EOA" || signatureType === "POLY_GNOSIS_SAFE"
-      ? Math.min(...allowanceValues)
-      : Math.max(...allowanceValues);
+      ? allowanceValues.reduce((currentMin, value) => (value < currentMin ? value : currentMin))
+      : allowanceValues.reduce((currentMax, value) => (value > currentMax ? value : currentMax));
 
-  return microUsdcToUsd(effectiveAllowance);
+  return normalizePolymarketAllowanceCandidate(effectiveAllowance);
+}
+
+export function extractPolymarketCollateralAllowanceUsd(
+  collateral: PolymarketCollateralLike,
+  signatureType?: string,
+) {
+  return extractPolymarketCollateralAllowanceInfo(collateral, signatureType).allowanceUsd;
 }
 
 export function extractPolymarketPositionValueUsd(payload: PositionValueResponse) {
@@ -824,6 +837,49 @@ function getNumericCandidate(value: unknown) {
   }
 
   return null;
+}
+
+function getRawAllowanceCandidate(value: unknown) {
+  if (typeof value === "bigint") {
+    return value >= 0n ? value : null;
+  }
+
+  if (typeof value === "number") {
+    if (!Number.isFinite(value) || value < 0) {
+      return null;
+    }
+
+    if (!Number.isSafeInteger(value)) {
+      return BigInt(Math.trunc(value));
+    }
+
+    return BigInt(value);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed || !/^\d+$/.test(trimmed)) {
+      return null;
+    }
+
+    return BigInt(trimmed);
+  }
+
+  return null;
+}
+
+function normalizePolymarketAllowanceCandidate(rawAllowance: bigint) {
+  if (rawAllowance >= POLY_EFFECTIVE_UNLIMITED_ALLOWANCE_RAW) {
+    return {
+      allowanceUsd: null,
+      unlimited: true,
+    };
+  }
+
+  return {
+    allowanceUsd: microUsdcToUsd(rawAllowance.toString()),
+    unlimited: false,
+  };
 }
 
 function toErrorMessage(error: unknown) {
