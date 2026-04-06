@@ -13,6 +13,8 @@ export const settingsSchema = z.object({
   pollingIntervalMs: z.number().int().min(250).max(10_000),
   minOrderSize: z.number().positive().max(10_000),
   maxSlippageBps: z.number().int().min(1).max(2_000),
+  immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
+  executionPriceBuffer: z.number().nonnegative().max(0.1),
   entryCutoffSeconds: z.number().int().min(1).max(120),
   maxOpenIntentsPerSlot: z.number().int().min(1).max(10),
   maxVenueExposureUsd: z.number().positive().max(1_000_000),

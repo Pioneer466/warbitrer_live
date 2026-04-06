@@ -21,6 +21,8 @@ const settings: StrategyConfig = {
   pollingIntervalMs: 1_000,
   minOrderSize: 0.01,
   maxSlippageBps: 30,
+  immediateOrderConfirmationTimeoutMs: 8_000,
+  executionPriceBuffer: 0.01,
   entryCutoffSeconds: 20,
   maxOpenIntentsPerSlot: 1,
   maxVenueExposureUsd: 1_000,

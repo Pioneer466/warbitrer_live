@@ -173,6 +173,8 @@ export type StrategyConfig = {
   pollingIntervalMs: number;
   minOrderSize: number;
   maxSlippageBps: number;
+  immediateOrderConfirmationTimeoutMs: number;
+  executionPriceBuffer: number;
   entryCutoffSeconds: number;
   maxOpenIntentsPerSlot: number;
   maxVenueExposureUsd: number;
