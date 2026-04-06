@@ -209,13 +209,18 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       }
 
       const openIntents = await readOpenOrderIntents();
+      const resumed = await resumeInFlightIntents(
+        openIntents.filter((intent) => intent.slotEndTs > now),
+        settings,
+        now,
+      );
       const openForSlot = openIntents.filter((intent) => intent.slotKey === slot.key);
       if (openForSlot.length >= settings.maxOpenIntentsPerSlot) {
-        return [];
+        return resumed;
       }
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
-      const created: OrderIntent[] = [];
+      const created: OrderIntent[] = [...resumed];
       const positions = await readPositions();
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
 
@@ -446,12 +451,8 @@ async function executeIntent(intent: OrderIntent, settings: StrategyConfig, now:
     createdAt: now,
   });
 
-  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
-  if (currentIntent.primaryVenue === "polymarket") {
-    currentIntent = await attachRecentPolymarketFills(currentIntent);
-  }
-
   if (primaryResult.status !== "filled" || primaryOrder.filledSize <= 0) {
+    currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
     currentIntent = markIntentStatus(
       currentIntent,
       "failed",
@@ -474,39 +475,67 @@ async function executeIntent(intent: OrderIntent, settings: StrategyConfig, now:
     return currentIntent;
   }
 
-  currentIntent = markIntentStatus(currentIntent, "hedging", Date.now());
+  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
+  currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
   await writeOrderIntent(currentIntent);
 
-  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  if (currentIntent.primaryVenue === "polymarket") {
+    currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
+  }
+
+  return executeHedgeLeg(currentIntent, settings.maxSlippageBps, now);
+}
+
+async function executeHedgeLeg(intent: OrderIntent, maxSlippageBps: number, now: number) {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    throw new Error(`Intent ${intent.id} missing legs for hedge execution`);
+  }
+
+  let currentIntent = markIntentStatus(intent, "hedging", now);
+  await writeOrderIntent(currentIntent);
+
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, maxSlippageBps, "FOK", false);
   const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
   const hedgeResult = await confirmImmediateOrderExecution(currentIntent.hedgeVenue, hedgeRequest, hedgeSubmission);
-  const hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, Date.now());
+  const hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
   await writeVenueOrder(hedgeOrder);
+  await writeRunEvent({
+    level: "info",
+    eventType: "order.hedge.submitted",
+    message: `Hedge ${currentIntent.hedgeVenue} order ${hedgeOrder.venueOrderId}`,
+    payload: {
+      intentId: currentIntent.id,
+      venue: currentIntent.hedgeVenue,
+    },
+    createdAt: now,
+  });
 
   if (currentIntent.hedgeVenue === "polymarket") {
-    currentIntent = await attachRecentPolymarketFills(currentIntent);
+    currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
   }
 
   if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
-    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", Date.now());
-    currentIntent = markIntentStatus(currentIntent, "hedged", Date.now());
+    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
+    currentIntent = markIntentStatus(currentIntent, "hedged", now);
     await writeOrderIntent(currentIntent);
     return currentIntent;
   }
 
-  currentIntent = markIntentStatus(currentIntent, "unwind_required", Date.now(), "Hedge order failed");
+  currentIntent = markIntentStatus(currentIntent, "unwind_required", now, "Hedge order failed");
   await writeOrderIntent(currentIntent);
 
-  const unwindResult = await unwindPrimaryLeg(currentIntent, settings.maxSlippageBps);
-  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindResult, "unwound", Date.now());
-  currentIntent = markIntentStatus(currentIntent, "unwound", Date.now(), "Hedge failed, primary unwound");
+  const unwindResult = await unwindPrimaryLeg(currentIntent, maxSlippageBps);
+  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindResult, "unwound", now);
+  currentIntent = markIntentStatus(currentIntent, "unwound", now, "Hedge failed, primary unwound");
   await writeOrderIntent(currentIntent);
   await writeVenueOrder(unwindResult);
   await writeCircuitBreaker({
     key: `slot:${currentIntent.slotKey}`,
     active: true,
     reason: "hedge_failure",
-    triggeredAt: Date.now(),
+    triggeredAt: now,
     payload: {
       intentId: currentIntent.id,
       venue: currentIntent.primaryVenue,
@@ -570,6 +599,84 @@ async function attachRecentPolymarketFills(intent: OrderIntent) {
   intent = (await syncIntentFromStoredVenueFills(intent.id, "polymarket", intent)) ?? intent;
   await writeOrderIntent(intent);
   return intent;
+}
+
+async function attachRecentPolymarketFillsSafely(
+  intent: OrderIntent,
+  stage: "primary" | "hedge",
+  now: number,
+) {
+  try {
+    return await attachRecentPolymarketFills(intent);
+  } catch (error) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "fills.polymarket.sync_failed",
+      message: `Polymarket fill sync failed during ${stage} for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        stage,
+        error: toErrorMessage(error),
+      },
+      createdAt: now,
+    });
+    return intent;
+  }
+}
+
+async function resumeInFlightIntents(intents: OrderIntent[], settings: StrategyConfig, now: number) {
+  const recentOrders = await readRecentVenueOrders(200);
+  const resumed: OrderIntent[] = [];
+
+  for (const intent of intents) {
+    if (intent.status !== "executing_primary" && intent.status !== "primary_filled") {
+      continue;
+    }
+
+    const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+    const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg) {
+      continue;
+    }
+
+    let currentIntent = intent;
+    const primaryOrder = recentOrders.find(
+      (order) => order.intentId === intent.id && order.venue === intent.primaryVenue,
+    );
+    if (!primaryOrder || primaryOrder.filledSize <= 0) {
+      continue;
+    }
+
+    currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
+    currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
+    await writeOrderIntent(currentIntent);
+
+    if (currentIntent.primaryVenue === "polymarket") {
+      currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
+    }
+
+    const latestHedgeOrder = recentOrders.find(
+      (order) => order.intentId === intent.id && order.venue === intent.hedgeVenue,
+    );
+    if (latestHedgeOrder) {
+      continue;
+    }
+
+    await writeRunEvent({
+      level: "warn",
+      eventType: "intent.resume.hedge",
+      message: `Resuming hedge submission for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+      },
+      createdAt: now,
+    });
+
+    resumed.push(await executeHedgeLeg(currentIntent, settings.maxSlippageBps, now));
+  }
+
+  return resumed;
 }
 
 async function unwindPrimaryLeg(intent: OrderIntent, maxSlippageBps: number) {
@@ -928,7 +1035,9 @@ function updateIntentLegFromFillSummary(
                 : leg.status === "hedged"
                   ? "hedged"
                   : summary.filledSize > 0
-                    ? "filled"
+                    ? venue === intent.hedgeVenue
+                      ? "hedged"
+                      : "filled"
                     : leg.status,
           }
         : leg,
