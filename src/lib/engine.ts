@@ -777,7 +777,7 @@ function buildVenueOrderRequest(
     outcome: leg.outcome,
     side: leg.side,
     size: leg.requestedSize,
-    price: leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps),
+    price: leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side),
     maxCostUsd: leg.requestedNotionalUsd * (1 + maxSlippageBps / 10_000),
     orderType,
     reduceOnly,

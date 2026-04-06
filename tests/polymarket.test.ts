@@ -2,6 +2,7 @@ import { Side } from "@polymarket/clob-client";
 
 import {
   derivePolymarketDepth,
+  extractPolymarketCollateralAllowanceUsd,
   extractPolymarketPositionValueUsd,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
@@ -37,6 +38,36 @@ describe("Polymarket helpers", () => {
   it("converts polymarket collateral balances from micro-USDC to USD", () => {
     expect(microUsdcToUsd("9993384")).toBe(9.993384);
     expect(microUsdcToUsd(1000000)).toBe(1);
+  });
+
+  it("extracts a direct collateral allowance when the legacy field is present", () => {
+    expect(extractPolymarketCollateralAllowanceUsd({ allowance: "2500000" }, "EOA")).toBe(2.5);
+  });
+
+  it("extracts the most relevant collateral allowance from allowance maps", () => {
+    expect(
+      extractPolymarketCollateralAllowanceUsd(
+        {
+          allowances: {
+            main: "5000000",
+            negRisk: "3000000",
+          },
+        },
+        "EOA",
+      ),
+    ).toBe(3);
+
+    expect(
+      extractPolymarketCollateralAllowanceUsd(
+        {
+          allowances: {
+            main: "5000000",
+            negRisk: "3000000",
+          },
+        },
+        "POLY_PROXY",
+      ),
+    ).toBe(5);
   });
 
   it("parses polymarket position value responses across documented shapes", () => {

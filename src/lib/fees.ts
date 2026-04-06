@@ -1,3 +1,5 @@
+import type { OrderSide } from "@/lib/types";
+
 type KalshiFeeInput = {
   contracts: number;
   price: number;
@@ -53,6 +55,7 @@ export function deriveTargetShares(notionalUsd: number, price: number, minOrderS
   return Math.max(0, roundToStep(notionalUsd / price, minOrderSize));
 }
 
-export function applySlippage(price: number, maxSlippageBps: number) {
-  return price * (1 + maxSlippageBps / 10_000);
+export function applySlippage(price: number, maxSlippageBps: number, side: OrderSide = "BUY") {
+  const multiplier = 1 + maxSlippageBps / 10_000;
+  return side === "SELL" ? price / multiplier : price * multiplier;
 }

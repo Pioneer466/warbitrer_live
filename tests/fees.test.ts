@@ -19,8 +19,12 @@ describe("live fee and sizing helpers", () => {
     expect(deriveTargetShares(25, 0.42, 0.01)).toBeCloseTo(59.52, 2);
   });
 
-  it("applies slippage in basis points", () => {
-    expect(applySlippage(0.5, 30)).toBeCloseTo(0.5015, 6);
+  it("applies slippage in basis points for buys", () => {
+    expect(applySlippage(0.5, 30, "BUY")).toBeCloseTo(0.5015, 6);
+  });
+
+  it("applies slippage in basis points for sells", () => {
+    expect(applySlippage(0.5, 30, "SELL")).toBeCloseTo(0.498504, 6);
   });
 
   it("returns payout only on the winning side", () => {
