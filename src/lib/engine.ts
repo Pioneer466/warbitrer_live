@@ -45,6 +45,7 @@ import {
   readOpenOrderIntents,
   readPositions,
   readRecentFills,
+  readRecentOrderIntents,
   readRecentVenueOrders,
   readSettings,
   readVenueBalances,
@@ -79,6 +80,7 @@ import type {
 
 const RESOLUTION_GRACE_MS = 5_000;
 const IN_FLIGHT_INTENT_STALE_MS = 15_000;
+const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
 
 const kalshiAdapter = createKalshiAdapter();
@@ -804,7 +806,7 @@ async function attachRecentPolymarketFills(intent: OrderIntent) {
     const orderId = leg.venueOrderId as string;
     const matching = extractPolymarketTradesForOrder(trades, orderId).filter(isConfirmedPolymarketTrade);
     for (const trade of matching) {
-      await writeFill(mapPolymarketTradeToFill(trade, intent.id, orderId));
+      await writePolymarketFillSafely(trade, intent.id, orderId, "intent_sync");
     }
   }
 
@@ -1187,7 +1189,7 @@ async function reconcileVenueOrders(now: number) {
         },
       });
       for (const trade of confirmedTrades) {
-        await writeFill(mapPolymarketTradeToFill(trade, existingOrder.intentId, existingOrder.venueOrderId));
+        await writePolymarketFillSafely(trade, existingOrder.intentId, existingOrder.venueOrderId, "reconcile");
       }
       touchedIntentLegs.add(`${existingOrder.intentId}:polymarket`);
       continue;
@@ -1237,6 +1239,117 @@ async function reconcileVenueOrders(now: number) {
   for (const entry of touchedIntentLegs) {
     const [intentId, venue] = entry.split(":") as [string, "polymarket" | "kalshi"];
     await syncIntentFromStoredVenueFills(intentId, venue);
+  }
+
+  await reconcileLatePrimaryFillRescue(now);
+}
+
+async function writePolymarketFillSafely(
+  trade: Parameters<typeof mapPolymarketTradeToFill>[0],
+  intentId: string,
+  venueOrderId: string,
+  stage: "intent_sync" | "reconcile",
+) {
+  try {
+    await writeFill(mapPolymarketTradeToFill(trade, intentId, venueOrderId));
+  } catch (error) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "fills.polymarket.write_failed",
+      message: `Polymarket fill write failed during ${stage} for intent ${intentId}`,
+      payload: {
+        intentId,
+        stage,
+        venueOrderId,
+        tradeId: trade.id,
+        error: toErrorMessage(error),
+      },
+      createdAt: Date.now(),
+    });
+  }
+}
+
+async function reconcileLatePrimaryFillRescue(now: number) {
+  const [recentIntents, recentOrders] = await Promise.all([readRecentOrderIntents(200), readRecentVenueOrders(200)]);
+
+  for (const intent of recentIntents) {
+    if (intent.status !== "failed") {
+      continue;
+    }
+    if (
+      now - intent.updatedAt > LATE_PRIMARY_FILL_RESCUE_WINDOW_MS ||
+      intent.failureReason?.includes("Late primary fill detected")
+    ) {
+      continue;
+    }
+
+    const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+    const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg) {
+      continue;
+    }
+
+    const primaryOrder = findLatestIntentOrderForLeg(recentOrders, intent.id, primaryLeg);
+    if (!primaryOrder || primaryOrder.status !== "filled" || primaryOrder.filledSize <= 0) {
+      continue;
+    }
+
+    const hedgeOrder = findLatestIntentOrderForLeg(recentOrders, intent.id, hedgeLeg);
+    if (hedgeOrder?.status === "filled" || (hedgeOrder?.filledSize ?? 0) > 0) {
+      continue;
+    }
+
+    let rescued = updateIntentLeg(intent, primaryLeg.venue, primaryOrder, "filled", now);
+    if (intent.slotEndTs > now) {
+      rescued = markIntentStatus(rescued, "primary_filled", now, "Late primary fill detected; resuming hedge");
+      await writeOrderIntent(rescued);
+      await writeRunEvent({
+        level: "error",
+        eventType: "intent.reopened.late_primary_fill",
+        message: `Intent ${intent.id} reopened after primary fill was confirmed late`,
+        payload: {
+          intentId: intent.id,
+          slotKey: intent.slotKey,
+          venue: intent.primaryVenue,
+          orderId: primaryOrder.venueOrderId,
+        },
+        createdAt: now,
+      });
+      continue;
+    }
+
+    rescued = markIntentStatus(
+      rescued,
+      "failed",
+      now,
+      "Late primary fill detected after intent had already failed; manual intervention required",
+    );
+    await writeOrderIntent(rescued);
+    await writeCircuitBreaker({
+      key: "global",
+      active: true,
+      reason: "hedge_failure",
+      triggeredAt: now,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        venue: intent.primaryVenue,
+        orderId: primaryOrder.venueOrderId,
+        stage: "late_primary_fill_after_close",
+      },
+    });
+    await writeRunEvent({
+      level: "error",
+      eventType: "intent.failed.late_primary_fill",
+      message: `Late primary fill detected after intent ${intent.id} was already closed`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        venue: intent.primaryVenue,
+        orderId: primaryOrder.venueOrderId,
+      },
+      createdAt: now,
+    });
   }
 }
 

@@ -932,6 +932,7 @@ function mapPolymarketOrderStatus(order: OpenOrder): VenueOrderStatus {
 }
 
 export function mapPolymarketOrder(order: OpenOrder, intentId: string): LiveOrder {
+  const createdAt = parsePolymarketTimestamp(order.created_at) ?? Date.now();
   return {
     id: `polymarket:${order.id}`,
     shadow: false,
@@ -950,14 +951,18 @@ export function mapPolymarketOrder(order: OpenOrder, intentId: string): LiveOrde
     averageFillPrice: Number(order.price),
     feeUsd: null,
     status: mapPolymarketOrderStatus(order),
-    createdAt: order.created_at,
-    updatedAt: order.created_at,
+    createdAt,
+    updatedAt: createdAt,
     raw: order as unknown as Record<string, unknown>,
   };
 }
 
 export function mapPolymarketTradeToFill(trade: Trade, intentId: string, venueOrderId?: string) {
   const side: "BUY" | "SELL" = trade.side === Side.BUY ? "BUY" : "SELL";
+  const filledAt =
+    parsePolymarketTimestamp(trade.match_time) ??
+    parsePolymarketTimestamp(trade.last_update) ??
+    Date.now();
   return {
     id: `polymarket-fill:${trade.id}`,
     shadow: false,
@@ -973,7 +978,7 @@ export function mapPolymarketTradeToFill(trade: Trade, intentId: string, venueOr
     size: Number(trade.size),
     feeUsd: Number(trade.price) * Number(trade.size) * (Number(trade.fee_rate_bps) / 10_000),
     liquidity: trade.trader_side,
-    filledAt: Date.parse(trade.match_time),
+    filledAt,
     raw: trade as unknown as Record<string, unknown>,
   };
 }
@@ -1053,4 +1058,34 @@ function isLiveRelevantPolymarketPosition(position: DataPosition) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parsePolymarketTimestamp(value: unknown) {
+  if (typeof value === "number") {
+    return normalizePolymarketEpoch(value);
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return null;
+    }
+
+    if (/^\d+(\.\d+)?$/.test(trimmed)) {
+      return normalizePolymarketEpoch(Number(trimmed));
+    }
+
+    const parsed = Date.parse(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function normalizePolymarketEpoch(value: number) {
+  if (!Number.isFinite(value) || value < 0) {
+    return null;
+  }
+
+  return value < 1e11 ? Math.round(value * 1000) : Math.round(value);
 }

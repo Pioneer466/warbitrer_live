@@ -10,6 +10,7 @@ import {
   isConfirmedPolymarketTrade,
   isPendingPolymarketTrade,
   mapPolymarketOrder,
+  mapPolymarketTradeToFill,
   microUsdcToUsd,
   summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
@@ -228,5 +229,36 @@ describe("Polymarket helpers", () => {
 
     expect(mapped.status).toBe("pending");
     expect(mapped.requestedSize).toBe(62.675);
+    expect(mapped.createdAt).toBe(1775513261000);
+    expect(mapped.updatedAt).toBe(1775513261000);
+  });
+
+  it("maps numeric polymarket trade timestamps to millisecond fill times", () => {
+    const fill = mapPolymarketTradeToFill(
+      {
+        id: "trade-1",
+        taker_order_id: "order-1",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: Side.BUY,
+        size: "10",
+        fee_rate_bps: "100",
+        price: "0.4",
+        status: "CONFIRMED",
+        match_time: "1775513261",
+        last_update: "1775513261",
+        outcome: "DOWN",
+        bucket_index: 0,
+        owner: "owner",
+        maker_address: "maker",
+        maker_orders: [],
+        transaction_hash: "0x1",
+        trader_side: "TAKER" as const,
+      } as any,
+      "intent-1",
+      "order-1",
+    );
+
+    expect(fill.filledAt).toBe(1775513261000);
   });
 });
