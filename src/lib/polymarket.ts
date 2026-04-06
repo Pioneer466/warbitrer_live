@@ -1,5 +1,12 @@
 import { ClobClient, OrderType, Side } from "@polymarket/clob-client";
-import { AssetType, SignatureType, type ApiKeyCreds, type OpenOrder, type Trade } from "@polymarket/clob-client";
+import {
+  AssetType,
+  SignatureType,
+  type ApiKeyCreds,
+  type BalanceAllowanceResponse,
+  type OpenOrder,
+  type Trade,
+} from "@polymarket/clob-client";
 import { Wallet } from "ethers";
 
 import { DEFAULT_POLY_CHAIN_ID, POLY_CLOB_BASE, POLY_DATA_BASE, POLY_GAMMA_BASE } from "@/lib/constants";
@@ -50,7 +57,12 @@ type CLOBBook = {
 
 type PriceResponse = { price: string };
 type MidpointResponse = { mid: string };
-type PositionValueResponse = { value: number } | { total: number };
+type PositionValueEntry = {
+  user?: string;
+  value?: number | string | null;
+  total?: number | string | null;
+};
+type PositionValueResponse = PositionValueEntry | PositionValueEntry[] | null;
 
 type DataPosition = {
   asset: string;
@@ -66,6 +78,9 @@ type DataPosition = {
   title: string;
   outcome: string;
 };
+
+const POLY_BALANCE_ALLOWANCE_REFRESH_INTERVAL_MS = 30_000;
+let lastPolymarketBalanceAllowanceRefreshAt = 0;
 
 export async function fetchPolymarketQuote(slot: MarketSlot): Promise<PolymarketQuote> {
   const market = await fetchPolymarketMarket(slot.polymarketSlug);
@@ -227,17 +242,30 @@ export function createPolymarketAdapter(): VenueAdapter {
 
       const client = createClobClient();
       const env = readEnv();
-      const [collateral, value] = await Promise.all([
-        client.getBalanceAllowance({ asset_type: AssetType.COLLATERAL }),
+      const [{ collateral, refreshError }, value] = await Promise.all([
+        getFreshPolymarketCollateralBalance(client),
         fetchJson<PositionValueResponse>(
           `${POLY_DATA_BASE}/value?user=${encodeURIComponent(env.POLY_FUNDER_ADDRESS!)}`,
-        ).catch(() => ({ value: 0 })),
+        ).catch(() => null),
       ]);
 
       const available = microUsdcToUsd(collateral.balance);
       const allowance = microUsdcToUsd(collateral.allowance);
-      const positionsValue = "value" in value ? value.value : value.total;
       const notes: string[] = [];
+      if (refreshError) {
+        notes.push(`Balance cache refresh Polymarket échoué: ${refreshError}`);
+      }
+
+      let positionsValueSource = "value";
+      let positionsValue = extractPolymarketPositionValueUsd(value);
+      if (positionsValue === null) {
+        positionsValue = await fetchPolymarketPositionValueFallback(env.POLY_FUNDER_ADDRESS!).catch((error) => {
+          notes.push(`Fallback positions Polymarket échoué: ${toErrorMessage(error)}`);
+          return 0;
+        });
+        positionsValueSource = "positions";
+      }
+
       const status =
         allowance + 1e-9 < available
           ? (notes.push("Allowance CLOB insuffisante pour le solde USDC disponible."), "degraded")
@@ -256,6 +284,7 @@ export function createPolymarketAdapter(): VenueAdapter {
         raw: {
           collateral,
           value,
+          positionsValueSource,
         },
       };
     },
@@ -673,8 +702,95 @@ function normalizePolymarketOutcome(outcome: string) {
   throw new Error(`Unexpected Polymarket outcome ${outcome}`);
 }
 
+async function getFreshPolymarketCollateralBalance(client: ClobClient): Promise<{
+  collateral: BalanceAllowanceResponse;
+  refreshError: string | null;
+}> {
+  const params = { asset_type: AssetType.COLLATERAL } as const;
+  let refreshError: string | null = null;
+
+  if (shouldRefreshPolymarketBalanceAllowanceCache()) {
+    refreshError = await refreshPolymarketBalanceAllowanceCache(client, params);
+  }
+
+  let collateral = await client.getBalanceAllowance(params);
+  if (microUsdcToUsd(collateral.balance) <= 0 && !refreshError) {
+    const forcedRefreshError = await refreshPolymarketBalanceAllowanceCache(client, params);
+    refreshError = forcedRefreshError;
+    collateral = await client.getBalanceAllowance(params);
+  }
+
+  return {
+    collateral,
+    refreshError,
+  };
+}
+
+function shouldRefreshPolymarketBalanceAllowanceCache(now = Date.now()) {
+  return now - lastPolymarketBalanceAllowanceRefreshAt >= POLY_BALANCE_ALLOWANCE_REFRESH_INTERVAL_MS;
+}
+
+async function refreshPolymarketBalanceAllowanceCache(
+  client: ClobClient,
+  params: { asset_type: AssetType.COLLATERAL },
+) {
+  lastPolymarketBalanceAllowanceRefreshAt = Date.now();
+
+  try {
+    await client.updateBalanceAllowance(params);
+    return null;
+  } catch (error) {
+    return toErrorMessage(error);
+  }
+}
+
 export function microUsdcToUsd(value: string | number) {
   return Number(value) / 1_000_000;
+}
+
+export function extractPolymarketPositionValueUsd(payload: PositionValueResponse) {
+  if (Array.isArray(payload)) {
+    const values = payload
+      .map((entry) => getNumericCandidate(entry.value ?? entry.total ?? null))
+      .filter((value): value is number => value !== null);
+
+    if (values.length === 0) {
+      return null;
+    }
+
+    return values.reduce((sum, value) => sum + value, 0);
+  }
+
+  if (!payload) {
+    return null;
+  }
+
+  return getNumericCandidate(payload.value ?? payload.total ?? null);
+}
+
+async function fetchPolymarketPositionValueFallback(user: string) {
+  const positions = await fetchJson<DataPosition[]>(
+    `${POLY_DATA_BASE}/positions?user=${encodeURIComponent(user)}&sizeThreshold=0`,
+  );
+
+  return positions.reduce((sum, position) => sum + (getNumericCandidate(position.currentValue) ?? 0), 0);
+}
+
+function getNumericCandidate(value: unknown) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function toErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function mapPolymarketOrderStatus(order: OpenOrder): VenueOrderStatus {

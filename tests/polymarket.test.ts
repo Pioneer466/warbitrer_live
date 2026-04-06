@@ -2,6 +2,7 @@ import { Side } from "@polymarket/clob-client";
 
 import {
   derivePolymarketDepth,
+  extractPolymarketPositionValueUsd,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
   microUsdcToUsd,
@@ -36,6 +37,14 @@ describe("Polymarket helpers", () => {
   it("converts polymarket collateral balances from micro-USDC to USD", () => {
     expect(microUsdcToUsd("9993384")).toBe(9.993384);
     expect(microUsdcToUsd(1000000)).toBe(1);
+  });
+
+  it("parses polymarket position value responses across documented shapes", () => {
+    expect(extractPolymarketPositionValueUsd([{ user: "0xabc", value: 5 }])).toBe(5);
+    expect(extractPolymarketPositionValueUsd({ total: 12.5 })).toBe(12.5);
+    expect(extractPolymarketPositionValueUsd([{ user: "0xabc", total: "3.75" }])).toBe(3.75);
+    expect(extractPolymarketPositionValueUsd([])).toBeNull();
+    expect(extractPolymarketPositionValueUsd(null)).toBeNull();
   });
 
   it("aggregates matched trades for a specific order", () => {
