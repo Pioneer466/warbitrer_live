@@ -898,18 +898,18 @@ function formatCount(value: number) {
   return value.toFixed(2);
 }
 
-function mapKalshiOrderStatus(status: string, filledSize: number, remainingSize: number): VenueOrderStatus {
+export function mapKalshiOrderStatus(status: string, filledSize: number, remainingSize: number): VenueOrderStatus {
+  if (filledSize > 0 && remainingSize > 0) {
+    return "partially_filled";
+  }
+  if (status === "executed" || status === "filled" || (filledSize > 0 && remainingSize === 0)) {
+    return "filled";
+  }
   if (status === "canceled" || status === "cancelled") {
     return "canceled";
   }
   if (status === "rejected") {
     return "rejected";
-  }
-  if (status === "executed" || status === "filled" || (filledSize > 0 && remainingSize === 0)) {
-    return "filled";
-  }
-  if (filledSize > 0 && remainingSize > 0) {
-    return "partially_filled";
   }
   if (status === "expired") {
     return "expired";

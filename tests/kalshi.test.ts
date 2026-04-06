@@ -6,6 +6,7 @@ import {
   fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  mapKalshiOrderStatus,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
@@ -242,5 +243,10 @@ describe("Kalshi quote derivation", () => {
       totalBalanceUsd: 52,
       notes: ["Kalshi portfolio_value inferieur au cash disponible; fallback sur le solde cash."],
     });
+  });
+
+  it("treats canceled Kalshi orders with residual fills as partially filled", () => {
+    expect(mapKalshiOrderStatus("canceled", 2, 3)).toBe("partially_filled");
+    expect(mapKalshiOrderStatus("executed", 5, 0)).toBe("filled");
   });
 });

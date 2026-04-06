@@ -7,7 +7,11 @@ import {
   extractPolymarketPositionValueUsd,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
+  isConfirmedPolymarketTrade,
+  isPendingPolymarketTrade,
+  mapPolymarketOrder,
   microUsdcToUsd,
+  summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
 
@@ -145,5 +149,84 @@ describe("Polymarket helpers", () => {
     expect(summary.filledSize).toBe(15);
     expect(summary.averageFillPrice).toBeCloseTo(0.4333, 4);
     expect(summary.feeUsd).toBeCloseTo(0.0525, 4);
+  });
+
+  it("separates confirmed polymarket trades from pending settlement trades", () => {
+    const trades = [
+      {
+        id: "trade-confirmed",
+        taker_order_id: "order-1",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: Side.BUY,
+        size: "10",
+        fee_rate_bps: "100",
+        price: "0.4",
+        status: "CONFIRMED",
+        match_time: new Date(10).toISOString(),
+        last_update: new Date(10).toISOString(),
+        outcome: "UP",
+        bucket_index: 0,
+        owner: "owner",
+        maker_address: "maker",
+        maker_orders: [],
+        transaction_hash: "0x1",
+        trader_side: "TAKER" as const,
+      },
+      {
+        id: "trade-matched",
+        taker_order_id: "order-1",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: Side.BUY,
+        size: "5",
+        fee_rate_bps: "100",
+        price: "0.41",
+        status: "MATCHED",
+        match_time: new Date(11).toISOString(),
+        last_update: new Date(11).toISOString(),
+        outcome: "UP",
+        bucket_index: 0,
+        owner: "owner",
+        maker_address: "maker",
+        maker_orders: [],
+        transaction_hash: "0x2",
+        trader_side: "TAKER" as const,
+      },
+    ];
+
+    expect(isConfirmedPolymarketTrade(trades[0]!)).toBe(true);
+    expect(isPendingPolymarketTrade(trades[1]!)).toBe(true);
+
+    const lifecycle = summarizePolymarketTradeLifecycle(trades as any);
+    expect(lifecycle.confirmedTrades).toHaveLength(1);
+    expect(lifecycle.pendingTrades).toHaveLength(1);
+    expect(summarizePolymarketTrades(lifecycle.confirmedTrades).filledSize).toBe(10);
+  });
+
+  it("maps MATCHED polymarket orders to pending until confirmed settlement", () => {
+    const mapped = mapPolymarketOrder(
+      {
+        id: "order-1",
+        status: "MATCHED",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: "BUY",
+        original_size: "62.675",
+        size_matched: "62.675",
+        price: "0.4",
+        outcome: "Down",
+        order_type: "FOK",
+        maker_address: "0xabc",
+        owner: "owner",
+        expiration: "0",
+        associate_trades: ["trade-1"],
+        created_at: 1775513261,
+      } as any,
+      "intent-1",
+    );
+
+    expect(mapped.status).toBe("pending");
+    expect(mapped.requestedSize).toBe(62.675);
   });
 });

@@ -349,7 +349,11 @@ export function createPolymarketAdapter(): VenueAdapter {
       return {
         venue: "polymarket",
         venueOrderId: response.orderID,
-        status: response.success ? "live" : "rejected",
+        status: response.success
+          ? typeof response.status === "string" && response.status.toLowerCase() === "matched"
+            ? "pending"
+            : "live"
+          : "rejected",
         filledSize: 0,
         averageFillPrice: null,
         feeUsd: 0,
@@ -388,7 +392,8 @@ export async function fetchPolymarketTrades(after?: string) {
 
 export async function confirmPolymarketOrderExecution(params: {
   orderId: string;
-  expectedSize: number;
+  expectedSize?: number;
+  orderType?: string | null;
   timeoutMs?: number;
 }): Promise<{ result: VenueOrderResult; order: OpenOrder | null; trades: Trade[] }> {
   const deadline = Date.now() + (params.timeoutMs ?? 3_000);
@@ -403,20 +408,29 @@ export async function confirmPolymarketOrderExecution(params: {
     latestOrder = order;
     latestTrades = extractPolymarketTradesForOrder(trades, params.orderId);
 
-    const aggregatedTrades = summarizePolymarketTrades(latestTrades);
-    if (aggregatedTrades.filledSize > 0) {
+    const tradeLifecycle = summarizePolymarketTradeLifecycle(latestTrades);
+    const confirmedTrades = summarizePolymarketTrades(tradeLifecycle.confirmedTrades);
+    if (confirmedTrades.filledSize > 0) {
+      const effectiveOrderType = order?.order_type ?? params.orderType ?? null;
+      const authoritativeExpectedSize =
+        effectiveOrderType === "FOK"
+          ? confirmedTrades.filledSize
+          : order
+            ? Number(order.original_size)
+            : params.expectedSize ?? confirmedTrades.filledSize;
       return {
         result: {
           venue: "polymarket" as const,
           venueOrderId: params.orderId,
           status:
-            aggregatedTrades.filledSize + 1e-6 >= params.expectedSize ? "filled" : "partially_filled",
-          filledSize: aggregatedTrades.filledSize,
-          averageFillPrice: aggregatedTrades.averageFillPrice,
-          feeUsd: aggregatedTrades.feeUsd,
+            confirmedTrades.filledSize + 1e-6 >= authoritativeExpectedSize ? "filled" : "partially_filled",
+          filledSize: confirmedTrades.filledSize,
+          averageFillPrice: confirmedTrades.averageFillPrice,
+          feeUsd: confirmedTrades.feeUsd,
           raw: {
             order,
             trades: latestTrades,
+            tradeLifecycle,
           },
         },
         order,
@@ -427,18 +441,24 @@ export async function confirmPolymarketOrderExecution(params: {
     if (order) {
       const mappedOrder = mapPolymarketOrder(order, "unknown");
       if (mappedOrder.status === "canceled" || mappedOrder.status === "expired" || mappedOrder.status === "rejected") {
+        const tradeLifecycle = summarizePolymarketTradeLifecycle(latestTrades);
+        const confirmedTrades = summarizePolymarketTrades(tradeLifecycle.confirmedTrades);
         return {
           result: {
             venue: "polymarket" as const,
             venueOrderId: params.orderId,
             status: mappedOrder.status,
-            filledSize: mappedOrder.filledSize,
-            averageFillPrice: mappedOrder.averageFillPrice,
-            feeUsd: 0,
-            raw: order as unknown as Record<string, unknown>,
+            filledSize: confirmedTrades.filledSize,
+            averageFillPrice: confirmedTrades.averageFillPrice,
+            feeUsd: confirmedTrades.feeUsd,
+            raw: {
+              order,
+              trades: latestTrades,
+              tradeLifecycle,
+            },
           },
           order,
-          trades: [],
+          trades: latestTrades,
         };
       }
     }
@@ -446,18 +466,21 @@ export async function confirmPolymarketOrderExecution(params: {
     await sleep(200);
   }
 
+  const tradeLifecycle = summarizePolymarketTradeLifecycle(latestTrades);
+  const confirmedTrades = summarizePolymarketTrades(tradeLifecycle.confirmedTrades);
   const fallbackOrder = latestOrder ? mapPolymarketOrder(latestOrder, "unknown") : null;
   return {
     result: {
       venue: "polymarket" as const,
       venueOrderId: params.orderId,
-      status: fallbackOrder?.status ?? "live",
-      filledSize: fallbackOrder?.filledSize ?? 0,
-      averageFillPrice: fallbackOrder?.averageFillPrice ?? null,
-      feeUsd: 0,
+      status: confirmedTrades.filledSize > 0 ? "filled" : tradeLifecycle.pendingTrades.length > 0 ? "pending" : fallbackOrder?.status ?? "live",
+      filledSize: confirmedTrades.filledSize,
+      averageFillPrice: confirmedTrades.averageFillPrice,
+      feeUsd: confirmedTrades.feeUsd,
       raw: {
         order: latestOrder,
         trades: latestTrades,
+        tradeLifecycle,
       },
     },
     order: latestOrder,
@@ -887,10 +910,17 @@ function toErrorMessage(error: unknown) {
 }
 
 function mapPolymarketOrderStatus(order: OpenOrder): VenueOrderStatus {
-  if (order.status === "canceled") {
+  const normalizedStatus = order.status.toLowerCase();
+  if (normalizedStatus === "canceled" || normalizedStatus === "cancelled") {
     return "canceled";
   }
-  if (order.status === "matched" || order.status === "filled") {
+  if (normalizedStatus === "expired") {
+    return "expired";
+  }
+  if (normalizedStatus === "matched") {
+    return "pending";
+  }
+  if (normalizedStatus === "filled") {
     return "filled";
   }
   const matched = Number(order.size_matched);
@@ -926,14 +956,14 @@ export function mapPolymarketOrder(order: OpenOrder, intentId: string): LiveOrde
   };
 }
 
-export function mapPolymarketTradeToFill(trade: Trade, intentId: string) {
+export function mapPolymarketTradeToFill(trade: Trade, intentId: string, venueOrderId?: string) {
   const side: "BUY" | "SELL" = trade.side === Side.BUY ? "BUY" : "SELL";
   return {
     id: `polymarket-fill:${trade.id}`,
     shadow: false,
     intentId,
     venue: "polymarket" as const,
-    venueOrderId: trade.taker_order_id,
+    venueOrderId: venueOrderId ?? trade.taker_order_id,
     tradeId: trade.id,
     marketRef: trade.market,
     tokenId: trade.asset_id,
@@ -963,6 +993,26 @@ export function summarizePolymarketTrades(trades: Trade[]) {
     filledSize,
     averageFillPrice: filledSize > 0 ? round4(grossCostUsd / filledSize) : null,
     feeUsd,
+  };
+}
+
+export function isConfirmedPolymarketTrade(trade: Trade) {
+  return trade.status === "CONFIRMED";
+}
+
+export function isPendingPolymarketTrade(trade: Trade) {
+  return trade.status === "MATCHED" || trade.status === "MINED" || trade.status === "RETRYING";
+}
+
+export function isFailedPolymarketTrade(trade: Trade) {
+  return trade.status === "FAILED";
+}
+
+export function summarizePolymarketTradeLifecycle(trades: Trade[]) {
+  return {
+    confirmedTrades: trades.filter(isConfirmedPolymarketTrade),
+    pendingTrades: trades.filter(isPendingPolymarketTrade),
+    failedTrades: trades.filter(isFailedPolymarketTrade),
   };
 }
 
