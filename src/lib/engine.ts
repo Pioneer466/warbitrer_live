@@ -74,6 +74,7 @@ import type {
 
 const RESOLUTION_GRACE_MS = 5_000;
 const IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS = 3_000;
+const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -288,6 +289,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       await autoConvertPolymarketIfConfigured(polyPositions, now);
 
       await reconcileVenueOrders(now);
+      await reconcileInFlightIntentStates(now);
       await reconcileSettlements(now);
       await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
       await maybeRunDatabaseMaintenance(now);
@@ -851,6 +853,104 @@ async function reconcileSettlements(now: number) {
   }
 }
 
+async function reconcileInFlightIntentStates(now: number) {
+  const [openIntents, recentOrders] = await Promise.all([readOpenOrderIntents(), readRecentVenueOrders(200)]);
+
+  for (const intent of openIntents) {
+    if (intent.status !== "executing_primary" && intent.status !== "primary_filled" && intent.status !== "hedging") {
+      continue;
+    }
+
+    const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+    const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg) {
+      continue;
+    }
+
+    const primaryOrder = recentOrders.find(
+      (order) => order.intentId === intent.id && order.venue === intent.primaryVenue,
+    );
+    const hedgeOrder = recentOrders.find(
+      (order) => order.intentId === intent.id && order.venue === intent.hedgeVenue,
+    );
+    const stale = isInFlightIntentStale(intent, now);
+    let currentIntent = intent;
+
+    if (!primaryOrder) {
+      if (intent.status === "executing_primary" && stale) {
+        currentIntent = markIntentStatus(
+          intent,
+          "failed",
+          now,
+          "Primary order not observed before timeout or slot end",
+        );
+        await writeOrderIntent(currentIntent);
+        await writeRunEvent({
+          level: "warn",
+          eventType: "intent.failed.primary_missing",
+          message: `Intent ${intent.id} closed after primary was never observed`,
+          payload: {
+            intentId: intent.id,
+            slotKey: intent.slotKey,
+          },
+          createdAt: now,
+        });
+      }
+      continue;
+    }
+
+    if (
+      primaryOrder.venueOrderId !== primaryLeg.venueOrderId ||
+      primaryOrder.filledSize !== primaryLeg.filledSize ||
+      primaryOrder.averageFillPrice !== primaryLeg.filledPrice ||
+      (primaryOrder.feeUsd ?? 0) !== primaryLeg.feeUsd
+    ) {
+      currentIntent = updateIntentLeg(
+        currentIntent,
+        primaryLeg.venue,
+        primaryOrder,
+        primaryOrder.filledSize > 0 ? "filled" : primaryLeg.status,
+        now,
+      );
+      await writeOrderIntent(currentIntent);
+    }
+
+    if (
+      (primaryOrder.status === "filled" || primaryOrder.status === "partially_filled" || primaryOrder.filledSize > 0) &&
+      currentIntent.status === "executing_primary"
+    ) {
+      currentIntent = markIntentStatus(currentIntent, hedgeOrder ? "hedging" : "primary_filled", now);
+      await writeOrderIntent(currentIntent);
+    }
+
+    if (
+      (primaryOrder.status === "canceled" || primaryOrder.status === "rejected" || primaryOrder.status === "expired") &&
+      stale
+    ) {
+      currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
+      currentIntent = markIntentStatus(
+        currentIntent,
+        "failed",
+        now,
+        `Primary order ${primaryOrder.status}`,
+      );
+      await writeOrderIntent(currentIntent);
+      await writeRunEvent({
+        level: "warn",
+        eventType: "intent.failed.primary_terminal",
+        message: `Intent ${intent.id} closed after primary order ended in status ${primaryOrder.status}`,
+        payload: {
+          intentId: intent.id,
+          slotKey: intent.slotKey,
+          orderId: primaryOrder.venueOrderId,
+          orderStatus: primaryOrder.status,
+        },
+        createdAt: now,
+      });
+    }
+  }
+}
+
 async function refreshPnl(now: number, positions: PositionSnapshot[]) {
   const balances = await readVenueBalances();
   const cashUsd = balances.reduce((sum, balance) => sum + balance.availableBalanceUsd, 0);
@@ -1184,4 +1284,8 @@ async function maybeRunDatabaseMaintenance(now: number) {
       createdAt: Date.now(),
     }).catch(() => undefined);
   }
+}
+
+function isInFlightIntentStale(intent: OrderIntent, now: number) {
+  return intent.slotEndTs <= now || now - intent.updatedAt >= IN_FLIGHT_INTENT_STALE_MS;
 }
