@@ -1,4 +1,5 @@
 import {
+  deriveKalshiBalanceSummary,
   buildKalshiSigningPath,
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
@@ -226,5 +227,20 @@ describe("Kalshi quote derivation", () => {
         "/portfolio/orders",
       ),
     ).toBe("/trade-api/v2/portfolio/orders");
+  });
+
+  it("falls back to cash when Kalshi reports a portfolio_value below available balance", () => {
+    expect(
+      deriveKalshiBalanceSummary({
+        balance: 5200,
+        portfolio_value: 0,
+        updated_ts: 0,
+      }),
+    ).toEqual({
+      availableBalanceUsd: 52,
+      portfolioValueUsd: 52,
+      totalBalanceUsd: 52,
+      notes: ["Kalshi portfolio_value inferieur au cash disponible; fallback sur le solde cash."],
+    });
   });
 });

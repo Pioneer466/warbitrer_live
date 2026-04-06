@@ -756,7 +756,7 @@ async function refreshPnl(now: number, positions: PositionSnapshot[]) {
   await writePnlSnapshot({
     capturedAt: now,
     cashUsd,
-    equityUsd: balances.reduce((sum, balance) => sum + balance.totalBalanceUsd, 0),
+    equityUsd: cashUsd + positionsValueUsd,
     positionsValueUsd,
     realizedPnlUsd,
     unrealizedPnlUsd,

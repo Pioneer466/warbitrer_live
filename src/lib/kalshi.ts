@@ -96,6 +96,13 @@ type KalshiBalanceResponse = {
   updated_ts: number;
 };
 
+type KalshiBalanceSummary = {
+  availableBalanceUsd: number;
+  portfolioValueUsd: number;
+  totalBalanceUsd: number;
+  notes: string[];
+};
+
 type KalshiPositionsResponse = {
   market_positions: Array<{
     ticker: string;
@@ -441,17 +448,18 @@ export function createKalshiAdapter(): VenueAdapter {
       }
 
       const response = await kalshiFetch<KalshiBalanceResponse>("/portfolio/balance");
+      const summary = deriveKalshiBalanceSummary(response);
 
       return {
         venue: "kalshi",
         capturedAt: response.updated_ts,
         status: "ready",
         currency: "USD",
-        availableBalanceUsd: centsToUsd(response.balance),
-        totalBalanceUsd: centsToUsd(response.portfolio_value),
-        portfolioValueUsd: centsToUsd(response.portfolio_value),
+        availableBalanceUsd: summary.availableBalanceUsd,
+        totalBalanceUsd: summary.totalBalanceUsd,
+        portfolioValueUsd: summary.portfolioValueUsd,
         allowanceUsd: null,
-        notes: [],
+        notes: summary.notes,
         raw: response as unknown as Record<string, unknown>,
       };
     },
@@ -652,6 +660,27 @@ function signKalshiRequest(privateKeyPem: string, timestamp: string, method: str
 
 export function buildKalshiSigningPath(baseUrl: string, path: string) {
   return new URL(`${baseUrl}${path}`).pathname;
+}
+
+export function deriveKalshiBalanceSummary(response: KalshiBalanceResponse): KalshiBalanceSummary {
+  const availableBalanceUsd = centsToUsd(response.balance);
+  const reportedPortfolioValueUsd = centsToUsd(response.portfolio_value);
+
+  if (reportedPortfolioValueUsd + 1e-9 < availableBalanceUsd) {
+    return {
+      availableBalanceUsd,
+      portfolioValueUsd: availableBalanceUsd,
+      totalBalanceUsd: availableBalanceUsd,
+      notes: ["Kalshi portfolio_value inferieur au cash disponible; fallback sur le solde cash."],
+    };
+  }
+
+  return {
+    availableBalanceUsd,
+    portfolioValueUsd: reportedPortfolioValueUsd,
+    totalBalanceUsd: reportedPortfolioValueUsd,
+    notes: [],
+  };
 }
 
 function createUnavailableKalshiQuote(
