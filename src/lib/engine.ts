@@ -281,18 +281,57 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         kalshiAdapter.getPositions(now),
       ]);
 
-      await Promise.all([
-        replaceVenuePositions("polymarket", polyPositions),
-        replaceVenuePositions("kalshi", kalshiPositions),
-      ]);
+      const reconcileErrors: string[] = [];
+      const allPositions = [...polyPositions, ...kalshiPositions];
 
-      await autoConvertPolymarketIfConfigured(polyPositions, now);
+      reconcileErrors.push(
+        ...(await runReconcileStep("replace_positions", now, async () => {
+          await Promise.all([
+            replaceVenuePositions("polymarket", polyPositions),
+            replaceVenuePositions("kalshi", kalshiPositions),
+          ]);
+        })),
+      );
 
-      await reconcileVenueOrders(now);
-      await reconcileInFlightIntentStates(now);
-      await reconcileSettlements(now);
-      await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
-      await maybeRunDatabaseMaintenance(now);
+      reconcileErrors.push(
+        ...(await runReconcileStep("auto_convert_polymarket", now, async () => {
+          await autoConvertPolymarketIfConfigured(polyPositions, now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("reconcile_venue_orders", now, async () => {
+          await reconcileVenueOrders(now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("reconcile_inflight_intents", now, async () => {
+          await reconcileInFlightIntentStates(now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("reconcile_settlements", now, async () => {
+          await reconcileSettlements(now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("refresh_pnl", now, async () => {
+          await refreshPnl(now, allPositions);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("database_maintenance", now, async () => {
+          await maybeRunDatabaseMaintenance(now);
+        })),
+      );
+
+      if (reconcileErrors.length > 0) {
+        throw new Error(reconcileErrors.join(" | "));
+      }
     },
   };
 }
@@ -1288,4 +1327,23 @@ async function maybeRunDatabaseMaintenance(now: number) {
 
 function isInFlightIntentStale(intent: OrderIntent, now: number) {
   return intent.slotEndTs <= now || now - intent.updatedAt >= IN_FLIGHT_INTENT_STALE_MS;
+}
+
+async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {
+  try {
+    await fn();
+    return [] as string[];
+  } catch (error) {
+    const message = `${step}: ${toErrorMessage(error)}`;
+    await writeRunEvent({
+      level: "warn",
+      eventType: "reconcile.step_failed",
+      message,
+      payload: {
+        step,
+      },
+      createdAt: now,
+    });
+    return [message];
+  }
 }
