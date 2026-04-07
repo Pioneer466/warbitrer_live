@@ -6,6 +6,7 @@ import {
   fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  getKalshiSoftNoFillMessage,
   mapKalshiOrderStatus,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
@@ -248,5 +249,15 @@ describe("Kalshi quote derivation", () => {
   it("treats canceled Kalshi orders with residual fills as partially filled", () => {
     expect(mapKalshiOrderStatus("canceled", 2, 3)).toBe("partially_filled");
     expect(mapKalshiOrderStatus("executed", 5, 0)).toBe("filled");
+  });
+
+  it("classifies Kalshi FOK kill responses as soft no-fill errors", () => {
+    expect(
+      getKalshiSoftNoFillMessage(
+        new Error("Kalshi HTTP 400: order couldn't be fully filled. FOK orders are fully filled or killed."),
+      ),
+    ).toContain("FOK orders are fully filled or killed");
+
+    expect(getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 401: authentication_error"))).toBeNull();
   });
 });

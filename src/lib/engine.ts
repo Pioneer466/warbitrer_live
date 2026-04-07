@@ -591,21 +591,37 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       currentIntent,
       "failed",
       now,
-      `Primary order not authoritatively filled (${primaryResult.status})`,
+      describeTerminalNoFill("Primary", primaryResult),
     );
     await writeOrderIntent(currentIntent);
-    await writeCircuitBreaker({
-      key: `slot:${currentIntent.slotKey}`,
-      active: true,
-      reason: "venue_error",
-      triggeredAt: now,
-      payload: {
-        intentId: currentIntent.id,
-        venue: currentIntent.primaryVenue,
-        stage: "primary_confirmation",
-        orderId: primaryOrder.venueOrderId,
-      },
-    });
+    if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
+      await writeCircuitBreaker({
+        key: `slot:${currentIntent.slotKey}`,
+        active: true,
+        reason: "venue_error",
+        triggeredAt: now,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          stage: "primary_confirmation",
+          orderId: primaryOrder.venueOrderId,
+        },
+      });
+    } else {
+      await writeRunEvent({
+        level: "warn",
+        eventType: "intent.failed.primary_no_fill",
+        message: `Intent ${currentIntent.id} closed after primary order was killed without fill`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          orderId: primaryOrder.venueOrderId,
+          orderStatus: primaryResult.status,
+          detail: extractTerminalNoFillDetail(primaryResult),
+        },
+        createdAt: now,
+      });
+    }
     return currentIntent;
   }
 
@@ -1946,6 +1962,23 @@ function normalizeOrderResultFromLiveOrder(
 
 function isTerminalOrderStatus(status: LiveOrder["status"]) {
   return status === "canceled" || status === "rejected" || status === "expired";
+}
+
+function shouldTripBreakerForTerminalNoFill(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {
+  return !Boolean(result.raw?.softNoFill);
+}
+
+function extractTerminalNoFillDetail(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {
+  return typeof result.raw?.error === "string" ? result.raw.error : null;
+}
+
+function describeTerminalNoFill(label: string, result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {
+  const detail = extractTerminalNoFillDetail(result);
+  if (detail) {
+    return `${label} order not filled (${detail})`;
+  }
+
+  return `${label} order not authoritatively filled (${result.status})`;
 }
 
 function isAwaitingOrderConfirmation(status: LiveOrder["status"]) {
