@@ -122,6 +122,10 @@ export function finalizeIntent({
     resolvedAt: now,
     polyResolution,
     kalshiResolution,
+    legs: intent.legs.map((leg) => ({
+      ...leg,
+      resolvedOutcome: leg.venue === "polymarket" ? polyResolution : kalshiResolution,
+    })) as OrderIntent["legs"],
     realizedPnlUsd,
     roi: totalNotional > 0 ? round4(realizedPnlUsd / totalNotional) : null,
   };
@@ -133,6 +137,10 @@ export function calculateWinningPayout(
   kalshiResolution: "YES" | "NO",
 ) {
   return legs.reduce((sum, leg) => {
+    if (leg.payoutUsd !== null) {
+      return sum + leg.payoutUsd;
+    }
+
     const resolvedOutcome: Resolution = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
     const won = leg.outcome === resolvedOutcome;
     return sum + (won ? leg.filledSize : 0);

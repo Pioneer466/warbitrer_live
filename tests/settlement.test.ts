@@ -77,6 +77,22 @@ describe("live intent settlement", () => {
     expect(calculateWinningPayout(intent.legs, "UP", "YES")).toBeCloseTo(58.9, 4);
   });
 
+  it("uses realized leg payout when a leg was sold before venue settlement", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity,
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+    intent.legs[0].filledSize = 58.9;
+    intent.legs[0].payoutUsd = 57.42;
+    intent.legs[1].filledSize = 51;
+
+    expect(calculateWinningPayout(intent.legs, "UP", "YES")).toBeCloseTo(57.42, 4);
+  });
+
   it("finalizes the intent into a settled record with pnl", () => {
     const intent = createIntentFromOpportunity({
       opportunity,

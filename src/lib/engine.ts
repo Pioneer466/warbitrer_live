@@ -322,7 +322,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_settlements", now, async () => {
-          await reconcileSettlements(now);
+          await reconcileSettlements(settings, now);
         })),
       );
 
@@ -1548,7 +1548,7 @@ async function reconcileLatePrimaryFillRescue(now: number) {
   }
 }
 
-async function reconcileSettlements(now: number) {
+async function reconcileSettlements(settings: StrategyConfig, now: number) {
   const openIntents = await readOpenOrderIntents();
   const settledCandidates = openIntents.filter(
     (intent) => intent.status === "hedged" && intent.slotEndTs + RESOLUTION_GRACE_MS <= now,
@@ -1577,9 +1577,19 @@ async function reconcileSettlements(now: number) {
       continue;
     }
 
-    const payoutUsd = calculateWinningPayout(intent.legs, polyResolution, kalshiResolution);
-    const settled = finalizeIntent({
+    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(
       intent,
+      settings,
+      polyResolution,
+      now,
+    );
+    if (exitAdjustedIntent.status !== "hedged") {
+      continue;
+    }
+
+    const payoutUsd = calculateWinningPayout(exitAdjustedIntent.legs, polyResolution, kalshiResolution);
+    const settled = finalizeIntent({
+      intent: exitAdjustedIntent,
       polyResolution,
       kalshiResolution,
       payoutUsd,
@@ -1588,6 +1598,7 @@ async function reconcileSettlements(now: number) {
     await writeOrderIntent(settled);
     for (const leg of settled.legs) {
       const resolvedOutcome = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
+      const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
       await writeSettlement({
         id: `${settled.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
         intentId: settled.id,
@@ -1595,18 +1606,150 @@ async function reconcileSettlements(now: number) {
         marketRef: leg.marketRef,
         outcome: leg.outcome,
         resolvedOutcome,
-        payoutUsd: leg.outcome === resolvedOutcome ? leg.filledSize : 0,
+        payoutUsd: legPayoutUsd,
         settledAt: now,
         raw: {
           slotKey: settled.slotKey,
           filledSize: leg.filledSize,
           filledPrice: leg.filledPrice,
+          legPayoutUsd,
           polyResolution,
           kalshiResolution,
         },
       });
     }
   }
+}
+
+async function maybeExitPolymarketLegAtSlotEnd(
+  intent: OrderIntent,
+  settings: StrategyConfig,
+  polyResolution: "UP" | "DOWN",
+  now: number,
+) {
+  if (intent.shadow) {
+    return intent;
+  }
+
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  if (
+    !polymarketLeg ||
+    polymarketLeg.filledSize <= 0 ||
+    polymarketLeg.payoutUsd !== null ||
+    now < intent.slotEndTs + RESOLUTION_GRACE_MS
+  ) {
+    return intent;
+  }
+
+  const slot = getCurrentSlot(new Date(intent.slotStartTs + 1));
+  const { polymarket: polymarketState } = await marketDataSupervisor.readSlotState(slot, now);
+  const outcome =
+    polymarketLeg.outcome === "UP" ? polymarketState.quote.outcomes.up : polymarketState.quote.outcomes.down;
+  const sellPrice = outcome.sellPrice ?? outcome.bestBid;
+
+  if (sellPrice === null || sellPrice <= 0) {
+    return intent;
+  }
+
+  const permissivePrice = Math.max(0.001, sellPrice - settings.executionPriceBuffer);
+  const exitLeg = {
+    ...polymarketLeg,
+    side: "SELL" as const,
+    requestedPrice: permissivePrice,
+    requestedSize: polymarketLeg.filledSize,
+    requestedNotionalUsd: polymarketLeg.filledSize * permissivePrice,
+  };
+
+  let lastOrder: LiveOrder | null = null;
+  for (let attempt = 1; attempt <= settings.hedgeRetryAttempts; attempt += 1) {
+    if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
+      await sleep(settings.hedgeRetryDelayMs);
+    }
+
+    const request = buildVenueOrderRequest(exitLeg, settings.maxSlippageBps, "FOK", true);
+    const submission = await polymarketAdapter.placeOrder(request);
+    const result = await confirmImmediateOrderExecution(
+      "polymarket",
+      request,
+      submission,
+      settings.immediateOrderConfirmationTimeoutMs,
+    );
+    const order = buildLiveOrderRecord(intent.id, exitLeg, request, result, Date.now());
+    lastOrder = order;
+    await writeVenueOrder(order);
+
+    if (order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= polymarketLeg.filledSize) {
+      const averageExitPrice = order.averageFillPrice ?? permissivePrice;
+      const payoutUsd = round4(order.filledSize * averageExitPrice - (order.feeUsd ?? 0));
+      const updated = {
+        ...intent,
+        updatedAt: now,
+        failureReason: null,
+        legs: intent.legs.map((leg) =>
+          leg.id === polymarketLeg.id
+            ? {
+                ...leg,
+                status: "unwound",
+                payoutUsd,
+                resolvedOutcome: polyResolution,
+              }
+            : leg,
+        ) as OrderIntent["legs"],
+      };
+      await writeRunEvent({
+        level: "info",
+        eventType: "order.slot_exit.polymarket_filled",
+        message: `Polymarket slot-end exit filled for intent ${intent.id}`,
+        payload: {
+          intentId: intent.id,
+          orderId: order.venueOrderId,
+          filledSize: order.filledSize,
+          averageExitPrice,
+          payoutUsd,
+        },
+        createdAt: now,
+      });
+      return updated;
+    }
+
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.slot_exit.polymarket_retry",
+      message: `Polymarket slot-end exit ${attempt}/${settings.hedgeRetryAttempts} did not fill for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        attempt,
+        attempts: settings.hedgeRetryAttempts,
+        orderId: order.venueOrderId,
+        orderStatus: order.status,
+      },
+      createdAt: now,
+    });
+  }
+
+  if (lastOrder?.filledSize && lastOrder.filledSize > ORDER_SIZE_TOLERANCE) {
+    const failed = markIntentStatus(
+      intent,
+      "failed",
+      now,
+      `Polymarket slot-end exit partially filled (${lastOrder.status}); manual intervention required`,
+    );
+    await writeOrderIntent(failed);
+    await writeCircuitBreaker({
+      key: "global",
+      active: true,
+      reason: "hedge_failure",
+      triggeredAt: now,
+      payload: {
+        intentId: intent.id,
+        stage: "polymarket_slot_exit_partial_fill",
+        orderId: lastOrder.venueOrderId,
+      },
+    });
+    return failed;
+  }
+
+  return intent;
 }
 
 async function reconcileInFlightIntentStates(now: number) {
