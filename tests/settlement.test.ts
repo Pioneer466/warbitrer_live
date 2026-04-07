@@ -1,4 +1,11 @@
-import { calculateWinningPayout, createIntentFromOpportunity, finalizeIntent, summarizeVenueFills } from "@/lib/settlement";
+import {
+  calculateWinningPayout,
+  createIntentFromOpportunity,
+  finalizeIntent,
+  finalizeUnwoundIntent,
+  markIntentStatus,
+  summarizeVenueFills,
+} from "@/lib/settlement";
 import type { LiveOpportunity } from "@/lib/types";
 
 const opportunity: LiveOpportunity = {
@@ -121,6 +128,64 @@ describe("live intent settlement", () => {
     expect(settled.realizedPnlUsd).toBeCloseTo(8.2783, 4);
     expect(settled.realizedPnlUsd).not.toBeNull();
     expect(settled.polyResolution).toBe("UP");
+  });
+
+  it("clears a stale failure reason when an intent recovers", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity,
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+
+    const recovered = markIntentStatus(
+      {
+        ...intent,
+        status: "primary_filled",
+        failureReason: "Late primary fill detected; resuming hedge",
+      },
+      "hedged",
+      1774899960000,
+      null,
+    );
+
+    expect(recovered.status).toBe("hedged");
+    expect(recovered.failureReason).toBeNull();
+  });
+
+  it("finalizes an unwound intent with realized pnl from payout", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity,
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+    intent.legs[0].filledSize = 58.9;
+    intent.legs[0].filledPrice = 0.423;
+    intent.legs[0].feeUsd = 0.15;
+    intent.legs[0].payoutUsd = 24.4;
+    intent.legs[0].status = "unwound";
+    intent.legs[1].filledSize = 0;
+    intent.legs[1].filledPrice = null;
+    intent.legs[1].feeUsd = 0;
+
+    const unwound = finalizeUnwoundIntent({
+      intent: {
+        ...intent,
+        status: "unwind_required",
+      },
+      now: 1774899960000,
+      failureReason: "Hedge failed, primary unwound",
+    });
+
+    expect(unwound.status).toBe("unwound");
+    expect(unwound.realizedPnlUsd).toBeCloseTo(-0.6647, 4);
+    expect(unwound.roi).toBeCloseTo(-0.0265, 4);
+    expect(unwound.failureReason).toBe("Hedge failed, primary unwound");
   });
 
   it("aggregates fills idempotently with a weighted average price", () => {

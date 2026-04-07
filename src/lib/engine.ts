@@ -33,6 +33,7 @@ import {
   calculateWinningPayout,
   createIntentFromOpportunity,
   finalizeIntent,
+  finalizeUnwoundIntent,
   markIntentStatus,
   summarizeVenueFills,
 } from "@/lib/settlement";
@@ -324,6 +325,12 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       );
 
       reconcileErrors.push(
+        ...(await runReconcileStep("clear_recovered_intent_messages", now, async () => {
+          await clearRecoveredIntentFailureReasons(now);
+        })),
+      );
+
+      reconcileErrors.push(
         ...(await runReconcileStep("reconcile_slot_end_polymarket_exits", now, async () => {
           await reconcileSlotEndPolymarketExits(settings, now);
         })),
@@ -332,6 +339,12 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_settlements", now, async () => {
           await reconcileSettlements(settings, now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("backfill_unwound_pnl", now, async () => {
+          await backfillUnwoundIntentPnl(now);
         })),
       );
 
@@ -775,7 +788,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
     }
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-    currentIntent = markIntentStatus(currentIntent, "hedged", now);
+    currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
     await writeOrderIntent(currentIntent);
     return currentIntent;
   }
@@ -825,7 +838,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
           currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
         }
         currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-        currentIntent = markIntentStatus(currentIntent, "hedged", now);
+        currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
         await writeOrderIntent(currentIntent);
         return currentIntent;
       }
@@ -905,7 +918,7 @@ async function executeShadowIntent(intent: OrderIntent, now: number) {
 
   currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
   currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now + 1);
-  currentIntent = markIntentStatus(currentIntent, "hedged", now + 1);
+  currentIntent = markIntentStatus(currentIntent, "hedged", now + 1, null);
   await writeOrderIntent(currentIntent);
   await writeRunEvent({
     level: "info",
@@ -1264,8 +1277,24 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
     await writeVenueOrder(unwindResult);
 
     if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
-      currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindResult, "unwound", now);
-      currentIntent = markIntentStatus(currentIntent, "unwound", now, "Hedge failed, primary unwound");
+      const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
+      const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
+      currentIntent = finalizeUnwoundIntent({
+        intent: {
+          ...currentIntent,
+          legs: currentIntent.legs.map((leg) =>
+            leg.id === primaryLeg.id
+              ? {
+                  ...leg,
+                  status: "unwound",
+                  payoutUsd,
+                }
+              : leg,
+          ) as OrderIntent["legs"],
+        },
+        now,
+        failureReason: "Hedge failed, primary unwound",
+      });
       await writeOrderIntent(currentIntent);
     } else if (unwindResult.filledSize > 0) {
       currentIntent = markIntentStatus(
@@ -1492,6 +1521,9 @@ async function reconcileLatePrimaryFillRescue(now: number) {
     if (!primaryLeg || !hedgeLeg) {
       continue;
     }
+    if (!isLatePrimaryFillRescueEligible(intent, recentOrders)) {
+      continue;
+    }
 
     const primaryOrder = findLatestIntentOrderForLeg(recentOrders, intent.id, primaryLeg);
     if (!primaryOrder || primaryOrder.status !== "filled" || primaryOrder.filledSize <= 0) {
@@ -1650,12 +1682,11 @@ async function reconcileSlotEndPolymarketExits(settings: StrategyConfig, now: nu
       continue;
     }
 
-    const closed = markIntentStatus(
-      exited,
-      "unwound",
+    const closed = finalizeUnwoundIntent({
+      intent: exited,
       now,
-      "Primary exited at slot end after hedge remained incomplete",
-    );
+      failureReason: "Primary exited at slot end after hedge remained incomplete",
+    });
     await writeOrderIntent(closed);
     await writeRunEvent({
       level: "warn",
@@ -1668,6 +1699,42 @@ async function reconcileSlotEndPolymarketExits(settings: StrategyConfig, now: nu
       },
       createdAt: now,
     });
+  }
+}
+
+async function clearRecoveredIntentFailureReasons(now: number) {
+  const openIntents = await readOpenOrderIntents();
+  for (const intent of openIntents) {
+    if (intent.status !== "hedged" || !intent.failureReason) {
+      continue;
+    }
+
+    await writeOrderIntent({
+      ...intent,
+      updatedAt: now,
+      failureReason: null,
+    });
+  }
+}
+
+async function backfillUnwoundIntentPnl(now: number) {
+  const recentIntents = await readRecentOrderIntents(200);
+  for (const intent of recentIntents) {
+    if (intent.shadow || intent.status !== "unwound" || intent.realizedPnlUsd !== null) {
+      continue;
+    }
+
+    if (!intent.legs.some((leg) => leg.payoutUsd !== null)) {
+      continue;
+    }
+
+    await writeOrderIntent(
+      finalizeUnwoundIntent({
+        intent,
+        now,
+        failureReason: intent.failureReason,
+      }),
+    );
   }
 }
 
@@ -1861,8 +1928,24 @@ async function reconcileInFlightIntentStates(now: number) {
       }
 
       if (unwindOrder.status === "filled" && unwindOrder.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
-        currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindOrder, "unwound", now);
-        currentIntent = markIntentStatus(currentIntent, "unwound", now, "Primary unwound after hedge failure");
+        const averageExitPrice = unwindOrder.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
+        const payoutUsd = round4(unwindOrder.filledSize * averageExitPrice - (unwindOrder.feeUsd ?? 0));
+        currentIntent = finalizeUnwoundIntent({
+          intent: {
+            ...currentIntent,
+            legs: currentIntent.legs.map((leg) =>
+              leg.id === primaryLeg.id
+                ? {
+                    ...leg,
+                    status: "unwound",
+                    payoutUsd,
+                  }
+                : leg,
+            ) as OrderIntent["legs"],
+          },
+          now,
+          failureReason: "Primary unwound after hedge failure",
+        });
         await writeOrderIntent(currentIntent);
         continue;
       }
@@ -2016,12 +2099,11 @@ async function reconcileInFlightIntentStates(now: number) {
         if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
           const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
           if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
-            currentIntent = markIntentStatus(
-              exited,
-              "unwound",
+            currentIntent = finalizeUnwoundIntent({
+              intent: exited,
               now,
-              "Primary exited at slot end after hedge remained incomplete",
-            );
+              failureReason: "Primary exited at slot end after hedge remained incomplete",
+            });
             await writeOrderIntent(currentIntent);
             continue;
           }
@@ -2070,7 +2152,7 @@ async function reconcileInFlightIntentStates(now: number) {
 
     if (hedgeOrder.status === "filled") {
       currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-      currentIntent = markIntentStatus(currentIntent, "hedged", now);
+      currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
       await writeOrderIntent(currentIntent);
       continue;
     }
@@ -2104,12 +2186,11 @@ async function reconcileInFlightIntentStates(now: number) {
       if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
         const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
         if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
-          currentIntent = markIntentStatus(
-            exited,
-            "unwound",
+          currentIntent = finalizeUnwoundIntent({
+            intent: exited,
             now,
-            "Primary exited at slot end after hedge remained incomplete",
-          );
+            failureReason: "Primary exited at slot end after hedge remained incomplete",
+          });
           await writeOrderIntent(currentIntent);
           continue;
         }
@@ -2586,6 +2667,29 @@ function hasRecordedPolymarketSlotExit(previous: OrderIntent, next: OrderIntent)
   const previousLeg = previous.legs.find((leg) => leg.venue === "polymarket");
   const nextLeg = next.legs.find((leg) => leg.venue === "polymarket");
   return previousLeg?.payoutUsd === null && nextLeg?.payoutUsd !== null;
+}
+
+export function isLatePrimaryFillRescueEligible(intent: OrderIntent, recentOrders: LiveOrder[]) {
+  const failureReason = intent.failureReason?.toLowerCase() ?? "";
+  if (
+    failureReason.includes("hedge") ||
+    failureReason.includes("unwind") ||
+    failureReason.includes("manual cleanup") ||
+    failureReason.includes("manual intervention required")
+  ) {
+    return false;
+  }
+
+  if (intent.legs.some((leg) => leg.status === "unwound" || leg.payoutUsd !== null)) {
+    return false;
+  }
+
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  if (!primaryLeg) {
+    return false;
+  }
+
+  return !Boolean(findLatestIntentReduceOnlyOrder(recentOrders, intent.id, primaryLeg));
 }
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {

@@ -65,7 +65,7 @@ export function markIntentStatus(intent: OrderIntent, status: OrderIntent["statu
     ...intent,
     status,
     updatedAt: now,
-    failureReason: failureReason ?? intent.failureReason,
+    failureReason: failureReason === undefined ? intent.failureReason : failureReason,
   };
 }
 
@@ -120,12 +120,43 @@ export function finalizeIntent({
     status: "settled",
     updatedAt: now,
     resolvedAt: now,
+    failureReason: null,
     polyResolution,
     kalshiResolution,
     legs: intent.legs.map((leg) => ({
       ...leg,
       resolvedOutcome: leg.venue === "polymarket" ? polyResolution : kalshiResolution,
     })) as OrderIntent["legs"],
+    realizedPnlUsd,
+    roi: totalNotional > 0 ? round4(realizedPnlUsd / totalNotional) : null,
+  };
+}
+
+export function finalizeUnwoundIntent({
+  intent,
+  now,
+  failureReason,
+}: {
+  intent: OrderIntent;
+  now: number;
+  failureReason: string | null;
+}): OrderIntent {
+  const totalNotional = intent.legs.reduce((sum, leg) => {
+    if (leg.filledSize <= 0 && leg.filledPrice === null) {
+      return sum;
+    }
+
+    return sum + calculateLegSpentUsd(leg);
+  }, 0);
+  const payoutUsd = intent.legs.reduce((sum, leg) => sum + (leg.payoutUsd ?? 0), 0);
+  const realizedPnlUsd = round4(payoutUsd - totalNotional);
+
+  return {
+    ...intent,
+    status: "unwound",
+    updatedAt: now,
+    resolvedAt: intent.resolvedAt ?? now,
+    failureReason,
     realizedPnlUsd,
     roi: totalNotional > 0 ? round4(realizedPnlUsd / totalNotional) : null,
   };
