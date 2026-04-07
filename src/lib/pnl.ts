@@ -31,10 +31,12 @@ export function buildPnlSnapshot({
 }
 
 export function enrichPnlSnapshot(
-  snapshot: Omit<PnlSnapshot, "strategyPnlUsd" | "accountDeltaUsd" | "baselineEquityUsd">,
+  snapshot: Omit<PnlSnapshot, "strategyPnlUsd" | "accountDeltaUsd" | "baselineEquityUsd" | "peakEquityUsd" | "drawdownUsd">,
   baselineEquityUsd?: number | null,
+  peakEquityUsd?: number | null,
 ): PnlSnapshot {
   const effectiveBaseline = baselineEquityUsd ?? snapshot.equityUsd;
+  const effectivePeak = peakEquityUsd ?? snapshot.equityUsd;
   const strategyPnlUsd = round4(snapshot.realizedPnlUsd + snapshot.unrealizedPnlUsd);
 
   return {
@@ -42,6 +44,8 @@ export function enrichPnlSnapshot(
     strategyPnlUsd,
     accountDeltaUsd: round4(snapshot.equityUsd - effectiveBaseline),
     baselineEquityUsd: effectiveBaseline,
+    peakEquityUsd: effectivePeak,
+    drawdownUsd: round4(snapshot.equityUsd - effectivePeak),
   };
 }
 

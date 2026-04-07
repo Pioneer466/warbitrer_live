@@ -36,4 +36,12 @@ describe("settings schema", () => {
     expect(settings.hedgeRetryAttempts).toBe(5);
     expect(settings.hedgeRetryDelayMs).toBe(500);
   });
+
+  it("accepts a 3 minute entry cutoff", () => {
+    const settings = normalizeSettings({
+      entryCutoffSeconds: 180,
+    });
+
+    expect(settings.entryCutoffSeconds).toBe(180);
+  });
 });

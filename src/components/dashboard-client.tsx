@@ -49,6 +49,15 @@ export function DashboardClient() {
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
+  const drawdownUsd = pnl?.drawdownUsd ?? 0;
+  const showDrawdownHeadline = pnl ? drawdownUsd <= -5 : false;
+  const accountHeadlineLabel = showDrawdownHeadline ? "Drawdown" : "Delta Compte";
+  const accountHeadlineValue = showDrawdownHeadline ? drawdownUsd : (accountDeltaUsd ?? 0);
+  const accountHeadlineMeta = pnl
+    ? showDrawdownHeadline
+      ? `Depuis pic ${formatCurrency(pnl.peakEquityUsd ?? pnl.equityUsd)} · Delta total ${formatCurrency(accountDeltaUsd ?? 0)} · Strategie ${formatCurrency(strategyPnlUsd ?? 0)}`
+      : `DD ${formatCurrency(drawdownUsd)} · Strategie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}`
+    : undefined;
 
   return (
     <div className="space-y-5">
@@ -81,10 +90,10 @@ export function DashboardClient() {
           <MetricCell label="Cash" value={pnl ? formatCurrency(pnl.cashUsd) : "--"} />
           <MetricCell label="Positions" value={String(positions.length)} meta={`${openIntents.length} intents ouverts`} />
           <MetricCell
-            label="P&L Compte"
-            value={pnl ? formatCurrency(accountDeltaUsd ?? 0) : "--"}
-            meta={pnl ? `Strategie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}` : undefined}
-            tone={pnl && (accountDeltaUsd ?? 0) >= 0 ? "cyan" : "rose"}
+            label={accountHeadlineLabel}
+            value={pnl ? formatCurrency(accountHeadlineValue) : "--"}
+            meta={accountHeadlineMeta}
+            tone={pnl && accountHeadlineValue >= 0 ? "cyan" : "rose"}
           />
         </div>
       </section>

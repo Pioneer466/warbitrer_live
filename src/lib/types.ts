@@ -375,6 +375,8 @@ export type PnlSnapshot = {
   strategyPnlUsd: number;
   accountDeltaUsd: number;
   baselineEquityUsd: number | null;
+  peakEquityUsd: number | null;
+  drawdownUsd: number;
   feesUsd: number;
   venueBreakdown: VenueBalance[];
 };

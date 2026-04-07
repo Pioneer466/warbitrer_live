@@ -287,6 +287,46 @@ describe("live signal engine", () => {
     expect(signal.reasons).toContain("Entrée bloquée sur les 20 dernières secondes");
   });
 
+  it("blocks entries when Polymarket already looks terminal", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        status: "closed",
+        resolution: "UP",
+      },
+      kalshi,
+      settings,
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Marché Polymarket déjà résolu");
+  });
+
+  it("blocks entries when Kalshi already looks terminal", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket,
+      kalshi: {
+        ...kalshi,
+        status: "finalized",
+        resolution: "YES",
+      },
+      settings,
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Marché Kalshi déjà résolu");
+  });
+
   it("blocks entries when a venue feed is stale", () => {
     const [signal] = buildSignals({
       slotKey: "1774899000000",

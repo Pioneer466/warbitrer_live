@@ -31,6 +31,7 @@ export function buildSignals({
   secondsRemaining,
 }: SignalContext): LiveOpportunity[] {
   const marketAlignmentReason =
+    getTerminalMarketReason(polymarket, kalshi) ??
     getLateEntryReason(secondsRemaining, settings.entryCutoffSeconds) ??
     getMarketAlignmentReason(polymarket, kalshi);
 
@@ -296,6 +297,26 @@ function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuo
     polymarket.ref.slotKey !== kalshi.ref.slotKey
   ) {
     return "Marchés non alignés sur le même créneau";
+  }
+
+  return null;
+}
+
+function getTerminalMarketReason(polymarket: PolymarketQuote, kalshi: KalshiQuote) {
+  if (polymarket.resolution !== null) {
+    return "Marché Polymarket déjà résolu";
+  }
+
+  if (kalshi.resolution !== null) {
+    return "Marché Kalshi déjà résolu";
+  }
+
+  if (polymarket.status === "closed") {
+    return "Marché Polymarket déjà fermé";
+  }
+
+  if (kalshi.status !== "active" && kalshi.status !== "open") {
+    return `Marché Kalshi non tradable (${kalshi.status})`;
   }
 
   return null;

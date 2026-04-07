@@ -887,12 +887,27 @@ async function getFirstTrackedEquityUsd(pool: Pool) {
     `
       SELECT equity_usd
       FROM pnl_snapshots
-      WHERE equity_usd > 0
+      WHERE isfinite(equity_usd)
+        AND equity_usd > 0
       ORDER BY captured_at ASC, id ASC
       LIMIT 1
     `,
   );
   return result.rows[0] ? Number(result.rows[0].equity_usd) : null;
+}
+
+async function getPeakTrackedEquityUsd(pool: Pool) {
+  const result = await pool.query<{ equity_usd: number }>(
+    `
+      SELECT MAX(equity_usd) AS equity_usd
+      FROM pnl_snapshots
+      WHERE isfinite(equity_usd)
+        AND equity_usd > 0
+    `,
+  );
+  return result.rows[0]?.equity_usd !== null && result.rows[0]?.equity_usd !== undefined
+    ? Number(result.rows[0].equity_usd)
+    : null;
 }
 
 export async function upsertBridgeTransfer(pool: Pool, transfer: BridgeTransfer) {
@@ -1116,7 +1131,9 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     (breaker) => breaker.key === "global" || breaker.key === `slot:${slot.key}`,
   );
   const pnl = await getLatestPnlSnapshot(pool);
-  const baselineEquityUsd = pnl ? await getFirstTrackedEquityUsd(pool) : null;
+  const [baselineEquityUsd, peakEquityUsd] = pnl
+    ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
+    : [null, null];
   return {
     fetchedAt: Date.now(),
     slot,
@@ -1130,7 +1147,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     recentOrders: await listRecentVenueOrders(pool, 20),
     recentFills: await listRecentFills(pool, 20),
     positions: await listPositions(pool),
-    pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd) : null,
+    pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
     circuitBreakers: relevantBreakers,
     runEvents: await listRecentRunEvents(pool, 10),
