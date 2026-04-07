@@ -887,6 +887,7 @@ async function getFirstTrackedEquityUsd(pool: Pool) {
     `
       SELECT equity_usd
       FROM pnl_snapshots
+      WHERE equity_usd > 0
       ORDER BY captured_at ASC, id ASC
       LIMIT 1
     `,
