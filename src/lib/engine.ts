@@ -204,7 +204,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
       const openIntents = await readOpenOrderIntents();
       const resumed = await resumeInFlightIntents(
-        openIntents.filter((intent) => intent.slotEndTs > now),
+        openIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
         slot,
         settings,
         now,
@@ -320,6 +320,12 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_inflight_intents", now, async () => {
           await reconcileInFlightIntentStates(now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("reconcile_slot_end_polymarket_exits", now, async () => {
+          await reconcileSlotEndPolymarketExits(settings, now);
         })),
       );
 
@@ -1498,7 +1504,7 @@ async function reconcileLatePrimaryFillRescue(now: number) {
     }
 
     let rescued = updateIntentLeg(intent, primaryLeg.venue, primaryOrder, "filled", now);
-    if (intent.slotEndTs > now) {
+    if (intent.slotEndTs + RESOLUTION_GRACE_MS > now) {
       rescued = markIntentStatus(rescued, "primary_filled", now, "Late primary fill detected; resuming hedge");
       await writeOrderIntent(rescued);
       await writeRunEvent({
@@ -1583,7 +1589,6 @@ async function reconcileSettlements(settings: StrategyConfig, now: number) {
     const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(
       intent,
       settings,
-      polyResolution,
       now,
     );
     if (exitAdjustedIntent.status !== "hedged") {
@@ -1624,10 +1629,51 @@ async function reconcileSettlements(settings: StrategyConfig, now: number) {
   }
 }
 
+async function reconcileSlotEndPolymarketExits(settings: StrategyConfig, now: number) {
+  const openIntents = await readOpenOrderIntents();
+  const candidates = openIntents.filter(
+    (intent) =>
+      !intent.shadow &&
+      intent.slotEndTs + RESOLUTION_GRACE_MS <= now &&
+      (intent.status === "hedged" ||
+        ((intent.status === "primary_filled" || intent.status === "hedging") && intent.primaryVenue === "polymarket")),
+  );
+
+  for (const intent of candidates) {
+    const exited = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now);
+    if (!hasRecordedPolymarketSlotExit(intent, exited)) {
+      continue;
+    }
+
+    if (intent.status === "hedged") {
+      await writeOrderIntent(exited);
+      continue;
+    }
+
+    const closed = markIntentStatus(
+      exited,
+      "unwound",
+      now,
+      "Primary exited at slot end after hedge remained incomplete",
+    );
+    await writeOrderIntent(closed);
+    await writeRunEvent({
+      level: "warn",
+      eventType: "intent.unwound.slot_end_exit",
+      message: `Intent ${intent.id} closed via Polymarket slot-end exit after hedge remained incomplete`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        primaryVenue: intent.primaryVenue,
+      },
+      createdAt: now,
+    });
+  }
+}
+
 async function maybeExitPolymarketLegAtSlotEnd(
   intent: OrderIntent,
   settings: StrategyConfig,
-  polyResolution: "UP" | "DOWN",
   now: number,
 ) {
   if (intent.shadow) {
@@ -1669,17 +1715,34 @@ async function maybeExitPolymarketLegAtSlotEnd(
       await sleep(settings.hedgeRetryDelayMs);
     }
 
-    const request = buildVenueOrderRequest(exitLeg, settings.maxSlippageBps, "FOK", true);
-    const submission = await polymarketAdapter.placeOrder(request);
-    const result = await confirmImmediateOrderExecution(
-      "polymarket",
-      request,
-      submission,
-      settings.immediateOrderConfirmationTimeoutMs,
-    );
-    const order = buildLiveOrderRecord(intent.id, exitLeg, request, result, Date.now());
-    lastOrder = order;
-    await writeVenueOrder(order);
+    let order: LiveOrder;
+    try {
+      const request = buildVenueOrderRequest(exitLeg, settings.maxSlippageBps, "FOK", true);
+      const submission = await polymarketAdapter.placeOrder(request);
+      const result = await confirmImmediateOrderExecution(
+        "polymarket",
+        request,
+        submission,
+        settings.immediateOrderConfirmationTimeoutMs,
+      );
+      order = buildLiveOrderRecord(intent.id, exitLeg, request, result, Date.now());
+      lastOrder = order;
+      await writeVenueOrder(order);
+    } catch (error) {
+      await writeRunEvent({
+        level: "warn",
+        eventType: "order.slot_exit.polymarket_submit_failed",
+        message: `Polymarket slot-end exit ${attempt}/${settings.hedgeRetryAttempts} submission failed for intent ${intent.id}`,
+        payload: {
+          intentId: intent.id,
+          attempt,
+          attempts: settings.hedgeRetryAttempts,
+          error: toErrorMessage(error),
+        },
+        createdAt: now,
+      });
+      continue;
+    }
 
     if (order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= polymarketLeg.filledSize) {
       const averageExitPrice = order.averageFillPrice ?? permissivePrice;
@@ -1694,7 +1757,6 @@ async function maybeExitPolymarketLegAtSlotEnd(
                 ...leg,
                 status: "unwound",
                 payoutUsd,
-                resolvedOutcome: polyResolution,
               }
             : leg,
         ) as OrderIntent["legs"],
@@ -1951,6 +2013,20 @@ async function reconcileInFlightIntentStates(now: number) {
 
     if (!hedgeOrder) {
       if (stale && (intent.status === "primary_filled" || intent.status === "hedging")) {
+        if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
+          const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
+          if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
+            currentIntent = markIntentStatus(
+              exited,
+              "unwound",
+              now,
+              "Primary exited at slot end after hedge remained incomplete",
+            );
+            await writeOrderIntent(currentIntent);
+            continue;
+          }
+        }
+
         await writeRunEvent({
           level: "error",
           eventType: "intent.failed.hedge_missing",
@@ -2025,6 +2101,20 @@ async function reconcileInFlightIntentStates(now: number) {
     }
 
     if (stale && (isTerminalOrderStatus(hedgeOrder.status) || isAwaitingOrderConfirmation(hedgeOrder.status))) {
+      if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
+        const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
+        if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
+          currentIntent = markIntentStatus(
+            exited,
+            "unwound",
+            now,
+            "Primary exited at slot end after hedge remained incomplete",
+          );
+          await writeOrderIntent(currentIntent);
+          continue;
+        }
+      }
+
       await attemptPrimaryUnwindAfterHedgeFailure(
         currentIntent,
         primaryLeg,
@@ -2489,7 +2579,13 @@ async function maybeRunDatabaseMaintenance(now: number) {
 }
 
 function isInFlightIntentStale(intent: OrderIntent, now: number) {
-  return intent.slotEndTs <= now || now - intent.updatedAt >= IN_FLIGHT_INTENT_STALE_MS;
+  return intent.slotEndTs + RESOLUTION_GRACE_MS <= now || now - intent.updatedAt >= IN_FLIGHT_INTENT_STALE_MS;
+}
+
+function hasRecordedPolymarketSlotExit(previous: OrderIntent, next: OrderIntent) {
+  const previousLeg = previous.legs.find((leg) => leg.venue === "polymarket");
+  const nextLeg = next.legs.find((leg) => leg.venue === "polymarket");
+  return previousLeg?.payoutUsd === null && nextLeg?.payoutUsd !== null;
 }
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {
