@@ -18,7 +18,7 @@ export function buildPnlSnapshot({
   const positionsValueUsd = round4(Math.max(0, equityUsd - cashUsd));
   const unrealizedPnlUsd = round4(positions.reduce((sum, position) => sum + position.unrealizedPnlUsd, 0));
 
-  return {
+  return enrichPnlSnapshot({
     capturedAt,
     cashUsd,
     equityUsd,
@@ -27,6 +27,21 @@ export function buildPnlSnapshot({
     unrealizedPnlUsd,
     feesUsd: round4(feesUsd),
     venueBreakdown: balances,
+  });
+}
+
+export function enrichPnlSnapshot(
+  snapshot: Omit<PnlSnapshot, "strategyPnlUsd" | "accountDeltaUsd" | "baselineEquityUsd">,
+  baselineEquityUsd?: number | null,
+): PnlSnapshot {
+  const effectiveBaseline = baselineEquityUsd ?? snapshot.equityUsd;
+  const strategyPnlUsd = round4(snapshot.realizedPnlUsd + snapshot.unrealizedPnlUsd);
+
+  return {
+    ...snapshot,
+    strategyPnlUsd,
+    accountDeltaUsd: round4(snapshot.equityUsd - effectiveBaseline),
+    baselineEquityUsd: effectiveBaseline,
   };
 }
 

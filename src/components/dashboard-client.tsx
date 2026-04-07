@@ -47,6 +47,8 @@ export function DashboardClient() {
   const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
   const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
+  const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
+  const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
 
   return (
     <div className="space-y-5">
@@ -79,10 +81,10 @@ export function DashboardClient() {
           <MetricCell label="Cash" value={pnl ? formatCurrency(pnl.cashUsd) : "--"} />
           <MetricCell label="Positions" value={String(positions.length)} meta={`${openIntents.length} intents ouverts`} />
           <MetricCell
-            label="P&L"
-            value={pnl ? formatCurrency(pnl.realizedPnlUsd + pnl.unrealizedPnlUsd) : "--"}
-            meta={pnl ? `Frais ${formatCurrency(pnl.feesUsd)}` : undefined}
-            tone={pnl && pnl.realizedPnlUsd + pnl.unrealizedPnlUsd >= 0 ? "cyan" : "rose"}
+            label="P&L Compte"
+            value={pnl ? formatCurrency(accountDeltaUsd ?? 0) : "--"}
+            meta={pnl ? `Strategie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}` : undefined}
+            tone={pnl && (accountDeltaUsd ?? 0) >= 0 ? "cyan" : "rose"}
           />
         </div>
       </section>

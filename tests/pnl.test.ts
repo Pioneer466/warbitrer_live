@@ -62,6 +62,9 @@ describe("pnl snapshot", () => {
     expect(snapshot.positionsValueUsd).toBeCloseTo(2.41, 4);
     expect(snapshot.realizedPnlUsd).toBeCloseTo(12.34, 4);
     expect(snapshot.unrealizedPnlUsd).toBeCloseTo(0, 4);
+    expect(snapshot.strategyPnlUsd).toBeCloseTo(12.34, 4);
+    expect(snapshot.accountDeltaUsd).toBeCloseTo(0, 4);
+    expect(snapshot.baselineEquityUsd).toBeCloseTo(105.88, 4);
     expect(snapshot.feesUsd).toBeCloseTo(11.36, 4);
   });
 });

@@ -2,6 +2,7 @@ import { Pool, types } from "pg";
 
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
+import { enrichPnlSnapshot } from "@/lib/pnl";
 import { normalizeSettings } from "@/lib/settings-schema";
 import type {
   DatabaseMaintenanceSummary,
@@ -881,6 +882,18 @@ export async function getLatestPnlSnapshot(pool: Pool): Promise<PnlSnapshot | nu
   return result.rows[0] ? mapPnlSnapshotRow(result.rows[0]) : null;
 }
 
+async function getFirstTrackedEquityUsd(pool: Pool) {
+  const result = await pool.query<{ equity_usd: number }>(
+    `
+      SELECT equity_usd
+      FROM pnl_snapshots
+      ORDER BY captured_at ASC, id ASC
+      LIMIT 1
+    `,
+  );
+  return result.rows[0] ? Number(result.rows[0].equity_usd) : null;
+}
+
 export async function upsertBridgeTransfer(pool: Pool, transfer: BridgeTransfer) {
   await pool.query(
     `
@@ -1101,6 +1114,8 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   const relevantBreakers = allBreakers.filter(
     (breaker) => breaker.key === "global" || breaker.key === `slot:${slot.key}`,
   );
+  const pnl = await getLatestPnlSnapshot(pool);
+  const baselineEquityUsd = pnl ? await getFirstTrackedEquityUsd(pool) : null;
   return {
     fetchedAt: Date.now(),
     slot,
@@ -1114,7 +1129,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     recentOrders: await listRecentVenueOrders(pool, 20),
     recentFills: await listRecentFills(pool, 20),
     positions: await listPositions(pool),
-    pnl: await getLatestPnlSnapshot(pool),
+    pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd) : null,
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
     circuitBreakers: relevantBreakers,
     runEvents: await listRecentRunEvents(pool, 10),
@@ -1257,7 +1272,7 @@ function mapPositionRow(row: any): PositionSnapshot {
 }
 
 function mapPnlSnapshotRow(row: any): PnlSnapshot {
-  return {
+  return enrichPnlSnapshot({
     id: row.id,
     capturedAt: row.captured_at,
     equityUsd: row.equity_usd,
@@ -1267,7 +1282,7 @@ function mapPnlSnapshotRow(row: any): PnlSnapshot {
     unrealizedPnlUsd: row.unrealized_pnl_usd,
     feesUsd: row.fees_usd,
     venueBreakdown: row.venue_breakdown_json,
-  };
+  });
 }
 
 function mapBridgeTransferRow(row: any): BridgeTransfer {
