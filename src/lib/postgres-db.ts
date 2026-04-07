@@ -586,6 +586,18 @@ export async function findOrderIntent(pool: Pool, intentId: string) {
   return result.rows[0] ? mapOrderIntentRow(result.rows[0]) : null;
 }
 
+export async function getLiveRealizedPnlUsd(pool: Pool) {
+  const result = await pool.query<{ realized_pnl_usd: number }>(
+    `
+      SELECT COALESCE(SUM(realized_pnl_usd), 0) AS realized_pnl_usd
+      FROM order_intents
+      WHERE shadow = false
+        AND realized_pnl_usd IS NOT NULL
+    `,
+  );
+  return Number(result.rows[0]?.realized_pnl_usd ?? 0);
+}
+
 export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
   await pool.query(
     `
@@ -717,6 +729,17 @@ export async function listRecentFills(pool: Pool, limit = 100): Promise<LiveFill
     [limit],
   );
   return result.rows.map(mapFillRow);
+}
+
+export async function getLiveFeesUsd(pool: Pool) {
+  const result = await pool.query<{ fees_usd: number }>(
+    `
+      SELECT COALESCE(SUM(fee_usd), 0) AS fees_usd
+      FROM fills
+      WHERE shadow = false
+    `,
+  );
+  return Number(result.rows[0]?.fees_usd ?? 0);
 }
 
 export async function listFillsForIntentVenue(pool: Pool, intentId: string, venue: Venue): Promise<LiveFill[]> {

@@ -12,6 +12,7 @@ import {
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
+import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
   createPolymarketAdapter,
@@ -43,6 +44,8 @@ import {
   readFillsForIntentVenue,
   readLastEntryCosts,
   readLatestSnapshot,
+  readLiveFeesUsd,
+  readLiveRealizedPnlUsd,
   readOpenOrderIntents,
   readPositions,
   readRecentFills,
@@ -2037,24 +2040,21 @@ async function reconcileInFlightIntentStates(now: number) {
 }
 
 async function refreshPnl(now: number, positions: PositionSnapshot[]) {
-  const balances = await readVenueBalances();
-  const cashUsd = balances.reduce((sum, balance) => sum + balance.availableBalanceUsd, 0);
-  const positionsValueUsd = positions.reduce((sum, position) => sum + position.currentValueUsd, 0);
-  const realizedPnlUsd = positions.reduce((sum, position) => sum + position.realizedPnlUsd, 0);
-  const unrealizedPnlUsd = positions.reduce((sum, position) => sum + position.unrealizedPnlUsd, 0);
-  const recentFills = await readRecentFills(200);
-  const feesUsd = recentFills.reduce((sum, fill) => sum + fill.feeUsd, 0);
+  const [balances, realizedPnlUsd, feesUsd] = await Promise.all([
+    readVenueBalances(),
+    readLiveRealizedPnlUsd(),
+    readLiveFeesUsd(),
+  ]);
 
-  await writePnlSnapshot({
-    capturedAt: now,
-    cashUsd,
-    equityUsd: cashUsd + positionsValueUsd,
-    positionsValueUsd,
-    realizedPnlUsd,
-    unrealizedPnlUsd,
-    feesUsd,
-    venueBreakdown: balances,
-  });
+  await writePnlSnapshot(
+    buildPnlSnapshot({
+      capturedAt: now,
+      balances,
+      positions,
+      realizedPnlUsd,
+      feesUsd,
+    }),
+  );
 }
 
 function buildVenueOrderRequest(

@@ -104,15 +104,18 @@ type KalshiBalanceSummary = {
   notes: string[];
 };
 
+export type KalshiPosition = {
+  ticker: string;
+  position_fp: string;
+  total_traded_dollars: string;
+  market_exposure_dollars: string;
+  realized_pnl_dollars: string;
+  fees_paid_dollars: string;
+  last_updated_ts: string;
+};
+
 type KalshiPositionsResponse = {
-  market_positions: Array<{
-    ticker: string;
-    position_fp: string;
-    market_exposure_dollars: string;
-    realized_pnl_dollars: string;
-    fees_paid_dollars: string;
-    last_updated_ts: string;
-  }>;
+  market_positions: KalshiPosition[];
 };
 
 type KalshiOrderResponse = {
@@ -403,6 +406,30 @@ export function deriveKalshiOutcomeQuotes(
   };
 }
 
+export function mapKalshiPosition(position: KalshiPosition, now = Date.now()): PositionSnapshot {
+  const signedSize = Number(position.position_fp);
+  const size = Math.abs(signedSize);
+  const totalTradedUsd = Number(position.total_traded_dollars);
+  const currentValueUsd = Number(position.market_exposure_dollars);
+
+  return {
+    id: `kalshi:${position.ticker}`,
+    venue: "kalshi",
+    marketRef: position.ticker,
+    outcome: signedSize >= 0 ? "YES" : "NO",
+    size,
+    averagePrice: size > 0 ? round4(totalTradedUsd / size) : null,
+    currentPrice: size > 0 ? round4(currentValueUsd / size) : null,
+    currentValueUsd,
+    realizedPnlUsd: Number(position.realized_pnl_dollars),
+    unrealizedPnlUsd: round4(currentValueUsd - totalTradedUsd),
+    redeemable: false,
+    mergeable: false,
+    updatedAt: Date.parse(position.last_updated_ts) || now,
+    raw: position as unknown as Record<string, unknown>,
+  };
+}
+
 export function extractKalshiLastTradePrices(
   trades: KalshiTrade[],
   fallbackLastPrice?: number | null,
@@ -470,22 +497,7 @@ export function createKalshiAdapter(): VenueAdapter {
       }
 
       const response = await kalshiFetch<KalshiPositionsResponse>("/portfolio/positions");
-      return response.market_positions.map((position) => ({
-        id: `kalshi:${position.ticker}`,
-        venue: "kalshi",
-        marketRef: position.ticker,
-        outcome: Number(position.position_fp) >= 0 ? "YES" : "NO",
-        size: Math.abs(Number(position.position_fp)),
-        averagePrice: null,
-        currentPrice: null,
-        currentValueUsd: Number(position.market_exposure_dollars),
-        realizedPnlUsd: Number(position.realized_pnl_dollars),
-        unrealizedPnlUsd: 0,
-        redeemable: false,
-        mergeable: false,
-        updatedAt: Date.parse(position.last_updated_ts) || now,
-        raw: position as unknown as Record<string, unknown>,
-      }));
+      return response.market_positions.map((position) => mapKalshiPosition(position, now));
     },
     async placeOrder(order) {
       try {

@@ -137,6 +137,14 @@ export async function readLatestPnlSnapshot() {
   return postgres.getLatestPnlSnapshot(await db());
 }
 
+export async function readLiveRealizedPnlUsd() {
+  return postgres.getLiveRealizedPnlUsd(await db());
+}
+
+export async function readLiveFeesUsd() {
+  return postgres.getLiveFeesUsd(await db());
+}
+
 export async function writeBridgeTransfer(transfer: BridgeTransfer) {
   return postgres.upsertBridgeTransfer(await db(), transfer);
 }
