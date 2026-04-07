@@ -15,6 +15,8 @@ export const settingsSchema = z.object({
   maxSlippageBps: z.number().int().min(1).max(2_000),
   immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
   executionPriceBuffer: z.number().nonnegative().max(0.1),
+  hedgeRetryAttempts: z.number().int().min(0).max(10),
+  hedgeRetryDelayMs: z.number().int().min(0).max(5_000),
   entryCutoffSeconds: z.number().int().min(1).max(120),
   maxOpenIntentsPerSlot: z.number().int().min(1).max(10),
   maxVenueExposureUsd: z.number().positive().max(1_000_000),

@@ -6,6 +6,8 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
+    expect(settings.hedgeRetryAttempts).toBe(3);
+    expect(settings.hedgeRetryDelayMs).toBe(350);
   });
 
   it("accepts explicit execution buffer overrides", () => {
@@ -21,6 +23,8 @@ describe("settings schema", () => {
       maxSlippageBps: 30,
       immediateOrderConfirmationTimeoutMs: 12000,
       executionPriceBuffer: 0.02,
+      hedgeRetryAttempts: 5,
+      hedgeRetryDelayMs: 500,
       entryCutoffSeconds: 20,
       maxOpenIntentsPerSlot: 1,
       maxVenueExposureUsd: 1000,
@@ -29,5 +33,7 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(12000);
     expect(settings.executionPriceBuffer).toBe(0.02);
+    expect(settings.hedgeRetryAttempts).toBe(5);
+    expect(settings.hedgeRetryDelayMs).toBe(500);
   });
 });

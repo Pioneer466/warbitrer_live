@@ -796,7 +796,16 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
   }
 
   if (isTerminalOrderStatus(hedgeResult.status)) {
-    const retried = await retryLegWithinExecutionBuffer(currentIntent, hedgeLeg, slot, settings, now, "hedge");
+    const retried = await retryLegWithinExecutionBufferWithAttempts(
+      currentIntent,
+      hedgeLeg,
+      slot,
+      settings,
+      now,
+      "hedge",
+      settings.hedgeRetryAttempts,
+      settings.hedgeRetryDelayMs,
+    );
     if (retried) {
       currentIntent = retried.intent;
       hedgeResult = retried.result;
@@ -1083,6 +1092,67 @@ async function retryLegWithinExecutionBuffer(
     order,
     result,
   };
+}
+
+async function retryLegWithinExecutionBufferWithAttempts(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  stage: "primary" | "hedge",
+  attempts: number,
+  retryDelayMs: number,
+) {
+  if (attempts <= 0) {
+    return null;
+  }
+
+  let currentIntent = intent;
+  let lastResult: Awaited<ReturnType<typeof retryLegWithinExecutionBuffer>> = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1 && retryDelayMs > 0) {
+      await sleep(retryDelayMs);
+    }
+
+    const retried = await retryLegWithinExecutionBuffer(
+      currentIntent,
+      leg,
+      slot,
+      settings,
+      Date.now(),
+      stage,
+    );
+    if (!retried) {
+      return lastResult;
+    }
+
+    lastResult = retried;
+    currentIntent = retried.intent;
+
+    if (!isTerminalOrderStatus(retried.result.status) || retried.order.filledSize > 0) {
+      return retried;
+    }
+
+    await writeRunEvent({
+      level: "warn",
+      eventType: `order.${stage}.retry_terminal`,
+      message: `${stage === "primary" ? "Primary" : "Hedge"} retry ${attempt}/${attempts} ended without fill`,
+      payload: {
+        intentId: retried.intent.id,
+        venue: leg.venue,
+        attempt,
+        attempts,
+        orderId: retried.order.venueOrderId,
+        orderStatus: retried.result.status,
+        detail: extractTerminalNoFillDetail(retried.result),
+      },
+      createdAt: Date.now(),
+    });
+  }
+
+  return lastResult;
 }
 
 async function repriceIntentWithinExecutionBuffer(
