@@ -6,6 +6,7 @@ import {
   fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  getKalshiOrderPriceUsd,
   getKalshiSoftNoFillMessage,
   mapKalshiPosition,
   mapKalshiOrderStatus,
@@ -281,6 +282,20 @@ describe("Kalshi quote derivation", () => {
     ).toContain("FOK orders are fully filled or killed");
 
     expect(getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 401: authentication_error"))).toBeNull();
+  });
+
+  it("maps Kalshi order prices on the correct YES/NO side", () => {
+    expect(
+      getKalshiOrderPriceUsd("NO", {
+        yes_price_dollars: "0.60",
+      }),
+    ).toBeCloseTo(0.4, 4);
+
+    expect(
+      getKalshiOrderPriceUsd("YES", {
+        no_price_dollars: "0.60",
+      }),
+    ).toBeCloseTo(0.4, 4);
   });
 
   it("rounds Kalshi order prices onto the order grid before submission", () => {

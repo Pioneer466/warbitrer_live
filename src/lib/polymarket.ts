@@ -334,31 +334,54 @@ export function createPolymarketAdapter(): VenueAdapter {
     },
     async placeOrder(order) {
       const client = createClobClient();
-      const response = await client.createAndPostMarketOrder(
-        {
-          tokenID: order.tokenId!,
-          amount: order.side === "BUY" ? order.maxCostUsd : order.size,
-          side: order.side === "BUY" ? Side.BUY : Side.SELL,
-          price: order.price ?? undefined,
-          orderType: order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
-        },
-        undefined,
-        order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
-      );
+      try {
+        const response = await client.createAndPostMarketOrder(
+          {
+            tokenID: order.tokenId!,
+            amount: order.side === "BUY" ? order.maxCostUsd : order.size,
+            side: order.side === "BUY" ? Side.BUY : Side.SELL,
+            price: order.price ?? undefined,
+            orderType: order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
+          },
+          undefined,
+          order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
+        );
 
-      return {
-        venue: "polymarket",
-        venueOrderId: response.orderID,
-        status: response.success
-          ? typeof response.status === "string" && response.status.toLowerCase() === "matched"
-            ? "pending"
-            : "live"
-          : "rejected",
-        filledSize: 0,
-        averageFillPrice: null,
-        feeUsd: 0,
-        raw: response as unknown as Record<string, unknown>,
-      };
+        return {
+          venue: "polymarket",
+          venueOrderId: response.orderID,
+          status: response.success
+            ? typeof response.status === "string" && response.status.toLowerCase() === "matched"
+              ? "pending"
+              : "live"
+            : "rejected",
+          filledSize: 0,
+          averageFillPrice: null,
+          feeUsd: 0,
+          raw: response as unknown as Record<string, unknown>,
+        };
+      } catch (error) {
+        const noFillMessage = getPolymarketSoftNoFillMessage(error);
+        if (noFillMessage) {
+          return {
+            venue: "polymarket",
+            venueOrderId: `killed:${order.clientOrderId}`,
+            status: "canceled",
+            filledSize: 0,
+            averageFillPrice: null,
+            feeUsd: 0,
+            raw: {
+              softNoFill: true,
+              error: noFillMessage,
+              clientOrderId: order.clientOrderId,
+              marketRef: order.marketRef,
+              orderType: order.orderType,
+            },
+          };
+        }
+
+        throw error;
+      }
     },
     async cancelOrder(orderId: string) {
       const client = createClobClient();
@@ -486,6 +509,22 @@ export async function confirmPolymarketOrderExecution(params: {
     order: latestOrder,
     trades: latestTrades,
   };
+}
+
+export function getPolymarketSoftNoFillMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+
+  if (
+    normalized.includes("order couldn't be fully filled") ||
+    normalized.includes("order could not be fully filled") ||
+    normalized.includes("fok orders are fully filled or killed") ||
+    normalized.includes("fill_or_kill")
+  ) {
+    return message;
+  }
+
+  return null;
 }
 
 async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promise<OutcomeQuote> {

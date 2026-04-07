@@ -8,6 +8,7 @@ import {
   fetchKalshiResolution,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  getKalshiOrderPriceUsd,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
@@ -772,8 +773,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
         primaryLeg,
         hedgeLeg,
         null,
-        settings.maxSlippageBps,
-        settings.immediateOrderConfirmationTimeoutMs,
+        settings,
         now,
         `Hedge submission failed (${toErrorMessage(error)})`,
       );
@@ -892,8 +892,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     primaryLeg,
     hedgeLeg,
     hedgeOrder,
-    settings.maxSlippageBps,
-    settings.immediateOrderConfirmationTimeoutMs,
+    settings,
     now,
     "Hedge order failed",
   );
@@ -1024,28 +1023,75 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
   return resumed;
 }
 
-async function unwindPrimaryLeg(intent: OrderIntent, maxSlippageBps: number, confirmationTimeoutMs: number) {
+async function resolvePrimaryExitSize(
+  intent: OrderIntent,
+  primaryLeg: OrderIntent["legs"][number],
+  now: number,
+) {
+  if (primaryLeg.venue !== "polymarket") {
+    return primaryLeg.filledSize;
+  }
+
+  const positions = await polymarketAdapter.getPositions(now).catch(() => []);
+  const matchingPosition = positions.find(
+    (position) => position.marketRef === primaryLeg.marketRef && position.outcome === primaryLeg.outcome,
+  );
+  if (!matchingPosition || matchingPosition.size <= 0) {
+    return primaryLeg.filledSize;
+  }
+
+  return Math.min(primaryLeg.filledSize, matchingPosition.size);
+}
+
+async function resolvePrimaryExitPrice(intent: OrderIntent, primaryLeg: OrderIntent["legs"][number], now: number) {
+  const slot = getCurrentSlot(new Date(intent.slotStartTs + 1));
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+
+  if (primaryLeg.venue === "polymarket") {
+    const outcome = primaryLeg.outcome === "UP" ? polymarketState.quote.outcomes.up : polymarketState.quote.outcomes.down;
+    return outcome.sellPrice ?? outcome.bestBid ?? null;
+  }
+
+  const outcome = primaryLeg.outcome === "YES" ? kalshiState.quote.outcomes.yes : kalshiState.quote.outcomes.no;
+  return outcome.sellPrice ?? outcome.bestBid ?? null;
+}
+
+async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, now: number) {
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   if (!primaryLeg || primaryLeg.filledSize <= 0) {
     throw new Error(`Unable to unwind intent ${intent.id}: no primary fill`);
   }
 
+  const requestedSize = await resolvePrimaryExitSize(intent, primaryLeg, now);
+  if (requestedSize <= 0) {
+    throw new Error(`Unable to unwind intent ${intent.id}: no exitable size`);
+  }
+
+  const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
+  const fallbackExitPrice =
+    primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99;
+  const requestedPrice = liveExitPrice ?? fallbackExitPrice;
+
   const request = buildVenueOrderRequest(
     {
       ...primaryLeg,
-      requestedPrice:
-        primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99,
+      requestedPrice,
       side: "SELL",
-      requestedSize: primaryLeg.filledSize,
-      requestedNotionalUsd: primaryLeg.filledSize * (primaryLeg.filledPrice ?? primaryLeg.requestedPrice ?? 0),
+      requestedSize,
+      requestedNotionalUsd: requestedSize * (requestedPrice ?? primaryLeg.filledPrice ?? primaryLeg.requestedPrice ?? 0),
     },
-    maxSlippageBps,
+    settings.maxSlippageBps,
     primaryLeg.venue === "polymarket" ? "FAK" : "IOC",
     true,
   );
   const submission = await adapterFor(primaryLeg.venue).placeOrder(request);
-  const result = await confirmImmediateOrderExecution(primaryLeg.venue, request, submission, confirmationTimeoutMs);
-  return buildLiveOrderRecord(intent.id, { ...primaryLeg, side: "SELL" }, request, result, Date.now());
+  const result = await confirmImmediateOrderExecution(
+    primaryLeg.venue,
+    request,
+    submission,
+    settings.immediateOrderConfirmationTimeoutMs,
+  );
+  return buildLiveOrderRecord(intent.id, { ...primaryLeg, side: "SELL" }, request, result, now);
 }
 
 async function retryLegWithinExecutionBuffer(
@@ -1261,8 +1307,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   primaryLeg: OrderIntent["legs"][number],
   hedgeLeg: OrderIntent["legs"][number],
   hedgeOrder: LiveOrder | null,
-  maxSlippageBps: number,
-  confirmationTimeoutMs: number,
+  settings: StrategyConfig,
   now: number,
   failureReason: string,
 ) {
@@ -1273,53 +1318,84 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   await writeOrderIntent(currentIntent);
 
   try {
-    const unwindResult = await unwindPrimaryLeg(currentIntent, maxSlippageBps, confirmationTimeoutMs);
-    await writeVenueOrder(unwindResult);
+    for (let attempt = 1; attempt <= Math.max(1, settings.hedgeRetryAttempts); attempt += 1) {
+      if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
+        await sleep(settings.hedgeRetryDelayMs);
+      }
 
-    if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
-      const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
-      const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
-      currentIntent = finalizeUnwoundIntent({
-        intent: {
-          ...currentIntent,
-          legs: currentIntent.legs.map((leg) =>
-            leg.id === primaryLeg.id
-              ? {
-                  ...leg,
-                  status: "unwound",
-                  payoutUsd,
-                }
-              : leg,
-          ) as OrderIntent["legs"],
-        },
-        now,
-        failureReason: "Hedge failed, primary unwound",
-      });
-      await writeOrderIntent(currentIntent);
-    } else if (unwindResult.filledSize > 0) {
-      currentIntent = markIntentStatus(
-        currentIntent,
-        "failed",
-        now,
-        `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
-      );
-      await writeOrderIntent(currentIntent);
-    } else if (isTerminalOrderStatus(unwindResult.status)) {
+      const unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now());
+      await writeVenueOrder(unwindResult);
+
+      if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= unwindResult.requestedSize) {
+        const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
+        const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
+        currentIntent = finalizeUnwoundIntent({
+          intent: {
+            ...currentIntent,
+            legs: currentIntent.legs.map((leg) =>
+              leg.id === primaryLeg.id
+                ? {
+                    ...leg,
+                    status: "unwound",
+                    payoutUsd,
+                  }
+                : leg,
+            ) as OrderIntent["legs"],
+          },
+          now,
+          failureReason: "Hedge failed, primary unwound",
+        });
+        await writeOrderIntent(currentIntent);
+        break;
+      }
+
+      if (unwindResult.filledSize > 0) {
+        currentIntent = markIntentStatus(
+          currentIntent,
+          "failed",
+          now,
+          `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
+        );
+        await writeOrderIntent(currentIntent);
+        break;
+      }
+
+      if (!isTerminalOrderStatus(unwindResult.status)) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.unwind.awaiting_confirmation",
+          message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
+          payload: {
+            intentId: currentIntent.id,
+            venue: currentIntent.primaryVenue,
+            orderId: unwindResult.venueOrderId,
+            orderStatus: unwindResult.status,
+          },
+          createdAt: now,
+        });
+        break;
+      }
+
+      if (attempt < Math.max(1, settings.hedgeRetryAttempts)) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.unwind.retry_terminal",
+          message: `Primary unwind ${attempt}/${Math.max(1, settings.hedgeRetryAttempts)} ended without fill for intent ${currentIntent.id}`,
+          payload: {
+            intentId: currentIntent.id,
+            venue: currentIntent.primaryVenue,
+            orderId: unwindResult.venueOrderId,
+            orderStatus: unwindResult.status,
+            attempt,
+            attempts: Math.max(1, settings.hedgeRetryAttempts),
+          },
+          createdAt: now,
+        });
+        continue;
+      }
+
       currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary unwind failed (${unwindResult.status})`);
       await writeOrderIntent(currentIntent);
-    } else {
-      await writeRunEvent({
-        level: "warn",
-        eventType: "order.unwind.awaiting_confirmation",
-        message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
-        payload: {
-          intentId: currentIntent.id,
-          venue: currentIntent.primaryVenue,
-          orderId: unwindResult.venueOrderId,
-          orderStatus: unwindResult.status,
-        },
-        createdAt: now,
-      });
     }
   } catch (error) {
     currentIntent = markIntentStatus(
@@ -1385,6 +1461,13 @@ async function reconcileVenueOrders(now: number) {
     if (!existing) {
       continue;
     }
+    const outcomePrice =
+      existing.outcome === "YES" || existing.outcome === "NO"
+        ? getKalshiOrderPriceUsd(existing.outcome, {
+            yes_price_dollars: order.yes_price_dollars,
+            no_price_dollars: order.no_price_dollars,
+          })
+        : null;
     await writeVenueOrder({
       ...existing,
       status: mapKalshiOrderStatus(
@@ -1393,7 +1476,7 @@ async function reconcileVenueOrders(now: number) {
         Number(order.remaining_count_fp ?? 0),
       ),
       filledSize: Number(order.fill_count_fp ?? existing.filledSize),
-      averageFillPrice: Number(order.yes_price_dollars ?? order.no_price_dollars ?? existing.averageFillPrice ?? 0),
+      averageFillPrice: outcomePrice ?? existing.averageFillPrice,
       feeUsd: Number(order.taker_fees_dollars ?? order.maker_fees_dollars ?? existing.feeUsd ?? 0),
       updatedAt: now,
       raw: order as unknown as Record<string, unknown>,
@@ -1768,12 +1851,16 @@ async function maybeExitPolymarketLegAtSlotEnd(
   }
 
   const permissivePrice = Math.max(0.001, sellPrice - settings.executionPriceBuffer);
+  const requestedSize = await resolvePrimaryExitSize(intent, polymarketLeg, now);
+  if (requestedSize <= 0) {
+    return intent;
+  }
   const exitLeg = {
     ...polymarketLeg,
     side: "SELL" as const,
     requestedPrice: permissivePrice,
-    requestedSize: polymarketLeg.filledSize,
-    requestedNotionalUsd: polymarketLeg.filledSize * permissivePrice,
+    requestedSize,
+    requestedNotionalUsd: requestedSize * permissivePrice,
   };
 
   let lastOrder: LiveOrder | null = null;
@@ -1811,7 +1898,7 @@ async function maybeExitPolymarketLegAtSlotEnd(
       continue;
     }
 
-    if (order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= polymarketLeg.filledSize) {
+    if (order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= exitLeg.requestedSize) {
       const averageExitPrice = order.averageFillPrice ?? permissivePrice;
       const payoutUsd = round4(order.filledSize * averageExitPrice - (order.feeUsd ?? 0));
       const updated = {
@@ -1927,7 +2014,7 @@ async function reconcileInFlightIntentStates(now: number) {
         continue;
       }
 
-      if (unwindOrder.status === "filled" && unwindOrder.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
+      if (unwindOrder.status === "filled" && unwindOrder.filledSize + ORDER_SIZE_TOLERANCE >= unwindOrder.requestedSize) {
         const averageExitPrice = unwindOrder.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
         const payoutUsd = round4(unwindOrder.filledSize * averageExitPrice - (unwindOrder.feeUsd ?? 0));
         currentIntent = finalizeUnwoundIntent({
@@ -2125,8 +2212,7 @@ async function reconcileInFlightIntentStates(now: number) {
           primaryLeg,
           hedgeLeg,
           null,
-          settings.maxSlippageBps,
-          settings.immediateOrderConfirmationTimeoutMs,
+          settings,
           now,
           "Hedge order not observed before timeout or slot end",
         );
@@ -2201,8 +2287,7 @@ async function reconcileInFlightIntentStates(now: number) {
         primaryLeg,
         hedgeLeg,
         hedgeOrder,
-        settings.maxSlippageBps,
-        settings.immediateOrderConfirmationTimeoutMs,
+        settings,
         now,
         `Hedge order not completed (${hedgeOrder.status})`,
       );
@@ -2497,6 +2582,9 @@ async function recoverKalshiOrderSubmissionForIntent(
   if (!recoveredOrder) {
     return null;
   }
+  if (leg.outcome !== "YES" && leg.outcome !== "NO") {
+    return null;
+  }
 
   const filledSize = Number(recoveredOrder.fill_count_fp ?? 0);
   const remainingSize = Number(recoveredOrder.remaining_count_fp ?? 0);
@@ -2506,7 +2594,10 @@ async function recoverKalshiOrderSubmissionForIntent(
     status: mapKalshiOrderStatus(recoveredOrder.status, filledSize, remainingSize),
     filledSize,
     averageFillPrice:
-      Number(recoveredOrder.yes_price_dollars ?? recoveredOrder.no_price_dollars ?? 0) || null,
+      getKalshiOrderPriceUsd(leg.outcome, {
+        yes_price_dollars: recoveredOrder.yes_price_dollars,
+        no_price_dollars: recoveredOrder.no_price_dollars,
+      }) ?? null,
     feeUsd: Number(recoveredOrder.taker_fees_dollars ?? recoveredOrder.maker_fees_dollars ?? 0),
     raw: recoveredOrder as unknown as Record<string, unknown>,
   };

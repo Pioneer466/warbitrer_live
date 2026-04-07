@@ -599,6 +599,26 @@ export function getKalshiFillPriceUsd(fill: {
   return null;
 }
 
+export function getKalshiOrderPriceUsd(
+  outcome: "YES" | "NO",
+  prices: {
+    yes_price_dollars?: string;
+    no_price_dollars?: string;
+  },
+) {
+  const directPrice = outcome === "YES" ? prices.yes_price_dollars : prices.no_price_dollars;
+  if (directPrice !== undefined) {
+    return Number(directPrice);
+  }
+
+  const complementSource = outcome === "YES" ? prices.no_price_dollars : prices.yes_price_dollars;
+  if (complementSource !== undefined) {
+    return round4(1 - Number(complementSource));
+  }
+
+  return null;
+}
+
 export function getKalshiFillFeeUsd(fill: {
   taker_fees_dollars?: string;
   maker_fees_dollars?: string;
@@ -982,7 +1002,11 @@ export function getKalshiSoftNoFillMessage(error: unknown) {
 function mapKalshiOrderResult(order: KalshiOrderResponse["order"]): VenueOrderResult {
   const filledSize = Number(order.fill_count_fp ?? 0);
   const remainingSize = Number(order.remaining_count_fp ?? 0);
-  const price = Number(order.yes_price_dollars ?? order.no_price_dollars ?? 0) || null;
+  const price =
+    getKalshiOrderPriceUsd(order.side === "yes" ? "YES" : "NO", {
+      yes_price_dollars: order.yes_price_dollars,
+      no_price_dollars: order.no_price_dollars,
+    }) ?? null;
   const feeUsd = Number(order.taker_fees_dollars ?? order.maker_fees_dollars ?? 0);
 
   return {
@@ -1000,7 +1024,12 @@ function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: strin
   const filledSize = Number(order.fill_count_fp ?? 0);
   const requestedSize = Number(order.initial_count_fp ?? filledSize);
   const remainingSize = Number(order.remaining_count_fp ?? 0);
-  const price = Number(order.yes_price_dollars ?? order.no_price_dollars ?? 0) || null;
+  const outcome = order.side === "yes" ? "YES" : "NO";
+  const price =
+    getKalshiOrderPriceUsd(outcome, {
+      yes_price_dollars: order.yes_price_dollars,
+      no_price_dollars: order.no_price_dollars,
+    }) ?? null;
 
   return {
     id: `kalshi:${order.order_id}`,
@@ -1011,7 +1040,7 @@ function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: strin
     clientOrderId: order.client_order_id ?? null,
     marketRef: order.ticker,
     side: order.action === "sell" ? "SELL" : "BUY",
-    outcome: order.side === "yes" ? "YES" : "NO",
+    outcome,
     orderType: "LIMIT",
     requestedPrice: price,
     requestedSize,

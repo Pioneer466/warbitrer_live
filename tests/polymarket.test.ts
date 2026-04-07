@@ -7,6 +7,7 @@ import {
   extractPolymarketPositionValueUsd,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
+  getPolymarketSoftNoFillMessage,
   isConfirmedPolymarketTrade,
   isPendingPolymarketTrade,
   mapPolymarketOrder,
@@ -21,6 +22,16 @@ describe("Polymarket helpers", () => {
     expect(extractPolymarketResolution('["1","0"]')).toBe("UP");
     expect(extractPolymarketResolution('["0","1"]')).toBe("DOWN");
     expect(extractPolymarketResolution('["0.61","0.39"]')).toBeNull();
+  });
+
+  it("classifies Polymarket FOK kill responses as soft no-fill errors", () => {
+    expect(
+      getPolymarketSoftNoFillMessage(
+        new Error("order couldn't be fully filled. FOK orders are fully filled or killed."),
+      ),
+    ).toContain("FOK orders are fully filled or killed");
+
+    expect(getPolymarketSoftNoFillMessage(new Error("authentication error"))).toBeNull();
   });
 
   it("uses the ask side depth closest to the targeted buy execution", () => {

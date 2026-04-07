@@ -9,7 +9,6 @@ async function run() {
     const startedAt = Date.now();
     try {
       await processTick();
-      console.log(`[worker] tick ok ${new Date(startedAt).toISOString()}`);
     } catch (error) {
       console.error("[worker] tick error", error);
     }

@@ -658,6 +658,24 @@ export async function listRecentVenueOrders(pool: Pool, limit = 50): Promise<Liv
   return result.rows.map(mapVenueOrderRow);
 }
 
+export async function listVenueOrdersForIntentIds(pool: Pool, intentIds: string[], limit = 500): Promise<LiveOrder[]> {
+  if (intentIds.length === 0) {
+    return [];
+  }
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM venue_orders
+      WHERE intent_id = ANY($1::text[])
+      ORDER BY created_at DESC, updated_at DESC
+      LIMIT $2
+    `,
+    [intentIds, limit],
+  );
+  return result.rows.map(mapVenueOrderRow);
+}
+
 export async function listOpenVenueOrders(pool: Pool) {
   const result = await pool.query(
     `
@@ -728,6 +746,24 @@ export async function listRecentFills(pool: Pool, limit = 100): Promise<LiveFill
       LIMIT $1
     `,
     [limit],
+  );
+  return result.rows.map(mapFillRow);
+}
+
+export async function listFillsForIntentIds(pool: Pool, intentIds: string[], limit = 1000): Promise<LiveFill[]> {
+  if (intentIds.length === 0) {
+    return [];
+  }
+
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM fills
+      WHERE intent_id = ANY($1::text[])
+      ORDER BY filled_at DESC, trade_id DESC
+      LIMIT $2
+    `,
+    [intentIds, limit],
   );
   return result.rows.map(mapFillRow);
 }
@@ -887,7 +923,7 @@ async function getFirstTrackedEquityUsd(pool: Pool) {
     `
       SELECT equity_usd
       FROM pnl_snapshots
-      WHERE isfinite(equity_usd)
+      WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
         AND equity_usd > 0
       ORDER BY captured_at ASC, id ASC
       LIMIT 1
@@ -901,7 +937,7 @@ async function getPeakTrackedEquityUsd(pool: Pool) {
     `
       SELECT MAX(equity_usd) AS equity_usd
       FROM pnl_snapshots
-      WHERE isfinite(equity_usd)
+      WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
         AND equity_usd > 0
     `,
   );
@@ -1155,11 +1191,14 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
 }
 
 export async function buildTradesResponse(pool: Pool): Promise<TradesResponse> {
+  const intents = await listRecentOrderIntents(pool, 100);
+  const intentIds = intents.map((intent) => intent.id);
+
   return {
     fetchedAt: Date.now(),
-    intents: await listRecentOrderIntents(pool),
-    orders: await listRecentVenueOrders(pool),
-    fills: await listRecentFills(pool),
+    intents,
+    orders: await listVenueOrdersForIntentIds(pool, intentIds),
+    fills: await listFillsForIntentIds(pool, intentIds),
   };
 }
 

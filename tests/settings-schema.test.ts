@@ -8,6 +8,7 @@ describe("settings schema", () => {
     expect(settings.executionPriceBuffer).toBe(0.01);
     expect(settings.hedgeRetryAttempts).toBe(3);
     expect(settings.hedgeRetryDelayMs).toBe(350);
+    expect(settings.entryCutoffSeconds).toBe(180);
   });
 
   it("accepts explicit execution buffer overrides", () => {
@@ -43,5 +44,13 @@ describe("settings schema", () => {
     });
 
     expect(settings.entryCutoffSeconds).toBe(180);
+  });
+
+  it("accepts a 5 minute entry cutoff override", () => {
+    const settings = normalizeSettings({
+      entryCutoffSeconds: 300,
+    });
+
+    expect(settings.entryCutoffSeconds).toBe(300);
   });
 });

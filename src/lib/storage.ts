@@ -154,6 +154,11 @@ export async function readBridgeTransfers(limit?: number) {
 }
 
 export async function writeRunEvent(event: RunEvent) {
+  if (event.level === "warn" || event.level === "error") {
+    const logger = event.level === "error" ? console.error : console.warn;
+    logger(`[run-event] ${event.eventType}: ${event.message}`, event.payload ?? {});
+  }
+
   return postgres.insertRunEvent(await db(), event);
 }
 
