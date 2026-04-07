@@ -9,6 +9,7 @@ import {
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
   mapKalshiOrderStatus,
+  normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
 import {
@@ -485,25 +486,73 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   await writeOrderIntent(currentIntent);
 
   const primaryRequest = buildVenueOrderRequest(primaryLeg, settings.maxSlippageBps, "FOK", false);
-  const primarySubmission = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
-  let primaryResult = await confirmImmediateOrderExecution(
-    currentIntent.primaryVenue,
-    primaryRequest,
-    primarySubmission,
-    settings.immediateOrderConfirmationTimeoutMs,
-  );
-  let primaryOrder = buildLiveOrderRecord(currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
-  await writeVenueOrder(primaryOrder);
-  await writeRunEvent({
-    level: "info",
-    eventType: "order.primary.submitted",
-    message: `Primary ${currentIntent.primaryVenue} order ${primaryOrder.venueOrderId}`,
-    payload: {
-      intentId: currentIntent.id,
-      venue: currentIntent.primaryVenue,
-    },
-    createdAt: now,
-  });
+  let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
+  let primaryOrder: LiveOrder;
+  try {
+    const primarySubmission = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
+    primaryResult = await confirmImmediateOrderExecution(
+      currentIntent.primaryVenue,
+      primaryRequest,
+      primarySubmission,
+      settings.immediateOrderConfirmationTimeoutMs,
+    );
+    primaryOrder = buildLiveOrderRecord(currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
+    await writeVenueOrder(primaryOrder);
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.primary.submitted",
+      message: `Primary ${currentIntent.primaryVenue} order ${primaryOrder.venueOrderId}`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.primaryVenue,
+      },
+      createdAt: now,
+    });
+  } catch (error) {
+    const recovered = await recoverKalshiOrderSubmissionForIntent(
+      currentIntent,
+      primaryLeg,
+      primaryRequest,
+      now,
+      "primary",
+    );
+    if (!recovered) {
+      currentIntent = markIntentStatus(
+        currentIntent,
+        "failed",
+        now,
+        `Primary submission failed (${toErrorMessage(error)})`,
+      );
+      await writeOrderIntent(currentIntent);
+      await writeRunEvent({
+        level: "error",
+        eventType: "order.primary.submit_failed",
+        message: `Primary ${currentIntent.primaryVenue} submission failed for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          clientOrderId: primaryRequest.clientOrderId,
+          error: toErrorMessage(error),
+        },
+        createdAt: now,
+      });
+      await writeCircuitBreaker({
+        key: `slot:${currentIntent.slotKey}`,
+        active: true,
+        reason: "venue_error",
+        triggeredAt: now,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          stage: "primary_submission",
+        },
+      });
+      return currentIntent;
+    }
+
+    primaryResult = recovered.result;
+    primaryOrder = recovered.order;
+  }
 
   if (primaryResult.status === "filled" && primaryOrder.filledSize > 0) {
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
@@ -653,25 +702,64 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
   await writeOrderIntent(currentIntent);
 
   const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
-  const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
-  let hedgeResult = await confirmImmediateOrderExecution(
-    currentIntent.hedgeVenue,
-    hedgeRequest,
-    hedgeSubmission,
-    settings.immediateOrderConfirmationTimeoutMs,
-  );
-  let hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
-  await writeVenueOrder(hedgeOrder);
-  await writeRunEvent({
-    level: "info",
-    eventType: "order.hedge.submitted",
-    message: `Hedge ${currentIntent.hedgeVenue} order ${hedgeOrder.venueOrderId}`,
-    payload: {
-      intentId: currentIntent.id,
-      venue: currentIntent.hedgeVenue,
-    },
-    createdAt: now,
-  });
+  let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
+  let hedgeOrder: LiveOrder;
+  try {
+    const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
+    hedgeResult = await confirmImmediateOrderExecution(
+      currentIntent.hedgeVenue,
+      hedgeRequest,
+      hedgeSubmission,
+      settings.immediateOrderConfirmationTimeoutMs,
+    );
+    hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
+    await writeVenueOrder(hedgeOrder);
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.hedge.submitted",
+      message: `Hedge ${currentIntent.hedgeVenue} order ${hedgeOrder.venueOrderId}`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.hedgeVenue,
+      },
+      createdAt: now,
+    });
+  } catch (error) {
+    const recovered = await recoverKalshiOrderSubmissionForIntent(
+      currentIntent,
+      hedgeLeg,
+      hedgeRequest,
+      now,
+      "hedge",
+    );
+    if (!recovered) {
+      await writeRunEvent({
+        level: "error",
+        eventType: "order.hedge.submit_failed",
+        message: `Hedge ${currentIntent.hedgeVenue} submission failed for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.hedgeVenue,
+          clientOrderId: hedgeRequest.clientOrderId,
+          error: toErrorMessage(error),
+        },
+        createdAt: now,
+      });
+      return attemptPrimaryUnwindAfterHedgeFailure(
+        currentIntent,
+        primaryLeg,
+        hedgeLeg,
+        null,
+        settings.maxSlippageBps,
+        settings.immediateOrderConfirmationTimeoutMs,
+        now,
+        `Hedge submission failed (${toErrorMessage(error)})`,
+      );
+    }
+
+    hedgeResult = recovered.result;
+    hedgeOrder = recovered.order;
+  }
 
   if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
     if (currentIntent.hedgeVenue === "polymarket") {
@@ -1625,6 +1713,29 @@ async function reconcileInFlightIntentStates(now: number) {
     }
 
     if (!hedgeOrder) {
+      if (stale && (intent.status === "primary_filled" || intent.status === "hedging")) {
+        await writeRunEvent({
+          level: "error",
+          eventType: "intent.failed.hedge_missing",
+          message: `Intent ${intent.id} has no observable hedge order after primary fill`,
+          payload: {
+            intentId: intent.id,
+            slotKey: intent.slotKey,
+            venue: intent.hedgeVenue,
+          },
+          createdAt: now,
+        });
+        await attemptPrimaryUnwindAfterHedgeFailure(
+          currentIntent,
+          primaryLeg,
+          hedgeLeg,
+          null,
+          settings.maxSlippageBps,
+          settings.immediateOrderConfirmationTimeoutMs,
+          now,
+          "Hedge order not observed before timeout or slot end",
+        );
+      }
       continue;
     }
 
@@ -1718,13 +1829,18 @@ function buildVenueOrderRequest(
   orderType: "FOK" | "IOC" | "FAK",
   reduceOnly: boolean,
 ): VenueOrderRequest {
+  const slippageAdjustedPrice =
+    leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side);
+  const price =
+    leg.venue === "kalshi" ? normalizeKalshiOrderPrice(slippageAdjustedPrice, leg.side) : slippageAdjustedPrice;
+
   return {
     marketRef: leg.marketRef,
     tokenId: leg.tokenId,
     outcome: leg.outcome,
     side: leg.side,
     size: leg.requestedSize,
-    price: leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side),
+    price,
     maxCostUsd: leg.requestedNotionalUsd * (1 + maxSlippageBps / 10_000),
     orderType,
     reduceOnly,
@@ -1957,6 +2073,57 @@ function normalizeOrderResultFromLiveOrder(
     averageFillPrice: order.averageFillPrice,
     feeUsd: order.feeUsd ?? 0,
     raw: order.raw ?? fallbackRaw,
+  };
+}
+
+async function recoverKalshiOrderSubmissionForIntent(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  request: VenueOrderRequest,
+  now: number,
+  stage: "primary" | "hedge",
+) {
+  if (leg.venue !== "kalshi") {
+    return null;
+  }
+
+  const kalshiOrders = await fetchKalshiOrders().catch(() => []);
+  const recoveredOrder = kalshiOrders.find((order) => order.client_order_id === request.clientOrderId);
+  if (!recoveredOrder) {
+    return null;
+  }
+
+  const filledSize = Number(recoveredOrder.fill_count_fp ?? 0);
+  const remainingSize = Number(recoveredOrder.remaining_count_fp ?? 0);
+  const result: Awaited<ReturnType<VenueAdapter["placeOrder"]>> = {
+    venue: "kalshi",
+    venueOrderId: recoveredOrder.order_id,
+    status: mapKalshiOrderStatus(recoveredOrder.status, filledSize, remainingSize),
+    filledSize,
+    averageFillPrice:
+      Number(recoveredOrder.yes_price_dollars ?? recoveredOrder.no_price_dollars ?? 0) || null,
+    feeUsd: Number(recoveredOrder.taker_fees_dollars ?? recoveredOrder.maker_fees_dollars ?? 0),
+    raw: recoveredOrder as unknown as Record<string, unknown>,
+  };
+  const order = buildLiveOrderRecord(intent.id, leg, request, result, now);
+  await writeVenueOrder(order);
+  await writeRunEvent({
+    level: "warn",
+    eventType: `order.${stage}.recovered`,
+    message: `${stage === "primary" ? "Primary" : "Hedge"} Kalshi order recovered via client_order_id`,
+    payload: {
+      intentId: intent.id,
+      venue: leg.venue,
+      clientOrderId: request.clientOrderId,
+      orderId: order.venueOrderId,
+      orderStatus: order.status,
+    },
+    createdAt: now,
+  });
+
+  return {
+    result,
+    order,
   };
 }
 

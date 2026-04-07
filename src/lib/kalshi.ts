@@ -14,6 +14,7 @@ import type {
   KalshiQuote,
   LiveOrder,
   MarketSlot,
+  OrderSide,
   OutcomeQuote,
   PositionSnapshot,
   VenueAdapter,
@@ -908,6 +909,16 @@ function getStatusRank(status: string) {
 
 function centsToUsd(cents: number) {
   return cents / 100;
+}
+
+export function normalizeKalshiOrderPrice(value: number | null, side: OrderSide = "BUY") {
+  if (value === null) {
+    return null;
+  }
+
+  const scaled = value * 100;
+  const rounded = side === "SELL" ? Math.floor(scaled + 1e-9) : Math.ceil(scaled - 1e-9);
+  return round4(rounded / 100);
 }
 
 function formatPrice(value: number | null) {

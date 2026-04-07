@@ -8,6 +8,7 @@ import {
   getKalshiFillPriceUsd,
   getKalshiSoftNoFillMessage,
   mapKalshiOrderStatus,
+  normalizeKalshiOrderPrice,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
@@ -259,5 +260,11 @@ describe("Kalshi quote derivation", () => {
     ).toContain("FOK orders are fully filled or killed");
 
     expect(getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 401: authentication_error"))).toBeNull();
+  });
+
+  it("rounds Kalshi order prices onto the order grid before submission", () => {
+    expect(normalizeKalshiOrderPrice(0.45135, "BUY")).toBe(0.46);
+    expect(normalizeKalshiOrderPrice(0.45135, "SELL")).toBe(0.45);
+    expect(normalizeKalshiOrderPrice(0.45, "BUY")).toBe(0.45);
   });
 });
