@@ -47,6 +47,7 @@ export function DashboardClient() {
   const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
   const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
+  const displayPositions = positions.filter(isDisplayablePosition);
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
   const drawdownUsd = pnl?.drawdownUsd ?? 0;
@@ -88,7 +89,7 @@ export function DashboardClient() {
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCell label="Equity" value={pnl ? formatCurrency(pnl.equityUsd) : "--"} />
           <MetricCell label="Cash" value={pnl ? formatCurrency(pnl.cashUsd) : "--"} />
-          <MetricCell label="Positions" value={String(positions.length)} meta={`${openIntents.length} intents ouverts`} />
+          <MetricCell label="Positions" value={String(displayPositions.length)} meta={`${openIntents.length} intents ouverts`} />
           <MetricCell
             label={accountHeadlineLabel}
             value={pnl ? formatCurrency(accountHeadlineValue) : "--"}
@@ -100,11 +101,7 @@ export function DashboardClient() {
 
       <section className="grid gap-4 xl:grid-cols-2">
         {venueBalances.map((balance) => (
-          <VenueBalanceCard
-            key={balance.venue}
-            balance={balance}
-            feedHealth={(balance.venue === "polymarket" ? polyFeed : kalshiFeed) ?? null}
-          />
+          <VenueBalanceCard key={balance.venue} balance={balance} />
         ))}
       </section>
 
@@ -181,12 +178,12 @@ export function DashboardClient() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
-        <Panel title="Positions" meta={`${positions.length} lignes`}>
-          {positions.length === 0 ? (
+        <Panel title="Positions" meta={`${displayPositions.length} lignes`}>
+          {displayPositions.length === 0 ? (
             <EmptyState message="Aucune position live." />
           ) : (
             <div className="grid gap-3">
-              {positions.map((position) => (
+              {displayPositions.map((position) => (
                 <PositionRow key={position.id} position={position} />
               ))}
             </div>
@@ -261,10 +258,8 @@ export function DashboardClient() {
 
 function VenueBalanceCard({
   balance,
-  feedHealth,
 }: {
   balance: DashboardResponse["venueBalances"][number];
-  feedHealth: VenueFeedHealth | null;
 }) {
   const allowanceDisplay =
     balance.raw["allowanceUnlimited"] === true
@@ -278,7 +273,7 @@ function VenueBalanceCard({
       <div className="flex items-center justify-between gap-3 border-b border-white/6 pb-4">
         <div>
           <div className="text-[11px] uppercase tracking-[0.24em] text-mist/70">{balance.venue}</div>
-          <div className="mt-1 text-sm text-white">{formatCurrency(balance.totalBalanceUsd)} total</div>
+          <div className="mt-1 text-sm text-white">{balance.currency}</div>
         </div>
         <StatusBadge tone={balance.status === "ready" ? "cyan" : balance.status === "degraded" ? "amber" : "rose"}>
           {balance.status}
@@ -289,21 +284,6 @@ function VenueBalanceCard({
         <MetricCell label="Portfolio" value={formatCurrency(balance.portfolioValueUsd)} compact />
         <MetricCell label="Allowance" value={allowanceDisplay} compact />
       </div>
-      {feedHealth ? (
-        <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          data {feedHealth.feedStatus} · {feedHealth.source}
-          {feedHealth.lastMessageAt ? ` · last ${formatClock(feedHealth.lastMessageAt)}` : ""}
-          {feedHealth.stalenessMs === null ? "" : ` · ${feedHealth.stalenessMs} ms`}
-        </div>
-      ) : null}
-      <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-        balance refresh {formatClock(balance.capturedAt)}
-      </div>
-      {balance.notes.length > 0 ? (
-        <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          {balance.notes.join(" | ")}
-        </div>
-      ) : null}
     </section>
   );
 }
@@ -540,4 +520,12 @@ function formatFeedMeta(feedHealth: VenueFeedHealth | null) {
   const freshness = feedHealth.stalenessMs === null ? "staleness n/a" : `${feedHealth.stalenessMs} ms`;
   const last = feedHealth.lastMessageAt ? ` · last ${formatClock(feedHealth.lastMessageAt)}` : "";
   return `best ask live · ${feedHealth.source} · ${freshness}${last}`;
+}
+
+function isDisplayablePosition(position: PositionSnapshot) {
+  return (
+    position.size > 0.0001 ||
+    Math.abs(position.currentValueUsd) > 0.0001 ||
+    Math.abs(position.unrealizedPnlUsd) > 0.0001
+  );
 }

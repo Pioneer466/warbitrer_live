@@ -8,6 +8,7 @@ import {
   getKalshiFillPriceUsd,
   getKalshiOrderPriceUsd,
   getKalshiSoftNoFillMessage,
+  isTrackedKalshiPosition,
   mapKalshiPosition,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
@@ -267,6 +268,20 @@ describe("Kalshi quote derivation", () => {
     expect(position.currentValueUsd).toBeCloseTo(11.2805, 4);
     expect(position.realizedPnlUsd).toBeCloseTo(1.25, 4);
     expect(position.unrealizedPnlUsd).toBeCloseTo(1.6408, 4);
+  });
+
+  it("ignores empty Kalshi placeholder positions", () => {
+    const position = mapKalshiPosition({
+      ticker: "KXBTC15M-26APR070530-30",
+      position_fp: "0",
+      total_traded_dollars: "0",
+      market_exposure_dollars: "0",
+      realized_pnl_dollars: "0",
+      fees_paid_dollars: "0",
+      last_updated_ts: "2026-04-07T09:19:39.671191Z",
+    });
+
+    expect(isTrackedKalshiPosition(position)).toBe(false);
   });
 
   it("treats canceled Kalshi orders with residual fills as partially filled", () => {

@@ -430,6 +430,14 @@ export function mapKalshiPosition(position: KalshiPosition, now = Date.now()): P
   };
 }
 
+export function isTrackedKalshiPosition(position: PositionSnapshot) {
+  return (
+    position.size > 0.0001 ||
+    Math.abs(position.currentValueUsd) > 0.0001 ||
+    Math.abs(position.unrealizedPnlUsd) > 0.0001
+  );
+}
+
 export function extractKalshiLastTradePrices(
   trades: KalshiTrade[],
   fallbackLastPrice?: number | null,
@@ -497,7 +505,9 @@ export function createKalshiAdapter(): VenueAdapter {
       }
 
       const response = await kalshiFetch<KalshiPositionsResponse>("/portfolio/positions");
-      return response.market_positions.map((position) => mapKalshiPosition(position, now));
+      return response.market_positions
+        .map((position) => mapKalshiPosition(position, now))
+        .filter(isTrackedKalshiPosition);
     },
     async placeOrder(order) {
       try {

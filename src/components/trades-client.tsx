@@ -1,14 +1,24 @@
 "use client";
 
+import { useState } from "react";
+
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatDateTime, formatPrice } from "@/lib/format";
 import type { LiveFill, LiveOrder, OrderIntent, TradesResponse } from "@/lib/types";
 
+type OrderGroup = {
+  key: string;
+  label: string;
+  orders: LiveOrder[];
+};
+
 export function TradesClient() {
   const { data, error, loading } = usePollingJson<TradesResponse>("/api/trades", 4_000);
+  const [showAllIntents, setShowAllIntents] = useState(false);
+  const [showAllExecutions, setShowAllExecutions] = useState(false);
 
   if (loading && !data) {
-    return <PanelMessage title="Flow Live" message="Chargement des intents, ordres et fills." />;
+    return <PanelMessage title="Flow Live" message="Chargement des intents, ordres et exécutions." />;
   }
 
   if (!data) {
@@ -25,56 +35,89 @@ export function TradesClient() {
   const orders = [...data.orders].sort((left, right) => right.createdAt - left.createdAt);
   const fills = [...data.fills].sort((left, right) => right.filledAt - left.filledAt);
   const intentsById = new Map(intents.map((intent) => [intent.id, intent]));
-  const grossIntentNotional = data.intents.reduce((sum, intent) => sum + intent.targetNotionalUsd, 0);
-  const totalFees = data.orders.reduce((sum, order) => sum + (order.feeUsd ?? 0), 0);
+  const intentNotionalUsd = intents.reduce((sum, intent) => sum + intent.targetNotionalUsd, 0);
+  const executedNotionalUsd = fills.reduce((sum, fill) => sum + fill.price * fill.size, 0);
+  const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
+  const visibleIntents = showAllIntents ? intents : intents.slice(0, 3);
+  const visibleExecutions = showAllExecutions ? fills : fills.slice(0, 8);
+  const orderGroups = groupOrdersByPair(orders, intentsById);
 
   return (
     <div className="space-y-5">
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCell label="Intents" value={String(intents.length)} />
-          <SummaryCell label="Orders" value={String(orders.length)} />
-          <SummaryCell label="Fills" value={String(fills.length)} />
-          <SummaryCell label="Fees" value={formatCurrency(totalFees)} />
+          <SummaryCell label="Intents" value={String(intents.length)} meta="1 décision de paire" />
+          <SummaryCell label="Orders" value={String(orders.length)} meta="inclut retries, unwind et exits" />
+          <SummaryCell label="Exécutions" value={String(fills.length)} meta="fills réellement matchés" />
+          <SummaryCell label="Frais Payés" value={formatCurrency(totalFees)} meta="somme des exécutions" />
         </div>
-        <div className="mt-4 text-sm text-mist">
-          notionnel cumulé {formatCurrency(grossIntentNotional)}
+        <div className="mt-4 grid gap-2 text-sm text-mist">
+          <div>
+            notionnel intents {formatCurrency(intentNotionalUsd)} · notionnel exécuté {formatCurrency(executedNotionalUsd)}
+          </div>
+          <div>
+            intent = décision de paire · order = tentative envoyée à une venue · exécution = trade réellement rempli
+          </div>
         </div>
       </section>
 
-      <Panel title="Intents">
+      <Panel title="Intents" meta={`${intents.length} total · ${visibleIntents.length} affichés`}>
         {intents.length === 0 ? (
           <EmptyState message="Aucun intent enregistré." />
         ) : (
-          <div className="grid gap-3">
-            {intents.map((intent) => (
-              <IntentRow key={intent.id} intent={intent} />
-            ))}
-          </div>
+          <>
+            <div className="grid gap-3">
+              {visibleIntents.map((intent) => (
+                <IntentRow key={intent.id} intent={intent} />
+              ))}
+            </div>
+            {intents.length > 3 ? (
+              <ExpandButton
+                expanded={showAllIntents}
+                collapsedLabel={`Voir les ${intents.length - 3} intents suivants`}
+                expandedLabel="Réduire la liste"
+                onClick={() => setShowAllIntents((value) => !value)}
+              />
+            ) : null}
+          </>
         )}
       </Panel>
 
-      <Panel title="Orders">
+      <Panel title="Orders Par Pair" meta={`${orders.length} ordres · ${orderGroups.length} groupes`}>
         {orders.length === 0 ? (
           <EmptyState message="Aucun ordre enregistré." />
         ) : (
-          <div className="grid gap-3">
-            {orders.map((order) => (
-              <OrderRow key={order.id} order={order} intent={intentsById.get(order.intentId) ?? null} />
+          <div className="grid gap-4">
+            {orderGroups.map((group) => (
+              <OrderGroupSection
+                key={group.key}
+                group={group}
+                intentsById={intentsById}
+              />
             ))}
           </div>
         )}
       </Panel>
 
-      <Panel title="Fills">
+      <Panel title="Exécutions" meta={`${fills.length} événements`}>
         {fills.length === 0 ? (
-          <EmptyState message="Aucun fill enregistré." />
+          <EmptyState message="Aucune exécution enregistrée." />
         ) : (
-          <div className="grid gap-3">
-            {fills.map((fill) => (
-              <FillRow key={fill.id} fill={fill} />
-            ))}
-          </div>
+          <>
+            <div className="grid gap-3">
+              {visibleExecutions.map((fill) => (
+                <FillRow key={fill.id} fill={fill} intent={intentsById.get(fill.intentId) ?? null} />
+              ))}
+            </div>
+            {fills.length > 8 ? (
+              <ExpandButton
+                expanded={showAllExecutions}
+                collapsedLabel={`Voir les ${fills.length - 8} exécutions suivantes`}
+                expandedLabel="Réduire la liste"
+                onClick={() => setShowAllExecutions((value) => !value)}
+              />
+            ) : null}
+          </>
         )}
       </Panel>
 
@@ -85,14 +128,19 @@ export function TradesClient() {
 
 function Panel({
   title,
+  meta,
   children,
 }: {
   title: string;
+  meta?: string;
   children: React.ReactNode;
 }) {
   return (
     <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
-      <div className="border-b border-white/6 pb-4 text-sm text-white">{title}</div>
+      <div className="flex flex-col gap-2 border-b border-white/6 pb-4 lg:flex-row lg:items-end lg:justify-between">
+        <div className="text-sm text-white">{title}</div>
+        {meta ? <div className="text-xs text-mist/70">{meta}</div> : null}
+      </div>
       <div className="mt-4">{children}</div>
     </section>
   );
@@ -110,17 +158,59 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
       <div className="mt-2">
         {intent.primaryVenue} {"->"} {intent.hedgeVenue} · notionnel {formatCurrency(intent.targetNotionalUsd)}
       </div>
-      {intent.failureReason ? <div className="mt-2 text-rose">{intent.failureReason}</div> : null}
+      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+        {intent.legs.map((leg) => (
+          <div key={leg.id} className="rounded-[18px] border border-white/6 px-3 py-3">
+            <div className="text-white">
+              {leg.venue} · {leg.outcome}
+            </div>
+            <div className="mt-2">
+              req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
+            </div>
+          </div>
+        ))}
+      </div>
+      {intent.failureReason ? <div className="mt-3 text-rose">{intent.failureReason}</div> : null}
+    </div>
+  );
+}
+
+function OrderGroupSection({
+  group,
+  intentsById,
+}: {
+  group: OrderGroup;
+  intentsById: Map<string, OrderIntent>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleOrders = expanded ? group.orders : group.orders.slice(0, 6);
+
+  return (
+    <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
+      <div className="flex items-center justify-between gap-3">
+        <div className="text-white">{group.label}</div>
+        <div className="text-sm text-mist">{group.orders.length} ordres</div>
+      </div>
+      <div className="mt-3 grid gap-3">
+        {visibleOrders.map((order) => (
+          <OrderRow key={order.id} order={order} intent={intentsById.get(order.intentId) ?? null} />
+        ))}
+      </div>
+      {group.orders.length > 6 ? (
+        <ExpandButton
+          expanded={expanded}
+          collapsedLabel={`Voir les ${group.orders.length - 6} ordres suivants`}
+          expandedLabel="Réduire la liste"
+          onClick={() => setExpanded((value) => !value)}
+        />
+      ) : null}
     </div>
   );
 }
 
 function OrderRow({ order, intent }: { order: LiveOrder; intent: OrderIntent | null }) {
-  const createdLabel = formatDateTime(order.createdAt);
-  const syncedLabel = order.updatedAt !== order.createdAt ? formatDateTime(order.updatedAt) : null;
-
   return (
-    <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
+    <div className="rounded-[20px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
         <div className="text-white">
           {order.venue} · {order.outcome} · {order.side} {order.shadow ? "· shadow" : ""}
@@ -133,17 +223,17 @@ function OrderRow({ order, intent }: { order: LiveOrder; intent: OrderIntent | n
         </div>
       ) : null}
       <div className="mt-2">
-        size {formatPrice(order.requestedSize, 2)} · filled {formatPrice(order.filledSize, 2)} · avg {formatPrice(order.averageFillPrice, 4)}
+        size {formatPrice(order.requestedSize, 2)} · filled {formatPrice(order.filledSize, 2)} · avg{" "}
+        {order.averageFillPrice === null ? "--" : formatPrice(order.averageFillPrice, 4)}
       </div>
       <div className="mt-2">
-        fee {order.feeUsd === null ? "--" : formatCurrency(order.feeUsd)} · créé {createdLabel}
+        fee {formatCurrency(order.feeUsd ?? 0)} · créé {formatDateTime(order.createdAt)}
       </div>
-      {syncedLabel ? <div className="mt-2">dernière synchro {syncedLabel}</div> : null}
     </div>
   );
 }
 
-function FillRow({ fill }: { fill: LiveFill }) {
+function FillRow({ fill, intent }: { fill: LiveFill; intent: OrderIntent | null }) {
   return (
     <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
@@ -152,6 +242,7 @@ function FillRow({ fill }: { fill: LiveFill }) {
         </div>
         <div>{formatDateTime(fill.filledAt)}</div>
       </div>
+      {intent ? <div className="mt-2">intent {intent.combination} · {intent.status}</div> : null}
       <div className="mt-2">
         {formatPrice(fill.size, 2)} @ {formatPrice(fill.price, 4)} · fee {formatCurrency(fill.feeUsd)}
       </div>
@@ -159,12 +250,43 @@ function FillRow({ fill }: { fill: LiveFill }) {
   );
 }
 
-function SummaryCell({ label, value }: { label: string; value: string }) {
+function SummaryCell({
+  label,
+  value,
+  meta,
+}: {
+  label: string;
+  value: string;
+  meta?: string;
+}) {
   return (
     <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
       <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{label}</div>
       <div className="mt-3 font-mono text-[34px] leading-none text-white">{value}</div>
+      {meta ? <div className="mt-2 text-xs text-mist/60">{meta}</div> : null}
     </div>
+  );
+}
+
+function ExpandButton({
+  expanded,
+  collapsedLabel,
+  expandedLabel,
+  onClick,
+}: {
+  expanded: boolean;
+  collapsedLabel: string;
+  expandedLabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="mt-4 rounded-full border border-white/10 bg-white/[0.03] px-4 py-2 text-sm text-mist transition hover:border-white/20 hover:bg-white/[0.06]"
+    >
+      {expanded ? expandedLabel : collapsedLabel}
+    </button>
   );
 }
 
@@ -197,4 +319,26 @@ function EmptyState({ message }: { message: string }) {
       {message}
     </div>
   );
+}
+
+function groupOrdersByPair(orders: LiveOrder[], intentsById: Map<string, OrderIntent>) {
+  const groups = new Map<string, OrderGroup>();
+
+  for (const order of orders) {
+    const intent = intentsById.get(order.intentId) ?? null;
+    const label = intent?.combination ?? `${order.venue} ${order.outcome}`;
+    const key = `${label}:${order.shadow ? "shadow" : "live"}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.orders.push(order);
+      continue;
+    }
+    groups.set(key, {
+      key,
+      label: `${label}${order.shadow ? " · shadow" : ""}`,
+      orders: [order],
+    });
+  }
+
+  return [...groups.values()].sort((left, right) => right.orders[0]!.createdAt - left.orders[0]!.createdAt);
 }
