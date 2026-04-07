@@ -26,7 +26,7 @@ import {
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
 import { autoConvertPolymarketIfConfigured } from "@/lib/recovery";
-import { calculateVenueExposureUsd } from "@/lib/risk";
+import { calculateVenueExposureUsd, countSlotExecutionBlockers } from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
 import {
   calculateWinningPayout,
@@ -224,8 +224,8 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         return resumed;
       }
 
-      const openForSlot = openIntents.filter((intent) => intent.slotKey === slot.key);
-      if (openForSlot.length >= settings.maxOpenIntentsPerSlot) {
+      const blockingOpenForSlot = countSlotExecutionBlockers(openIntents, slot.key);
+      if (blockingOpenForSlot >= settings.maxOpenIntentsPerSlot) {
         return resumed;
       }
 
@@ -234,7 +234,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       const positions = await readPositions();
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
 
-      for (const opportunity of eligible.slice(0, settings.maxOpenIntentsPerSlot - openForSlot.length)) {
+      for (const opportunity of eligible.slice(0, settings.maxOpenIntentsPerSlot - blockingOpenForSlot)) {
         const intent = createIntentFromOpportunity({
           opportunity,
           slotStartTs: slot.startTs,

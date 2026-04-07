@@ -31,3 +31,7 @@ export function calculateLegExposureUsd(
 
   return leg.requestedNotionalUsd;
 }
+
+export function countSlotExecutionBlockers(openIntents: OrderIntent[], slotKey: string) {
+  return openIntents.filter((intent) => intent.slotKey === slotKey && intent.status !== "hedged").length;
+}
