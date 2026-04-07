@@ -1180,34 +1180,55 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   currentIntent = markIntentStatus(currentIntent, "unwind_required", now, failureReason);
   await writeOrderIntent(currentIntent);
 
-  const unwindResult = await unwindPrimaryLeg(currentIntent, maxSlippageBps, confirmationTimeoutMs);
-  await writeVenueOrder(unwindResult);
+  try {
+    const unwindResult = await unwindPrimaryLeg(currentIntent, maxSlippageBps, confirmationTimeoutMs);
+    await writeVenueOrder(unwindResult);
 
-  if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
-    currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindResult, "unwound", now);
-    currentIntent = markIntentStatus(currentIntent, "unwound", now, "Hedge failed, primary unwound");
-    await writeOrderIntent(currentIntent);
-  } else if (unwindResult.filledSize > 0) {
+    if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= primaryLeg.filledSize) {
+      currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, unwindResult, "unwound", now);
+      currentIntent = markIntentStatus(currentIntent, "unwound", now, "Hedge failed, primary unwound");
+      await writeOrderIntent(currentIntent);
+    } else if (unwindResult.filledSize > 0) {
+      currentIntent = markIntentStatus(
+        currentIntent,
+        "failed",
+        now,
+        `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
+      );
+      await writeOrderIntent(currentIntent);
+    } else if (isTerminalOrderStatus(unwindResult.status)) {
+      currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary unwind failed (${unwindResult.status})`);
+      await writeOrderIntent(currentIntent);
+    } else {
+      await writeRunEvent({
+        level: "warn",
+        eventType: "order.unwind.awaiting_confirmation",
+        message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          orderId: unwindResult.venueOrderId,
+          orderStatus: unwindResult.status,
+        },
+        createdAt: now,
+      });
+    }
+  } catch (error) {
     currentIntent = markIntentStatus(
       currentIntent,
       "failed",
       now,
-      `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
+      `Primary unwind submission failed (${toErrorMessage(error)}); manual intervention required`,
     );
     await writeOrderIntent(currentIntent);
-  } else if (isTerminalOrderStatus(unwindResult.status)) {
-    currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary unwind failed (${unwindResult.status})`);
-    await writeOrderIntent(currentIntent);
-  } else {
     await writeRunEvent({
-      level: "warn",
-      eventType: "order.unwind.awaiting_confirmation",
-      message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
+      level: "error",
+      eventType: "order.unwind.submit_failed",
+      message: `Primary unwind submission failed for intent ${currentIntent.id}`,
       payload: {
         intentId: currentIntent.id,
         venue: currentIntent.primaryVenue,
-        orderId: unwindResult.venueOrderId,
-        orderStatus: unwindResult.status,
+        error: toErrorMessage(error),
       },
       createdAt: now,
     });
