@@ -21,6 +21,10 @@ export function TradesClient() {
     );
   }
 
+  const intents = [...data.intents].sort((left, right) => right.createdAt - left.createdAt);
+  const orders = [...data.orders].sort((left, right) => right.createdAt - left.createdAt);
+  const fills = [...data.fills].sort((left, right) => right.filledAt - left.filledAt);
+  const intentsById = new Map(intents.map((intent) => [intent.id, intent]));
   const grossIntentNotional = data.intents.reduce((sum, intent) => sum + intent.targetNotionalUsd, 0);
   const totalFees = data.orders.reduce((sum, order) => sum + (order.feeUsd ?? 0), 0);
 
@@ -28,9 +32,9 @@ export function TradesClient() {
     <div className="space-y-5">
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCell label="Intents" value={String(data.intents.length)} />
-          <SummaryCell label="Orders" value={String(data.orders.length)} />
-          <SummaryCell label="Fills" value={String(data.fills.length)} />
+          <SummaryCell label="Intents" value={String(intents.length)} />
+          <SummaryCell label="Orders" value={String(orders.length)} />
+          <SummaryCell label="Fills" value={String(fills.length)} />
           <SummaryCell label="Fees" value={formatCurrency(totalFees)} />
         </div>
         <div className="mt-4 text-sm text-mist">
@@ -39,11 +43,11 @@ export function TradesClient() {
       </section>
 
       <Panel title="Intents">
-        {data.intents.length === 0 ? (
+        {intents.length === 0 ? (
           <EmptyState message="Aucun intent enregistré." />
         ) : (
           <div className="grid gap-3">
-            {data.intents.map((intent) => (
+            {intents.map((intent) => (
               <IntentRow key={intent.id} intent={intent} />
             ))}
           </div>
@@ -51,23 +55,23 @@ export function TradesClient() {
       </Panel>
 
       <Panel title="Orders">
-        {data.orders.length === 0 ? (
+        {orders.length === 0 ? (
           <EmptyState message="Aucun ordre enregistré." />
         ) : (
           <div className="grid gap-3">
-            {data.orders.map((order) => (
-              <OrderRow key={order.id} order={order} />
+            {orders.map((order) => (
+              <OrderRow key={order.id} order={order} intent={intentsById.get(order.intentId) ?? null} />
             ))}
           </div>
         )}
       </Panel>
 
       <Panel title="Fills">
-        {data.fills.length === 0 ? (
+        {fills.length === 0 ? (
           <EmptyState message="Aucun fill enregistré." />
         ) : (
           <div className="grid gap-3">
-            {data.fills.map((fill) => (
+            {fills.map((fill) => (
               <FillRow key={fill.id} fill={fill} />
             ))}
           </div>
@@ -111,7 +115,10 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
   );
 }
 
-function OrderRow({ order }: { order: LiveOrder }) {
+function OrderRow({ order, intent }: { order: LiveOrder; intent: OrderIntent | null }) {
+  const createdLabel = formatDateTime(order.createdAt);
+  const syncedLabel = order.updatedAt !== order.createdAt ? formatDateTime(order.updatedAt) : null;
+
   return (
     <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
@@ -120,12 +127,18 @@ function OrderRow({ order }: { order: LiveOrder }) {
         </div>
         <div>{order.status}</div>
       </div>
+      {intent ? (
+        <div className="mt-2">
+          intent {intent.combination} · {intent.status}
+        </div>
+      ) : null}
       <div className="mt-2">
         size {formatPrice(order.requestedSize, 2)} · filled {formatPrice(order.filledSize, 2)} · avg {formatPrice(order.averageFillPrice, 4)}
       </div>
       <div className="mt-2">
-        fee {order.feeUsd === null ? "--" : formatCurrency(order.feeUsd)} · {formatDateTime(order.updatedAt)}
+        fee {order.feeUsd === null ? "--" : formatCurrency(order.feeUsd)} · créé {createdLabel}
       </div>
+      {syncedLabel ? <div className="mt-2">dernière synchro {syncedLabel}</div> : null}
     </div>
   );
 }
