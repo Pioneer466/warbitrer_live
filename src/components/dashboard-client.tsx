@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { LineChart } from "@/components/line-chart";
 import { usePollingJson } from "@/components/use-polling-json";
 import {
@@ -22,6 +24,8 @@ import type {
 export function DashboardClient() {
   const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 1_000);
   const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 1_000);
+  const [showAllPositions, setShowAllPositions] = useState(false);
+  const [showAllRecentFills, setShowAllRecentFills] = useState(false);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -48,6 +52,13 @@ export function DashboardClient() {
   const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
   const displayPositions = positions.filter(isDisplayablePosition);
+  const sortedPositions = [...displayPositions].sort((left, right) => {
+    const leftScore = Math.max(Math.abs(left.currentValueUsd), Math.abs(left.unrealizedPnlUsd), Math.abs(left.size));
+    const rightScore = Math.max(Math.abs(right.currentValueUsd), Math.abs(right.unrealizedPnlUsd), Math.abs(right.size));
+    return rightScore - leftScore || right.updatedAt - left.updatedAt;
+  });
+  const visiblePositions = showAllPositions ? sortedPositions : sortedPositions.slice(0, 2);
+  const visibleRecentFills = showAllRecentFills ? recentFills : recentFills.slice(0, 2);
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
   const drawdownUsd = pnl?.drawdownUsd ?? 0;
@@ -178,24 +189,32 @@ export function DashboardClient() {
       </section>
 
       <section className="grid gap-4 xl:grid-cols-2">
-        <Panel title="Positions" meta={`${displayPositions.length} lignes`}>
+        <Panel title="Positions Ouvertes" meta={`${displayPositions.length} lignes`}>
           {displayPositions.length === 0 ? (
             <EmptyState message="Aucune position live." />
           ) : (
             <div className="grid gap-3">
-              {displayPositions.map((position) => (
+              {visiblePositions.map((position) => (
                 <PositionRow key={position.id} position={position} />
               ))}
+              {displayPositions.length > 2 ? (
+                <ExpandButton
+                  expanded={showAllPositions}
+                  collapsedLabel={`Afficher ${displayPositions.length - 2} positions de plus`}
+                  expandedLabel="Réduire la liste"
+                  onClick={() => setShowAllPositions((value) => !value)}
+                />
+              ) : null}
             </div>
           )}
         </Panel>
 
-        <Panel title="Recent Fills" meta={`${recentFills.length} événements`}>
+        <Panel title="Exécutions Récentes" meta={`${recentFills.length} événements`}>
           {recentFills.length === 0 ? (
-            <EmptyState message="Aucun fill enregistré." />
+            <EmptyState message="Aucune exécution enregistrée." />
           ) : (
             <div className="grid gap-3">
-              {recentFills.slice(0, 8).map((fill) => (
+              {visibleRecentFills.map((fill) => (
                 <div key={fill.id} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
                   <div className="flex items-center justify-between gap-3">
                     <div className="text-white">
@@ -208,6 +227,14 @@ export function DashboardClient() {
                   </div>
                 </div>
               ))}
+              {recentFills.length > 2 ? (
+                <ExpandButton
+                  expanded={showAllRecentFills}
+                  collapsedLabel={`Afficher ${recentFills.length - 2} exécutions de plus`}
+                  expandedLabel="Réduire la liste"
+                  onClick={() => setShowAllRecentFills((value) => !value)}
+                />
+              ) : null}
             </div>
           )}
         </Panel>
@@ -493,6 +520,28 @@ function EmptyState({ message }: { message: string }) {
   );
 }
 
+function ExpandButton({
+  expanded,
+  collapsedLabel,
+  expandedLabel,
+  onClick,
+}: {
+  expanded: boolean;
+  collapsedLabel: string;
+  expandedLabel: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-[18px] border border-white/8 bg-white/[0.03] px-4 py-3 text-left text-sm text-mist transition hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+    >
+      {expanded ? expandedLabel : collapsedLabel}
+    </button>
+  );
+}
+
 function StatusBadge({
   children,
   tone,
@@ -523,9 +572,16 @@ function formatFeedMeta(feedHealth: VenueFeedHealth | null) {
 }
 
 function isDisplayablePosition(position: PositionSnapshot) {
-  return (
-    position.size > 0.0001 ||
-    Math.abs(position.currentValueUsd) > 0.0001 ||
-    Math.abs(position.unrealizedPnlUsd) > 0.0001
-  );
+  const meaningfulValue = Math.abs(position.currentValueUsd) > 0.05;
+
+  if (position.venue === "polymarket") {
+    if (position.redeemable || position.mergeable) {
+      return false;
+    }
+
+    return meaningfulValue;
+  }
+
+  const meaningfulSize = Math.abs(position.size) > 0.05;
+  return meaningfulValue || meaningfulSize;
 }
