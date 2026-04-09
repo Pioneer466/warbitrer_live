@@ -3,6 +3,7 @@ import {
   AssetType,
   SignatureType,
   type ApiKeyCreds,
+  type BalanceAllowanceParams,
   type BalanceAllowanceResponse,
   type OpenOrder,
   type Trade,
@@ -811,7 +812,7 @@ function shouldRefreshPolymarketBalanceAllowanceCache(now = Date.now()) {
 
 async function refreshPolymarketBalanceAllowanceCache(
   client: ClobClient,
-  params: { asset_type: AssetType.COLLATERAL },
+  params: BalanceAllowanceParams,
 ) {
   lastPolymarketBalanceAllowanceRefreshAt = Date.now();
 
@@ -881,6 +882,28 @@ export function extractPolymarketCollateralAllowanceUsd(
   signatureType?: string,
 ) {
   return extractPolymarketCollateralAllowanceInfo(collateral, signatureType).allowanceUsd;
+}
+
+export async function getPolymarketConditionalSellableBalance(tokenId: string) {
+  const client = createClobClient();
+  const env = readEnv();
+  const params: BalanceAllowanceParams = {
+    asset_type: AssetType.CONDITIONAL,
+    token_id: tokenId,
+  };
+  const refreshError = await refreshPolymarketBalanceAllowanceCache(client, params);
+  const conditional = await withPolymarketClientTimeout("getBalanceAllowance", () => client.getBalanceAllowance(params));
+  const balance = microUsdcToUsd(conditional.balance);
+  const allowanceInfo = extractPolymarketCollateralAllowanceInfo(conditional, env.POLY_SIGNATURE_TYPE);
+  const allowance = allowanceInfo.unlimited ? balance : allowanceInfo.allowanceUsd;
+
+  return {
+    balance,
+    allowance,
+    sellable: allowance === null ? balance : Math.min(balance, allowance),
+    refreshError,
+    raw: conditional,
+  };
 }
 
 export function extractPolymarketPositionValueUsd(payload: PositionValueResponse) {

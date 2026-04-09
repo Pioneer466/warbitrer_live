@@ -169,6 +169,10 @@ Après un `git pull`, lancer:
 
 `bash deploy/vps/deploy.sh`
 
+Pour relancer après un `hedge_failure` sans toucher la DB à la main:
+
+`cd /opt/warbitrer-live/app && sudo -u warbitrer npm run breaker:clear-hedge-failures`
+
 ## Séquence recommandée
 
 1. démarrer avec `enableTrading=false`

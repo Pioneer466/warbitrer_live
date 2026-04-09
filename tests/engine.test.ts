@@ -1,4 +1,8 @@
-import { isLatePrimaryFillRescueEligible } from "@/lib/engine";
+import {
+  derivePrimaryExitSize,
+  isLatePrimaryFillRescueEligible,
+  isRetryablePolymarketInventorySyncError,
+} from "@/lib/engine";
 import type { LiveOrder, OrderIntent } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
@@ -116,5 +120,44 @@ describe("late primary fill rescue eligibility", () => {
         [buildOrder()],
       ),
     ).toBe(false);
+  });
+});
+
+describe("primary exit sizing", () => {
+  it("caps the unwind size to the smallest observable polymarket inventory", () => {
+    expect(
+      derivePrimaryExitSize({
+        filledSize: 20.04,
+        positionSize: 20.04,
+        sellableSize: 19.264187,
+      }),
+    ).toBe(19.264187);
+  });
+
+  it("falls back to the confirmed fill size when no fresher inventory snapshot exists", () => {
+    expect(
+      derivePrimaryExitSize({
+        filledSize: 20.04,
+        positionSize: null,
+        sellableSize: null,
+      }),
+    ).toBe(20.04);
+  });
+});
+
+describe("retryable polymarket unwind errors", () => {
+  it("treats inventory sync errors as retryable", () => {
+    expect(
+      isRetryablePolymarketInventorySyncError(
+        new Error(
+          "not enough balance / allowance: the balance is not enough -> balance: 19264187, order amount: 20040000",
+        ),
+      ),
+    ).toBe(true);
+
+    expect(isRetryablePolymarketInventorySyncError(new Error("Unable to unwind intent x: no exitable size"))).toBe(
+      true,
+    );
+    expect(isRetryablePolymarketInventorySyncError(new Error("authentication failed"))).toBe(false);
   });
 });

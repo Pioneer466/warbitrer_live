@@ -18,6 +18,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "poly:derive-api-key": "tsx scripts/polymarket-derive-api-key.ts",
+    "breaker:clear-hedge-failures": "tsx scripts/clear-hedge-failure-breakers.ts",
     "worker": "tsx src/worker/index.ts",
     "worker:dev": "tsx watch src/worker/index.ts",
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""

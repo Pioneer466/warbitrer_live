@@ -19,6 +19,7 @@ import {
   createPolymarketAdapter,
   extractPolymarketTradesForOrder,
   fetchPolymarketOpenOrders,
+  getPolymarketConditionalSellableBalance,
   fetchPolymarketResolution,
   fetchPolymarketTrades,
   isConfirmedPolymarketTrade,
@@ -1050,15 +1051,19 @@ async function resolvePrimaryExitSize(
     return primaryLeg.filledSize;
   }
 
-  const positions = await polymarketAdapter.getPositions(now).catch(() => []);
+  const [positions, sellableBalance] = await Promise.all([
+    polymarketAdapter.getPositions(now).catch(() => []),
+    primaryLeg.tokenId ? getPolymarketConditionalSellableBalance(primaryLeg.tokenId).catch(() => null) : null,
+  ]);
   const matchingPosition = positions.find(
     (position) => position.marketRef === primaryLeg.marketRef && position.outcome === primaryLeg.outcome,
   );
-  if (!matchingPosition || matchingPosition.size <= 0) {
-    return primaryLeg.filledSize;
-  }
 
-  return Math.min(primaryLeg.filledSize, matchingPosition.size);
+  return derivePrimaryExitSize({
+    filledSize: primaryLeg.filledSize,
+    positionSize: matchingPosition?.size ?? null,
+    sellableSize: sellableBalance?.sellable ?? null,
+  });
 }
 
 async function resolvePrimaryExitPrice(intent: OrderIntent, primaryLeg: OrderIntent["legs"][number], now: number) {
@@ -1083,6 +1088,21 @@ async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, n
   const requestedSize = await resolvePrimaryExitSize(intent, primaryLeg, now);
   if (requestedSize <= 0) {
     throw new Error(`Unable to unwind intent ${intent.id}: no exitable size`);
+  }
+
+  if (requestedSize + ORDER_SIZE_TOLERANCE < primaryLeg.filledSize) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.unwind.size_capped",
+      message: `Primary unwind size capped for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        venue: primaryLeg.venue,
+        filledSize: primaryLeg.filledSize,
+        requestedSize,
+      },
+      createdAt: now,
+    });
   }
 
   const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
@@ -1335,78 +1355,35 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   currentIntent = markIntentStatus(currentIntent, "unwind_required", now, failureReason);
   await writeOrderIntent(currentIntent);
 
-  try {
-    for (let attempt = 1; attempt <= Math.max(1, settings.hedgeRetryAttempts); attempt += 1) {
-      if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
-        await sleep(settings.hedgeRetryDelayMs);
-      }
+  const maxAttempts = Math.max(1, settings.hedgeRetryAttempts);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
+      await sleep(settings.hedgeRetryDelayMs);
+    }
 
-      const unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now());
-      await writeVenueOrder(unwindResult);
-
-      if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= unwindResult.requestedSize) {
-        const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
-        const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
-        currentIntent = finalizeUnwoundIntent({
-          intent: {
-            ...currentIntent,
-            legs: currentIntent.legs.map((leg) =>
-              leg.id === primaryLeg.id
-                ? {
-                    ...leg,
-                    status: "unwound",
-                    payoutUsd,
-                  }
-                : leg,
-            ) as OrderIntent["legs"],
-          },
-          now,
-          failureReason: "Hedge failed, primary unwound",
-        });
-        await writeOrderIntent(currentIntent);
-        break;
-      }
-
-      if (unwindResult.filledSize > 0) {
+    let unwindResult: LiveOrder;
+    try {
+      unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now());
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      if (isRetryablePolymarketInventorySyncError(error)) {
         currentIntent = markIntentStatus(
           currentIntent,
           "unwind_required",
           now,
-          `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
+          `Primary unwind waiting for inventory sync (${errorMessage})`,
         );
         await writeOrderIntent(currentIntent);
-        await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill");
-        break;
-      }
-
-      if (!isTerminalOrderStatus(unwindResult.status)) {
         await writeRunEvent({
           level: "warn",
-          eventType: "order.unwind.awaiting_confirmation",
-          message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
+          eventType: "order.unwind.inventory_sync_pending",
+          message: `Primary unwind delayed for intent ${currentIntent.id}`,
           payload: {
             intentId: currentIntent.id,
             venue: currentIntent.primaryVenue,
-            orderId: unwindResult.venueOrderId,
-            orderStatus: unwindResult.status,
-          },
-          createdAt: now,
-        });
-        break;
-      }
-
-      if (attempt < Math.max(1, settings.hedgeRetryAttempts)) {
-        await writeRunEvent({
-          level: "warn",
-          eventType: "order.unwind.retry_terminal",
-          message: `Primary unwind ${attempt}/${Math.max(1, settings.hedgeRetryAttempts)} ended without fill for intent ${currentIntent.id}`,
-          payload: {
-            intentId: currentIntent.id,
-            venue: currentIntent.primaryVenue,
-            orderId: unwindResult.venueOrderId,
-            orderStatus: unwindResult.status,
             attempt,
-            attempts: Math.max(1, settings.hedgeRetryAttempts),
+            attempts: maxAttempts,
+            error: errorMessage,
           },
           createdAt: now,
         });
@@ -1417,31 +1394,103 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         currentIntent,
         "unwind_required",
         now,
-        `Primary unwind failed (${unwindResult.status}); manual intervention required`,
+        `Primary unwind submission failed (${errorMessage}); manual intervention required`,
       );
       await writeOrderIntent(currentIntent);
-      await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
+      await writeRunEvent({
+        level: "error",
+        eventType: "order.unwind.submit_failed",
+        message: `Primary unwind submission failed for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          error: errorMessage,
+        },
+        createdAt: now,
+      });
+      await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_submit_failed");
+      break;
     }
-  } catch (error) {
+
+    await writeVenueOrder(unwindResult);
+
+    if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= unwindResult.requestedSize) {
+      const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
+      const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
+      currentIntent = finalizeUnwoundIntent({
+        intent: {
+          ...currentIntent,
+          legs: currentIntent.legs.map((leg) =>
+            leg.id === primaryLeg.id
+              ? {
+                  ...leg,
+                  status: "unwound",
+                  payoutUsd,
+                }
+              : leg,
+          ) as OrderIntent["legs"],
+        },
+        now,
+        failureReason: "Hedge failed, primary unwound",
+      });
+      await writeOrderIntent(currentIntent);
+      break;
+    }
+
+    if (unwindResult.filledSize > 0) {
+      currentIntent = markIntentStatus(
+        currentIntent,
+        "unwind_required",
+        now,
+        `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
+      );
+      await writeOrderIntent(currentIntent);
+      await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill");
+      break;
+    }
+
+    if (!isTerminalOrderStatus(unwindResult.status)) {
+      await writeRunEvent({
+        level: "warn",
+        eventType: "order.unwind.awaiting_confirmation",
+        message: `Primary unwind order ${unwindResult.venueOrderId} awaiting authoritative confirmation`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          orderId: unwindResult.venueOrderId,
+          orderStatus: unwindResult.status,
+        },
+        createdAt: now,
+      });
+      break;
+    }
+
+    if (attempt < maxAttempts) {
+      await writeRunEvent({
+        level: "warn",
+        eventType: "order.unwind.retry_terminal",
+        message: `Primary unwind ${attempt}/${maxAttempts} ended without fill for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          orderId: unwindResult.venueOrderId,
+          orderStatus: unwindResult.status,
+          attempt,
+          attempts: maxAttempts,
+        },
+        createdAt: now,
+      });
+      continue;
+    }
+
     currentIntent = markIntentStatus(
       currentIntent,
       "unwind_required",
       now,
-      `Primary unwind submission failed (${toErrorMessage(error)}); manual intervention required`,
+      `Primary unwind failed (${unwindResult.status}); manual intervention required`,
     );
     await writeOrderIntent(currentIntent);
-    await writeRunEvent({
-      level: "error",
-      eventType: "order.unwind.submit_failed",
-      message: `Primary unwind submission failed for intent ${currentIntent.id}`,
-      payload: {
-        intentId: currentIntent.id,
-        venue: currentIntent.primaryVenue,
-        error: toErrorMessage(error),
-      },
-      createdAt: now,
-    });
-    await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_submit_failed");
+    await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
   }
 
   await writeCircuitBreaker({
@@ -2050,14 +2099,15 @@ async function reconcileInFlightIntentStates(now: number) {
     if (intent.status === "unwind_required") {
       if (!unwindOrder) {
         if (stale) {
-          currentIntent = markIntentStatus(
+          currentIntent = await attemptPrimaryUnwindAfterHedgeFailure(
             currentIntent,
-            "unwind_required",
+            primaryLeg,
+            hedgeLeg,
+            hedgeOrder,
+            settings,
             now,
-            "Primary unwind order not observed before timeout or slot end; manual intervention required",
+            currentIntent.failureReason ?? "Retrying primary unwind after hedge failure",
           );
-          await writeOrderIntent(currentIntent);
-          await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_missing");
         }
         continue;
       }
@@ -2760,6 +2810,10 @@ function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
 }
 
+function floorToSixDecimals(value: number) {
+  return Math.floor(value * 1_000_000) / 1_000_000;
+}
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -2835,6 +2889,32 @@ export function isLatePrimaryFillRescueEligible(intent: OrderIntent, recentOrder
   }
 
   return !Boolean(findLatestIntentReduceOnlyOrder(recentOrders, intent.id, primaryLeg));
+}
+
+export function derivePrimaryExitSize(params: {
+  filledSize: number;
+  positionSize?: number | null;
+  sellableSize?: number | null;
+}) {
+  const candidates = [params.filledSize, params.positionSize ?? null, params.sellableSize ?? null].filter(
+    (value): value is number => typeof value === "number" && Number.isFinite(value) && value > 0,
+  );
+
+  if (candidates.length === 0) {
+    return 0;
+  }
+
+  return floorToSixDecimals(Math.min(...candidates));
+}
+
+export function isRetryablePolymarketInventorySyncError(error: unknown) {
+  const normalized = toErrorMessage(error).toLowerCase();
+  return (
+    normalized.includes("no exitable size") ||
+    normalized.includes("not enough balance / allowance") ||
+    normalized.includes("balance is not enough") ||
+    normalized.includes("allowance is not enough")
+  );
 }
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {

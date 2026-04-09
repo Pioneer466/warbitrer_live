@@ -71,7 +71,7 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
   }
 
   const breakers = await readCircuitBreakers();
-  if (breakers.some((breaker) => breaker.key === "global" && breaker.active)) {
+  if (breakers.some((breaker) => breaker.key === "global" && breaker.active && breaker.reason === "manual")) {
     return [];
   }
 
