@@ -85,6 +85,7 @@ type DataPosition = {
 
 const POLY_BALANCE_ALLOWANCE_REFRESH_INTERVAL_MS = 30_000;
 const POLY_EFFECTIVE_UNLIMITED_ALLOWANCE_RAW = 10n ** 24n;
+const POLY_CLIENT_TIMEOUT_MS = 15_000;
 let lastPolymarketBalanceAllowanceRefreshAt = 0;
 
 export async function fetchPolymarketQuote(slot: MarketSlot): Promise<PolymarketQuote> {
@@ -335,16 +336,18 @@ export function createPolymarketAdapter(): VenueAdapter {
     async placeOrder(order) {
       const client = createClobClient();
       try {
-        const response = await client.createAndPostMarketOrder(
-          {
-            tokenID: order.tokenId!,
-            amount: order.side === "BUY" ? order.maxCostUsd : order.size,
-            side: order.side === "BUY" ? Side.BUY : Side.SELL,
-            price: order.price ?? undefined,
-            orderType: order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
-          },
-          undefined,
-          order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
+        const response = await withPolymarketClientTimeout("createAndPostMarketOrder", () =>
+          client.createAndPostMarketOrder(
+            {
+              tokenID: order.tokenId!,
+              amount: order.side === "BUY" ? order.maxCostUsd : order.size,
+              side: order.side === "BUY" ? Side.BUY : Side.SELL,
+              price: order.price ?? undefined,
+              orderType: order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
+            },
+            undefined,
+            order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
+          ),
         );
 
         return {
@@ -385,11 +388,11 @@ export function createPolymarketAdapter(): VenueAdapter {
     },
     async cancelOrder(orderId: string) {
       const client = createClobClient();
-      await client.cancelOrder({ orderID: orderId });
+      await withPolymarketClientTimeout("cancelOrder", () => client.cancelOrder({ orderID: orderId }));
     },
     async getOrder(orderId: string) {
       const client = createClobClient();
-      const order = await client.getOrder(orderId);
+      const order = await withPolymarketClientTimeout("getOrder", () => client.getOrder(orderId));
       return mapPolymarketOrder(order, "unknown");
     },
   };
@@ -401,7 +404,7 @@ export async function fetchPolymarketOpenOrders() {
   }
 
   const client = createClobClient();
-  return client.getOpenOrders();
+  return withPolymarketClientTimeout("getOpenOrders", () => client.getOpenOrders());
 }
 
 export async function fetchPolymarketTrades(after?: string) {
@@ -410,7 +413,7 @@ export async function fetchPolymarketTrades(after?: string) {
   }
 
   const client = createClobClient();
-  return client.getTrades(after ? { after } : undefined);
+  return withPolymarketClientTimeout("getTrades", () => client.getTrades(after ? { after } : undefined));
 }
 
 export async function confirmPolymarketOrderExecution(params: {
@@ -789,11 +792,11 @@ async function getFreshPolymarketCollateralBalance(client: ClobClient): Promise<
     refreshError = await refreshPolymarketBalanceAllowanceCache(client, params);
   }
 
-  let collateral = await client.getBalanceAllowance(params);
+  let collateral = await withPolymarketClientTimeout("getBalanceAllowance", () => client.getBalanceAllowance(params));
   if (microUsdcToUsd(collateral.balance) <= 0 && !refreshError) {
     const forcedRefreshError = await refreshPolymarketBalanceAllowanceCache(client, params);
     refreshError = forcedRefreshError;
-    collateral = await client.getBalanceAllowance(params);
+    collateral = await withPolymarketClientTimeout("getBalanceAllowance", () => client.getBalanceAllowance(params));
   }
 
   return {
@@ -813,11 +816,31 @@ async function refreshPolymarketBalanceAllowanceCache(
   lastPolymarketBalanceAllowanceRefreshAt = Date.now();
 
   try {
-    await client.updateBalanceAllowance(params);
+    await withPolymarketClientTimeout("updateBalanceAllowance", () => client.updateBalanceAllowance(params));
     return null;
   } catch (error) {
     return toErrorMessage(error);
   }
+}
+
+function withPolymarketClientTimeout<T>(
+  operation: string,
+  fn: () => Promise<T>,
+  timeoutMs = POLY_CLIENT_TIMEOUT_MS,
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(`Polymarket ${operation} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+  });
+
+  return Promise.race([fn(), timeoutPromise]).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }) as Promise<T>;
 }
 
 export function microUsdcToUsd(value: string | number) {

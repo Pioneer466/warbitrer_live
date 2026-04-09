@@ -88,6 +88,7 @@ const RESOLUTION_GRACE_MS = 5_000;
 const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
+const RECONCILE_STEP_TIMEOUT_MS = 30_000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -2785,7 +2786,7 @@ export function isLatePrimaryFillRescueEligible(intent: OrderIntent, recentOrder
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {
   try {
-    await fn();
+    await withTimeout(fn, RECONCILE_STEP_TIMEOUT_MS, `reconcile step ${step} timed out after ${RECONCILE_STEP_TIMEOUT_MS}ms`);
     return [] as string[];
   } catch (error) {
     const message = `${step}: ${toErrorMessage(error)}`;
@@ -2800,4 +2801,20 @@ async function runReconcileStep(step: string, now: number, fn: () => Promise<voi
     });
     return [message];
   }
+}
+
+function withTimeout<T>(fn: () => Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new Error(message));
+    }, timeoutMs);
+  });
+
+  return Promise.race([fn(), timeoutPromise]).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }) as Promise<T>;
 }

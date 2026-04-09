@@ -2,15 +2,20 @@ import { processTick } from "@/lib/engine";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { readSettings, storageMode } from "@/lib/storage";
 
+const WORKER_TICK_TIMEOUT_MS = 90_000;
+
 async function run() {
   console.log(`[worker] storage=${storageMode()}`);
 
   while (true) {
     const startedAt = Date.now();
     try {
-      await processTick();
+      await processTickWithWatchdog();
     } catch (error) {
       console.error("[worker] tick error", error);
+      if (error instanceof WorkerTickTimeoutError) {
+        throw error;
+      }
     }
 
     const elapsed = Date.now() - startedAt;
@@ -22,7 +27,7 @@ async function run() {
 
 run().catch((error) => {
   console.error("[worker] fatal", error);
-  process.exitCode = 1;
+  process.exit(1);
 });
 
 function sleep(ms: number) {
@@ -36,5 +41,28 @@ async function readPollingIntervalMs() {
   } catch (error) {
     console.error("[worker] settings read failed, using default live polling interval", error);
     return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;
+  }
+}
+
+async function processTickWithWatchdog() {
+  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutHandle = setTimeout(() => {
+      reject(new WorkerTickTimeoutError(`processTick timed out after ${WORKER_TICK_TIMEOUT_MS}ms`));
+    }, WORKER_TICK_TIMEOUT_MS);
+  });
+
+  return Promise.race([processTick(), timeoutPromise]).finally(() => {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  });
+}
+
+class WorkerTickTimeoutError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkerTickTimeoutError";
   }
 }
