@@ -3,6 +3,7 @@ import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
 import { POLY_CTF_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
 import {
+  getPolymarketRelayerTransaction,
   derivePolymarketProxyAddress,
   readPolymarketSignerAddress,
   submitPolymarketProxyTransactions,
@@ -11,6 +12,22 @@ import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
 
 const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
+const AUTO_CONVERT_RETRY_AFTER_FAILURE_MS = 60 * 1000;
+const AUTO_CONVERT_MAX_PENDING_RELAYER_TX = 1;
+const AUTO_CONVERT_PENDING_TIMEOUT_MS = 10 * 60 * 1000;
+const POLYMARKET_CONVERT_SUBMITTED_EVENTS = new Set([
+  "polymarket.convert.submitted",
+  "polymarket.redeem.submitted",
+  "polymarket.merge.submitted",
+]);
+const POLYMARKET_CONVERT_TERMINAL_EVENTS = new Set([
+  "polymarket.convert.confirmed",
+  "polymarket.convert.failed",
+  "polymarket.redeem.confirmed",
+  "polymarket.redeem.failed",
+  "polymarket.merge.confirmed",
+  "polymarket.merge.failed",
+]);
 
 export async function buildRecoveryResponse(): Promise<RecoveryResponse> {
   const env = readEnv();
@@ -59,21 +76,28 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
   }
 
   const recentEvents = await readRunEvents(200);
-  const markets = buildRecoveryMarkets(positions, env, walletValidation.canDirectConversion).filter(
-    (market) => market.conversionAction !== null && market.directConversionSupported,
-  );
+  const pendingRelayerTransactions = extractPendingPolymarketRelayerTransactions(recentEvents);
+  const availableSubmissionSlots = Math.max(0, AUTO_CONVERT_MAX_PENDING_RELAYER_TX - pendingRelayerTransactions.length);
+
+  if (availableSubmissionSlots === 0) {
+    return [];
+  }
+
+  const markets = buildRecoveryMarkets(positions, env, walletValidation.canDirectConversion)
+    .filter((market) => market.conversionAction !== null && market.directConversionSupported)
+    .filter(
+      (market) =>
+        !pendingRelayerTransactions.some((transaction) => {
+          const payloadMarketRef =
+            typeof transaction.event.payload?.marketRef === "string" ? transaction.event.payload.marketRef : null;
+          return payloadMarketRef === market.marketRef;
+        }),
+    )
+    .sort((left, right) => scoreRecoveryMarket(right) - scoreRecoveryMarket(left));
   const submitted: string[] = [];
 
-  for (const market of markets) {
-    const recentlySubmitted = recentEvents.some(
-      (event) =>
-        (event.eventType === "polymarket.convert.submitted" ||
-          event.eventType === "polymarket.redeem.submitted" ||
-          event.eventType === "polymarket.merge.submitted") &&
-        typeof event.payload?.marketRef === "string" &&
-        event.payload.marketRef === market.marketRef &&
-        now - event.createdAt < AUTO_CONVERT_COOLDOWN_MS,
-    );
+  for (const market of markets.slice(0, availableSubmissionSlots)) {
+    const recentlySubmitted = shouldThrottlePolymarketConversionSubmission(recentEvents, market.marketRef, now);
 
     if (recentlySubmitted) {
       continue;
@@ -104,6 +128,47 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
 
 export async function autoRedeemPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
   return autoConvertPolymarketIfConfigured(positions, now);
+}
+
+export async function reconcilePolymarketProxyConversions(now = Date.now()) {
+  const env = readEnv();
+  const autoConvertEnabled = isTruthyEnv(env.POLY_AUTO_CONVERT) || isTruthyEnv(env.POLY_AUTO_REDEEM);
+
+  if (!autoConvertEnabled || env.POLY_SIGNATURE_TYPE !== "POLY_PROXY") {
+    return [];
+  }
+
+  const recentEvents = await readRunEvents(400);
+  const pendingTransactions = extractPendingPolymarketRelayerTransactions(recentEvents);
+  const completed: string[] = [];
+
+  for (const pending of pendingTransactions) {
+    const relayerTransaction = await getPolymarketRelayerTransaction(pending.relayerTransactionId, env).catch(() => null);
+
+    if (!relayerTransaction) {
+      if (now - pending.event.createdAt >= AUTO_CONVERT_PENDING_TIMEOUT_MS) {
+        await writePolymarketConversionTerminalEvent("failed", pending, {
+          state: "STATE_TIMEOUT",
+          transactionHash: null,
+        }, now);
+        completed.push(pending.relayerTransactionId);
+      }
+      continue;
+    }
+
+    if (relayerTransaction.state === "STATE_FAILED") {
+      await writePolymarketConversionTerminalEvent("failed", pending, relayerTransaction, now);
+      completed.push(pending.relayerTransactionId);
+      continue;
+    }
+
+    if (relayerTransaction.state === "STATE_MINED" || relayerTransaction.state === "STATE_CONFIRMED") {
+      await writePolymarketConversionTerminalEvent("confirmed", pending, relayerTransaction, now);
+      completed.push(pending.relayerTransactionId);
+    }
+  }
+
+  return completed;
 }
 
 export function buildRedeemTxData(conditionId: string) {
@@ -647,6 +712,141 @@ function deriveRecoveryAction(market: RecoveryMarket): RecoveryMarket["conversio
   }
 
   return null;
+}
+
+type PendingPolymarketConversion = {
+  action: "redeem" | "merge" | "convert";
+  relayerTransactionId: string;
+  event: Awaited<ReturnType<typeof readRunEvents>>[number];
+};
+
+function extractPendingPolymarketRelayerTransactions(events: Awaited<ReturnType<typeof readRunEvents>>) {
+  const terminalIds = new Set<string>();
+
+  for (const event of events) {
+    if (!POLYMARKET_CONVERT_TERMINAL_EVENTS.has(event.eventType)) {
+      continue;
+    }
+
+    const relayerTransactionId =
+      typeof event.payload?.relayerTransactionId === "string" ? event.payload.relayerTransactionId : null;
+    if (relayerTransactionId) {
+      terminalIds.add(relayerTransactionId);
+    }
+  }
+
+  const pending = new Map<string, PendingPolymarketConversion>();
+  for (const event of [...events].reverse()) {
+    if (!POLYMARKET_CONVERT_SUBMITTED_EVENTS.has(event.eventType)) {
+      continue;
+    }
+
+    const relayerTransactionId =
+      typeof event.payload?.relayerTransactionId === "string" ? event.payload.relayerTransactionId : null;
+    if (!relayerTransactionId || terminalIds.has(relayerTransactionId)) {
+      continue;
+    }
+
+    const action =
+      event.eventType === "polymarket.merge.submitted"
+        ? "merge"
+        : event.eventType === "polymarket.redeem.submitted"
+          ? "redeem"
+          : typeof event.payload?.action === "string" && event.payload.action === "merge"
+            ? "merge"
+            : typeof event.payload?.action === "string" && event.payload.action === "redeem"
+              ? "redeem"
+              : "convert";
+
+    pending.set(relayerTransactionId, {
+      action,
+      relayerTransactionId,
+      event,
+    });
+  }
+
+  return [...pending.values()].sort((left, right) => left.event.createdAt - right.event.createdAt);
+}
+
+function scoreRecoveryMarket(market: RecoveryMarket) {
+  return market.outcomes.reduce((best, outcome) => Math.max(best, Math.max(outcome.currentValueUsd, outcome.size)), 0);
+}
+
+function shouldThrottlePolymarketConversionSubmission(
+  events: Awaited<ReturnType<typeof readRunEvents>>,
+  marketRef: string,
+  now: number,
+) {
+  let latestSubmittedAt: number | null = null;
+  let latestFailedAt: number | null = null;
+
+  for (const event of events) {
+    if (typeof event.payload?.marketRef !== "string" || event.payload.marketRef !== marketRef) {
+      continue;
+    }
+
+    if (POLYMARKET_CONVERT_SUBMITTED_EVENTS.has(event.eventType)) {
+      latestSubmittedAt = Math.max(latestSubmittedAt ?? event.createdAt, event.createdAt);
+    }
+
+    if (
+      (event.eventType === "polymarket.convert.failed" ||
+        event.eventType === "polymarket.redeem.failed" ||
+        event.eventType === "polymarket.merge.failed") &&
+      typeof event.payload?.relayerTransactionId === "string"
+    ) {
+      latestFailedAt = Math.max(latestFailedAt ?? event.createdAt, event.createdAt);
+    }
+  }
+
+  if (latestFailedAt !== null && (latestSubmittedAt === null || latestFailedAt >= latestSubmittedAt)) {
+    return now - latestFailedAt < AUTO_CONVERT_RETRY_AFTER_FAILURE_MS;
+  }
+
+  return latestSubmittedAt !== null && now - latestSubmittedAt < AUTO_CONVERT_COOLDOWN_MS;
+}
+
+async function writePolymarketConversionTerminalEvent(
+  status: "confirmed" | "failed",
+  pending: PendingPolymarketConversion,
+  relayerTransaction: { state: string; transactionHash?: string | null },
+  createdAt: number,
+) {
+  const payload = {
+    action: pending.action,
+    state: relayerTransaction.state,
+    txHash: relayerTransaction.transactionHash ?? null,
+    relayerTransactionId: pending.relayerTransactionId,
+    ...(pending.event.payload ?? {}),
+  };
+  const marketRef = typeof pending.event.payload?.marketRef === "string" ? pending.event.payload.marketRef : "unknown market";
+  const actionLabel = pending.action === "merge" ? "Merge" : "Redeem";
+  const specificEventType = `polymarket.${pending.action}.${status}`;
+  const genericEventType = `polymarket.convert.${status}`;
+  const specificMessage =
+    status === "confirmed"
+      ? `${actionLabel} confirmed for ${marketRef} via proxy relayer`
+      : `${actionLabel} failed for ${marketRef} via proxy relayer (${relayerTransaction.state})`;
+  const genericMessage =
+    status === "confirmed"
+      ? `${actionLabel} confirmed for ${marketRef} via proxy relayer`
+      : `${actionLabel} failed for ${marketRef} via proxy relayer (${relayerTransaction.state})`;
+
+  await writeRunEvent({
+    level: status === "confirmed" ? "info" : "warn",
+    eventType: specificEventType,
+    message: specificMessage,
+    payload,
+    createdAt,
+  });
+
+  await writeRunEvent({
+    level: status === "confirmed" ? "info" : "warn",
+    eventType: genericEventType,
+    message: genericMessage,
+    payload,
+    createdAt,
+  });
 }
 
 function deriveMergeableSize(market: RecoveryMarket) {

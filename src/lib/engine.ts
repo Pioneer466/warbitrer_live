@@ -27,8 +27,8 @@ import {
   mapPolymarketTradeToFill,
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
-import { autoConvertPolymarketIfConfigured } from "@/lib/recovery";
-import { calculateVenueExposureUsd, countSlotExecutionBlockers } from "@/lib/risk";
+import { autoConvertPolymarketIfConfigured, reconcilePolymarketProxyConversions } from "@/lib/recovery";
+import { calculateVenueExposureUsd, countSlotExecutionBlockers, hasUnresolvedExposureBlocker } from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
 import {
   calculateWinningPayout,
@@ -205,13 +205,14 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       const snapshot = latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
       const readiness = await computeReadiness(snapshot, now);
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
-      const openIntents = await readOpenOrderIntents();
+      const initialOpenIntents = await readOpenOrderIntents();
       const resumed = await resumeInFlightIntents(
-        openIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
+        initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
         slot,
         settings,
         now,
       );
+      const openIntents = await readOpenOrderIntents();
 
       await writeWorkerState({
         readinessStatus: readiness.state.readinessStatus,
@@ -227,6 +228,10 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       }
 
       if (!snapshot) {
+        return resumed;
+      }
+
+      if (hasUnresolvedExposureBlocker(openIntents)) {
         return resumed;
       }
 
@@ -305,6 +310,12 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
             replaceVenuePositions("polymarket", polyPositions),
             replaceVenuePositions("kalshi", kalshiPositions),
           ]);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("reconcile_polymarket_convert_status", now, async () => {
+          await reconcilePolymarketProxyConversions(now);
         })),
       );
 
@@ -409,7 +420,7 @@ async function computeReadiness(
   const balances = await readVenueBalances();
   const slotKey = snapshot?.slotKey ?? null;
   const breakers = (await readCircuitBreakers()).filter(
-    (breaker) => breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`),
+    (breaker) => breaker.active || breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`),
   );
   const checks = balances.map((balance) => ({
     key: `${balance.venue}:balance`,
@@ -460,7 +471,13 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
   const key = `slot:${slot.key}` as const;
   const breakers = await readCircuitBreakers();
   for (const breaker of breakers) {
-    if (breaker.active && breaker.key.startsWith("slot:") && breaker.key !== key) {
+    const isFeedHealthBreaker =
+      breaker.reason === "venue_error" &&
+      breaker.payload !== null &&
+      typeof breaker.payload === "object" &&
+      Array.isArray((breaker.payload as { feeds?: unknown }).feeds);
+
+    if (breaker.active && breaker.key.startsWith("slot:") && breaker.key !== key && isFeedHealthBreaker) {
       await writeCircuitBreaker({
         key: breaker.key,
         active: false,
@@ -1353,11 +1370,12 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       if (unwindResult.filledSize > 0) {
         currentIntent = markIntentStatus(
           currentIntent,
-          "failed",
+          "unwind_required",
           now,
           `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill");
         break;
       }
 
@@ -1395,13 +1413,19 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         continue;
       }
 
-      currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary unwind failed (${unwindResult.status})`);
+      currentIntent = markIntentStatus(
+        currentIntent,
+        "unwind_required",
+        now,
+        `Primary unwind failed (${unwindResult.status}); manual intervention required`,
+      );
       await writeOrderIntent(currentIntent);
+      await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
     }
   } catch (error) {
     currentIntent = markIntentStatus(
       currentIntent,
-      "failed",
+      "unwind_required",
       now,
       `Primary unwind submission failed (${toErrorMessage(error)}); manual intervention required`,
     );
@@ -1417,6 +1441,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       },
       createdAt: now,
     });
+    await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_submit_failed");
   }
 
   await writeCircuitBreaker({
@@ -1433,6 +1458,27 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   });
 
   return currentIntent;
+}
+
+async function tripManualInterventionBreaker(
+  intent: OrderIntent,
+  now: number,
+  hedgeOrder: LiveOrder | null,
+  stage: string,
+) {
+  await writeCircuitBreaker({
+    key: "global",
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.primaryVenue,
+      stage,
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+    },
+  });
 }
 
 async function reconcileVenueOrders(now: number) {
@@ -2006,11 +2052,12 @@ async function reconcileInFlightIntentStates(now: number) {
         if (stale) {
           currentIntent = markIntentStatus(
             currentIntent,
-            "failed",
+            "unwind_required",
             now,
-            "Primary unwind order not observed before timeout or slot end",
+            "Primary unwind order not observed before timeout or slot end; manual intervention required",
           );
           await writeOrderIntent(currentIntent);
+          await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_missing");
         }
         continue;
       }
@@ -2041,22 +2088,24 @@ async function reconcileInFlightIntentStates(now: number) {
       if (unwindOrder.filledSize > 0) {
         currentIntent = markIntentStatus(
           currentIntent,
-          "failed",
+          "unwind_required",
           now,
           `Primary unwind partially filled (${unwindOrder.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill_reconcile");
         continue;
       }
 
       if (stale && (isTerminalOrderStatus(unwindOrder.status) || isAwaitingOrderConfirmation(unwindOrder.status))) {
         currentIntent = markIntentStatus(
           currentIntent,
-          "failed",
+          "unwind_required",
           now,
-          `Primary unwind not completed (${unwindOrder.status})`,
+          `Primary unwind not completed (${unwindOrder.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_not_completed");
       }
       continue;
     }

@@ -54,6 +54,12 @@ export type ProxyRelayerSubmission = {
   state: string;
 };
 
+export type ProxyRelayerTransactionStatus = {
+  transactionID?: string;
+  transactionHash?: string | null;
+  state: string;
+};
+
 export function readPolymarketSignerAddress(env = readEnv()) {
   return normalizeAddress(readPolymarketSigner(env).address, "POLY_PRIVATE_KEY");
 }
@@ -159,6 +165,26 @@ export async function waitForPolymarketRelayerTransaction(
   }
 
   return null;
+}
+
+export async function getPolymarketRelayerTransaction(
+  transactionId: string,
+  env = readEnv(),
+): Promise<ProxyRelayerTransactionStatus | null> {
+  if (!env.POLY_RELAYER_API_KEY) {
+    return null;
+  }
+
+  const signerAddress = readPolymarketSignerAddress(env);
+  const relayerUrl = readRelayerUrl(env);
+  const transactions = await fetchJson<RelayerTransaction[]>(
+    `${relayerUrl}/transaction?id=${encodeURIComponent(transactionId)}`,
+    {
+      headers: buildPolymarketRelayerHeaders(env.POLY_RELAYER_API_KEY, signerAddress),
+    },
+  ).catch(() => []);
+
+  return transactions[0] ?? null;
 }
 
 async function buildProxyTransactionRequest(

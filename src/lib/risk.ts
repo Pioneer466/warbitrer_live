@@ -35,3 +35,7 @@ export function calculateLegExposureUsd(
 export function countSlotExecutionBlockers(openIntents: OrderIntent[], slotKey: string) {
   return openIntents.filter((intent) => intent.slotKey === slotKey && intent.status !== "hedged").length;
 }
+
+export function hasUnresolvedExposureBlocker(openIntents: OrderIntent[]) {
+  return openIntents.some((intent) => intent.status !== "hedged");
+}

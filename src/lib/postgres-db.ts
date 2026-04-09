@@ -1164,7 +1164,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.key);
   const allBreakers = await listCircuitBreakers(pool);
   const relevantBreakers = allBreakers.filter(
-    (breaker) => breaker.key === "global" || breaker.key === `slot:${slot.key}`,
+    (breaker) => breaker.active || breaker.key === "global" || breaker.key === `slot:${slot.key}`,
   );
   const pnl = await getLatestPnlSnapshot(pool);
   const [baselineEquityUsd, peakEquityUsd] = pnl
