@@ -2373,6 +2373,10 @@ function buildVenueOrderRequest(
     leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side);
   const price =
     leg.venue === "kalshi" ? normalizeKalshiOrderPrice(slippageAdjustedPrice, leg.side) : slippageAdjustedPrice;
+  const maxCostUsd =
+    leg.venue === "polymarket" && leg.side === "BUY" && price !== null
+      ? round4(leg.requestedSize * price)
+      : leg.requestedNotionalUsd * (1 + maxSlippageBps / 10_000);
 
   return {
     marketRef: leg.marketRef,
@@ -2381,7 +2385,7 @@ function buildVenueOrderRequest(
     side: leg.side,
     size: leg.requestedSize,
     price,
-    maxCostUsd: leg.requestedNotionalUsd * (1 + maxSlippageBps / 10_000),
+    maxCostUsd,
     orderType,
     reduceOnly,
     clientOrderId: crypto.randomUUID(),
