@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 import { LineChart } from "@/components/line-chart";
 import { usePollingJson } from "@/components/use-polling-json";
 import {
@@ -22,6 +24,8 @@ import type {
 export function DashboardClient() {
   const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 1_000);
   const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 1_000);
+  const [settingsBusy, setSettingsBusy] = useState(false);
+  const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -60,6 +64,34 @@ export function DashboardClient() {
       : `DD ${formatCurrency(drawdownUsd)} · Strategie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}`
     : undefined;
 
+  async function toggleTrading() {
+    setSettingsBusy(true);
+    setSettingsMessage(null);
+
+    try {
+      const response = await fetch("/api/settings", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ...config,
+          enableTrading: !config.enableTrading,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      setSettingsMessage(!config.enableTrading ? "Trading réactivé." : "Trading coupé.");
+    } catch (error) {
+      setSettingsMessage(error instanceof Error ? error.message : "Impossible de modifier le trading.");
+    } finally {
+      setSettingsBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-5">
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
@@ -71,7 +103,19 @@ export function DashboardClient() {
               phase `{workerState.phase}` · readiness `{workerState.readinessStatus}`
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center justify-end gap-3">
+            <button
+              type="button"
+              onClick={toggleTrading}
+              disabled={settingsBusy}
+              className={`rounded-full border px-4 py-2 text-[11px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
+                config.enableTrading
+                  ? "border-rose/20 bg-rose/10 text-rose"
+                  : "border-cyan/20 bg-cyan/10 text-cyan"
+              }`}
+            >
+              {settingsBusy ? "updating" : config.enableTrading ? "trading off" : "trading on"}
+            </button>
             <div className="text-right">
               <div className="font-mono text-[40px] leading-none text-white">
                 {formatCountdown(slot.secondsRemaining)}
@@ -85,6 +129,10 @@ export function DashboardClient() {
             </StatusBadge>
           </div>
         </div>
+
+        {settingsMessage ? (
+          <div className="mt-4 rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">{settingsMessage}</div>
+        ) : null}
 
         <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCell label="Equity" value={pnl ? formatCurrency(pnl.equityUsd) : "--"} />

@@ -6,7 +6,6 @@ import {
   derivePolymarketProxyAddress,
   readPolymarketSignerAddress,
   submitPolymarketProxyTransactions,
-  waitForPolymarketRelayerTransaction,
 } from "@/lib/polymarket-relayer";
 import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from "@/lib/storage";
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
@@ -48,8 +47,9 @@ export async function redeemPolymarketMarket(marketRef: string) {
 export async function autoConvertPolymarketIfConfigured(positions: PositionSnapshot[], now = Date.now()) {
   const env = readEnv();
   const walletValidation = buildWalletValidation(env);
+  const autoConvertEnabled = isTruthyEnv(env.POLY_AUTO_CONVERT) || isTruthyEnv(env.POLY_AUTO_REDEEM);
 
-  if (!isTruthyEnv(env.POLY_AUTO_CONVERT ?? env.POLY_AUTO_REDEEM) || !walletValidation.canDirectConversion) {
+  if (!autoConvertEnabled || !walletValidation.canDirectConversion) {
     return [];
   }
 
@@ -378,9 +378,8 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
       `redeem:${marketRef}`,
       env,
     );
-    const mined = await waitForPolymarketRelayerTransaction(submitted.transactionId, env);
-    const txHash = mined?.transactionHash ?? submitted.transactionHash;
-    const relayerState = mined?.state ?? submitted.state;
+    const txHash = submitted.transactionHash;
+    const relayerState = submitted.state;
 
     await writeRunEvent({
       level: "info",
@@ -516,9 +515,8 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       `merge:${market.marketRef}`,
       env,
     );
-    const mined = await waitForPolymarketRelayerTransaction(submitted.transactionId, env);
-    const txHash = mined?.transactionHash ?? submitted.transactionHash;
-    const relayerState = mined?.state ?? submitted.state;
+    const txHash = submitted.transactionHash;
+    const relayerState = submitted.state;
 
     await writeRunEvent({
       level: "info",
