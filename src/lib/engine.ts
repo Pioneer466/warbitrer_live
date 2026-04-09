@@ -1366,6 +1366,21 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now());
     } catch (error) {
       const errorMessage = toErrorMessage(error);
+      if (
+        isPolymarketOrderbookUnavailableError(error) &&
+        currentIntent.primaryVenue === "polymarket" &&
+        currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now
+      ) {
+        currentIntent = await closeIntentAfterPolymarketOrderbookUnavailable(
+          currentIntent,
+          primaryLeg,
+          hedgeOrder,
+          now,
+          errorMessage,
+        );
+        break;
+      }
+
       if (isRetryablePolymarketInventorySyncError(error)) {
         currentIntent = markIntentStatus(
           currentIntent,
@@ -1979,6 +1994,20 @@ async function maybeExitPolymarketLegAtSlotEnd(
       lastOrder = order;
       await writeVenueOrder(order);
     } catch (error) {
+      if (isPolymarketOrderbookUnavailableError(error)) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.slot_exit.polymarket_orderbook_unavailable",
+          message: `Polymarket slot-end exit unavailable because the orderbook is gone for intent ${intent.id}`,
+          payload: {
+            intentId: intent.id,
+            error: toErrorMessage(error),
+          },
+          createdAt: now,
+        });
+        break;
+      }
+
       await writeRunEvent({
         level: "warn",
         eventType: "order.slot_exit.polymarket_submit_failed",
@@ -2915,6 +2944,60 @@ export function isRetryablePolymarketInventorySyncError(error: unknown) {
     normalized.includes("balance is not enough") ||
     normalized.includes("allowance is not enough")
   );
+}
+
+export function isPolymarketOrderbookUnavailableError(error: unknown) {
+  const normalized = toErrorMessage(error).toLowerCase();
+  return normalized.includes("orderbook") && normalized.includes("does not exist");
+}
+
+async function closeIntentAfterPolymarketOrderbookUnavailable(
+  intent: OrderIntent,
+  primaryLeg: OrderIntent["legs"][number],
+  hedgeOrder: LiveOrder | null,
+  now: number,
+  errorMessage: string,
+) {
+  const slotSlug = `btc-updown-15m-${Math.floor(intent.slotStartTs / 1000)}`;
+  const polyResolution = await fetchPolymarketResolution(slotSlug).catch(() => null);
+  const failureReason =
+    polyResolution === null
+      ? `Primary unwind impossible after Polymarket market close (${errorMessage}); waiting for venue settlement / reclaim`
+      : `Primary unwind impossible after Polymarket market close (${errorMessage}); market resolved ${polyResolution}, waiting for reclaim`;
+
+  const closedIntent: OrderIntent = {
+    ...intent,
+    status: "failed",
+    updatedAt: now,
+    resolvedAt: now,
+    failureReason,
+    polyResolution: polyResolution ?? intent.polyResolution,
+    legs: intent.legs.map((leg) =>
+      leg.id === primaryLeg.id
+        ? {
+            ...leg,
+            resolvedOutcome: polyResolution ?? leg.resolvedOutcome,
+          }
+        : leg,
+    ) as OrderIntent["legs"],
+  };
+
+  await writeOrderIntent(closedIntent);
+  await writeRunEvent({
+    level: "error",
+    eventType: "intent.closed.polymarket_orderbook_unavailable",
+    message: `Intent ${intent.id} closed after the Polymarket orderbook disappeared`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      orderbookUnavailable: true,
+      error: errorMessage,
+      polyResolution,
+    },
+    createdAt: now,
+  });
+  await tripManualInterventionBreaker(closedIntent, now, hedgeOrder, "primary_unwind_orderbook_unavailable");
+  return closedIntent;
 }
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {

@@ -1,6 +1,7 @@
 import {
   derivePrimaryExitSize,
   isLatePrimaryFillRescueEligible,
+  isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
 } from "@/lib/engine";
 import type { LiveOrder, OrderIntent } from "@/lib/types";
@@ -159,5 +160,16 @@ describe("retryable polymarket unwind errors", () => {
       true,
     );
     expect(isRetryablePolymarketInventorySyncError(new Error("authentication failed"))).toBe(false);
+  });
+});
+
+describe("polymarket closed orderbook errors", () => {
+  it("detects when a token orderbook has disappeared", () => {
+    expect(
+      isPolymarketOrderbookUnavailableError(
+        new Error("the orderbook 110016697850489733765199292378131676749047131268297622626845863046634270666333 does not exist"),
+      ),
+    ).toBe(true);
+    expect(isPolymarketOrderbookUnavailableError(new Error("market not found"))).toBe(false);
   });
 });
