@@ -809,7 +809,7 @@ function shouldThrottlePolymarketConversionSubmission(
 async function writePolymarketConversionTerminalEvent(
   status: "confirmed" | "failed",
   pending: PendingPolymarketConversion,
-  relayerTransaction: { state: string; transactionHash?: string | null },
+  relayerTransaction: Record<string, unknown> & { state: string; transactionHash?: string | null },
   createdAt: number,
 ) {
   const payload = {
@@ -817,6 +817,7 @@ async function writePolymarketConversionTerminalEvent(
     state: relayerTransaction.state,
     txHash: relayerTransaction.transactionHash ?? null,
     relayerTransactionId: pending.relayerTransactionId,
+    relayerTransaction,
     ...(pending.event.payload ?? {}),
   };
   const marketRef = typeof pending.event.payload?.marketRef === "string" ? pending.event.payload.marketRef : "unknown market";
