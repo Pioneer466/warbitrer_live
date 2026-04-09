@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { TradingToggle } from "@/components/trading-toggle";
+
 type ShellProps = {
   activePath: "/" | "/trades" | "/recovery";
   children: React.ReactNode;
@@ -28,6 +30,7 @@ export function Shell({ activePath, children }: ShellProps) {
           </div>
           <div className="flex items-center gap-2">
             <Badge tone="amber">BTC 15m</Badge>
+            <TradingToggle />
             <Badge tone="cyan">LIVE</Badge>
             <Badge tone="default">POSTGRES</Badge>
           </div>

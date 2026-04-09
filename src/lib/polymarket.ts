@@ -1101,6 +1101,10 @@ async function safeGetPolymarketOrder(orderId: string) {
 }
 
 function isStrategyScopedPolymarketPosition(position: DataPosition) {
+  if (position.redeemable || position.mergeable) {
+    return true;
+  }
+
   const title = position.title.toLowerCase();
   const mentionsBitcoin = title.includes("bitcoin") || title.includes("btc");
   const mentions15m =
