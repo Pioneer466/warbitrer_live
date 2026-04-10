@@ -3,8 +3,9 @@ import {
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  summarizeIntentLegFills,
 } from "@/lib/engine";
-import type { LiveOrder, OrderIntent } from "@/lib/types";
+import type { LiveFill, LiveOrder, OrderIntent } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   return {
@@ -171,5 +172,52 @@ describe("polymarket closed orderbook errors", () => {
       ),
     ).toBe(true);
     expect(isPolymarketOrderbookUnavailableError(new Error("market not found"))).toBe(false);
+  });
+});
+
+describe("intent fill summaries", () => {
+  it("separates entry fills from unwind fills on the same venue", () => {
+    const leg = buildIntent().legs[0];
+    const fills: LiveFill[] = [
+      {
+        id: "fill-buy",
+        shadow: false,
+        intentId: "intent-1",
+        venue: "polymarket",
+        venueOrderId: "buy-1",
+        tradeId: "trade-buy",
+        marketRef: "poly-market",
+        tokenId: "token-1",
+        side: "BUY",
+        outcome: "DOWN",
+        price: 0.38,
+        size: 22.68,
+        feeUsd: 0.86,
+        liquidity: "TAKER",
+        filledAt: 1,
+        raw: {},
+      },
+      {
+        id: "fill-sell",
+        shadow: false,
+        intentId: "intent-1",
+        venue: "polymarket",
+        venueOrderId: "sell-1",
+        tradeId: "trade-sell",
+        marketRef: "poly-market",
+        tokenId: "token-1",
+        side: "SELL",
+        outcome: "DOWN",
+        price: 0.4,
+        size: 21.67,
+        feeUsd: 0.87,
+        liquidity: "TAKER",
+        filledAt: 2,
+        raw: {},
+      },
+    ];
+
+    expect(summarizeIntentLegFills(fills, leg, "entry")?.filledSize).toBe(22.68);
+    expect(summarizeIntentLegFills(fills, leg, "exit")?.filledSize).toBe(21.67);
   });
 });

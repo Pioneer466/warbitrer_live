@@ -399,8 +399,10 @@ function PositionRow({ position }: { position: PositionSnapshot }) {
   return (
     <div className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
-        <div className="text-white">
+        <div className="flex items-center gap-2 text-white">
           {position.venue} · {position.outcome}
+          {position.redeemable ? <StatusBadge tone="cyan">redeemable</StatusBadge> : null}
+          {position.mergeable ? <StatusBadge tone="amber">mergeable</StatusBadge> : null}
         </div>
         <div>{formatCurrency(position.currentValueUsd)}</div>
       </div>
@@ -576,7 +578,7 @@ function isDisplayablePosition(position: PositionSnapshot) {
 
   if (position.venue === "polymarket") {
     if (position.redeemable || position.mergeable) {
-      return false;
+      return true;
     }
 
     return meaningfulValue;

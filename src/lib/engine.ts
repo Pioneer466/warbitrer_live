@@ -71,6 +71,7 @@ import {
 } from "@/lib/storage";
 import type {
   ExecutionCoordinator,
+  LiveFill,
   LiveOpportunity,
   LiveOrder,
   MarketSlot,
@@ -2126,6 +2127,41 @@ async function reconcileInFlightIntentStates(now: number) {
     let currentIntent = intent;
 
     if (intent.status === "unwind_required") {
+      const primaryVenueFills = await readFillsForIntentVenue(intent.id, primaryLeg.venue);
+      const entryFillSummary = summarizeIntentLegFills(primaryVenueFills, primaryLeg, "entry");
+      const exitFillSummary = summarizeIntentLegFills(primaryVenueFills, primaryLeg, "exit");
+      const entryFilledSize = entryFillSummary?.filledSize ?? primaryLeg.filledSize;
+      const exitFilledSize = exitFillSummary?.filledSize ?? 0;
+
+      if (entryFillSummary) {
+        currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, entryFillSummary, now);
+        await writeOrderIntent(currentIntent);
+      }
+
+      if (exitFillSummary && exitFilledSize + ORDER_SIZE_TOLERANCE >= entryFilledSize && entryFilledSize > 0) {
+        const payoutUsd = round4(
+          exitFillSummary.filledSize * (exitFillSummary.averageFillPrice ?? 0) - (exitFillSummary.feeUsd ?? 0),
+        );
+        currentIntent = finalizeUnwoundIntent({
+          intent: {
+            ...currentIntent,
+            legs: currentIntent.legs.map((leg) =>
+              leg.id === primaryLeg.id
+                ? {
+                    ...leg,
+                    status: "unwound",
+                    payoutUsd,
+                  }
+                : leg,
+            ) as OrderIntent["legs"],
+          },
+          now,
+          failureReason: "Primary unwound after hedge failure",
+        });
+        await writeOrderIntent(currentIntent);
+        continue;
+      }
+
       if (!unwindOrder) {
         if (stale) {
           currentIntent = await attemptPrimaryUnwindAfterHedgeFailure(
@@ -2593,7 +2629,7 @@ function updateIntentLeg(
 
 function updateIntentLegFromFillSummary(
   intent: OrderIntent,
-  venue: OrderIntent["legs"][number]["venue"],
+  legId: OrderIntent["legs"][number]["id"],
   summary: ReturnType<typeof summarizeVenueFills>,
   now: number,
 ) {
@@ -2601,7 +2637,7 @@ function updateIntentLegFromFillSummary(
     ...intent,
     updatedAt: now,
     legs: intent.legs.map((leg) =>
-      leg.venue === venue
+      leg.id === legId
         ? {
             ...leg,
             venueOrderId: summary.venueOrderId ?? leg.venueOrderId,
@@ -2614,7 +2650,7 @@ function updateIntentLegFromFillSummary(
                 : leg.status === "hedged"
                   ? "hedged"
                   : summary.filledSize > 0
-                    ? venue === intent.hedgeVenue
+                    ? leg.venue === intent.hedgeVenue
                       ? "hedged"
                       : "filled"
                     : leg.status,
@@ -2639,7 +2675,17 @@ async function syncIntentFromStoredVenueFills(
     return intent;
   }
 
-  const updatedIntent = updateIntentLegFromFillSummary(intent, venue, summarizeVenueFills(fills), Date.now());
+  const leg = intent.legs.find((candidate) => candidate.venue === venue);
+  if (!leg) {
+    return intent;
+  }
+
+  const summary = summarizeIntentLegFills(fills, leg, "entry");
+  if (!summary) {
+    return intent;
+  }
+
+  const updatedIntent = updateIntentLegFromFillSummary(intent, leg.id, summary, Date.now());
   await writeOrderIntent(updatedIntent);
   return updatedIntent;
 }
@@ -2934,6 +2980,28 @@ export function derivePrimaryExitSize(params: {
   }
 
   return floorToSixDecimals(Math.min(...candidates));
+}
+
+export function summarizeIntentLegFills(
+  fills: LiveFill[],
+  leg: Pick<OrderIntent["legs"][number], "venue" | "marketRef" | "outcome" | "tokenId" | "side">,
+  mode: "entry" | "exit",
+) {
+  const expectedSide = mode === "entry" ? leg.side : leg.side === "BUY" ? "SELL" : "BUY";
+  const matchingFills = fills.filter(
+    (fill) =>
+      fill.venue === leg.venue &&
+      fill.marketRef === leg.marketRef &&
+      fill.outcome === leg.outcome &&
+      fill.side === expectedSide &&
+      (leg.tokenId === undefined || fill.tokenId === undefined || fill.tokenId === leg.tokenId),
+  );
+
+  if (matchingFills.length === 0) {
+    return null;
+  }
+
+  return summarizeVenueFills(matchingFills);
 }
 
 export function isRetryablePolymarketInventorySyncError(error: unknown) {
