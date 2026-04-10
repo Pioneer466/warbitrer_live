@@ -6,6 +6,7 @@ import {
   fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  mapKalshiFillToLiveFill,
   getKalshiOrderPriceUsd,
   getKalshiSoftNoFillMessage,
   isTrackedKalshiPosition,
@@ -26,6 +27,39 @@ describe("Kalshi quote derivation", () => {
       DATABASE_URL: "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live",
       KALSHI_ENV: "prod",
     };
+  });
+
+  it("canonicalizes raw fill semantics back to the submitted order semantics", () => {
+    const order = {
+      intentId: "intent-1",
+      venueOrderId: "kalshi-order-1",
+      marketRef: "KXBTC15M-1",
+      side: "BUY" as const,
+      outcome: "YES" as const,
+    };
+
+    const fill = mapKalshiFillToLiveFill(
+      {
+        trade_id: "trade-1",
+        order_id: "kalshi-order-1",
+        market_ticker: "KXBTC15M-1",
+        is_taker: true,
+        side: "no",
+        action: "sell",
+        yes_price_dollars: "0.41",
+        no_price_dollars: "0.59",
+        count_fp: "23",
+        taker_fees_dollars: "0",
+        created_time: "2026-04-10T10:05:00.000Z",
+      },
+      order,
+      3,
+    );
+
+    expect(fill.side).toBe("BUY");
+    expect(fill.outcome).toBe("YES");
+    expect(fill.price).toBe(0.41);
+    expect(fill.size).toBe(23);
   });
 
   afterEach(() => {

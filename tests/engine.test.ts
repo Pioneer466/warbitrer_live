@@ -1,5 +1,6 @@
 import {
   deriveLiveRemainingLegSize,
+  deriveBufferedRetryLeg,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   isLatePrimaryFillRescueEligible,
@@ -153,6 +154,35 @@ describe("remaining exposure sizing", () => {
   it("derives the net primary exposure after unwind fills", () => {
     expect(deriveRemainingExposureSize(22.68, 21.67)).toBe(1.01);
     expect(deriveRemainingExposureSize(20.04, 20.04)).toBe(0);
+  });
+});
+
+describe("hedge retry repricing", () => {
+  it("can reprice the hedge leg from live venue liquidity without revalidating the whole pair", () => {
+    const hedgeLeg = buildIntent({
+      primaryVenue: "polymarket",
+      hedgeVenue: "kalshi",
+    }).legs[1];
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.42,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          minOrderSize: 5,
+        },
+      ),
+    ).toMatchObject({
+      id: hedgeLeg.id,
+      venue: "kalshi",
+      requestedPrice: 0.42,
+    });
   });
 });
 

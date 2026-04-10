@@ -6,9 +6,8 @@ import {
   fetchKalshiFills,
   fetchKalshiOrders,
   fetchKalshiResolution,
-  getKalshiFillFeeUsd,
-  getKalshiFillPriceUsd,
   getKalshiOrderPriceUsd,
+  mapKalshiFillToLiveFill,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
@@ -907,6 +906,22 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     return currentIntent;
   }
 
+  const hedgeFailureReason = describeTerminalNoFill("Hedge", hedgeResult);
+  await writeRunEvent({
+    level: shouldTripBreakerForTerminalNoFill(hedgeResult) ? "error" : "warn",
+    eventType: "order.hedge.no_fill",
+    message: `Hedge ${currentIntent.hedgeVenue} order ended without fill for intent ${currentIntent.id}`,
+    payload: {
+      intentId: currentIntent.id,
+      venue: currentIntent.hedgeVenue,
+      orderId: hedgeOrder.venueOrderId,
+      orderStatus: hedgeResult.status,
+      detail: extractTerminalNoFillDetail(hedgeResult),
+      softNoFill: Boolean(hedgeResult.raw?.softNoFill),
+    },
+    createdAt: now,
+  });
+
   return attemptPrimaryUnwindAfterHedgeFailure(
     currentIntent,
     primaryLeg,
@@ -914,7 +929,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     hedgeOrder,
     settings,
     now,
-    "Hedge order failed",
+    hedgeFailureReason,
   );
 }
 
@@ -1145,15 +1160,11 @@ async function retryLegWithinExecutionBuffer(
     return null;
   }
 
-  const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now);
-  if (!repricedIntent) {
+  const repriced = await repriceRetryLegWithinExecutionBuffer(intent, leg, slot, settings, now, stage);
+  if (!repriced) {
     return null;
   }
-
-  const repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === leg.id);
-  if (!repricedLeg) {
-    return null;
-  }
+  const { intent: repricedIntent, leg: repricedLeg } = repriced;
 
   await writeOrderIntent(repricedIntent);
   await writeRunEvent({
@@ -1198,6 +1209,46 @@ async function retryLegWithinExecutionBuffer(
     intent: repricedIntent,
     order,
     result,
+  };
+}
+
+async function repriceRetryLegWithinExecutionBuffer(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  stage: "primary" | "hedge",
+) {
+  if (stage === "primary") {
+    const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now);
+    if (!repricedIntent) {
+      return null;
+    }
+
+    const repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === leg.id);
+    if (!repricedLeg) {
+      return null;
+    }
+
+    return {
+      intent: repricedIntent,
+      leg: repricedLeg,
+    };
+  }
+
+  const repricedLeg = await repriceSingleHedgeLegWithinExecutionBuffer(intent, leg, slot, settings, now);
+  if (!repricedLeg) {
+    return null;
+  }
+
+  return {
+    intent: {
+      ...intent,
+      updatedAt: now,
+      legs: intent.legs.map((candidate) => (candidate.id === leg.id ? repricedLeg : candidate)) as OrderIntent["legs"],
+    },
+    leg: repricedLeg,
   };
 }
 
@@ -1308,6 +1359,92 @@ async function repriceIntentWithinExecutionBuffer(
     grossCost: pair.grossCost,
     updatedAt: now,
     legs: updatedLegs as OrderIntent["legs"],
+  };
+}
+
+async function repriceSingleHedgeLegWithinExecutionBuffer(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+) {
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const liveLeg = getLiveIntentLegSnapshot(leg, polymarketState.quote, kalshiState.quote);
+  if (!liveLeg) {
+    return null;
+  }
+
+  return deriveBufferedRetryLeg(leg, liveLeg, {
+    executionPriceBuffer: settings.executionPriceBuffer,
+    maxLegPrice: settings.maxLegPrice,
+    minOrderSize: settings.minOrderSize,
+  });
+}
+
+function getLiveIntentLegSnapshot(
+  leg: OrderIntent["legs"][number],
+  polymarket: OpportunitySnapshot["polymarket"],
+  kalshi: OpportunitySnapshot["kalshi"],
+) {
+  if (leg.venue === "polymarket") {
+    const outcome = leg.outcome === "UP" ? polymarket.outcomes.up : leg.outcome === "DOWN" ? polymarket.outcomes.down : null;
+    if (!outcome) {
+      return null;
+    }
+
+    return {
+      price: leg.side === "SELL" ? outcome.sellPrice : outcome.buyPrice,
+      depth: outcome.depth,
+      minOrderSize: outcome.minOrderSize,
+    };
+  }
+
+  const outcome = leg.outcome === "YES" ? kalshi.outcomes.yes : leg.outcome === "NO" ? kalshi.outcomes.no : null;
+  if (!outcome) {
+    return null;
+  }
+
+  return {
+    price: leg.side === "SELL" ? outcome.sellPrice : outcome.buyPrice,
+    depth: outcome.depth,
+    minOrderSize: outcome.minOrderSize,
+  };
+}
+
+export function deriveBufferedRetryLeg<
+  T extends Pick<
+    OrderIntent["legs"][number],
+    "venue" | "requestedNotionalUsd" | "requestedPrice" | "requestedSize" | "side" | "outcome" | "id" | "intentId" | "status" | "marketRef"
+  >,
+>(
+  leg: T,
+  liveLeg: {
+    price: number | null;
+    depth: number | null;
+    minOrderSize: number | null;
+  },
+  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "minOrderSize">,
+) {
+  if (liveLeg.price === null) {
+    return null;
+  }
+
+  const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
+  if (liveLeg.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
+    return null;
+  }
+
+  const step = liveLeg.minOrderSize ?? (leg.venue === "polymarket" ? settings.minOrderSize : 1);
+  const size = deriveTargetShares(leg.requestedNotionalUsd, liveLeg.price, step);
+  if (size <= 0 || (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)) {
+    return null;
+  }
+
+  return {
+    ...leg,
+    requestedPrice: liveLeg.price,
+    requestedSize: size,
   };
 }
 
@@ -1446,7 +1583,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
           ) as OrderIntent["legs"],
         },
         now,
-        failureReason: "Hedge failed, primary unwound",
+        failureReason: describeUnwoundAfterFailure(failureReason),
       });
       await writeOrderIntent(currentIntent);
       break;
@@ -1652,24 +1789,18 @@ async function reconcileVenueOrders(now: number) {
     if (!existingOrder) {
       continue;
     }
-
-    await writeFill({
-      id: `kalshi-fill:${fill.trade_id}`,
-      shadow: false,
+    if (existingOrder.outcome !== "YES" && existingOrder.outcome !== "NO") {
+      continue;
+    }
+    const canonicalKalshiOrder = {
       intentId: existingOrder.intentId,
-      venue: "kalshi",
-      venueOrderId: fill.order_id,
-      tradeId: fill.trade_id,
-      marketRef: fill.market_ticker,
-      side: fill.action === "sell" ? "SELL" : "BUY",
-      outcome: fill.side === "yes" ? "YES" : "NO",
-      price: getKalshiFillPriceUsd(fill) ?? 0,
-      size: Number(fill.count_fp),
-      feeUsd: getKalshiFillFeeUsd(fill),
-      liquidity: fill.is_taker ? "TAKER" : "MAKER",
-      filledAt: fill.created_time ? Date.parse(fill.created_time) : now,
-      raw: fill as unknown as Record<string, unknown>,
-    });
+      venueOrderId: existingOrder.venueOrderId,
+      marketRef: existingOrder.marketRef,
+      side: existingOrder.side,
+      outcome: existingOrder.outcome,
+    };
+
+    await writeFill(mapKalshiFillToLiveFill(fill, canonicalKalshiOrder, now));
     touchedIntentLegs.add(`${existingOrder.intentId}:kalshi`);
   }
 
@@ -2916,6 +3047,12 @@ function describeTerminalNoFill(label: string, result: Awaited<ReturnType<VenueA
   }
 
   return `${label} order not authoritatively filled (${result.status})`;
+}
+
+function describeUnwoundAfterFailure(failureReason: string) {
+  return failureReason.toLowerCase().includes("primary unwound")
+    ? failureReason
+    : `${failureReason}; primary unwound`;
 }
 
 function isAwaitingOrderConfirmation(status: LiveOrder["status"]) {

@@ -12,6 +12,7 @@ import type {
   ChartPriceSurface,
   ExecutionPriceSurface,
   KalshiQuote,
+  LiveFill,
   LiveOrder,
   MarketSlot,
   OrderSide,
@@ -634,6 +635,49 @@ export function getKalshiFillFeeUsd(fill: {
   maker_fees_dollars?: string;
 }) {
   return Number(fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
+}
+
+export function mapKalshiFillToLiveFill(
+  fill: {
+    trade_id: string;
+    order_id: string;
+    market_ticker: string;
+    is_taker: boolean;
+    side: "yes" | "no";
+    action: "buy" | "sell";
+    yes_price_dollars?: string;
+    no_price_dollars?: string;
+    count_fp: string;
+    taker_fees_dollars?: string;
+    maker_fees_dollars?: string;
+    created_time?: string;
+  },
+  order: Pick<LiveOrder, "intentId" | "venueOrderId" | "marketRef" | "side"> & { outcome: "YES" | "NO" },
+  now = Date.now(),
+): LiveFill {
+  return {
+    id: `kalshi-fill:${fill.trade_id}`,
+    shadow: false,
+    intentId: order.intentId,
+    venue: "kalshi",
+    venueOrderId: order.venueOrderId,
+    tradeId: fill.trade_id,
+    marketRef: order.marketRef,
+    side: order.side,
+    outcome: order.outcome,
+    price:
+      getKalshiOrderPriceUsd(order.outcome, {
+        yes_price_dollars: fill.yes_price_dollars,
+        no_price_dollars: fill.no_price_dollars,
+      }) ??
+      getKalshiFillPriceUsd(fill) ??
+      0,
+    size: Number(fill.count_fp),
+    feeUsd: getKalshiFillFeeUsd(fill),
+    liquidity: fill.is_taker ? "TAKER" : "MAKER",
+    filledAt: fill.created_time ? Date.parse(fill.created_time) : now,
+    raw: fill as unknown as Record<string, unknown>,
+  };
 }
 
 async function createKalshiOrder(order: VenueOrderRequest) {
