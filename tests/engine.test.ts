@@ -175,6 +175,7 @@ describe("hedge retry repricing", () => {
         {
           executionPriceBuffer: 0.01,
           maxLegPrice: 0.49,
+          maxSlippageBps: 30,
           minOrderSize: 5,
         },
       ),
@@ -183,6 +184,60 @@ describe("hedge retry repricing", () => {
       venue: "kalshi",
       requestedPrice: 0.42,
     });
+  });
+
+  it("adds one Kalshi order-price rung per hedge retry attempt", () => {
+    const hedgeLeg = buildIntent({
+      primaryVenue: "polymarket",
+      hedgeVenue: "kalshi",
+    }).legs[1];
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.42,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.03,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+        },
+        3,
+      ),
+    ).toMatchObject({
+      id: hedgeLeg.id,
+      venue: "kalshi",
+      requestedPrice: 0.44,
+    });
+  });
+
+  it("refuses a Kalshi retry rung once the effective order price would exceed the allowed cap", () => {
+    const hedgeLeg = buildIntent({
+      primaryVenue: "polymarket",
+      hedgeVenue: "kalshi",
+    }).legs[1];
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.49,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 30,
+          minOrderSize: 5,
+        },
+        2,
+      ),
+    ).toBeNull();
   });
 });
 

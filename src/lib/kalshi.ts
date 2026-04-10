@@ -997,14 +997,16 @@ function centsToUsd(cents: number) {
   return cents / 100;
 }
 
+export const KALSHI_ORDER_PRICE_STEP_USD = 0.01;
+
 export function normalizeKalshiOrderPrice(value: number | null, side: OrderSide = "BUY") {
   if (value === null) {
     return null;
   }
 
-  const scaled = value * 100;
+  const scaled = value / KALSHI_ORDER_PRICE_STEP_USD;
   const rounded = side === "SELL" ? Math.floor(scaled + 1e-9) : Math.ceil(scaled - 1e-9);
-  return round4(rounded / 100);
+  return round4(rounded * KALSHI_ORDER_PRICE_STEP_USD);
 }
 
 function formatPrice(value: number | null) {

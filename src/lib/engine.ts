@@ -7,6 +7,7 @@ import {
   fetchKalshiOrders,
   fetchKalshiResolution,
   getKalshiOrderPriceUsd,
+  KALSHI_ORDER_PRICE_STEP_USD,
   mapKalshiFillToLiveFill,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
@@ -1155,34 +1156,41 @@ async function retryLegWithinExecutionBuffer(
   settings: StrategyConfig,
   now: number,
   stage: "primary" | "hedge",
+  retryAttempt = 1,
 ) {
   if (settings.executionPriceBuffer <= 0) {
     return null;
   }
 
-  const repriced = await repriceRetryLegWithinExecutionBuffer(intent, leg, slot, settings, now, stage);
+  const repriced = await repriceRetryLegWithinExecutionBuffer(intent, leg, slot, settings, now, stage, retryAttempt);
   if (!repriced) {
     return null;
   }
   const { intent: repricedIntent, leg: repricedLeg } = repriced;
+  const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, "FOK", false);
+  const retryPriceLadderTicks = getRetryPriceLadderTicks(repricedLeg, retryAttempt);
 
   await writeOrderIntent(repricedIntent);
   await writeRunEvent({
     level: "info",
     eventType: `order.${stage}.repriced`,
-    message: `${stage === "primary" ? "Primary" : "Hedge"} leg repriced within execution buffer for intent ${intent.id}`,
+    message: `${stage === "primary" ? "Primary" : "Hedge"} leg repriced within execution buffer for intent ${intent.id}${
+      retryPriceLadderTicks > 0 ? ` (+${retryPriceLadderTicks} Kalshi tick${retryPriceLadderTicks === 1 ? "" : "s"})` : ""
+    }`,
     payload: {
       intentId: intent.id,
       venue: repricedLeg.venue,
       requestedPrice: repricedLeg.requestedPrice,
       requestedSize: repricedLeg.requestedSize,
+      orderPrice: request.price,
       grossCost: repricedIntent.grossCost,
       executionPriceBuffer: settings.executionPriceBuffer,
+      retryAttempt,
+      retryPriceLadderTicks,
     },
     createdAt: now,
   });
 
-  const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, "FOK", false);
   const submission = await adapterFor(repricedLeg.venue).placeOrder(request);
   const result = await confirmImmediateOrderExecution(
     repricedLeg.venue,
@@ -1201,6 +1209,10 @@ async function retryLegWithinExecutionBuffer(
       venue: repricedLeg.venue,
       orderId: order.venueOrderId,
       orderStatus: result.status,
+      retryAttempt,
+      retryPriceLadderTicks,
+      requestedPrice: repricedLeg.requestedPrice,
+      orderPrice: request.price,
     },
     createdAt: now,
   });
@@ -1219,6 +1231,7 @@ async function repriceRetryLegWithinExecutionBuffer(
   settings: StrategyConfig,
   now: number,
   stage: "primary" | "hedge",
+  retryAttempt = 1,
 ) {
   if (stage === "primary") {
     const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now);
@@ -1237,7 +1250,7 @@ async function repriceRetryLegWithinExecutionBuffer(
     };
   }
 
-  const repricedLeg = await repriceSingleHedgeLegWithinExecutionBuffer(intent, leg, slot, settings, now);
+  const repricedLeg = await repriceSingleHedgeLegWithinExecutionBuffer(intent, leg, slot, settings, now, retryAttempt);
   if (!repricedLeg) {
     return null;
   }
@@ -1281,6 +1294,7 @@ async function retryLegWithinExecutionBufferWithAttempts(
       settings,
       Date.now(),
       stage,
+      attempt,
     );
     if (!retried) {
       return lastResult;
@@ -1368,6 +1382,7 @@ async function repriceSingleHedgeLegWithinExecutionBuffer(
   slot: MarketSlot,
   settings: StrategyConfig,
   now: number,
+  retryAttempt = 1,
 ) {
   const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
   const liveLeg = getLiveIntentLegSnapshot(leg, polymarketState.quote, kalshiState.quote);
@@ -1378,8 +1393,9 @@ async function repriceSingleHedgeLegWithinExecutionBuffer(
   return deriveBufferedRetryLeg(leg, liveLeg, {
     executionPriceBuffer: settings.executionPriceBuffer,
     maxLegPrice: settings.maxLegPrice,
+    maxSlippageBps: settings.maxSlippageBps,
     minOrderSize: settings.minOrderSize,
-  });
+  }, retryAttempt);
 }
 
 function getLiveIntentLegSnapshot(
@@ -1424,28 +1440,76 @@ export function deriveBufferedRetryLeg<
     depth: number | null;
     minOrderSize: number | null;
   },
-  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "minOrderSize">,
+  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize">,
+  retryAttempt = 1,
 ) {
   if (liveLeg.price === null) {
     return null;
   }
 
+  const requestedPrice = deriveRetryReferencePrice(leg, liveLeg.price, retryAttempt);
+  if (requestedPrice === null) {
+    return null;
+  }
+
   const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
-  if (liveLeg.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
+  const boundedPrice =
+    leg.venue === "kalshi"
+      ? deriveEffectiveKalshiRetryOrderPrice(requestedPrice, leg.side, settings.maxSlippageBps) ?? requestedPrice
+      : requestedPrice;
+  if (boundedPrice > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
     return null;
   }
 
   const step = liveLeg.minOrderSize ?? (leg.venue === "polymarket" ? settings.minOrderSize : 1);
-  const size = deriveTargetShares(leg.requestedNotionalUsd, liveLeg.price, step);
+  const size = deriveTargetShares(leg.requestedNotionalUsd, requestedPrice, step);
   if (size <= 0 || (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)) {
     return null;
   }
 
   return {
     ...leg,
-    requestedPrice: liveLeg.price,
+    requestedPrice,
     requestedSize: size,
   };
+}
+
+function deriveRetryReferencePrice(
+  leg: Pick<OrderIntent["legs"][number], "venue" | "side">,
+  livePrice: number,
+  retryAttempt: number,
+) {
+  if (leg.venue !== "kalshi") {
+    return livePrice;
+  }
+
+  const retryPriceLadderTicks = getRetryPriceLadderTicks(leg, retryAttempt);
+  if (retryPriceLadderTicks <= 0) {
+    return livePrice;
+  }
+
+  const priceDelta = retryPriceLadderTicks * KALSHI_ORDER_PRICE_STEP_USD;
+  return round4(
+    Math.max(
+      KALSHI_ORDER_PRICE_STEP_USD,
+      livePrice + (leg.side === "SELL" ? -priceDelta : priceDelta),
+    ),
+  );
+}
+
+function deriveEffectiveKalshiRetryOrderPrice(
+  requestedPrice: number,
+  side: OrderIntent["legs"][number]["side"],
+  maxSlippageBps: number,
+) {
+  return normalizeKalshiOrderPrice(applySlippage(requestedPrice, maxSlippageBps, side), side);
+}
+
+function getRetryPriceLadderTicks(
+  leg: Pick<OrderIntent["legs"][number], "venue">,
+  retryAttempt: number,
+) {
+  return leg.venue === "kalshi" ? Math.max(0, retryAttempt - 1) : 0;
 }
 
 function getLivePairSnapshot(
