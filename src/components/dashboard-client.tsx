@@ -12,6 +12,7 @@ import {
   formatPercent,
   formatPrice,
 } from "@/lib/format";
+import { isRiskActivePosition } from "@/lib/positions";
 import type {
   DashboardResponse,
   HistoryResponse,
@@ -574,16 +575,5 @@ function formatFeedMeta(feedHealth: VenueFeedHealth | null) {
 }
 
 function isDisplayablePosition(position: PositionSnapshot) {
-  const meaningfulValue = Math.abs(position.currentValueUsd) > 0.05;
-
-  if (position.venue === "polymarket") {
-    if (position.redeemable || position.mergeable) {
-      return true;
-    }
-
-    return meaningfulValue;
-  }
-
-  const meaningfulSize = Math.abs(position.size) > 0.05;
-  return meaningfulValue || meaningfulSize;
+  return isRiskActivePosition(position);
 }

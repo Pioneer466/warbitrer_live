@@ -69,4 +69,51 @@ describe("pnl snapshot", () => {
     expect(snapshot.drawdownUsd).toBeCloseTo(0, 4);
     expect(snapshot.feesUsd).toBeCloseTo(11.36, 4);
   });
+
+  it("ignores polymarket recovery-only ghosts in unrealized pnl", () => {
+    const balances: VenueBalance[] = [
+      {
+        venue: "polymarket",
+        capturedAt: 1,
+        status: "ready",
+        currency: "USDC",
+        availableBalanceUsd: 100,
+        totalBalanceUsd: 100,
+        portfolioValueUsd: 100,
+        allowanceUsd: 100,
+        notes: [],
+        raw: {},
+      },
+    ];
+
+    const positions: PositionSnapshot[] = [
+      {
+        id: "polymarket:ghost",
+        venue: "polymarket",
+        marketRef: "ghost-market",
+        outcome: "UP",
+        size: 140.31,
+        averagePrice: 0.3396,
+        currentPrice: 0,
+        currentValueUsd: 0,
+        realizedPnlUsd: 0,
+        unrealizedPnlUsd: -47.65,
+        redeemable: true,
+        mergeable: false,
+        updatedAt: 1,
+        raw: {},
+      },
+    ];
+
+    const snapshot = buildPnlSnapshot({
+      capturedAt: 10,
+      balances,
+      positions,
+      realizedPnlUsd: 0,
+      feesUsd: 0,
+    });
+
+    expect(snapshot.unrealizedPnlUsd).toBe(0);
+    expect(snapshot.strategyPnlUsd).toBe(0);
+  });
 });
