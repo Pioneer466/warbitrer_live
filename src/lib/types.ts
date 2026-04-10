@@ -515,6 +515,7 @@ export type RecoveryMarket = {
   url: string | null;
   outcomes: RecoveryOutcome[];
   redeemable: boolean;
+  redeemableSize: number | null;
   mergeable: boolean;
   conversionAction: "redeem" | "merge" | null;
   mergeableSize: number | null;

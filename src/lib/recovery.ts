@@ -12,7 +12,7 @@ import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
 
 const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
-const AUTO_CONVERT_RETRY_AFTER_FAILURE_MS = 60 * 1000;
+const AUTO_CONVERT_RETRY_AFTER_FAILURE_MS = 15 * 60 * 1000;
 const AUTO_CONVERT_MAX_PENDING_RELAYER_TX = 1;
 const AUTO_CONVERT_PENDING_TIMEOUT_MS = 10 * 60 * 1000;
 const POLYMARKET_CONVERT_SUBMITTED_EVENTS = new Set([
@@ -198,7 +198,7 @@ export function buildMergeTxData(conditionId: string, amount: string) {
   ]);
 }
 
-function buildRecoveryMarkets(
+export function buildRecoveryMarkets(
   positions: PositionSnapshot[],
   env = readEnv(),
   directConversionSupported = buildWalletValidation(env).canDirectConversion,
@@ -221,6 +221,7 @@ function buildRecoveryMarkets(
         url,
         outcomes: [],
         redeemable: false,
+        redeemableSize: null,
         mergeable: false,
         conversionAction: null,
         mergeableSize: null,
@@ -237,16 +238,20 @@ function buildRecoveryMarkets(
       redeemable: position.redeemable,
       mergeable: position.mergeable,
     });
-    market.redeemable ||= position.redeemable;
-    market.mergeable ||= position.mergeable;
   }
 
   for (const market of marketsByRef.values()) {
+    market.redeemableSize = deriveRedeemableSize(market);
+    market.mergeableSize = deriveMergeableSize(market);
+    market.redeemable = market.redeemableSize !== null;
+    market.mergeable = market.mergeableSize !== null;
     market.conversionAction = deriveRecoveryAction(market);
-    market.mergeableSize = market.mergeable ? deriveMergeableSize(market) : null;
 
     if (market.redeemable) {
       market.notes.push("Gains Polymarket reclaimables vers USDC.e.");
+      if (market.redeemableSize !== null) {
+        market.notes.push(`Taille redeemable: ${market.redeemableSize.toFixed(6)}`);
+      }
     }
     if (market.mergeable) {
       market.notes.push("Paire complete mergeable vers USDC.e.");
@@ -262,11 +267,13 @@ function buildRecoveryMarkets(
     }
   }
 
-  return [...marketsByRef.values()].sort((left, right) => {
-    const leftRank = Number(left.redeemable) * 2 + Number(left.mergeable);
-    const rightRank = Number(right.redeemable) * 2 + Number(right.mergeable);
-    return rightRank - leftRank || left.title.localeCompare(right.title);
-  });
+  return [...marketsByRef.values()]
+    .filter((market) => market.conversionAction !== null)
+    .sort((left, right) => {
+      const leftRank = Number(left.redeemable) * 2 + Number(left.mergeable);
+      const rightRank = Number(right.redeemable) * 2 + Number(right.mergeable);
+      return rightRank - leftRank || left.title.localeCompare(right.title);
+    });
 }
 
 function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidation"] {
@@ -703,11 +710,11 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
 }
 
 function deriveRecoveryAction(market: RecoveryMarket): RecoveryMarket["conversionAction"] {
-  if (market.redeemable) {
+  if (market.redeemableSize !== null && market.redeemableSize > 0) {
     return "redeem";
   }
 
-  if (market.mergeable) {
+  if (market.mergeableSize !== null && market.mergeableSize > 0) {
     return "merge";
   }
 
@@ -858,6 +865,18 @@ function deriveMergeableSize(market: RecoveryMarket) {
 
   const size = Math.min(...mergeableOutcomes.map((outcome) => outcome.size));
   return floorToTokenPrecision(size);
+}
+
+function deriveRedeemableSize(market: RecoveryMarket) {
+  const redeemableSize = market.outcomes.reduce((sum, outcome) => {
+    if (!outcome.redeemable || outcome.size <= 0) {
+      return sum;
+    }
+
+    return sum + outcome.size;
+  }, 0);
+
+  return redeemableSize > 0 ? floorToTokenPrecision(redeemableSize) : null;
 }
 
 function floorToTokenPrecision(value: number) {

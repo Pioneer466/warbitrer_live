@@ -1375,7 +1375,6 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         currentIntent = await closeIntentAfterPolymarketOrderbookUnavailable(
           currentIntent,
           primaryLeg,
-          hedgeOrder,
           now,
           errorMessage,
         );
@@ -1509,18 +1508,28 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
     await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
   }
 
-  await writeCircuitBreaker({
-    key: `slot:${currentIntent.slotKey}`,
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: currentIntent.id,
-      venue: currentIntent.primaryVenue,
-      stage: "hedge_failure",
-      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-    },
-  });
+  await writeCircuitBreaker(
+    currentIntent.status === "unwind_required"
+      ? {
+          key: `slot:${currentIntent.slotKey}`,
+          active: true,
+          reason: "hedge_failure",
+          triggeredAt: now,
+          payload: {
+            intentId: currentIntent.id,
+            venue: currentIntent.primaryVenue,
+            stage: "hedge_failure",
+            hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+          },
+        }
+      : {
+          key: `slot:${currentIntent.slotKey}`,
+          active: false,
+          reason: null,
+          triggeredAt: null,
+          payload: null,
+        },
+  );
 
   return currentIntent;
 }
@@ -2098,10 +2107,11 @@ async function maybeExitPolymarketLegAtSlotEnd(
 }
 
 async function reconcileInFlightIntentStates(now: number) {
-  const [openIntents, recentOrders, settings] = await Promise.all([
+  const [openIntents, recentOrders, settings, livePositions] = await Promise.all([
     readOpenOrderIntents(),
     readRecentVenueOrders(200),
     readSettings(),
+    readPositions(),
   ]);
 
   for (const intent of openIntents) {
@@ -2132,16 +2142,61 @@ async function reconcileInFlightIntentStates(now: number) {
       const exitFillSummary = summarizeIntentLegFills(primaryVenueFills, primaryLeg, "exit");
       const entryFilledSize = entryFillSummary?.filledSize ?? primaryLeg.filledSize;
       const exitFilledSize = exitFillSummary?.filledSize ?? 0;
+      const liveRemainingSize = deriveLiveRemainingLegSize(livePositions, primaryLeg);
+      const remainingExposureSize = deriveRemainingExposureSize(entryFilledSize, exitFilledSize);
+      const exitAverageFillPrice =
+        exitFillSummary?.averageFillPrice ?? unwindOrder?.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
+      const exitFeeUsd = exitFillSummary?.feeUsd ?? (unwindOrder?.feeUsd ?? 0);
 
       if (entryFillSummary) {
         currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, entryFillSummary, now);
         await writeOrderIntent(currentIntent);
       }
 
-      if (exitFillSummary && exitFilledSize + ORDER_SIZE_TOLERANCE >= entryFilledSize && entryFilledSize > 0) {
-        const payoutUsd = round4(
-          exitFillSummary.filledSize * (exitFillSummary.averageFillPrice ?? 0) - (exitFillSummary.feeUsd ?? 0),
-        );
+      if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
+        const polyResolution =
+          currentIntent.polyResolution ??
+          (await fetchPolymarketResolution(`btc-updown-15m-${Math.floor(currentIntent.slotStartTs / 1000)}`).catch(
+            () => null,
+          ));
+        if (polyResolution !== null) {
+          const residualPayoutUsd = primaryLeg.outcome === polyResolution ? remainingExposureSize : 0;
+          const payoutUsd = round4(exitFilledSize * exitAverageFillPrice - exitFeeUsd + residualPayoutUsd);
+          const failureReason =
+            exitFilledSize > 0 && remainingExposureSize > ORDER_SIZE_TOLERANCE
+              ? "Primary partially unwound before Polymarket settlement"
+              : exitFilledSize > 0
+                ? "Primary unwound after hedge failure"
+                : "Primary settled on Polymarket after hedge failure";
+
+          currentIntent = finalizeUnwoundIntent({
+            intent: {
+              ...currentIntent,
+              polyResolution,
+              legs: currentIntent.legs.map((leg) =>
+                leg.id === primaryLeg.id
+                  ? {
+                      ...leg,
+                      status: "unwound",
+                      payoutUsd,
+                      resolvedOutcome: polyResolution,
+                    }
+                  : leg,
+              ) as OrderIntent["legs"],
+            },
+            now,
+            failureReason,
+          });
+          await writeOrderIntent(currentIntent);
+          continue;
+        }
+      }
+
+      if (
+        (liveRemainingSize <= ORDER_SIZE_TOLERANCE && exitFilledSize > 0) ||
+        (exitFillSummary && exitFilledSize + ORDER_SIZE_TOLERANCE >= entryFilledSize && entryFilledSize > 0)
+      ) {
+        const payoutUsd = round4(exitFilledSize * exitAverageFillPrice - exitFeeUsd);
         currentIntent = finalizeUnwoundIntent({
           intent: {
             ...currentIntent,
@@ -2456,6 +2511,46 @@ async function reconcileInFlightIntentStates(now: number) {
         now,
         `Hedge order not completed (${hedgeOrder.status})`,
       );
+    }
+  }
+
+  await syncActiveHedgeFailureBreakers();
+}
+
+async function syncActiveHedgeFailureBreakers() {
+  const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
+  const unresolvedSlots = new Set(
+    openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
+  );
+  const hasUnresolvedHedgeFailure = unresolvedSlots.size > 0;
+
+  for (const breaker of breakers) {
+    if (!breaker.active || breaker.reason !== "hedge_failure") {
+      continue;
+    }
+
+    if (breaker.key === "global" && !hasUnresolvedHedgeFailure) {
+      await writeCircuitBreaker({
+        key: "global",
+        active: false,
+        reason: null,
+        triggeredAt: null,
+        payload: null,
+      });
+      continue;
+    }
+
+    if (breaker.key.startsWith("slot:")) {
+      const slotKey = breaker.key.slice("slot:".length);
+      if (!unresolvedSlots.has(slotKey)) {
+        await writeCircuitBreaker({
+          key: breaker.key,
+          active: false,
+          reason: null,
+          triggeredAt: null,
+          payload: null,
+        });
+      }
     }
   }
 }
@@ -2885,6 +2980,10 @@ function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
 }
 
+function roundToSixDecimals(value: number) {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
 function floorToSixDecimals(value: number) {
   return Math.floor(value * 1_000_000) / 1_000_000;
 }
@@ -2982,6 +3081,35 @@ export function derivePrimaryExitSize(params: {
   return floorToSixDecimals(Math.min(...candidates));
 }
 
+export function deriveRemainingExposureSize(entryFilledSize: number, exitFilledSize: number) {
+  return roundToSixDecimals(Math.max(0, entryFilledSize - exitFilledSize));
+}
+
+export function deriveLiveRemainingLegSize(
+  positions: PositionSnapshot[],
+  leg: Pick<OrderIntent["legs"][number], "venue" | "marketRef" | "outcome" | "tokenId">,
+) {
+  const matchingPositions = positions.filter(
+    (position) =>
+      position.venue === leg.venue &&
+      position.marketRef === leg.marketRef &&
+      position.outcome === leg.outcome,
+  );
+  if (matchingPositions.length === 0) {
+    return 0;
+  }
+
+  const exactMatch =
+    leg.tokenId === undefined
+      ? null
+      : matchingPositions.find((position) => {
+          const rawTokenId = extractPositionTokenId(position);
+          return rawTokenId !== null && rawTokenId === leg.tokenId;
+        });
+  const matchedPosition = exactMatch ?? matchingPositions[0];
+  return roundToSixDecimals(Math.max(0, matchedPosition.size));
+}
+
 export function summarizeIntentLegFills(
   fills: LiveFill[],
   leg: Pick<OrderIntent["legs"][number], "venue" | "marketRef" | "outcome" | "tokenId" | "side">,
@@ -3022,7 +3150,6 @@ export function isPolymarketOrderbookUnavailableError(error: unknown) {
 async function closeIntentAfterPolymarketOrderbookUnavailable(
   intent: OrderIntent,
   primaryLeg: OrderIntent["legs"][number],
-  hedgeOrder: LiveOrder | null,
   now: number,
   errorMessage: string,
 ) {
@@ -3033,11 +3160,11 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
       ? `Primary unwind impossible after Polymarket market close (${errorMessage}); waiting for venue settlement / reclaim`
       : `Primary unwind impossible after Polymarket market close (${errorMessage}); market resolved ${polyResolution}, waiting for reclaim`;
 
-  const closedIntent: OrderIntent = {
+  const deferredIntent: OrderIntent = {
     ...intent,
-    status: "failed",
+    status: "unwind_required",
     updatedAt: now,
-    resolvedAt: now,
+    resolvedAt: null,
     failureReason,
     polyResolution: polyResolution ?? intent.polyResolution,
     legs: intent.legs.map((leg) =>
@@ -3050,11 +3177,11 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
     ) as OrderIntent["legs"],
   };
 
-  await writeOrderIntent(closedIntent);
+  await writeOrderIntent(deferredIntent);
   await writeRunEvent({
-    level: "error",
-    eventType: "intent.closed.polymarket_orderbook_unavailable",
-    message: `Intent ${intent.id} closed after the Polymarket orderbook disappeared`,
+    level: "warn",
+    eventType: "intent.unwind.awaiting_polymarket_settlement",
+    message: `Intent ${intent.id} deferred to Polymarket settlement after the orderbook disappeared`,
     payload: {
       intentId: intent.id,
       slotKey: intent.slotKey,
@@ -3064,8 +3191,26 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
     },
     createdAt: now,
   });
-  await tripManualInterventionBreaker(closedIntent, now, hedgeOrder, "primary_unwind_orderbook_unavailable");
-  return closedIntent;
+  return deferredIntent;
+}
+
+function extractPositionTokenId(position: PositionSnapshot) {
+  if (typeof position.raw.asset === "string") {
+    return position.raw.asset;
+  }
+  if (typeof position.raw.asset_id === "string") {
+    return position.raw.asset_id;
+  }
+  if (typeof position.raw.tokenId === "string") {
+    return position.raw.tokenId;
+  }
+  if (typeof position.raw.token_id === "string") {
+    return position.raw.token_id;
+  }
+  if (position.id.startsWith("polymarket:")) {
+    return position.id.slice("polymarket:".length);
+  }
+  return null;
 }
 
 async function runReconcileStep(step: string, now: number, fn: () => Promise<void>) {

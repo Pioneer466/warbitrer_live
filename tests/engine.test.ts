@@ -1,4 +1,6 @@
 import {
+  deriveLiveRemainingLegSize,
+  deriveRemainingExposureSize,
   derivePrimaryExitSize,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
@@ -147,6 +149,13 @@ describe("primary exit sizing", () => {
   });
 });
 
+describe("remaining exposure sizing", () => {
+  it("derives the net primary exposure after unwind fills", () => {
+    expect(deriveRemainingExposureSize(22.68, 21.67)).toBe(1.01);
+    expect(deriveRemainingExposureSize(20.04, 20.04)).toBe(0);
+  });
+});
+
 describe("retryable polymarket unwind errors", () => {
   it("treats inventory sync errors as retryable", () => {
     expect(
@@ -219,5 +228,37 @@ describe("intent fill summaries", () => {
 
     expect(summarizeIntentLegFills(fills, leg, "entry")?.filledSize).toBe(22.68);
     expect(summarizeIntentLegFills(fills, leg, "exit")?.filledSize).toBe(21.67);
+  });
+});
+
+describe("live remaining leg size", () => {
+  it("matches the live position back to the polymarket token when available", () => {
+    const leg = buildIntent().legs[0];
+
+    expect(
+      deriveLiveRemainingLegSize(
+        [
+          {
+            id: "polymarket:token-1",
+            venue: "polymarket",
+            marketRef: "poly-market",
+            outcome: "DOWN",
+            size: 1.01,
+            averagePrice: 0.38,
+            currentPrice: 1,
+            currentValueUsd: 1.01,
+            realizedPnlUsd: 0,
+            unrealizedPnlUsd: 0,
+            redeemable: true,
+            mergeable: false,
+            updatedAt: 3,
+            raw: {
+              asset: "token-1",
+            },
+          },
+        ],
+        leg,
+      ),
+    ).toBe(1.01);
   });
 });
