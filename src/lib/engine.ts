@@ -1,6 +1,10 @@
 import { fetchBtcSlotResolution, toKalshiResolution } from "@/lib/btc-resolution";
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
-import { applySlippage, deriveTargetShares } from "@/lib/fees";
+import {
+  applySlippage,
+  deriveVenueTargetSize,
+  getVenueMinimumOrderSize,
+} from "@/lib/fees";
 import {
   createKalshiAdapter,
   fetchKalshiFills,
@@ -1351,9 +1355,14 @@ async function repriceIntentWithinExecutionBuffer(
 
   const updatedLegs = intent.legs.map((leg) => {
     const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
-    const step = liveLeg.minOrderSize ?? (leg.venue === "polymarket" ? settings.minOrderSize : 1);
-    const size = deriveTargetShares(leg.requestedNotionalUsd, liveLeg.price, step);
-    if (size <= 0 || (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)) {
+    const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
+    const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, liveLeg.price, liveLeg.minOrderSize, fallbackMinOrderSize);
+    const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
+    if (
+      size <= 0 ||
+      size + ORDER_SIZE_TOLERANCE < minimumSize ||
+      (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)
+    ) {
       return null;
     }
 
@@ -1461,9 +1470,14 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
-  const step = liveLeg.minOrderSize ?? (leg.venue === "polymarket" ? settings.minOrderSize : 1);
-  const size = deriveTargetShares(leg.requestedNotionalUsd, requestedPrice, step);
-  if (size <= 0 || (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)) {
+  const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
+  const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, requestedPrice, liveLeg.minOrderSize, fallbackMinOrderSize);
+  const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
+  if (
+    size <= 0 ||
+    size + ORDER_SIZE_TOLERANCE < minimumSize ||
+    (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)
+  ) {
     return null;
   }
 
@@ -2768,7 +2782,7 @@ async function refreshPnl(now: number, positions: PositionSnapshot[]) {
   );
 }
 
-function buildVenueOrderRequest(
+export function buildVenueOrderRequest(
   leg: OrderIntent["legs"][number],
   maxSlippageBps: number,
   orderType: "FOK" | "IOC" | "FAK",
@@ -2779,8 +2793,8 @@ function buildVenueOrderRequest(
   const price =
     leg.venue === "kalshi" ? normalizeKalshiOrderPrice(slippageAdjustedPrice, leg.side) : slippageAdjustedPrice;
   const maxCostUsd =
-    leg.venue === "polymarket" && leg.side === "BUY" && price !== null
-      ? round4(leg.requestedSize * price)
+    leg.venue === "polymarket" && leg.side === "BUY"
+      ? round4(leg.requestedNotionalUsd)
       : leg.requestedNotionalUsd * (1 + maxSlippageBps / 10_000);
 
   return {

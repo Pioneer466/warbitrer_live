@@ -1,4 +1,5 @@
 import {
+  buildVenueOrderRequest,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
   deriveRemainingExposureSize,
@@ -238,6 +239,69 @@ describe("hedge retry repricing", () => {
         2,
       ),
     ).toBeNull();
+  });
+
+  it("reprices a polymarket retry in shares while keeping the usd budget fixed", () => {
+    const primaryLeg = {
+      ...buildIntent().legs[0],
+      requestedPrice: 0.45,
+      requestedSize: 22.22,
+      requestedNotionalUsd: 10,
+    };
+
+    expect(
+      deriveBufferedRetryLeg(
+        primaryLeg,
+        {
+          price: 0.47,
+          depth: 25,
+          minOrderSize: 5,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 30,
+          minOrderSize: 5,
+        },
+      ),
+    ).toMatchObject({
+      id: primaryLeg.id,
+      venue: "polymarket",
+      requestedPrice: 0.47,
+      requestedSize: 21.27,
+      requestedNotionalUsd: 10,
+    });
+  });
+});
+
+describe("venue order request sizing", () => {
+  it("uses the polymarket leg usd budget as the buy amount", () => {
+    const polymarketLeg = {
+      ...buildIntent().legs[0],
+      requestedPrice: 0.42,
+      requestedSize: 20,
+      requestedNotionalUsd: 10,
+    };
+
+    const request = buildVenueOrderRequest(polymarketLeg, 30, "FOK", false);
+
+    expect(request.price).toBeCloseTo(0.42126, 5);
+    expect(request.size).toBe(20);
+    expect(request.maxCostUsd).toBe(10);
+  });
+
+  it("keeps kalshi max cost slippage-adjusted", () => {
+    const kalshiLeg = {
+      ...buildIntent().legs[1],
+      requestedPrice: 0.42,
+      requestedSize: 20,
+      requestedNotionalUsd: 10,
+    };
+
+    const request = buildVenueOrderRequest(kalshiLeg, 30, "FOK", false);
+
+    expect(request.price).toBe(0.43);
+    expect(request.maxCostUsd).toBeCloseTo(10.03, 4);
   });
 });
 

@@ -1,4 +1,4 @@
-import type { OrderSide } from "@/lib/types";
+import type { OrderSide, Venue } from "@/lib/types";
 
 type KalshiFeeInput = {
   contracts: number;
@@ -12,6 +12,8 @@ type PolymarketFeeInput = {
   price: number;
   feeRateBps?: number;
 };
+
+export const POLYMARKET_SHARE_ESTIMATE_STEP = 0.01;
 
 export function roundUpToCent(value: number) {
   return Math.ceil((value - Number.EPSILON) * 100) / 100;
@@ -53,6 +55,36 @@ export function deriveTargetShares(notionalUsd: number, price: number, minOrderS
   }
 
   return Math.max(0, roundToStep(notionalUsd / price, minOrderSize));
+}
+
+export function derivePolymarketTargetShares(notionalUsd: number, price: number) {
+  return deriveTargetShares(notionalUsd, price, POLYMARKET_SHARE_ESTIMATE_STEP);
+}
+
+export function deriveVenueTargetSize(
+  venue: Venue,
+  notionalUsd: number,
+  price: number,
+  minOrderSize: number | null,
+  fallbackMinOrderSize: number,
+) {
+  if (venue === "polymarket") {
+    return derivePolymarketTargetShares(notionalUsd, price);
+  }
+
+  return deriveTargetShares(notionalUsd, price, minOrderSize ?? fallbackMinOrderSize);
+}
+
+export function getVenueMinimumOrderSize(
+  venue: Venue,
+  minOrderSize: number | null,
+  fallbackMinOrderSize: number,
+) {
+  if (venue === "polymarket") {
+    return minOrderSize ?? POLYMARKET_SHARE_ESTIMATE_STEP;
+  }
+
+  return minOrderSize ?? fallbackMinOrderSize;
 }
 
 export function applySlippage(price: number, maxSlippageBps: number, side: OrderSide = "BUY") {

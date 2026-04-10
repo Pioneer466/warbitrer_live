@@ -3,6 +3,7 @@ import {
   calculateBinaryPositionPayout,
   calculateKalshiFee,
   calculatePolymarketFee,
+  derivePolymarketTargetShares,
   deriveTargetShares,
 } from "@/lib/fees";
 
@@ -17,6 +18,10 @@ describe("live fee and sizing helpers", () => {
 
   it("rounds target shares down to the requested step", () => {
     expect(deriveTargetShares(25, 0.42, 0.01)).toBeCloseTo(59.52, 2);
+  });
+
+  it("estimates polymarket buy shares at cent precision", () => {
+    expect(derivePolymarketTargetShares(10, 0.42)).toBeCloseTo(23.8, 2);
   });
 
   it("applies slippage in basis points for buys", () => {

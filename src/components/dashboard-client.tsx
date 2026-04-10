@@ -382,7 +382,7 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
               {leg.venue} · {leg.outcome}
             </div>
             <div className="mt-2">
-              req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
+              target {formatCurrency(leg.requestedNotionalUsd)} · req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
             </div>
           </div>
         ))}

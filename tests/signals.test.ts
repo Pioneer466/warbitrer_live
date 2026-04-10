@@ -253,6 +253,63 @@ describe("live signal engine", () => {
     expect(signal.legs[1].size).toBeGreaterThan(0);
   });
 
+  it("keeps the polymarket leg at a 10 USD budget even when the venue minimum is 5 shares", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: {
+            ...polymarket.outcomes.up,
+            minOrderSize: 5,
+          },
+        },
+      },
+      kalshi,
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(true);
+    expect(signal.legs[0].targetNotionalUsd).toBe(10);
+    expect(signal.legs[0].size).toBeCloseTo(23.8, 2);
+  });
+
+  it("blocks entries when the polymarket budget cannot satisfy the venue minimum size", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: {
+            ...polymarket.outcomes.up,
+            minOrderSize: 25,
+          },
+        },
+      },
+      kalshi,
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Taille minimum Polymarket non atteinte");
+  });
+
   it("blocks re-entry when the improvement is below the configured threshold", () => {
     const [signal] = buildSignals({
       slotKey: "1774899000000",

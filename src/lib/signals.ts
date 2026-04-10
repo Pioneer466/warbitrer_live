@@ -1,4 +1,9 @@
-import { calculateKalshiFee, calculatePolymarketFee, deriveTargetShares } from "@/lib/fees";
+import {
+  calculateKalshiFee,
+  calculatePolymarketFee,
+  deriveVenueTargetSize,
+  getVenueMinimumOrderSize,
+} from "@/lib/fees";
 import type {
   KalshiQuote,
   LiveOpportunity,
@@ -19,6 +24,8 @@ type SignalContext = {
   lastEntryCosts: Partial<Record<PairCombination, number>>;
   secondsRemaining?: number;
 };
+
+const ORDER_SIZE_TOLERANCE = 1e-6;
 
 export function buildSignals({
   slotKey,
@@ -147,11 +154,12 @@ function buildSignal({
   const polyUnits =
     polyPrice === null
       ? 0
-      : deriveTargetShares(targetLegNotionalUsd, polyPrice, polyMinOrderSize ?? settings.minOrderSize);
+      : deriveVenueTargetSize("polymarket", targetLegNotionalUsd, polyPrice, polyMinOrderSize, settings.minOrderSize);
   const kalshiUnits =
     kalshiPrice === null
       ? 0
-      : deriveTargetShares(targetLegNotionalUsd, kalshiPrice, kalshiMinOrderSize ?? 1);
+      : deriveVenueTargetSize("kalshi", targetLegNotionalUsd, kalshiPrice, kalshiMinOrderSize, 1);
+  const minimumPolyUnits = getVenueMinimumOrderSize("polymarket", polyMinOrderSize, settings.minOrderSize);
   const estimatedFees =
     calculatePolymarketFee({
       shares: polyUnits,
@@ -169,6 +177,9 @@ function buildSignal({
   }
   if (safePolyPrice > settings.maxLegPrice || safeKalshiPrice > settings.maxLegPrice) {
     reasons.push(`Une jambe dépasse ${settings.maxLegPrice.toFixed(2)}`);
+  }
+  if (polyUnits > 0 && polyUnits + ORDER_SIZE_TOLERANCE < minimumPolyUnits) {
+    reasons.push("Taille minimum Polymarket non atteinte");
   }
   if (polyDepth !== null && polyUnits > polyDepth) {
     reasons.push("Liquidité Polymarket insuffisante");
