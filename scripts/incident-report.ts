@@ -120,9 +120,12 @@ type CliOptions = {
   sinceMs: number;
   untilMs: number;
   limit: number;
+  maxIntents: number;
   envPath: string;
   slotKey: string | null;
   includeHealthy: boolean;
+  format: "text" | "markdown";
+  outputPath: string | null;
 };
 
 async function main() {
@@ -135,7 +138,18 @@ async function main() {
 
   try {
     const report = await collectReport(pool, options);
-    printReport(report, options);
+    const rendered =
+      options.format === "markdown"
+        ? renderMarkdownReport(report, options)
+        : renderTextReport(report, options);
+
+    if (options.outputPath) {
+      fs.writeFileSync(options.outputPath, rendered);
+      console.log(`Report written to ${options.outputPath}`);
+      return;
+    }
+
+    console.log(rendered);
   } finally {
     await pool.end();
   }
@@ -436,7 +450,7 @@ async function queryRunEvents(pool: Pool, sinceMs: number, untilMs: number) {
   })) satisfies RunEventRow[];
 }
 
-function printReport(
+function renderTextReport(
   report: {
     windowStartPnl: PnlSnapshotRow | null;
     windowEndPnl: PnlSnapshotRow | null;
@@ -446,122 +460,235 @@ function printReport(
   },
   options: CliOptions,
 ) {
-  console.log(`Fenêtre: ${formatTs(options.sinceMs)} -> ${formatTs(options.untilMs)}`);
-  if (options.slotKey) {
-    console.log(`Filtre slot: ${options.slotKey}`);
-  }
-  console.log(`Intents analysés: ${report.intents.length}`);
-  console.log(`Intents suspects: ${report.suspicious.filter((item) => item.flags.length > 0).length}`);
+  const lines: string[] = [];
+  const displayedIntents = report.suspicious.slice(0, options.maxIntents);
 
-  console.log("");
-  console.log("P&L");
+  lines.push(`Fenêtre: ${formatTs(options.sinceMs)} -> ${formatTs(options.untilMs)}`);
+  if (options.slotKey) {
+    lines.push(`Filtre slot: ${options.slotKey}`);
+  }
+  lines.push(`Intents analysés: ${report.intents.length}`);
+  lines.push(`Intents suspects: ${report.suspicious.filter((item) => item.flags.length > 0).length}`);
+  lines.push(`Intents affichés: ${displayedIntents.length}`);
+
+  lines.push("");
+  lines.push("P&L");
   if (report.windowStartPnl && report.windowEndPnl) {
-    console.log(
+    lines.push(
       `- equity ${formatUsd(report.windowStartPnl.equityUsd)} -> ${formatUsd(report.windowEndPnl.equityUsd)} (${formatUsd(report.windowEndPnl.equityUsd - report.windowStartPnl.equityUsd)})`,
     );
-    console.log(
+    lines.push(
       `- realized ${formatUsd(report.windowStartPnl.realizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.realizedPnlUsd)} (${formatUsd(report.windowEndPnl.realizedPnlUsd - report.windowStartPnl.realizedPnlUsd)})`,
     );
-    console.log(
+    lines.push(
       `- unrealized ${formatUsd(report.windowStartPnl.unrealizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.unrealizedPnlUsd)} (${formatUsd(report.windowEndPnl.unrealizedPnlUsd - report.windowStartPnl.unrealizedPnlUsd)})`,
     );
-    console.log(
+    lines.push(
       `- fees ${formatUsd(report.windowStartPnl.feesUsd)} -> ${formatUsd(report.windowEndPnl.feesUsd)} (${formatUsd(report.windowEndPnl.feesUsd - report.windowStartPnl.feesUsd)})`,
     );
   } else {
-    console.log("- snapshots P&L insuffisants sur la fenêtre");
+    lines.push("- snapshots P&L insuffisants sur la fenêtre");
   }
 
-  console.log("");
-  console.log("Circuit Breakers");
+  lines.push("");
+  lines.push("Circuit Breakers");
   if (report.circuitBreakers.length === 0) {
-    console.log("- aucun breaker actif ou déclenché sur la fenêtre");
+    lines.push("- aucun breaker actif ou déclenché sur la fenêtre");
   } else {
     for (const breaker of report.circuitBreakers) {
-      console.log(
+      lines.push(
         `- ${breaker.key} · active=${breaker.active} · reason=${breaker.reason ?? "--"} · triggered=${breaker.triggeredAt ? formatTs(breaker.triggeredAt) : "--"}`,
       );
     }
   }
 
-  console.log("");
-  console.log("Intents");
-  if (report.suspicious.length === 0) {
-    console.log("- aucun intent sur la fenêtre");
-    return;
+  lines.push("");
+  lines.push("Intents");
+  if (displayedIntents.length === 0) {
+    lines.push("- aucun intent sur la fenêtre");
+    return lines.join("\n");
   }
 
-  for (const item of report.suspicious) {
+  for (const item of displayedIntents) {
     const { intent, flags, orders, fills, settlements, events } = item;
-    console.log("");
-    console.log(`=== ${intent.id} · ${intent.combination} · ${intent.status} ===`);
-    console.log(
+    lines.push("");
+    lines.push(`=== ${intent.id} · ${intent.combination} · ${intent.status} ===`);
+    lines.push(
       `slot ${intent.slotKey} · created ${formatTs(intent.createdAt)} · updated ${formatTs(intent.updatedAt)} · resolved ${intent.resolvedAt ? formatTs(intent.resolvedAt) : "--"}`,
     );
-    console.log(
+    lines.push(
       `primary ${intent.primaryVenue} -> hedge ${intent.hedgeVenue} · gross ${formatNum(intent.grossCost, 4)} · target ${formatUsd(intent.targetNotionalUsd)} · pnl ${intent.realizedPnlUsd === null ? "--" : formatUsd(intent.realizedPnlUsd)}`,
     );
     if (intent.failureReason) {
-      console.log(`failure_reason: ${intent.failureReason}`);
+      lines.push(`failure_reason: ${intent.failureReason}`);
     }
     if (flags.length > 0) {
-      console.log(`flags: ${flags.join(" | ")}`);
+      lines.push(`flags: ${flags.join(" | ")}`);
     } else {
-      console.log("flags: aucune");
+      lines.push("flags: aucune");
     }
-    console.log(
+    lines.push(
       `resolutions: poly=${intent.polyResolution ?? "--"} · kalshi=${intent.kalshiResolution ?? "--"}`,
     );
 
-    console.log("legs:");
+    lines.push("legs:");
     for (const leg of intent.legs) {
-      console.log(
+      lines.push(
         `- ${leg.venue} ${leg.outcome} ${leg.side} · target ${formatUsd(leg.requestedNotionalUsd)} · req ${formatNum(leg.requestedSize, 4)} @ ${formatNullableNum(leg.requestedPrice, 4)} · filled ${formatNum(leg.filledSize, 4)} @ ${formatNullableNum(leg.filledPrice, 4)} · status ${leg.status}`,
       );
     }
 
-    console.log("orders:");
+    lines.push("orders:");
     if (orders.length === 0) {
-      console.log("- none");
+      lines.push("- none");
     } else {
       for (const order of orders) {
-        console.log(
+        lines.push(
           `- ${formatTs(order.createdAt)} · ${order.venue} ${order.side} ${order.orderType} · status ${order.status} · req ${formatNum(order.requestedSize, 4)} @ ${formatNullableNum(order.requestedPrice, 4)} · filled ${formatNum(order.filledSize, 4)} @ ${formatNullableNum(order.averageFillPrice, 4)} · order ${order.venueOrderId}`,
         );
       }
     }
 
-    console.log("fills:");
+    lines.push("fills:");
     if (fills.length === 0) {
-      console.log("- none");
+      lines.push("- none");
     } else {
       for (const fill of fills) {
-        console.log(
+        lines.push(
           `- ${formatTs(fill.filledAt)} · ${fill.venue} ${fill.side} ${fill.outcome} · ${formatNum(fill.size, 4)} @ ${formatNum(fill.price, 4)} · fee ${formatUsd(fill.feeUsd)} · trade ${fill.tradeId}`,
         );
       }
     }
 
-    console.log("events:");
+    lines.push("events:");
     if (events.length === 0) {
-      console.log("- none");
+      lines.push("- none");
     } else {
       for (const event of events) {
-        console.log(`- ${formatTs(event.createdAt)} · ${event.level} · ${event.eventType} · ${event.message}`);
+        lines.push(`- ${formatTs(event.createdAt)} · ${event.level} · ${event.eventType} · ${event.message}`);
       }
     }
 
-    console.log("settlements:");
+    lines.push("settlements:");
     if (settlements.length === 0) {
-      console.log("- none");
+      lines.push("- none");
     } else {
       for (const settlement of settlements) {
-        console.log(
+        lines.push(
           `- ${formatTs(settlement.settledAt)} · ${settlement.venue} ${settlement.outcome} -> ${settlement.resolvedOutcome ?? "--"} · payout ${formatUsd(settlement.payoutUsd)}`,
         );
       }
     }
   }
+
+  return lines.join("\n");
+}
+
+function renderMarkdownReport(
+  report: {
+    windowStartPnl: PnlSnapshotRow | null;
+    windowEndPnl: PnlSnapshotRow | null;
+    circuitBreakers: CircuitBreakerRow[];
+    intents: IntentRow[];
+    suspicious: Array<ReturnType<typeof analyzeIntent>>;
+  },
+  options: CliOptions,
+) {
+  const lines: string[] = [];
+  const displayedIntents = report.suspicious.slice(0, options.maxIntents);
+  const suspectCount = report.suspicious.filter((item) => item.flags.length > 0).length;
+
+  lines.push("# Incident Report");
+  lines.push("");
+  lines.push(`- Fenêtre: ${formatTs(options.sinceMs)} -> ${formatTs(options.untilMs)}`);
+  if (options.slotKey) {
+    lines.push(`- Slot: \`${options.slotKey}\``);
+  }
+  lines.push(`- Intents analysés: ${report.intents.length}`);
+  lines.push(`- Intents suspects: ${suspectCount}`);
+  lines.push(`- Intents inclus dans ce doc: ${displayedIntents.length}`);
+  lines.push("");
+  lines.push("## P&L");
+
+  if (report.windowStartPnl && report.windowEndPnl) {
+    lines.push(`- Equity: ${formatUsd(report.windowStartPnl.equityUsd)} -> ${formatUsd(report.windowEndPnl.equityUsd)} (${formatUsd(report.windowEndPnl.equityUsd - report.windowStartPnl.equityUsd)})`);
+    lines.push(`- Realized: ${formatUsd(report.windowStartPnl.realizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.realizedPnlUsd)} (${formatUsd(report.windowEndPnl.realizedPnlUsd - report.windowStartPnl.realizedPnlUsd)})`);
+    lines.push(`- Unrealized: ${formatUsd(report.windowStartPnl.unrealizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.unrealizedPnlUsd)} (${formatUsd(report.windowEndPnl.unrealizedPnlUsd - report.windowStartPnl.unrealizedPnlUsd)})`);
+    lines.push(`- Fees: ${formatUsd(report.windowStartPnl.feesUsd)} -> ${formatUsd(report.windowEndPnl.feesUsd)} (${formatUsd(report.windowEndPnl.feesUsd - report.windowStartPnl.feesUsd)})`);
+  } else {
+    lines.push("- Snapshots P&L insuffisants sur la fenêtre");
+  }
+
+  lines.push("");
+  lines.push("## Circuit Breakers");
+  if (report.circuitBreakers.length === 0) {
+    lines.push("- Aucun breaker actif ou déclenché sur la fenêtre");
+  } else {
+    for (const breaker of report.circuitBreakers) {
+      lines.push(`- \`${breaker.key}\` · active=${breaker.active} · reason=${breaker.reason ?? "--"} · triggered=${breaker.triggeredAt ? formatTs(breaker.triggeredAt) : "--"}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("## Intents");
+  if (displayedIntents.length === 0) {
+    lines.push("- Aucun intent à afficher");
+    return lines.join("\n");
+  }
+
+  for (const item of displayedIntents) {
+    const { intent, flags, orders, fills, settlements, events } = item;
+    lines.push("");
+    lines.push(`### ${intent.id}`);
+    lines.push(`- Pair: ${intent.combination}`);
+    lines.push(`- Status: ${intent.status}`);
+    lines.push(`- Créé: ${formatTs(intent.createdAt)}`);
+    lines.push(`- PnL: ${intent.realizedPnlUsd === null ? "--" : formatUsd(intent.realizedPnlUsd)}`);
+    lines.push(`- Primary/Hedge: ${intent.primaryVenue} -> ${intent.hedgeVenue}`);
+    lines.push(`- Resolutions: poly=${intent.polyResolution ?? "--"} · kalshi=${intent.kalshiResolution ?? "--"}`);
+    lines.push(`- Flags: ${flags.length > 0 ? flags.join(" | ") : "aucune"}`);
+    if (intent.failureReason) {
+      lines.push(`- Failure reason: ${intent.failureReason}`);
+    }
+
+    lines.push("- Legs:");
+    for (const leg of intent.legs) {
+      lines.push(`  - ${leg.venue} ${leg.outcome} ${leg.side} · target ${formatUsd(leg.requestedNotionalUsd)} · req ${formatNum(leg.requestedSize, 4)} @ ${formatNullableNum(leg.requestedPrice, 4)} · filled ${formatNum(leg.filledSize, 4)} @ ${formatNullableNum(leg.filledPrice, 4)} · status ${leg.status}`);
+    }
+
+    lines.push(`- Orders: ${orders.length}`);
+    for (const order of orders.slice(0, 6)) {
+      lines.push(`  - ${formatTs(order.createdAt)} · ${order.venue} ${order.side} ${order.orderType} · ${order.status} · req ${formatNum(order.requestedSize, 4)} @ ${formatNullableNum(order.requestedPrice, 4)} · filled ${formatNum(order.filledSize, 4)} @ ${formatNullableNum(order.averageFillPrice, 4)}`);
+    }
+    if (orders.length > 6) {
+      lines.push(`  - ... ${orders.length - 6} ordres de plus`);
+    }
+
+    lines.push(`- Fills: ${fills.length}`);
+    for (const fill of fills.slice(0, 8)) {
+      lines.push(`  - ${formatTs(fill.filledAt)} · ${fill.venue} ${fill.side} ${fill.outcome} · ${formatNum(fill.size, 4)} @ ${formatNum(fill.price, 4)} · fee ${formatUsd(fill.feeUsd)}`);
+    }
+    if (fills.length > 8) {
+      lines.push(`  - ... ${fills.length - 8} fills de plus`);
+    }
+
+    lines.push(`- Events: ${events.length}`);
+    for (const event of events.slice(0, 10)) {
+      lines.push(`  - ${formatTs(event.createdAt)} · ${event.level} · ${event.eventType} · ${event.message}`);
+    }
+    if (events.length > 10) {
+      lines.push(`  - ... ${events.length - 10} events de plus`);
+    }
+
+    if (settlements.length > 0) {
+      lines.push(`- Settlements: ${settlements.length}`);
+      for (const settlement of settlements.slice(0, 4)) {
+        lines.push(`  - ${formatTs(settlement.settledAt)} · ${settlement.venue} ${settlement.outcome} -> ${settlement.resolvedOutcome ?? "--"} · payout ${formatUsd(settlement.payoutUsd)}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
 }
 
 function mapIntentRow(row: Record<string, unknown>) {
@@ -687,9 +814,12 @@ function parseArgs(args: string[]): CliOptions {
   let sinceMs: number | null = null;
   let untilMs = Date.now();
   let limit = 50;
+  let maxIntents = 12;
   let envPath = DEFAULT_ENV_PATH;
   let slotKey: string | null = null;
   let includeHealthy = false;
+  let format: "text" | "markdown" = "text";
+  let outputPath: string | null = null;
 
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
@@ -709,6 +839,10 @@ function parseArgs(args: string[]): CliOptions {
       limit = Number(nextArg(args, ++index, "--limit"));
       continue;
     }
+    if (arg === "--max-intents") {
+      maxIntents = Number(nextArg(args, ++index, "--max-intents"));
+      continue;
+    }
     if (arg === "--env") {
       envPath = nextArg(args, ++index, "--env");
       continue;
@@ -719,6 +853,14 @@ function parseArgs(args: string[]): CliOptions {
     }
     if (arg === "--all") {
       includeHealthy = true;
+      continue;
+    }
+    if (arg === "--markdown") {
+      format = "markdown";
+      continue;
+    }
+    if (arg === "--output") {
+      outputPath = nextArg(args, ++index, "--output");
       continue;
     }
     if (arg === "--help") {
@@ -735,14 +877,20 @@ function parseArgs(args: string[]): CliOptions {
   if (!Number.isFinite(limit) || limit <= 0) {
     throw new Error("`--limit` doit être > 0");
   }
+  if (!Number.isFinite(maxIntents) || maxIntents <= 0) {
+    throw new Error("`--max-intents` doit être > 0");
+  }
 
   return {
     sinceMs: resolvedSinceMs,
     untilMs,
     limit,
+    maxIntents,
     envPath,
     slotKey,
     includeHealthy,
+    format,
+    outputPath,
   };
 }
 
@@ -822,7 +970,7 @@ function normalizeTimestamp(value: unknown) {
 }
 
 function printHelpAndExit(): never {
-  console.log("Usage: npm run incident:report -- [--hours 12] [--since ISO] [--until ISO] [--slot-key KEY] [--limit 50] [--env /etc/warbitrer/warbitrer.env] [--all]");
+  console.log("Usage: npm run incident:report -- [--hours 12] [--since ISO] [--until ISO] [--slot-key KEY] [--limit 50] [--max-intents 12] [--env /etc/warbitrer/warbitrer.env] [--all] [--markdown] [--output incident-report.md]");
   process.exit(0);
 }
 
