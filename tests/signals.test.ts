@@ -282,6 +282,43 @@ describe("live signal engine", () => {
     expect(signal.legs[0].size).toBeCloseTo(23.8, 2);
   });
 
+  it("still prefers Kalshi as the primary venue even when Polymarket looks shallower on displayed depth", () => {
+    const [signal] = buildSignals({
+      slotKey: "1774899000000",
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: {
+            ...polymarket.outcomes.up,
+            depth: 30,
+          },
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: {
+            ...kalshi.outcomes.no,
+            depth: 300,
+          },
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(true);
+    expect(signal.primaryVenue).toBe("kalshi");
+  });
+
   it("blocks entries when the polymarket budget cannot satisfy the venue minimum size", () => {
     const [signal] = buildSignals({
       slotKey: "1774899000000",

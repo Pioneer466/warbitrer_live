@@ -55,6 +55,7 @@ import {
   readLiveRealizedPnlUsd,
   readOpenOrderIntents,
   readPositions,
+  readRunEvents,
   readRecentFills,
   readRecentOrderIntents,
   readRecentVenueOrders,
@@ -75,6 +76,7 @@ import {
 } from "@/lib/storage";
 import type {
   ExecutionCoordinator,
+  CircuitBreaker,
   LiveFill,
   LiveOpportunity,
   LiveOrder,
@@ -83,6 +85,7 @@ import type {
   OrderIntent,
   PositionSnapshot,
   StrategyConfig,
+  RunEvent,
   VenueAdapter,
   VenueBalance,
   VenueFeedHealth,
@@ -95,6 +98,9 @@ const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
 const RECONCILE_STEP_TIMEOUT_MS = 30_000;
+const KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD = 2;
+const KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -250,9 +256,31 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       const created: OrderIntent[] = [...resumed];
       const positions = await readPositions();
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
+      const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
+      let createdCount = 0;
 
-      for (const opportunity of eligible.slice(0, settings.maxOpenIntentsPerSlot - blockingOpenForSlot)) {
-        const intent = createIntentFromOpportunity({
+      for (const opportunity of eligible) {
+        if (createdCount >= creationBudget) {
+          break;
+        }
+
+        const currentBreakers = (await readCircuitBreakers()).filter(
+          (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.key),
+        );
+        if (currentBreakers.length > 0) {
+          break;
+        }
+
+        const currentOpenIntents = await readOpenOrderIntents();
+        if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
+          break;
+        }
+
+        if (countSlotExecutionBlockers(currentOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
+          break;
+        }
+
+        const baseIntent = createIntentFromOpportunity({
           opportunity,
           slotStartTs: slot.startTs,
           slotEndTs: slot.endTs,
@@ -260,6 +288,34 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
           maxSlippageBps: settings.maxSlippageBps,
           shadow: settings.shadowMode,
         });
+
+        const preparedIntent =
+          settings.shadowMode
+            ? { intent: baseIntent, reason: null }
+            : await prepareIntentForLiveExecution(baseIntent, slot, settings, now);
+        if (!preparedIntent.intent) {
+          await writeRunEvent({
+            level: "warn",
+            eventType:
+              preparedIntent.reason === "unsafe_polymarket_primary"
+                ? "intent.skipped.unsafe_primary_sequence"
+                : "intent.skipped.execution_window",
+            message:
+              preparedIntent.reason === "unsafe_polymarket_primary"
+                ? `Intent ${baseIntent.id} skipped because Kalshi hedge capacity is not robust enough to lead with Polymarket`
+                : `Intent ${baseIntent.id} skipped because the live pair no longer fits the execution window`,
+            payload: {
+              intentId: baseIntent.id,
+              slotKey: baseIntent.slotKey,
+              combination: baseIntent.combination,
+              primaryVenue: baseIntent.primaryVenue,
+              reason: preparedIntent.reason,
+            },
+            createdAt: now,
+          });
+          continue;
+        }
+        const intent = preparedIntent.intent;
 
         if (wouldExceedVenueExposure(intent, exposureUsd, settings.maxVenueExposureUsd)) {
           await writeRunEvent({
@@ -296,6 +352,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
           ? await executeShadowIntent(intent, now)
           : await executeIntent(intent, slot, settings, now);
         created.push(executed);
+        createdCount += 1;
       }
 
       return created;
@@ -425,9 +482,7 @@ async function computeReadiness(
 ): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
   const balances = await readVenueBalances();
   const slotKey = snapshot?.slotKey ?? null;
-  const breakers = (await readCircuitBreakers()).filter(
-    (breaker) => breaker.active || breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`),
-  );
+  const breakers = (await readCircuitBreakers()).filter((breaker) => isBreakerRelevantToSlot(breaker, slotKey));
   const checks = balances.map((balance) => ({
     key: `${balance.venue}:balance`,
     label: `${balance.venue} readiness`,
@@ -935,6 +990,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     settings,
     now,
     hedgeFailureReason,
+    hedgeResult,
   );
 }
 
@@ -1179,7 +1235,7 @@ async function retryLegWithinExecutionBuffer(
     level: "info",
     eventType: `order.${stage}.repriced`,
     message: `${stage === "primary" ? "Primary" : "Hedge"} leg repriced within execution buffer for intent ${intent.id}${
-      retryPriceLadderTicks > 0 ? ` (+${retryPriceLadderTicks} Kalshi tick${retryPriceLadderTicks === 1 ? "" : "s"})` : ""
+      retryPriceLadderTicks > 0 ? ` (+${retryPriceLadderTicks} retry rung${retryPriceLadderTicks === 1 ? "" : "s"})` : ""
     }`,
     payload: {
       intentId: intent.id,
@@ -1422,6 +1478,7 @@ function getLiveIntentLegSnapshot(
       price: leg.side === "SELL" ? outcome.sellPrice : outcome.buyPrice,
       depth: outcome.depth,
       minOrderSize: outcome.minOrderSize,
+      tickSize: outcome.tickSize,
     };
   }
 
@@ -1434,6 +1491,7 @@ function getLiveIntentLegSnapshot(
     price: leg.side === "SELL" ? outcome.sellPrice : outcome.buyPrice,
     depth: outcome.depth,
     minOrderSize: outcome.minOrderSize,
+    tickSize: outcome.tickSize,
   };
 }
 
@@ -1448,6 +1506,7 @@ export function deriveBufferedRetryLeg<
     price: number | null;
     depth: number | null;
     minOrderSize: number | null;
+    tickSize?: number | null;
   },
   settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize">,
   retryAttempt = 1,
@@ -1456,7 +1515,7 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
-  const requestedPrice = deriveRetryReferencePrice(leg, liveLeg.price, retryAttempt);
+  const requestedPrice = deriveRetryReferencePrice(leg, liveLeg.price, liveLeg.tickSize ?? null, retryAttempt);
   if (requestedPrice === null) {
     return null;
   }
@@ -1491,21 +1550,28 @@ export function deriveBufferedRetryLeg<
 function deriveRetryReferencePrice(
   leg: Pick<OrderIntent["legs"][number], "venue" | "side">,
   livePrice: number,
+  liveTickSize: number | null,
   retryAttempt: number,
 ) {
-  if (leg.venue !== "kalshi") {
-    return livePrice;
-  }
-
   const retryPriceLadderTicks = getRetryPriceLadderTicks(leg, retryAttempt);
   if (retryPriceLadderTicks <= 0) {
     return livePrice;
   }
 
-  const priceDelta = retryPriceLadderTicks * KALSHI_ORDER_PRICE_STEP_USD;
+  const priceStep =
+    leg.venue === "kalshi"
+      ? KALSHI_ORDER_PRICE_STEP_USD
+      : leg.venue === "polymarket"
+        ? Math.max(0.001, liveTickSize ?? 0.001)
+        : 0;
+  if (priceStep <= 0) {
+    return livePrice;
+  }
+
+  const priceDelta = retryPriceLadderTicks * priceStep;
   return round4(
     Math.max(
-      KALSHI_ORDER_PRICE_STEP_USD,
+      priceStep,
       livePrice + (leg.side === "SELL" ? -priceDelta : priceDelta),
     ),
   );
@@ -1523,7 +1589,7 @@ function getRetryPriceLadderTicks(
   leg: Pick<OrderIntent["legs"][number], "venue">,
   retryAttempt: number,
 ) {
-  return leg.venue === "kalshi" ? Math.max(0, retryAttempt - 1) : 0;
+  return leg.venue === "kalshi" || leg.venue === "polymarket" ? Math.max(0, retryAttempt - 1) : 0;
 }
 
 function getLivePairSnapshot(
@@ -1564,12 +1630,14 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   settings: StrategyConfig,
   now: number,
   failureReason: string,
+  hedgeResult?: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
 ) {
   let currentIntent = hedgeOrder
     ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "failed", now)
     : intent;
   currentIntent = markIntentStatus(currentIntent, "unwind_required", now, failureReason);
   await writeOrderIntent(currentIntent);
+  await armHedgeFailureGuards(currentIntent, hedgeOrder, hedgeResult ?? null, now);
 
   const maxAttempts = Math.max(1, settings.hedgeRetryAttempts);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1722,29 +1790,6 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
     await writeOrderIntent(currentIntent);
     await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
   }
-
-  await writeCircuitBreaker(
-    currentIntent.status === "unwind_required"
-      ? {
-          key: `slot:${currentIntent.slotKey}`,
-          active: true,
-          reason: "hedge_failure",
-          triggeredAt: now,
-          payload: {
-            intentId: currentIntent.id,
-            venue: currentIntent.primaryVenue,
-            stage: "hedge_failure",
-            hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-          },
-        }
-      : {
-          key: `slot:${currentIntent.slotKey}`,
-          active: false,
-          reason: null,
-          triggeredAt: null,
-          payload: null,
-        },
-  );
 
   return currentIntent;
 }
@@ -2723,22 +2768,26 @@ async function reconcileInFlightIntentStates(now: number) {
     }
   }
 
-  await syncActiveHedgeFailureBreakers();
+  await syncActiveHedgeFailureBreakers(now);
 }
 
-async function syncActiveHedgeFailureBreakers() {
+async function syncActiveHedgeFailureBreakers(now: number) {
   const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
   const unresolvedSlots = new Set(
     openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
   );
-  const hasUnresolvedHedgeFailure = unresolvedSlots.size > 0;
+  const currentSlotKey = getCurrentSlot(new Date(now)).key;
 
   for (const breaker of breakers) {
+    if (shouldKeepHedgeFailureBreakerActive(breaker, now, currentSlotKey, unresolvedSlots)) {
+      continue;
+    }
+
     if (!breaker.active || breaker.reason !== "hedge_failure") {
       continue;
     }
 
-    if (breaker.key === "global" && !hasUnresolvedHedgeFailure) {
+    if (breaker.key === "global") {
       await writeCircuitBreaker({
         key: "global",
         active: false,
@@ -3110,12 +3159,243 @@ function isTerminalOrderStatus(status: LiveOrder["status"]) {
   return status === "canceled" || status === "rejected" || status === "expired";
 }
 
+export function isBreakerRelevantToSlot(
+  breaker: Pick<CircuitBreaker, "key">,
+  slotKey: string | null,
+) {
+  return breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`);
+}
+
+export function shouldKeepHedgeFailureBreakerActive(
+  breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
+  now: number,
+  currentSlotKey: string,
+  unresolvedSlots: Set<string>,
+) {
+  if (!breaker.active || breaker.reason !== "hedge_failure") {
+    return false;
+  }
+
+  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
+  if (cooldownUntil !== null && now < cooldownUntil) {
+    return true;
+  }
+
+  if (breaker.key === "global") {
+    return unresolvedSlots.size > 0;
+  }
+
+  if (!breaker.key.startsWith("slot:")) {
+    return false;
+  }
+
+  const slotKey = breaker.key.slice("slot:".length);
+  if (unresolvedSlots.has(slotKey)) {
+    return true;
+  }
+
+  return getPayloadBoolean(breaker.payload, "lockSlot") && slotKey === currentSlotKey;
+}
+
+export function countRecentKalshiSoftHedgeNoFillEvents(
+  events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[],
+  now: number,
+  windowMs = KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
+) {
+  return countRecentSoftHedgeNoFillEvents(events, now, "kalshi", windowMs);
+}
+
+export function hasKalshiHedgeRetryCapacity(
+  leg: Pick<
+    OrderIntent["legs"][number],
+    "venue" | "requestedNotionalUsd" | "requestedPrice" | "requestedSize" | "side" | "outcome" | "id" | "intentId" | "status" | "marketRef"
+  >,
+  liveLeg: {
+    price: number | null;
+    depth: number | null;
+    minOrderSize: number | null;
+    tickSize?: number | null;
+  },
+  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize">,
+  hedgeRetryAttempts: number,
+) {
+  return deriveBufferedRetryLeg(leg, liveLeg, settings, Math.max(1, hedgeRetryAttempts)) !== null;
+}
+
 function shouldTripBreakerForTerminalNoFill(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {
   return !Boolean(result.raw?.softNoFill);
 }
 
 function extractTerminalNoFillDetail(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {
   return typeof result.raw?.error === "string" ? result.raw.error : null;
+}
+
+async function prepareIntentForLiveExecution(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
+  const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now);
+  if (!repricedIntent) {
+    return {
+      intent: null,
+      reason: "pair_outside_execution_window" as const,
+    };
+  }
+
+  if (!(await canSafelyLeadWithPolymarket(repricedIntent, slot, settings, now))) {
+    return {
+      intent: null,
+      reason: "unsafe_polymarket_primary" as const,
+    };
+  }
+
+  return {
+    intent: repricedIntent,
+    reason: null,
+  };
+}
+
+async function canSafelyLeadWithPolymarket(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
+  if (intent.primaryVenue !== "polymarket" || intent.hedgeVenue !== "kalshi") {
+    return true;
+  }
+
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  if (!hedgeLeg) {
+    return false;
+  }
+
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const liveLeg = getLiveIntentLegSnapshot(hedgeLeg, polymarketState.quote, kalshiState.quote);
+  if (!liveLeg) {
+    return false;
+  }
+
+  return hasKalshiHedgeRetryCapacity(
+    hedgeLeg,
+    liveLeg,
+    {
+      executionPriceBuffer: settings.executionPriceBuffer,
+      maxLegPrice: settings.maxLegPrice,
+      maxSlippageBps: settings.maxSlippageBps,
+      minOrderSize: settings.minOrderSize,
+    },
+    settings.hedgeRetryAttempts,
+  );
+}
+
+async function armHedgeFailureGuards(
+  intent: OrderIntent,
+  hedgeOrder: LiveOrder | null,
+  hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null,
+  now: number,
+) {
+  await writeCircuitBreaker({
+    key: `slot:${intent.slotKey}`,
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.hedgeVenue,
+      stage: "hedge_no_fill_slot_lock",
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      lockSlot: true,
+    },
+  });
+
+  if (!Boolean(hedgeResult?.raw?.softNoFill)) {
+    return;
+  }
+
+  const breakers = await readCircuitBreakers();
+  if (breakers.some((breaker) => breaker.key === "global" && breaker.active)) {
+    return;
+  }
+
+  const recentEvents = await readRunEvents(100);
+  const recentSoftNoFills = recentEvents.filter((event) =>
+    isRecentSoftHedgeNoFillEvent(event, now, KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS, intent.hedgeVenue),
+  );
+  if (recentSoftNoFills.length < KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD) {
+    return;
+  }
+
+  const cooldownUntil = now + KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS;
+  const slotKeys = Array.from(
+    new Set(
+      recentSoftNoFills
+        .map((event) => getPayloadString(event.payload, "slotKey"))
+        .filter((slotKey): slotKey is string => Boolean(slotKey)),
+    ),
+  );
+
+  await writeCircuitBreaker({
+    key: "global",
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.hedgeVenue,
+      stage: `repeated_${intent.hedgeVenue}_soft_no_fill`,
+      failureCount: recentSoftNoFills.length,
+      threshold: KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD,
+      windowMs: KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
+      cooldownUntil,
+      slotKeys,
+    },
+  });
+  await writeRunEvent({
+    level: "error",
+    eventType: "breaker.global.hedge_failure",
+    message: `Global hedge failure breaker armed after ${recentSoftNoFills.length} recent ${intent.hedgeVenue} soft no-fills`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.hedgeVenue,
+      failureCount: recentSoftNoFills.length,
+      threshold: KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD,
+      windowMs: KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
+      cooldownUntil,
+      slotKeys,
+    },
+    createdAt: now,
+  });
+}
+
+function isRecentSoftHedgeNoFillEvent(
+  event: Pick<RunEvent, "createdAt" | "eventType" | "payload">,
+  now: number,
+  windowMs: number,
+  venue?: "kalshi" | "polymarket",
+) {
+  return (
+    event.eventType === "order.hedge.no_fill" &&
+    event.createdAt >= now - windowMs &&
+    (venue === undefined || getPayloadString(event.payload, "venue") === venue) &&
+    getPayloadBoolean(event.payload, "softNoFill")
+  );
+}
+
+function countRecentSoftHedgeNoFillEvents(
+  events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[],
+  now: number,
+  venue: "kalshi" | "polymarket",
+  windowMs: number,
+) {
+  return events.filter((event) => isRecentSoftHedgeNoFillEvent(event, now, windowMs, venue)).length;
+}
+
+function getPayloadBoolean(payload: Record<string, unknown> | null, key: string) {
+  return payload !== null && payload[key] === true;
+}
+
+function getPayloadNumber(payload: Record<string, unknown> | null, key: string) {
+  return payload !== null && typeof payload[key] === "number" ? payload[key] : null;
+}
+
+function getPayloadString(payload: Record<string, unknown> | null, key: string) {
+  return payload !== null && typeof payload[key] === "string" ? payload[key] : null;
 }
 
 function describeTerminalNoFill(label: string, result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {

@@ -226,10 +226,7 @@ function buildSignal({
       ? null
       : round4(projectedNetProfitUsd / capitalDeployed);
 
-  const primaryVenue =
-    polyDepth === null || kalshiDepth === null
-      ? null
-      : choosePrimaryVenue(polyDepth * safePolyPrice, kalshiDepth * safeKalshiPrice);
+  const primaryVenue = polyDepth === null || kalshiDepth === null ? null : choosePrimaryVenue();
 
   return {
     id: `${combination}-${slotKey}-${now}`,
@@ -289,8 +286,8 @@ function buildSignal({
   };
 }
 
-function choosePrimaryVenue(polyDepthUsd: number, kalshiDepthUsd: number): Venue {
-  return polyDepthUsd <= kalshiDepthUsd ? "polymarket" : "kalshi";
+function choosePrimaryVenue(): Venue {
+  return "kalshi";
 }
 
 function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuote) {

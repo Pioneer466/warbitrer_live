@@ -1,15 +1,19 @@
 import {
   buildVenueOrderRequest,
+  countRecentKalshiSoftHedgeNoFillEvents,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
+  hasKalshiHedgeRetryCapacity,
+  isBreakerRelevantToSlot,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  shouldKeepHedgeFailureBreakerActive,
   summarizeIntentLegFills,
 } from "@/lib/engine";
-import type { LiveFill, LiveOrder, OrderIntent } from "@/lib/types";
+import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, RunEvent } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   return {
@@ -272,6 +276,84 @@ describe("hedge retry repricing", () => {
       requestedNotionalUsd: 10,
     });
   });
+
+  it("adds one Polymarket tick per retry attempt when repricing a polymarket leg", () => {
+    const primaryLeg = {
+      ...buildIntent().legs[0],
+      requestedPrice: 0.45,
+      requestedSize: 22.22,
+      requestedNotionalUsd: 10,
+    };
+
+    expect(
+      deriveBufferedRetryLeg(
+        primaryLeg,
+        {
+          price: 0.47,
+          depth: 25,
+          minOrderSize: 5,
+          tickSize: 0.001,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 30,
+          minOrderSize: 5,
+        },
+        3,
+      ),
+    ).toMatchObject({
+      id: primaryLeg.id,
+      venue: "polymarket",
+      requestedPrice: 0.472,
+      requestedNotionalUsd: 10,
+    });
+  });
+});
+
+describe("kalshi hedge safety guards", () => {
+  it("requires the final Kalshi retry rung to remain inside the allowed cap", () => {
+    const hedgeLeg = buildIntent({
+      primaryVenue: "polymarket",
+      hedgeVenue: "kalshi",
+    }).legs[1];
+
+    expect(
+      hasKalshiHedgeRetryCapacity(
+        hedgeLeg,
+        {
+          price: 0.42,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.03,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+        },
+        3,
+      ),
+    ).toBe(true);
+
+    expect(
+      hasKalshiHedgeRetryCapacity(
+        hedgeLeg,
+        {
+          price: 0.49,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 30,
+          minOrderSize: 5,
+        },
+        2,
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("venue order request sizing", () => {
@@ -319,6 +401,110 @@ describe("retryable polymarket unwind errors", () => {
       true,
     );
     expect(isRetryablePolymarketInventorySyncError(new Error("authentication failed"))).toBe(false);
+  });
+});
+
+describe("hedge failure breakers", () => {
+  it("ignores slot breakers from old slots when evaluating the current slot", () => {
+    expect(isBreakerRelevantToSlot({ key: "global" }, "slot-2")).toBe(true);
+    expect(isBreakerRelevantToSlot({ key: "slot:slot-2" }, "slot-2")).toBe(true);
+    expect(isBreakerRelevantToSlot({ key: "slot:slot-1" }, "slot-2")).toBe(false);
+  });
+
+  it("keeps a slot hedge breaker active for the rest of the current slot", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "slot:slot-1",
+      active: true,
+      reason: "hedge_failure",
+      payload: {
+        lockSlot: true,
+      },
+    };
+
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, "slot-1", new Set())).toBe(true);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, "slot-2", new Set())).toBe(false);
+  });
+
+  it("keeps a global hedge breaker active through its cooldown", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "global",
+      active: true,
+      reason: "hedge_failure",
+      payload: {
+        cooldownUntil: 200,
+      },
+    };
+
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 150, "slot-1", new Set())).toBe(true);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 250, "slot-1", new Set())).toBe(false);
+  });
+});
+
+describe("kalshi soft no-fill escalation", () => {
+  it("counts only recent Kalshi soft hedge no-fills toward the global breaker threshold", () => {
+    const events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[] = [
+      {
+        createdAt: 1_000,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: true,
+          slotKey: "slot-1",
+        },
+      },
+      {
+        createdAt: 2_000,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: true,
+          slotKey: "slot-2",
+        },
+      },
+      {
+        createdAt: 2_500,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "polymarket",
+          softNoFill: true,
+        },
+      },
+      {
+        createdAt: 100,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: true,
+        },
+      },
+    ];
+
+    expect(countRecentKalshiSoftHedgeNoFillEvents(events, 2_500, 2_000)).toBe(2);
+  });
+
+  it("does not count recent Polymarket soft hedge no-fills toward the Kalshi threshold", () => {
+    const events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[] = [
+      {
+        createdAt: 1_000,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "polymarket",
+          softNoFill: true,
+          slotKey: "slot-1",
+        },
+      },
+      {
+        createdAt: 2_000,
+        eventType: "order.hedge.no_fill",
+        payload: {
+          venue: "polymarket",
+          softNoFill: true,
+          slotKey: "slot-2",
+        },
+      },
+    ];
+
+    expect(countRecentKalshiSoftHedgeNoFillEvents(events, 2_500, 2_000)).toBe(0);
   });
 });
 
