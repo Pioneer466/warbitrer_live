@@ -69,6 +69,23 @@ describe("live intent settlement", () => {
     expect(intent.legs[0].requestedNotionalUsd + intent.legs[1].requestedNotionalUsd).toBe(50);
   });
 
+  it("does not trust a stale snapshot primary venue when rebuilding a live intent", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity: {
+        ...opportunity,
+        primaryVenue: "polymarket",
+      },
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+
+    expect(intent.primaryVenue).toBe("kalshi");
+    expect(intent.hedgeVenue).toBe("polymarket");
+  });
+
   it("computes payout from the winning leg only", () => {
     const intent = createIntentFromOpportunity({
       opportunity,

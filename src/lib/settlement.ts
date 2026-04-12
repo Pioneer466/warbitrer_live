@@ -22,13 +22,14 @@ export function createIntentFromOpportunity({
   maxSlippageBps: number;
   shadow: boolean;
 }): OrderIntent {
-  if (!opportunity.primaryVenue || !opportunity.eligible || opportunity.grossCost === null) {
+  const executionPrimaryVenue = deriveExecutionPrimaryVenue(opportunity);
+  if (!executionPrimaryVenue || !opportunity.eligible || opportunity.grossCost === null) {
     throw new Error("Impossible de créer une intention live sans opportunité exécutable");
   }
 
   const [firstLeg, secondLeg] = opportunity.legs;
-  const primaryLeg = firstLeg.venue === opportunity.primaryVenue ? firstLeg : secondLeg;
-  const hedgeLeg = firstLeg.venue === opportunity.primaryVenue ? secondLeg : firstLeg;
+  const primaryLeg = firstLeg.venue === executionPrimaryVenue ? firstLeg : secondLeg;
+  const hedgeLeg = firstLeg.venue === executionPrimaryVenue ? secondLeg : firstLeg;
   const intentId = crypto.randomUUID();
 
   return {
@@ -42,7 +43,7 @@ export function createIntentFromOpportunity({
     createdAt: now,
     updatedAt: now,
     resolvedAt: null,
-    primaryVenue: primaryLeg.venue,
+    primaryVenue: executionPrimaryVenue,
     hedgeVenue: hedgeLeg.venue,
     grossCost: opportunity.grossCost,
     targetNotionalUsd: primaryLeg.targetNotionalUsd + hedgeLeg.targetNotionalUsd,
@@ -58,6 +59,15 @@ export function createIntentFromOpportunity({
       buildIntentLeg(intentId, secondLeg.venue, secondLeg.outcome, secondLeg.marketRef, secondLeg.tokenId, secondLeg.price, secondLeg.size, secondLeg.targetNotionalUsd),
     ],
   };
+}
+
+function deriveExecutionPrimaryVenue(opportunity: Pick<LiveOpportunity, "legs" | "primaryVenue">): Venue | null {
+  const venues = new Set(opportunity.legs.map((leg) => leg.venue));
+  if (venues.has("kalshi") && venues.has("polymarket")) {
+    return "kalshi";
+  }
+
+  return opportunity.primaryVenue ?? opportunity.legs[0]?.venue ?? null;
 }
 
 export function markIntentStatus(intent: OrderIntent, status: OrderIntent["status"], now: number, failureReason?: string | null): OrderIntent {
