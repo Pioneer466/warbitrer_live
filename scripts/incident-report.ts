@@ -180,7 +180,16 @@ async function collectReport(pool: Pool, options: CliOptions) {
     }),
   );
 
-  const suspicious = analyses.filter((analysis) => options.includeHealthy || analysis.flags.length > 0);
+  const suspicious = analyses
+    .filter((analysis) => options.includeHealthy || analysis.flags.length > 0)
+    .sort((left, right) => {
+      const leftPnl = left.intent.realizedPnlUsd ?? Number.POSITIVE_INFINITY;
+      const rightPnl = right.intent.realizedPnlUsd ?? Number.POSITIVE_INFINITY;
+      if (leftPnl !== rightPnl) {
+        return leftPnl - rightPnl;
+      }
+      return left.intent.createdAt - right.intent.createdAt;
+    });
 
   return {
     windowStartPnl,
@@ -766,7 +775,16 @@ function toNullableNumber(value: unknown) {
 }
 
 function formatTs(value: number) {
-  return new Date(value).toISOString();
+  const normalized = normalizeTimestamp(value);
+  if (normalized === null) {
+    return `invalid-ts(${String(value)})`;
+  }
+
+  try {
+    return new Date(normalized).toISOString();
+  } catch {
+    return `invalid-ts(${String(value)})`;
+  }
 }
 
 function formatUsd(value: number) {
@@ -779,6 +797,28 @@ function formatNum(value: number, digits = 2) {
 
 function formatNullableNum(value: number | null, digits = 2) {
   return value === null ? "--" : formatNum(value, digits);
+}
+
+function normalizeTimestamp(value: unknown) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  if (numeric === 0) {
+    return 0;
+  }
+
+  const absolute = Math.abs(numeric);
+  if (absolute < 1e11) {
+    return Math.trunc(numeric * 1000);
+  }
+
+  if (absolute > 1e15) {
+    return Math.trunc(numeric / 1000);
+  }
+
+  return Math.trunc(numeric);
 }
 
 function printHelpAndExit(): never {
