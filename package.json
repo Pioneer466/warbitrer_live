@@ -21,6 +21,7 @@
     "incident:report": "node --import tsx ./scripts/incident-report.ts",
     "incident:doc": "node --import tsx ./scripts/incident-report.ts --markdown --output incident-report.md --max-intents 12",
     "breaker:clear-hedge-failures": "tsx scripts/clear-hedge-failure-breakers.ts",
+    "intent:close-poly-unwind": "tsx scripts/close-polymarket-unwind-intent.ts",
     "worker": "tsx src/worker/index.ts",
     "worker:dev": "tsx watch src/worker/index.ts",
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""
