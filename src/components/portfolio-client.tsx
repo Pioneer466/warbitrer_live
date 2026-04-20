@@ -55,7 +55,7 @@ export function PortfolioClient() {
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
         <div className="flex flex-col gap-3 border-b border-white/6 pb-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.24em] text-cyan/80">Vue Multi-Actifs</div>
+            <div className="text-[11px] uppercase tracking-[0.24em] text-mist/70">Vue Multi-Actifs</div>
             <div className="mt-2 text-sm text-mist/75">
               Lecture rapide du moteur global, des modes de trading et des meilleures opportunités par actif.
             </div>
@@ -132,11 +132,6 @@ export function PortfolioClient() {
                   value={String(asset.activeBreakers.length)}
                   tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"}
                 />
-                <MiniStat
-                  label="Meilleur brut"
-                  value={best?.grossCost !== null && best?.grossCost !== undefined ? formatPrice(best.grossCost, 3) : "--"}
-                  tone={best?.eligible ? "emerald" : best ? "amber" : "default"}
-                />
               </div>
 
               <div className="mt-4 rounded-[20px] border border-white/6 bg-white/[0.02] px-4 py-4 text-sm text-mist">
@@ -176,7 +171,7 @@ function SummaryCell({
   return (
     <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
       <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{label}</div>
-      <div className={`mt-3 font-mono text-[34px] leading-none ${getValueToneClass(tone)}`}>{value}</div>
+      <div className="mt-3 font-mono text-[34px] leading-none text-white">{value}</div>
       {meta ? <div className="mt-2 text-xs text-mist/60">{meta}</div> : null}
     </div>
   );
@@ -194,7 +189,7 @@ function MiniStat({
   return (
     <div className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3">
       <div className="text-[11px] uppercase tracking-[0.16em] text-mist/60">{label}</div>
-      <div className={`mt-2 text-sm ${getValueToneClass(tone)}`}>{value}</div>
+      <div className="mt-2 text-sm text-white">{value}</div>
     </div>
   );
 }
@@ -209,23 +204,6 @@ function getModeTone(mode: "off" | "shadow" | "live"): Tone {
 
 function getReadinessTone(status: ReadinessStatus): Tone {
   return status === "ready" ? "emerald" : status === "degraded" ? "amber" : "rose";
-}
-
-function getValueToneClass(tone: Tone) {
-  switch (tone) {
-    case "cyan":
-      return "text-cyan";
-    case "amber":
-      return "text-amber";
-    case "rose":
-      return "text-rose";
-    case "emerald":
-      return "text-emerald-300";
-    case "indigo":
-      return "text-indigo-200";
-    default:
-      return "text-white";
-  }
 }
 
 function getPillToneClass(tone: Tone) {
