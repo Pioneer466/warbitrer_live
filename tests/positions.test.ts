@@ -2,8 +2,9 @@ import { isRiskActivePosition } from "@/lib/positions";
 import type { PositionSnapshot } from "@/lib/types";
 
 function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnapshot {
-  return {
+  const base: PositionSnapshot = {
     id: "position-1",
+    asset: "btc",
     venue: "polymarket",
     marketRef: "market-1",
     outcome: "UP",
@@ -17,7 +18,12 @@ function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnaps
     mergeable: false,
     updatedAt: 1,
     raw: {},
+  };
+
+  return {
+    ...base,
     ...overrides,
+    asset: overrides.asset ?? base.asset,
   };
 }
 

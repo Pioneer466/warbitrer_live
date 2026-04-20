@@ -1,11 +1,11 @@
-# Warbitrer Live BTC 15m
+# Warbitrer Live BTC + ETH 15m
 
-Cockpit et worker live pour la stratégie d’arbitrage BTC 15 minutes entre Polymarket et Kalshi.
+Cockpit et worker live pour la stratégie d’arbitrage BTC et ETH 15 minutes entre Polymarket et Kalshi.
 
 ## Ce que fait le système
 
 - market data live `WS-first` avec resync REST de secours sur Polymarket et Kalshi
-- scan du créneau BTC 15m courant sur Polymarket et Kalshi
+- scan des créneaux BTC et ETH 15m courants sur Polymarket et Kalshi
 - calcul des opportunités `Poly Up + Kalshi No` et `Poly Down + Kalshi Yes`
 - exécution live `taker-only` avec jambe primaire puis hedge immédiat
 - reconciliation des ordres, fills, positions, P&L et settlements
@@ -50,8 +50,8 @@ Pour Polymarket:
 - en `EOA`, `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
 - `POLY_RELAYER_URL` peut rester sur `https://relayer-v2.polymarket.com`
 
-La config de stratégie est stockée en base via `strategy_config`, pas dans les variables d’environnement.
-Tu la pilotes via `GET /api/settings` et `PUT /api/settings`.
+La config de stratégie est stockée en base via `strategy_configs`, pas dans les variables d’environnement.
+Tu la pilotes via `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/[asset]` et `PUT /api/settings/[asset]`.
 
 Champs importants:
 
@@ -80,12 +80,16 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 ## Endpoints utiles
 
 - `GET /api/dashboard`
+- `GET /api/dashboard/[asset]`
 - `GET /api/trades`
-- `GET /api/history/current-slot`
+- `GET /api/trades?asset=btc|eth|all`
+- `GET /api/history/current-slot?asset=btc|eth`
 - `GET /api/health`
 - `GET /api/recovery`
 - `GET /api/settings`
+- `GET /api/settings/[asset]`
 - `PUT /api/settings`
+- `PUT /api/settings/[asset]`
 - `GET /api/circuit-breakers`
 - `PUT /api/circuit-breakers`
 
@@ -95,8 +99,8 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `enableTrading=true` et `shadowMode=true` : intents/ordres/fills synthétiques, même interface, aucune soumission aux venues
 - `enableTrading=true` et `shadowMode=false` : exécution live réelle
 
-Le dashboard `/` et la page `/trades` restent les interfaces opérateur principales dans les trois modes.
-La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation de la migration `EOA`.
+Le dashboard `/` agrège le portefeuille global, `/btc` et `/eth` exposent les dashboards opérateur par actif, et `/trades` reste la vue transversale.
+La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation wallet.
 
 ## Déploiement VPS
 

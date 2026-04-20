@@ -91,7 +91,8 @@ describe("Kalshi quote derivation", () => {
 
   it("selects the Kalshi market that matches the requested 15 minute slot", () => {
     const slot: MarketSlot = {
-      key: "1774900800000",
+      asset: "btc",
+      key: "btc:1774900800000",
       startTs: 1774900800000,
       endTs: 1774901700000,
       startIso: "2026-03-30T20:00:00.000Z",
@@ -243,7 +244,7 @@ describe("Kalshi quote derivation", () => {
 
     vi.stubGlobal("fetch", fetchMock as any);
 
-    const response = await fetchKalshiMarkets();
+    const response = await fetchKalshiMarkets("btc");
 
     expect(response.markets.map((market) => market.ticker)).toEqual([
       "KXBTC15M-PAGE-1",
@@ -251,6 +252,22 @@ describe("Kalshi quote derivation", () => {
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=next-page");
+  });
+
+  it("queries the ETH series when fetching ETH Kalshi markets", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        markets: [],
+        cursor: null,
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await fetchKalshiMarkets("eth");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXETH15M");
   });
 
   it("signs Kalshi authenticated requests with the full trade-api path", () => {

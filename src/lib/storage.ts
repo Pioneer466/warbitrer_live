@@ -1,5 +1,7 @@
 import * as postgres from "@/lib/postgres-db";
+import { isMarketAsset } from "@/lib/market-catalog";
 import type {
+  MarketAsset,
   BridgeTransfer,
   CircuitBreaker,
   DatabaseMaintenanceSummary,
@@ -11,10 +13,12 @@ import type {
   MarketSlot,
   OpportunitySnapshot,
   OrderIntent,
+  PortfolioDashboardResponse,
   PnlSnapshot,
   PositionSnapshot,
   RunEvent,
   StrategyConfig,
+  StrategyConfigMap,
   TradesResponse,
   Venue,
   VenueBalance,
@@ -29,23 +33,32 @@ async function db() {
   return postgres.getPgDb();
 }
 
-export async function readSettings(): Promise<StrategyConfig> {
-  return postgres.getStrategyConfig(await db());
+export async function readSettings(asset: MarketAsset): Promise<StrategyConfig> {
+  return postgres.getStrategyConfig(await db(), asset);
 }
 
-export async function writeSettings(payload: StrategyConfig) {
-  return postgres.updateStrategyConfig(await db(), payload);
+export async function readSettingsMap(): Promise<StrategyConfigMap> {
+  return postgres.listStrategyConfigs(await db());
 }
 
-export async function readWorkerState(): Promise<WorkerState> {
-  return postgres.getWorkerState(await db());
+export async function writeSettings(asset: MarketAsset, payload: StrategyConfig) {
+  return postgres.updateStrategyConfig(await db(), asset, payload);
 }
 
-export async function writeWorkerState(state: Partial<WorkerState>) {
-  return postgres.updateWorkerState(await db(), state);
+export async function readWorkerState(asset: MarketAsset): Promise<WorkerState> {
+  return postgres.getWorkerState(await db(), asset);
+}
+
+export async function readWorkerStates() {
+  return postgres.listWorkerStates(await db());
+}
+
+export async function writeWorkerState(asset: MarketAsset, state: Partial<WorkerState>) {
+  return postgres.updateWorkerState(await db(), asset, state);
 }
 
 export async function writeSnapshot(snapshot: {
+  asset: MarketAsset;
   slotKey: string;
   slotStartTs: number;
   slotEndTs: number;
@@ -57,12 +70,12 @@ export async function writeSnapshot(snapshot: {
   return postgres.insertOpportunitySnapshot(await db(), snapshot);
 }
 
-export async function readLatestSnapshot(slotKey?: string): Promise<OpportunitySnapshot | null> {
-  return postgres.getLatestOpportunitySnapshot(await db(), slotKey);
+export async function readLatestSnapshot(asset: MarketAsset, slotKey?: string): Promise<OpportunitySnapshot | null> {
+  return postgres.getLatestOpportunitySnapshot(await db(), asset, slotKey);
 }
 
-export async function readLastEntryCosts(slotKey: string) {
-  return postgres.getLastEntryCosts(await db(), slotKey);
+export async function readLastEntryCosts(asset: MarketAsset, slotKey: string) {
+  return postgres.getLastEntryCosts(await db(), asset, slotKey);
 }
 
 export async function writeVenueBalance(balance: VenueBalance) {
@@ -77,12 +90,12 @@ export async function writeOrderIntent(intent: OrderIntent) {
   return postgres.upsertOrderIntent(await db(), intent);
 }
 
-export async function readOpenOrderIntents() {
-  return postgres.listOpenOrderIntents(await db());
+export async function readOpenOrderIntents(asset?: MarketAsset) {
+  return postgres.listOpenOrderIntents(await db(), asset);
 }
 
-export async function readRecentOrderIntents(limit?: number) {
-  return postgres.listRecentOrderIntents(await db(), limit);
+export async function readRecentOrderIntents(limit?: number, asset?: MarketAsset) {
+  return postgres.listRecentOrderIntents(await db(), limit, asset);
 }
 
 export async function findOrderIntent(intentId: string) {
@@ -93,12 +106,12 @@ export async function writeVenueOrder(order: LiveOrder) {
   return postgres.upsertVenueOrder(await db(), order);
 }
 
-export async function readOpenVenueOrders() {
-  return postgres.listOpenVenueOrders(await db());
+export async function readOpenVenueOrders(asset?: MarketAsset) {
+  return postgres.listOpenVenueOrders(await db(), asset);
 }
 
-export async function readRecentVenueOrders(limit?: number) {
-  return postgres.listRecentVenueOrders(await db(), limit);
+export async function readRecentVenueOrders(limit?: number, asset?: MarketAsset) {
+  return postgres.listRecentVenueOrders(await db(), limit, asset);
 }
 
 export async function findVenueOrder(venue: string, venueOrderId: string) {
@@ -109,20 +122,24 @@ export async function writeFill(fill: LiveFill) {
   return postgres.upsertFill(await db(), fill);
 }
 
-export async function readRecentFills(limit?: number) {
-  return postgres.listRecentFills(await db(), limit);
+export async function readRecentFills(limit?: number, asset?: MarketAsset) {
+  return postgres.listRecentFills(await db(), limit, asset);
 }
 
 export async function readFillsForIntentVenue(intentId: string, venue: Venue) {
   return postgres.listFillsForIntentVenue(await db(), intentId, venue);
 }
 
-export async function replaceVenuePositions(venue: "polymarket" | "kalshi", positions: PositionSnapshot[]) {
-  return postgres.replaceVenuePositions(await db(), venue, positions);
+export async function replaceVenuePositions(
+  venue: "polymarket" | "kalshi",
+  asset: MarketAsset,
+  positions: PositionSnapshot[],
+) {
+  return postgres.replaceVenuePositions(await db(), venue, asset, positions);
 }
 
-export async function readPositions() {
-  return postgres.listPositions(await db());
+export async function readPositions(asset?: MarketAsset) {
+  return postgres.listPositions(await db(), asset);
 }
 
 export async function writeSettlement(settlement: Parameters<typeof postgres.upsertSettlement>[1]) {
@@ -159,11 +176,14 @@ export async function writeRunEvent(event: RunEvent) {
     logger(`[run-event] ${event.eventType}: ${event.message}`, event.payload ?? {});
   }
 
-  return postgres.insertRunEvent(await db(), event);
+  return postgres.insertRunEvent(await db(), {
+    ...event,
+    asset: await inferRunEventAsset(event),
+  });
 }
 
-export async function readRunEvents(limit?: number) {
-  return postgres.listRecentRunEvents(await db(), limit);
+export async function readRunEvents(limit?: number, asset?: MarketAsset | null) {
+  return postgres.listRecentRunEvents(await db(), limit, asset);
 }
 
 export async function readDatabaseMetrics(): Promise<DatabaseMetrics> {
@@ -189,10 +209,73 @@ export async function readDashboard(slot: MarketSlot): Promise<DashboardResponse
   return postgres.buildDashboardResponse(await db(), slot);
 }
 
-export async function readTrades(): Promise<TradesResponse> {
-  return postgres.buildTradesResponse(await db());
+export async function readPortfolioDashboard(slots: MarketSlot[]): Promise<PortfolioDashboardResponse> {
+  return postgres.buildPortfolioDashboardResponse(await db(), slots);
+}
+
+export async function readTrades(asset: MarketAsset | "all" = "all"): Promise<TradesResponse> {
+  return postgres.buildTradesResponse(await db(), asset);
 }
 
 export async function readHistoryPoints(slot: MarketSlot): Promise<HistoryPoint[]> {
   return postgres.buildHistoryPoints(await db(), slot);
+}
+
+async function inferRunEventAsset(event: RunEvent): Promise<MarketAsset | null> {
+  if (event.asset) {
+    return event.asset;
+  }
+
+  const payloadAsset = inferRunEventAssetFromPayload(event.payload);
+  if (payloadAsset) {
+    return payloadAsset;
+  }
+
+  const intentId =
+    event.payload &&
+    typeof event.payload === "object" &&
+    typeof event.payload.intentId === "string"
+      ? event.payload.intentId
+      : null;
+
+  if (!intentId) {
+    return null;
+  }
+
+  try {
+    return (await findOrderIntent(intentId))?.asset ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function inferRunEventAssetFromPayload(payload: RunEvent["payload"]): MarketAsset | null {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  if (typeof payload.asset === "string" && isMarketAsset(payload.asset)) {
+    return payload.asset;
+  }
+
+  const directSlotAsset = inferSlotAsset(payload.slotKey) ?? inferSlotAsset(payload.currentSlotKey);
+  if (directSlotAsset) {
+    return directSlotAsset;
+  }
+
+  if (!Array.isArray(payload.slotKeys)) {
+    return null;
+  }
+
+  const inferredAssets = payload.slotKeys.map(inferSlotAsset).filter((asset): asset is MarketAsset => asset !== null);
+  return inferredAssets.length > 0 && new Set(inferredAssets).size === 1 ? inferredAssets[0] : null;
+}
+
+function inferSlotAsset(value: unknown): MarketAsset | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const [candidate] = value.split(":");
+  return candidate && isMarketAsset(candidate) ? candidate : null;
 }

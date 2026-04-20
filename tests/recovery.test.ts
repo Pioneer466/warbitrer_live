@@ -38,6 +38,7 @@ describe("recovery helpers", () => {
     const positions: PositionSnapshot[] = [
       {
         id: "polymarket:ghost",
+        asset: "btc",
         venue: "polymarket",
         marketRef: "0xghost",
         outcome: "UP",
@@ -64,6 +65,7 @@ describe("recovery helpers", () => {
     const positions: PositionSnapshot[] = [
       {
         id: "polymarket:redeemable",
+        asset: "btc",
         venue: "polymarket",
         marketRef: "0xredeemable",
         outcome: "UP",

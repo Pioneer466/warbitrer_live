@@ -1,7 +1,10 @@
 import { buildSignals } from "@/lib/signals";
 import type { KalshiQuote, PolymarketQuote, StrategyConfig, VenueBalance, VenueFeedHealth } from "@/lib/types";
 
+const SLOT_KEY = "btc:1774899000000";
+
 const readyFeed = (venue: "polymarket" | "kalshi"): VenueFeedHealth => ({
+  asset: "btc",
   venue,
   feedStatus: "ready",
   source: "ws",
@@ -60,6 +63,7 @@ const balances: VenueBalance[] = [
 
 const polymarket: PolymarketQuote = {
   ref: {
+    asset: "btc",
     venue: "polymarket",
     id: "poly-market",
     conditionId: "condition-1",
@@ -68,7 +72,7 @@ const polymarket: PolymarketQuote = {
     url: "https://polymarket.com/event/test",
     startTime: "2026-03-30T19:30:00.000Z",
     endTime: "2026-03-30T19:45:00.000Z",
-    slotKey: "1774899000000",
+    slotKey: SLOT_KEY,
   },
   conditionId: "condition-1",
   status: "open",
@@ -149,6 +153,7 @@ const polymarket: PolymarketQuote = {
 
 const kalshi: KalshiQuote = {
   ref: {
+    asset: "btc",
     venue: "kalshi",
     id: "KXBTC15M-26MAR301545-45",
     ticker: "KXBTC15M-26MAR301545-45",
@@ -156,7 +161,7 @@ const kalshi: KalshiQuote = {
     url: "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/test",
     startTime: "2026-03-30T19:30:00.000Z",
     endTime: "2026-03-30T19:45:00.000Z",
-    slotKey: "1774899000000",
+    slotKey: SLOT_KEY,
   },
   status: "active",
   slotAligned: true,
@@ -235,7 +240,7 @@ const kalshi: KalshiQuote = {
 describe("live signal engine", () => {
   it("marks the sub-threshold pair as eligible and chooses a primary venue", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket,
       kalshi,
@@ -255,7 +260,7 @@ describe("live signal engine", () => {
 
   it("keeps the polymarket leg at a 10 USD budget even when the venue minimum is 5 shares", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket: {
         ...polymarket,
@@ -284,7 +289,7 @@ describe("live signal engine", () => {
 
   it("still prefers Kalshi as the primary venue even when Polymarket looks shallower on displayed depth", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket: {
         ...polymarket,
@@ -321,7 +326,7 @@ describe("live signal engine", () => {
 
   it("blocks entries when the polymarket budget cannot satisfy the venue minimum size", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket: {
         ...polymarket,
@@ -349,7 +354,7 @@ describe("live signal engine", () => {
 
   it("blocks re-entry when the improvement is below the configured threshold", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket,
       kalshi,
@@ -367,7 +372,7 @@ describe("live signal engine", () => {
 
   it("blocks late entries inside the cutoff window", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket,
       kalshi,
@@ -383,7 +388,7 @@ describe("live signal engine", () => {
 
   it("blocks entries when Polymarket already looks terminal", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket: {
         ...polymarket,
@@ -403,7 +408,7 @@ describe("live signal engine", () => {
 
   it("blocks entries when Kalshi already looks terminal", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket,
       kalshi: {
@@ -423,7 +428,7 @@ describe("live signal engine", () => {
 
   it("blocks entries when a venue feed is stale", () => {
     const [signal] = buildSignals({
-      slotKey: "1774899000000",
+      slotKey: SLOT_KEY,
       now: 1774899060000,
       polymarket: {
         ...polymarket,

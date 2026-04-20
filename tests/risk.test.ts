@@ -6,6 +6,7 @@ describe("venue exposure", () => {
     const positions: PositionSnapshot[] = [
       {
         id: "poly-position",
+        asset: "btc",
         venue: "polymarket",
         marketRef: "poly-market",
         outcome: "UP",
@@ -22,6 +23,7 @@ describe("venue exposure", () => {
       },
       {
         id: "kalshi-position",
+        asset: "btc",
         venue: "kalshi",
         marketRef: "kalshi-market",
         outcome: "YES",
@@ -41,8 +43,9 @@ describe("venue exposure", () => {
     const openIntents: OrderIntent[] = [
       {
         id: "intent-1",
+        asset: "btc",
         shadow: false,
-        slotKey: "slot-1",
+        slotKey: "btc:slot-1",
         slotStartTs: 1,
         slotEndTs: 2,
         combination: "POLY_UP_KALSHI_NO",
@@ -113,8 +116,9 @@ describe("venue exposure", () => {
     const openIntents: OrderIntent[] = [
       {
         id: "intent-hedged",
+        asset: "btc",
         shadow: false,
-        slotKey: "slot-1",
+        slotKey: "btc:slot-1",
         slotStartTs: 1,
         slotEndTs: 2,
         combination: "POLY_UP_KALSHI_NO",
@@ -175,8 +179,9 @@ describe("venue exposure", () => {
       },
       {
         id: "intent-hedging",
+        asset: "btc",
         shadow: false,
-        slotKey: "slot-1",
+        slotKey: "btc:slot-1",
         slotStartTs: 1,
         slotEndTs: 2,
         combination: "POLY_DOWN_KALSHI_YES",
@@ -237,6 +242,6 @@ describe("venue exposure", () => {
       },
     ];
 
-    expect(countSlotExecutionBlockers(openIntents, "slot-1")).toBe(1);
+    expect(countSlotExecutionBlockers(openIntents, "btc:slot-1")).toBe(1);
   });
 });

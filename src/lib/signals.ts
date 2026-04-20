@@ -229,6 +229,7 @@ function buildSignal({
   const primaryVenue = polyDepth === null || kalshiDepth === null ? null : choosePrimaryVenue();
 
   return {
+    asset: polymarket.ref.asset,
     id: `${combination}-${slotKey}-${now}`,
     slotKey,
     capturedAt: now,

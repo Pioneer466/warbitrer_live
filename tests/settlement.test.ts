@@ -10,7 +10,8 @@ import type { LiveOpportunity } from "@/lib/types";
 
 const opportunity: LiveOpportunity = {
   id: "opp-1",
-  slotKey: "1774899000000",
+  asset: "btc",
+  slotKey: "btc:1774899000000",
   capturedAt: 1774899060000,
   combination: "POLY_UP_KALSHI_NO",
   label: "Poly Up + Kalshi No",

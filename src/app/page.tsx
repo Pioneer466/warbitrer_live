@@ -1,10 +1,10 @@
-import { DashboardClient } from "@/components/dashboard-client";
+import { PortfolioClient } from "@/components/portfolio-client";
 import { Shell } from "@/components/shell";
 
 export default function HomePage() {
   return (
     <Shell activePath="/">
-      <DashboardClient />
+      <PortfolioClient />
     </Shell>
   );
 }

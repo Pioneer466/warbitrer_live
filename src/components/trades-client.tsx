@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatDateTime, formatPrice } from "@/lib/format";
-import type { LiveFill, LiveOrder, OrderIntent, TradesResponse } from "@/lib/types";
+import type { LiveFill, LiveOrder, MarketAsset, OrderIntent, TradesResponse } from "@/lib/types";
 
 type OrderGroup = {
   key: string;
@@ -13,7 +13,8 @@ type OrderGroup = {
 };
 
 export function TradesClient() {
-  const { data, error, loading } = usePollingJson<TradesResponse>("/api/trades", 4_000);
+  const [assetFilter, setAssetFilter] = useState<MarketAsset | "all">("all");
+  const { data, error, loading } = usePollingJson<TradesResponse>(`/api/trades?asset=${assetFilter}`, 4_000);
   const [showAllIntents, setShowAllIntents] = useState(false);
   const [showAllExecutions, setShowAllExecutions] = useState(false);
 
@@ -58,6 +59,22 @@ export function TradesClient() {
           <div>
             intent = décision de paire · order = tentative envoyée à une venue · exécution = trade réellement rempli
           </div>
+        </div>
+        <div className="mt-4 flex gap-2">
+          {(["all", "btc", "eth"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setAssetFilter(value)}
+              className={`rounded-full border px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] ${
+                assetFilter === value
+                  ? "border-cyan/25 bg-cyan/10 text-cyan"
+                  : "border-white/8 bg-white/[0.03] text-mist"
+              }`}
+            >
+              {value}
+            </button>
+          ))}
         </div>
       </section>
 
@@ -151,7 +168,7 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
     <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
         <div className="text-white">
-          {intent.combination} · {intent.status} {intent.shadow ? "· shadow" : ""}
+          {intent.asset.toUpperCase()} · {intent.combination} · {intent.status} {intent.shadow ? "· shadow" : ""}
         </div>
         <div>{formatDateTime(intent.createdAt)}</div>
       </div>
@@ -213,7 +230,7 @@ function OrderRow({ order, intent }: { order: LiveOrder; intent: OrderIntent | n
     <div className="rounded-[20px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
         <div className="text-white">
-          {order.venue} · {order.outcome} · {order.side} {order.shadow ? "· shadow" : ""}
+          {order.asset.toUpperCase()} · {order.venue} · {order.outcome} · {order.side} {order.shadow ? "· shadow" : ""}
         </div>
         <div>{order.status}</div>
       </div>
@@ -238,7 +255,7 @@ function FillRow({ fill, intent }: { fill: LiveFill; intent: OrderIntent | null 
     <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
         <div className="text-white">
-          {fill.venue} · {fill.outcome} · {fill.side} {fill.shadow ? "· shadow" : ""}
+          {fill.asset.toUpperCase()} · {fill.venue} · {fill.outcome} · {fill.side} {fill.shadow ? "· shadow" : ""}
         </div>
         <div>{formatDateTime(fill.filledAt)}</div>
       </div>

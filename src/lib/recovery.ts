@@ -2,6 +2,7 @@ import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
 import { POLY_CTF_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
   getPolymarketRelayerTransaction,
   derivePolymarketProxyAddress,
@@ -215,6 +216,7 @@ export function buildRecoveryMarkets(
 
     if (!existing) {
       marketsByRef.set(position.marketRef, {
+        asset: position.asset,
         marketRef: position.marketRef,
         conditionId: position.marketRef,
         title,
@@ -270,6 +272,11 @@ export function buildRecoveryMarkets(
   return [...marketsByRef.values()]
     .filter((market) => market.conversionAction !== null)
     .sort((left, right) => {
+      const assetDelta = MARKET_ASSETS.indexOf(left.asset) - MARKET_ASSETS.indexOf(right.asset);
+      if (assetDelta !== 0) {
+        return assetDelta;
+      }
+
       const leftRank = Number(left.redeemable) * 2 + Number(left.mergeable);
       const rightRank = Number(right.redeemable) * 2 + Number(right.mergeable);
       return rightRank - leftRank || left.title.localeCompare(right.title);

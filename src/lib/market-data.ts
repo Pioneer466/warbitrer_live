@@ -5,6 +5,7 @@ import {
   POLY_USER_WS_BASE,
 } from "@/lib/constants";
 import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
+import { getMarketCatalogEntry } from "@/lib/market-catalog";
 import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
@@ -33,6 +34,7 @@ import type {
   FeedSource,
   KalshiQuote,
   LiveMarketState,
+  MarketAsset,
   MarketSlot,
   PolymarketQuote,
   ReadinessStatus,
@@ -45,6 +47,7 @@ const FEED_READY_MS = 4_000;
 const FEED_BLOCKED_MS = 10_000;
 const POLYMARKET_RESYNC_MS = 2_000;
 const KALSHI_RESYNC_MS = 1_000;
+const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 10_000;
 
@@ -104,14 +107,14 @@ export function computeFeedStatus(lastMessageAt: number | null, dataReady: boole
   return { status: "blocked", stalenessMs };
 }
 
-function chooseFeedSource(lastWsMessageAt: number | null, lastRestSyncAt: number | null, now: number): FeedSource {
+export function chooseFeedSource(lastWsMessageAt: number | null, lastRestSyncAt: number | null, now: number): FeedSource {
   const wsFresh = lastWsMessageAt !== null && now - lastWsMessageAt <= FEED_BLOCKED_MS;
   const restFresh = lastRestSyncAt !== null && now - lastRestSyncAt <= FEED_BLOCKED_MS;
 
   if (wsFresh) {
     return "ws";
   }
-  if (restFresh && lastRestSyncAt !== null && lastWsMessageAt !== null && lastRestSyncAt < lastWsMessageAt) {
+  if (restFresh && lastWsMessageAt !== null) {
     return "rest-fallback";
   }
   if (restFresh) {
@@ -121,6 +124,7 @@ function chooseFeedSource(lastWsMessageAt: number | null, lastRestSyncAt: number
 }
 
 function buildFeedHealth(input: {
+  asset: MarketSlot["asset"];
   venue: "kalshi" | "polymarket";
   now: number;
   lastMessageAt: number | null;
@@ -132,6 +136,7 @@ function buildFeedHealth(input: {
 }): VenueFeedHealth {
   const { status, stalenessMs } = computeFeedStatus(input.lastMessageAt, input.dataReady, input.now);
   return {
+    asset: input.asset,
     venue: input.venue,
     feedStatus: status,
     source: chooseFeedSource(input.lastWsMessageAt, input.lastRestSyncAt, input.now),
@@ -216,6 +221,8 @@ class PolymarketRealtimeFeed {
   private books = new Map<string, PolymarketBookState>();
   private ws: WebSocket | null = null;
   private userWs: WebSocket | null = null;
+  private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private userWsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private bootstrapPromise: Promise<void> | null = null;
   private resyncPromise: Promise<void> | null = null;
   private lastRestSyncAt: number | null = null;
@@ -260,6 +267,7 @@ class PolymarketRealtimeFeed {
     const downBook = this.books.get(this.tokenIds.down);
     const lastMessageAt = [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
     const feedHealth = buildFeedHealth({
+      asset: slot.asset,
       venue: "polymarket",
       now,
       lastMessageAt,
@@ -296,6 +304,7 @@ class PolymarketRealtimeFeed {
 
     const quote: PolymarketQuote = {
       ref: {
+        asset: slot.asset,
         venue: "polymarket",
         id: this.market.id,
         slotKey: slot.key,
@@ -423,6 +432,7 @@ class PolymarketRealtimeFeed {
       }
 
       this.reconnectAttempt = 0;
+      this.startMarketHeartbeat(ws);
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
         status: "subscribed",
         source: "ws",
@@ -438,13 +448,25 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("message", (buffer: Buffer) => {
-      const payload = safeJsonParse(buffer.toString());
+      const raw = buffer.toString();
+      const nowTs = Date.now();
+      if (raw === "PONG") {
+        this.lastWsMessageAt = nowTs;
+        this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
+          status: "subscribed",
+          source: "ws",
+          lastMessageAt: nowTs,
+          details: "market channel actif",
+        });
+        return;
+      }
+
+      const payload = safeJsonParse(raw);
       if (!payload) {
         return;
       }
 
       const events = Array.isArray(payload) ? payload : [payload];
-      const nowTs = Date.now();
       for (const event of events) {
         this.applyMarketEvent(event, nowTs);
       }
@@ -459,6 +481,7 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("error", (error: unknown) => {
+      this.stopMarketHeartbeat();
       this.lastError = error instanceof Error ? error.message : "Polymarket market WS error";
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
         status: "error",
@@ -468,6 +491,7 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("close", () => {
+      this.stopMarketHeartbeat();
       this.ws = null;
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
         status: "closed",
@@ -500,6 +524,7 @@ class PolymarketRealtimeFeed {
 
     ws.on("open", () => {
       this.userReconnectAttempt = 0;
+      this.startUserHeartbeat(ws);
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
         source: "ws",
@@ -508,6 +533,7 @@ class PolymarketRealtimeFeed {
       ws.send(
         JSON.stringify({
           type: "user",
+          markets: this.market ? [this.market.conditionId ?? this.market.id] : [],
           auth: {
             apiKey: env.POLY_API_KEY,
             secret: env.POLY_API_SECRET,
@@ -517,8 +543,19 @@ class PolymarketRealtimeFeed {
       );
     });
 
-    ws.on("message", () => {
+    ws.on("message", (buffer: Buffer) => {
       const nowTs = Date.now();
+      if (buffer.toString() === "PONG") {
+        this.lastUserMessageAt = nowTs;
+        this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
+          status: "subscribed",
+          source: "ws",
+          lastMessageAt: nowTs,
+          details: "user channel actif",
+        });
+        return;
+      }
+
       this.lastUserMessageAt = nowTs;
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
@@ -529,6 +566,7 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("error", (error: unknown) => {
+      this.stopUserHeartbeat();
       const details = error instanceof Error ? error.message : "Polymarket user WS error";
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "error",
@@ -538,6 +576,7 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("close", () => {
+      this.stopUserHeartbeat();
       this.userWs = null;
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "closed",
@@ -551,6 +590,40 @@ class PolymarketRealtimeFeed {
         }
       }, delay);
     });
+  }
+
+  private startMarketHeartbeat(ws: WebSocket) {
+    this.stopMarketHeartbeat();
+    this.wsHeartbeat = setInterval(() => {
+      if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      ws.send("PING");
+    }, POLYMARKET_WS_HEARTBEAT_MS);
+  }
+
+  private stopMarketHeartbeat() {
+    if (this.wsHeartbeat) {
+      clearInterval(this.wsHeartbeat);
+      this.wsHeartbeat = null;
+    }
+  }
+
+  private startUserHeartbeat(ws: WebSocket) {
+    this.stopUserHeartbeat();
+    this.userWsHeartbeat = setInterval(() => {
+      if (this.userWs !== ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      ws.send("PING");
+    }, POLYMARKET_WS_HEARTBEAT_MS);
+  }
+
+  private stopUserHeartbeat() {
+    if (this.userWsHeartbeat) {
+      clearInterval(this.userWsHeartbeat);
+      this.userWsHeartbeat = null;
+    }
   }
 
   private applyMarketEvent(event: any, now: number) {
@@ -648,6 +721,8 @@ class PolymarketRealtimeFeed {
   private async reset() {
     this.ws?.close();
     this.userWs?.close();
+    this.stopMarketHeartbeat();
+    this.stopUserHeartbeat();
     this.ws = null;
     this.userWs = null;
     this.market = null;
@@ -697,6 +772,7 @@ class KalshiRealtimeFeed {
   buildState(slot: MarketSlot, now = Date.now()): LiveMarketState<KalshiQuote> {
     const lastMessageAt = [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
     const feedHealth = buildFeedHealth({
+      asset: slot.asset,
       venue: "kalshi",
       now,
       lastMessageAt,
@@ -741,13 +817,14 @@ class KalshiRealtimeFeed {
 
     const quote: KalshiQuote = {
       ref: {
+        asset: slot.asset,
         venue: "kalshi",
         id: this.market.ticker,
         slotKey: slot.key,
         ticker: this.market.ticker,
         eventTicker: this.market.event_ticker,
         title: this.market.title,
-        url: `https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/${this.market.event_ticker.toLowerCase()}`,
+        url: `https://kalshi.com/markets/${getMarketCatalogEntry(slot.asset).kalshiEventPath}/${this.market.event_ticker.toLowerCase()}`,
         startTime: this.market.open_time,
         endTime: this.market.close_time,
       },
@@ -779,7 +856,10 @@ class KalshiRealtimeFeed {
   private async bootstrap(slot: MarketSlot, now: number) {
     if (!this.bootstrapPromise) {
       this.bootstrapPromise = (async () => {
-        const [seriesResponse, marketsResponse] = await Promise.all([fetchKalshiSeries(), fetchKalshiMarkets()]);
+        const [seriesResponse, marketsResponse] = await Promise.all([
+          fetchKalshiSeries(slot.asset),
+          fetchKalshiMarkets(slot.asset),
+        ]);
         const market = resolveKalshiMarketForSlot(marketsResponse.markets, slot);
         if (!market) {
           throw new Error("Marché Kalshi du créneau courant indisponible");
@@ -1114,20 +1194,36 @@ class KalshiRealtimeFeed {
 }
 
 export class MarketDataSupervisor {
-  private polymarket = new PolymarketRealtimeFeed();
-  private kalshi = new KalshiRealtimeFeed();
+  private feeds: Record<
+    MarketAsset,
+    {
+      polymarket: PolymarketRealtimeFeed;
+      kalshi: KalshiRealtimeFeed;
+    }
+  > = {
+    btc: {
+      polymarket: new PolymarketRealtimeFeed(),
+      kalshi: new KalshiRealtimeFeed(),
+    },
+    eth: {
+      polymarket: new PolymarketRealtimeFeed(),
+      kalshi: new KalshiRealtimeFeed(),
+    },
+  };
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
+    const feeds = this.feeds[slot.asset];
     await Promise.allSettled([
-      this.polymarket.ensureSlot(slot, now),
-      this.kalshi.ensureSlot(slot, now),
+      feeds.polymarket.ensureSlot(slot, now),
+      feeds.kalshi.ensureSlot(slot, now),
     ]);
   }
 
   async readSlotState(slot: MarketSlot, now = Date.now()) {
     await this.ensureSlot(slot, now);
-    const polymarket = this.polymarket.buildState(slot, now);
-    const kalshi = this.kalshi.buildState(slot, now);
+    const feeds = this.feeds[slot.asset];
+    const polymarket = feeds.polymarket.buildState(slot, now);
+    const kalshi = feeds.kalshi.buildState(slot, now);
     return { polymarket, kalshi };
   }
 }
@@ -1282,6 +1378,7 @@ function createBlockedKalshiQuote(
   reason: string,
 ): KalshiQuote {
   const feedHealth = buildFeedHealth({
+    asset: slot.asset,
     venue: "kalshi",
     now: Date.now(),
     lastMessageAt: null,
@@ -1303,11 +1400,12 @@ function createBlockedKalshiQuote(
 
   return {
     ref: {
+      asset: slot.asset,
       venue: "kalshi",
-      id: `KXBTC15M-${slot.key}`,
+      id: `${getMarketCatalogEntry(slot.asset).kalshiSeriesTicker}-${slot.key}`,
       slotKey: slot.key,
-      title: series?.title ?? "Kalshi BTC 15m",
-      url: "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down",
+      title: series?.title ?? getMarketCatalogEntry(slot.asset).title,
+      url: `https://kalshi.com/markets/${getMarketCatalogEntry(slot.asset).kalshiEventPath}`,
       startTime: slot.startIso,
       endTime: slot.endIso,
     },

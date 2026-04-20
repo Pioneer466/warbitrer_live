@@ -1,13 +1,14 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { getCurrentSlot } from "@/lib/slot";
 import {
   readCircuitBreakers,
   readDatabaseMetrics,
   readLatestSnapshot,
-  readSettings,
-  readWorkerState,
+  readSettingsMap,
+  readWorkerStates,
   storageMode,
 } from "@/lib/storage";
 
@@ -16,25 +17,36 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const slot = getCurrentSlot();
-    const [workerState, circuitBreakers, config, latestSnapshot, database] = await Promise.all([
-      readWorkerState(),
+    const slots = MARKET_ASSETS.map((asset) => getCurrentSlot(asset));
+    const [workerStates, circuitBreakers, config, latestSnapshots, database] = await Promise.all([
+      readWorkerStates(),
       readCircuitBreakers(),
-      readSettings(),
-      readLatestSnapshot(slot.key),
+      readSettingsMap(),
+      Promise.all(slots.map((slot) => readLatestSnapshot(slot.asset, slot.key))),
       readDatabaseMetrics().catch(() => null),
     ]);
 
+    const assets = slots.map((slot, index) => {
+      const latestSnapshot = latestSnapshots[index];
+      const assetConfig = config[slot.asset];
+      const assetState = workerStates[slot.asset];
+      return {
+        asset: slot.asset,
+        phase: assetState.phase,
+        readinessStatus: assetState.readinessStatus,
+        tradingEnabled: assetConfig.enableTrading,
+        shadowMode: assetConfig.shadowMode,
+        feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
+      };
+    });
+
     return NextResponse.json({
-      ok: workerState.readinessStatus !== "blocked",
+      ok: assets.every((asset) => !asset.tradingEnabled || asset.readinessStatus !== "blocked"),
       timestamp: Date.now(),
       storageMode: storageMode(),
-      phase: workerState.phase,
-      readinessStatus: workerState.readinessStatus,
       activeBreakers: circuitBreakers.filter((breaker) => breaker.active).length,
-      tradingEnabled: config.enableTrading,
-      shadowMode: config.shadowMode,
-      feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
+      tradingEnabledAssets: assets.filter((asset) => asset.tradingEnabled).map((asset) => asset.asset),
+      assets,
       database,
     });
   } catch (error) {

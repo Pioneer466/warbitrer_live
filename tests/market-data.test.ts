@@ -1,8 +1,22 @@
 import * as polymarketLib from "@/lib/polymarket";
 import { deriveKalshiOutcomeQuotes, extractKalshiLastTradePrices } from "@/lib/kalshi";
-import { applyLevelDelta, computeFeedStatus, MarketDataSupervisor } from "@/lib/market-data";
+import { applyLevelDelta, chooseFeedSource, computeFeedStatus, MarketDataSupervisor } from "@/lib/market-data";
 import type { MarketSlot } from "@/lib/types";
 import { afterEach, vi } from "vitest";
+
+function buildSlot(asset: "btc" | "eth" = "btc"): MarketSlot {
+  return {
+    asset,
+    key: `${asset}:1770000000000`,
+    startTs: 1770000000000,
+    endTs: 1770000900000,
+    startIso: "2026-02-02T10:00:00.000Z",
+    endIso: "2026-02-02T10:15:00.000Z",
+    label: "Feb 2, 5:00 AM - Feb 2, 5:15 AM",
+    polymarketSlug: `${asset}-updown-15m-1770000000`,
+    secondsRemaining: 120,
+  };
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -22,6 +36,12 @@ describe("market data helpers", () => {
       status: "blocked",
       stalenessMs: 11_500,
     });
+  });
+
+  it("distinguishes websocket freshness from REST fallback freshness", () => {
+    expect(chooseFeedSource(5_000, 4_000, 6_000)).toBe("ws");
+    expect(chooseFeedSource(1_000, 11_000, 12_000)).toBe("rest-fallback");
+    expect(chooseFeedSource(null, 11_000, 12_000)).toBe("rest-bootstrap");
   });
 
   it("applies top-of-book level deltas and removes empty levels", () => {
@@ -63,16 +83,7 @@ describe("market data helpers", () => {
   });
 
   it("keeps producing slot state when one venue bootstrap fails", async () => {
-    const slot: MarketSlot = {
-      key: "1770000000000",
-      startTs: 1770000000000,
-      endTs: 1770000900000,
-      startIso: "2026-02-02T10:00:00.000Z",
-      endIso: "2026-02-02T10:15:00.000Z",
-      label: "Feb 2, 5:00 AM - Feb 2, 5:15 AM",
-      polymarketSlug: "btc-updown-15m-1770000000",
-      secondsRemaining: 120,
-    };
+    const slot = buildSlot();
 
     const supervisor = new MarketDataSupervisor() as any;
     const polymarketState = { venue: "polymarket", quote: { ref: { id: "poly" } } };
@@ -80,11 +91,11 @@ describe("market data helpers", () => {
     const polyEnsureSlot = vi.fn().mockResolvedValue(undefined);
     const kalshiEnsureSlot = vi.fn().mockRejectedValue(new Error("kalshi bootstrap failed"));
 
-    supervisor.polymarket = {
+    supervisor.feeds.btc.polymarket = {
       ensureSlot: polyEnsureSlot,
       buildState: vi.fn().mockReturnValue(polymarketState),
     };
-    supervisor.kalshi = {
+    supervisor.feeds.btc.kalshi = {
       ensureSlot: kalshiEnsureSlot,
       buildState: vi.fn().mockReturnValue(kalshiState),
     };
@@ -95,24 +106,45 @@ describe("market data helpers", () => {
     });
     expect(polyEnsureSlot).toHaveBeenCalledWith(slot, 1770000005000);
     expect(kalshiEnsureSlot).toHaveBeenCalledWith(slot, 1770000005000);
-    expect(supervisor.polymarket.buildState).toHaveBeenCalledWith(slot, 1770000005000);
-    expect(supervisor.kalshi.buildState).toHaveBeenCalledWith(slot, 1770000005000);
+    expect(supervisor.feeds.btc.polymarket.buildState).toHaveBeenCalledWith(slot, 1770000005000);
+    expect(supervisor.feeds.btc.kalshi.buildState).toHaveBeenCalledWith(slot, 1770000005000);
+  });
+
+  it("keeps separate feed instances per asset", async () => {
+    const supervisor = new MarketDataSupervisor() as any;
+    const btcSlot = buildSlot("btc");
+    const ethSlot = buildSlot("eth");
+
+    supervisor.feeds.btc.polymarket = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "polymarket", quote: { ref: { id: "btc-poly" } } }),
+    };
+    supervisor.feeds.btc.kalshi = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "kalshi", quote: { ref: { id: "btc-kalshi" } } }),
+    };
+    supervisor.feeds.eth.polymarket = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "polymarket", quote: { ref: { id: "eth-poly" } } }),
+    };
+    supervisor.feeds.eth.kalshi = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "kalshi", quote: { ref: { id: "eth-kalshi" } } }),
+    };
+
+    await supervisor.readSlotState(btcSlot, 1770000005000);
+    await supervisor.readSlotState(ethSlot, 1770000005001);
+
+    expect(supervisor.feeds.btc.polymarket.ensureSlot).toHaveBeenCalledWith(btcSlot, 1770000005000);
+    expect(supervisor.feeds.eth.polymarket.ensureSlot).toHaveBeenCalledWith(ethSlot, 1770000005001);
+    expect(supervisor.feeds.btc.polymarket).not.toBe(supervisor.feeds.eth.polymarket);
   });
 
   it("uses nested Polymarket price_change payloads to keep the top of book aligned", () => {
-    const slot: MarketSlot = {
-      key: "1770000000000",
-      startTs: 1770000000000,
-      endTs: 1770000900000,
-      startIso: "2026-02-02T10:00:00.000Z",
-      endIso: "2026-02-02T10:15:00.000Z",
-      label: "Feb 2, 5:00 AM - Feb 2, 5:15 AM",
-      polymarketSlug: "btc-updown-15m-1770000000",
-      secondsRemaining: 120,
-    };
+    const slot = buildSlot();
 
     const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.polymarket as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
 
     feed.market = {
       id: "market-1",
@@ -181,21 +213,12 @@ describe("market data helpers", () => {
   });
 
   it("keeps the existing Polymarket state when background resync fails", async () => {
-    const slot: MarketSlot = {
-      key: "1770000000000",
-      startTs: 1770000000000,
-      endTs: 1770000900000,
-      startIso: "2026-02-02T10:00:00.000Z",
-      endIso: "2026-02-02T10:15:00.000Z",
-      label: "Feb 2, 5:00 AM - Feb 2, 5:15 AM",
-      polymarketSlug: "btc-updown-15m-1770000000",
-      secondsRemaining: 120,
-    };
+    const slot = buildSlot();
 
     vi.spyOn(polymarketLib, "fetchPolymarketBook").mockRejectedValue(new Error("HTTP 502 on Polymarket book"));
 
     const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.polymarket as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
 
     feed.slotKey = slot.key;
     feed.market = {

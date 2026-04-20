@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Warbitrer Live BTC 15m",
+  title: "Warbitrer Live BTC + ETH 15m",
   description:
-    "Cockpit live pour la stratégie d'arbitrage BTC 15 minutes entre Polymarket et Kalshi.",
+    "Cockpit live pour la stratégie d'arbitrage BTC et ETH 15 minutes entre Polymarket et Kalshi.",
 };
 
 export default function RootLayout({

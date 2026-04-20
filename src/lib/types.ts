@@ -1,3 +1,5 @@
+export type MarketAsset = "btc" | "eth";
+export type AssetScoped<T> = Record<MarketAsset, T>;
 export type Venue = "polymarket" | "kalshi";
 export type PairCombination = "POLY_UP_KALSHI_NO" | "POLY_DOWN_KALSHI_YES";
 export type Resolution = "UP" | "DOWN" | "YES" | "NO";
@@ -32,7 +34,7 @@ export type ExecutionLegStatus =
   | "hedged"
   | "unwound"
   | "failed";
-export type CircuitBreakerKey = "global" | `slot:${string}`;
+export type CircuitBreakerKey = "global" | `asset:${MarketAsset}` | `slot:${MarketAsset}:${string}`;
 export type CircuitBreakerReason =
   | "manual"
   | "hedge_failure"
@@ -43,6 +45,7 @@ export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" |
 export type RunEventLevel = "info" | "warn" | "error";
 
 export type MarketSlot = {
+  asset: MarketAsset;
   key: string;
   startTs: number;
   endTs: number;
@@ -54,6 +57,7 @@ export type MarketSlot = {
 };
 
 export type VenueMarketRef = {
+  asset: MarketAsset;
   venue: Venue;
   id: string;
   title: string;
@@ -111,6 +115,7 @@ export type VenueSubscriptionState = {
 };
 
 export type VenueFeedHealth = {
+  asset: MarketAsset;
   venue: Venue;
   feedStatus: ReadinessStatus;
   source: FeedSource;
@@ -183,6 +188,8 @@ export type StrategyConfig = {
   polyBridgeLowWaterUsdc: number;
 };
 
+export type StrategyConfigMap = AssetScoped<StrategyConfig>;
+
 export type VenueBalance = {
   venue: Venue;
   capturedAt: number;
@@ -219,6 +226,7 @@ export type OpportunityLeg = {
 };
 
 export type LiveOpportunity = {
+  asset: MarketAsset;
   id: string;
   slotKey: string;
   capturedAt: number;
@@ -239,6 +247,7 @@ export type LiveOpportunity = {
 
 export type OpportunitySnapshot = {
   id?: number;
+  asset: MarketAsset;
   slotKey: string;
   slotStartTs: number;
   slotEndTs: number;
@@ -270,6 +279,7 @@ export type OrderIntentLeg = {
 
 export type OrderIntent = {
   id: string;
+  asset: MarketAsset;
   shadow: boolean;
   slotKey: string;
   slotStartTs: number;
@@ -295,6 +305,7 @@ export type OrderIntent = {
 
 export type LiveOrder = {
   id: string;
+  asset: MarketAsset;
   shadow: boolean;
   intentId: string;
   venue: Venue;
@@ -318,6 +329,7 @@ export type LiveOrder = {
 
 export type LiveFill = {
   id: string;
+  asset: MarketAsset;
   shadow: boolean;
   intentId: string;
   venue: Venue;
@@ -337,6 +349,7 @@ export type LiveFill = {
 
 export type PositionSnapshot = {
   id: string;
+  asset: MarketAsset;
   venue: Venue;
   marketRef: string;
   outcome: Resolution;
@@ -354,6 +367,7 @@ export type PositionSnapshot = {
 
 export type SettlementRecord = {
   id: string;
+  asset: MarketAsset;
   intentId: string;
   venue: Venue;
   marketRef: string;
@@ -404,6 +418,7 @@ export type BridgeTransfer = {
 
 export type RunEvent = {
   id?: number;
+  asset?: MarketAsset | null;
   level: RunEventLevel;
   eventType: string;
   message: string;
@@ -447,6 +462,7 @@ export type CircuitBreaker = {
 };
 
 export type WorkerState = {
+  asset: MarketAsset;
   phase: WorkerPhase;
   currentSlotKey: string | null;
   lastScanAt: number | null;
@@ -476,8 +492,28 @@ export type DashboardResponse = {
   runEvents: RunEvent[];
 };
 
+export type AssetDashboardSummary = {
+  asset: MarketAsset;
+  slot: MarketSlot;
+  config: StrategyConfig;
+  workerState: WorkerState;
+  latestSnapshot: OpportunitySnapshot | null;
+  bestOpportunity: LiveOpportunity | null;
+  feedHealth: VenueFeedHealth[];
+  activeBreakers: CircuitBreaker[];
+};
+
+export type PortfolioDashboardResponse = {
+  fetchedAt: number;
+  assets: AssetDashboardSummary[];
+  venueBalances: VenueBalance[];
+  pnl: PnlSnapshot | null;
+  activeBreakers: CircuitBreaker[];
+};
+
 export type TradesResponse = {
   fetchedAt: number;
+  asset: MarketAsset | "all";
   intents: OrderIntent[];
   orders: LiveOrder[];
   fills: LiveFill[];
@@ -509,6 +545,7 @@ export type RecoveryOutcome = {
 };
 
 export type RecoveryMarket = {
+  asset: MarketAsset;
   marketRef: string;
   conditionId: string;
   title: string;
@@ -534,6 +571,23 @@ export type RecoveryResponse = {
   };
   markets: RecoveryMarket[];
   kalshiSettlementMode: "automatic";
+};
+
+export type HealthResponse = {
+  ok: boolean;
+  timestamp: number;
+  storageMode: "postgres";
+  activeBreakers: number;
+  tradingEnabledAssets: MarketAsset[];
+  assets: Array<{
+    asset: MarketAsset;
+    phase: WorkerPhase;
+    readinessStatus: ReadinessStatus;
+    tradingEnabled: boolean;
+    shadowMode: boolean;
+    feedHealth: VenueFeedHealth[];
+  }>;
+  database: DatabaseMetrics | null;
 };
 
 export type VenueOrderRequest = {

@@ -13,6 +13,7 @@ import { Wallet } from "ethers";
 import { DEFAULT_POLY_CHAIN_ID, POLY_CLOB_BASE, POLY_DATA_BASE, POLY_GAMMA_BASE } from "@/lib/constants";
 import { hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
+import { getMarketCatalogEntry, inferPolymarketAsset } from "@/lib/market-catalog";
 import type {
   ChartPriceSurface,
   ExecutionPriceSurface,
@@ -90,6 +91,7 @@ const POLY_CLIENT_TIMEOUT_MS = 15_000;
 let lastPolymarketBalanceAllowanceRefreshAt = 0;
 
 export async function fetchPolymarketQuote(slot: MarketSlot): Promise<PolymarketQuote> {
+  const marketConfig = getMarketCatalogEntry(slot.asset);
   const market = await fetchPolymarketMarket(slot.polymarketSlug);
   if (!market) {
     throw new Error(`Polymarket market ${slot.polymarketSlug} introuvable`);
@@ -108,6 +110,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
 
   return {
     ref: {
+      asset: slot.asset,
       venue: "polymarket",
       id: market.id,
       slotKey: slot.key,
@@ -123,6 +126,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     slotAligned: true,
     availabilityReason: null,
     feedHealth: createVenueFeedHealth({
+      asset: slot.asset,
       venue: "polymarket",
       feedStatus: "ready",
       source: "rest-bootstrap",
@@ -149,7 +153,9 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
 }
 
 export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityReason: string): PolymarketQuote {
+  const marketConfig = getMarketCatalogEntry(slot.asset);
   const feedHealth = createVenueFeedHealth({
+    asset: slot.asset,
     venue: "polymarket",
     feedStatus: "blocked",
     source: "unavailable",
@@ -161,11 +167,12 @@ export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityR
 
   return {
     ref: {
+      asset: slot.asset,
       venue: "polymarket",
       id: slot.polymarketSlug,
       conditionId: slot.polymarketSlug,
       slug: slot.polymarketSlug,
-      title: "Polymarket BTC 15m",
+      title: marketConfig.title,
       url: `https://polymarket.com/event/${slot.polymarketSlug}`,
       startTime: slot.startIso,
       endTime: slot.endIso,
@@ -319,6 +326,7 @@ export function createPolymarketAdapter(): VenueAdapter {
         .filter(isLiveRelevantPolymarketPosition)
         .map((position) => ({
           id: `polymarket:${position.asset}`,
+          asset: inferPolymarketAsset(position.title),
           venue: "polymarket",
           marketRef: position.conditionId,
           outcome: normalizePolymarketOutcome(position.outcome),
@@ -1020,6 +1028,7 @@ export function mapPolymarketOrder(order: OpenOrder, intentId: string): LiveOrde
   const createdAt = parsePolymarketTimestamp(order.created_at) ?? Date.now();
   return {
     id: `polymarket:${order.id}`,
+    asset: inferPolymarketAsset(order.market),
     shadow: false,
     intentId,
     venue: "polymarket",
@@ -1050,6 +1059,7 @@ export function mapPolymarketTradeToFill(trade: Trade, intentId: string, venueOr
     Date.now();
   return {
     id: `polymarket-fill:${trade.id}`,
+    asset: inferPolymarketAsset(trade.market),
     shadow: false,
     intentId,
     venue: "polymarket" as const,
@@ -1129,14 +1139,19 @@ function isStrategyScopedPolymarketPosition(position: DataPosition) {
   }
 
   const title = position.title.toLowerCase();
-  const mentionsBitcoin = title.includes("bitcoin") || title.includes("btc");
+  const mentionsTrackedAsset =
+    title.includes("bitcoin") ||
+    title.includes("btc") ||
+    title.includes("ethereum") ||
+    title.includes("ether") ||
+    title.includes("eth");
   const mentions15m =
     title.includes("15m") ||
     title.includes("15 minute") ||
     title.includes("15-minute") ||
     title.includes("fifteen minute");
 
-  return mentionsBitcoin && mentions15m;
+  return mentionsTrackedAsset && mentions15m;
 }
 
 function isLiveRelevantPolymarketPosition(position: DataPosition) {

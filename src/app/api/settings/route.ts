@@ -1,15 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { settingsSchema } from "@/lib/settings-schema";
-import { readSettings, writeSettings } from "@/lib/storage";
+import { settingsMapSchema } from "@/lib/settings-schema";
+import { readSettingsMap, writeSettings } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json(await readSettings(), {
+    return NextResponse.json(await readSettingsMap(), {
       headers: {
         "Cache-Control": "no-store",
       },
@@ -22,7 +22,7 @@ export async function GET() {
 export async function PUT(request: Request) {
   try {
     const body = await request.json();
-    const parsed = settingsSchema.safeParse(body);
+    const parsed = settingsMapSchema.safeParse(body);
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -33,7 +33,11 @@ export async function PUT(request: Request) {
       );
     }
 
-    return NextResponse.json(await writeSettings(parsed.data));
+    await Promise.all([
+      writeSettings("btc", parsed.data.btc),
+      writeSettings("eth", parsed.data.eth),
+    ]);
+    return NextResponse.json(parsed.data);
   } catch (error) {
     return createApiErrorResponse(error);
   }

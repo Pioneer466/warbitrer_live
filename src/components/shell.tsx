@@ -1,9 +1,7 @@
 import Link from "next/link";
 
-import { TradingToggle } from "@/components/trading-toggle";
-
 type ShellProps = {
-  activePath: "/" | "/trades" | "/recovery";
+  activePath: "/" | "/btc" | "/eth" | "/trades" | "/recovery";
   children: React.ReactNode;
 };
 
@@ -18,7 +16,13 @@ export function Shell({ activePath, children }: ShellProps) {
             </div>
             <nav className="flex items-center gap-1 rounded-2xl border border-white/8 bg-white/[0.03] p-1">
               <Tab href="/" active={activePath === "/"}>
-                Dashboard
+                Portfolio
+              </Tab>
+              <Tab href="/btc" active={activePath === "/btc"}>
+                BTC
+              </Tab>
+              <Tab href="/eth" active={activePath === "/eth"}>
+                ETH
               </Tab>
               <Tab href="/trades" active={activePath === "/trades"}>
                 Trades
@@ -29,9 +33,8 @@ export function Shell({ activePath, children }: ShellProps) {
             </nav>
           </div>
           <div className="flex items-center gap-2">
-            <Badge tone="amber">BTC 15m</Badge>
-            <TradingToggle />
-            <Badge tone="cyan">LIVE</Badge>
+            <Badge tone="amber">BTC + ETH 15m</Badge>
+            <Badge tone="cyan">MULTI</Badge>
             <Badge tone="default">POSTGRES</Badge>
           </div>
         </div>

@@ -45,7 +45,8 @@ async function main() {
     throw new Error(`Intent ${intentId} sans leg primaire Polymarket`);
   }
 
-  const slotSlug = `btc-updown-15m-${Math.floor(intent.slotStartTs / 1000)}`;
+  const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
+  const slotSlug = slot.polymarketSlug;
   const polyResolution = intent.polyResolution ?? (await fetchPolymarketResolution(slotSlug).catch(() => null));
   if (polyResolution === null) {
     throw new Error(`Resolution Polymarket introuvable pour ${slotSlug}. Attends la resolution ou passe par /api/recovery.`);
@@ -80,7 +81,7 @@ async function main() {
   });
 
   await writeOrderIntent(closedIntent);
-  await clearResolvedSlotBreaker(closedIntent.slotKey);
+  await clearResolvedSlotBreaker(closedIntent.asset, closedIntent.slotKey);
   await writeRunEvent({
     level: "warn",
     eventType: "intent.unwound.manual_close",
@@ -149,7 +150,7 @@ function applyManualUnwindSettlement(
   };
 }
 
-async function clearResolvedSlotBreaker(slotKey: string) {
+async function clearResolvedSlotBreaker(asset: OrderIntent["asset"], slotKey: string) {
   const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
   const stillBlocked = openIntents.some((intent) => intent.slotKey === slotKey && intent.status === "unwind_required");
   if (stillBlocked) {
@@ -163,7 +164,7 @@ async function clearResolvedSlotBreaker(slotKey: string) {
     return;
   }
 
-  const currentSlotKey = getCurrentSlot(new Date()).key;
+  const currentSlotKey = getCurrentSlot(asset, new Date()).key;
   if (slotKey === currentSlotKey) {
     return;
   }

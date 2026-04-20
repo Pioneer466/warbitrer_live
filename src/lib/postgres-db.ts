@@ -1,15 +1,18 @@
 import { Pool, types } from "pg";
 
-import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { DEFAULT_STRATEGY_CONFIG, DEFAULT_STRATEGY_CONFIGS } from "@/lib/constants";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { enrichPnlSnapshot } from "@/lib/pnl";
-import { normalizeSettings } from "@/lib/settings-schema";
+import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
 import type {
+  MarketAsset,
   DatabaseMaintenanceSummary,
   DatabaseMetrics,
   BridgeTransfer,
   CircuitBreaker,
   DashboardResponse,
+  PortfolioDashboardResponse,
   HistoryPoint,
   LiveFill,
   LiveOpportunity,
@@ -21,6 +24,7 @@ import type {
   PositionSnapshot,
   RunEvent,
   StrategyConfig,
+  StrategyConfigMap,
   TradesResponse,
   Venue,
   VenueBalance,
@@ -58,6 +62,8 @@ export async function getPgDb() {
 }
 
 async function bootstrapDatabase(pool: Pool) {
+  const now = Date.now();
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS strategy_config (
       id INTEGER PRIMARY KEY,
@@ -262,6 +268,24 @@ async function bootstrapDatabase(pool: Pool) {
       triggered_at BIGINT,
       payload_json JSONB
     );
+
+    CREATE TABLE IF NOT EXISTS strategy_configs (
+      asset TEXT PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS worker_states (
+      asset TEXT PRIMARY KEY,
+      phase TEXT NOT NULL,
+      current_slot_key TEXT,
+      last_scan_at BIGINT,
+      last_execute_at BIGINT,
+      last_reconcile_at BIGINT,
+      last_error TEXT,
+      readiness_status TEXT NOT NULL,
+      readiness_json JSONB NOT NULL
+    );
   `);
 
   await pool.query(
@@ -270,7 +294,7 @@ async function bootstrapDatabase(pool: Pool) {
       VALUES (1, $1::jsonb, $2)
       ON CONFLICT (id) DO NOTHING
     `,
-    [JSON.stringify(DEFAULT_STRATEGY_CONFIG), Date.now()],
+    [JSON.stringify(DEFAULT_STRATEGY_CONFIG), now],
   );
 
   await pool.query(
@@ -293,6 +317,123 @@ async function bootstrapDatabase(pool: Pool) {
   );
 
   await pool.query(`
+    ALTER TABLE opportunity_snapshots
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE opportunity_snapshots
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE opportunity_snapshots
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS opportunity_snapshots_asset_slot_idx
+    ON opportunity_snapshots(asset, slot_key, captured_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE order_intents
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE order_intents
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE order_intents
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS order_intents_asset_slot_idx
+    ON order_intents(asset, slot_key, created_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE venue_orders
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE venue_orders
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE venue_orders
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS venue_orders_asset_updated_idx
+    ON venue_orders(asset, updated_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE fills
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE fills
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE fills
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS fills_asset_filled_idx
+    ON fills(asset, filled_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE positions
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE positions
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE positions
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS positions_venue_asset_idx
+    ON positions(venue, asset, updated_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE settlements
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    UPDATE settlements
+    SET asset = 'btc'
+    WHERE asset IS NULL
+  `);
+  await pool.query(`
+    ALTER TABLE settlements
+    ALTER COLUMN asset SET NOT NULL
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS settlements_asset_settled_idx
+    ON settlements(asset, settled_at DESC)
+  `);
+
+  await pool.query(`
+    ALTER TABLE run_events
+    ADD COLUMN IF NOT EXISTS asset TEXT
+  `);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS run_events_asset_created_idx
+    ON run_events(asset, created_at DESC)
+  `);
+
+  await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
@@ -306,32 +447,145 @@ async function bootstrapDatabase(pool: Pool) {
     ALTER TABLE fills
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
-}
 
-export async function getStrategyConfig(pool: Pool): Promise<StrategyConfig> {
-  const result = await pool.query("SELECT payload FROM strategy_config WHERE id = 1");
-  return normalizeSettings(result.rows[0].payload as Partial<StrategyConfig>);
-}
-
-export async function updateStrategyConfig(pool: Pool, payload: StrategyConfig) {
-  await pool.query(
-    "UPDATE strategy_config SET payload = $1::jsonb, updated_at = $2 WHERE id = 1",
-    [JSON.stringify(payload), Date.now()],
+  const legacyStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
+    "SELECT payload FROM strategy_config WHERE id = 1 LIMIT 1",
   );
-  return payload;
-}
+  const legacyStrategyPayload = normalizeSettings(legacyStrategyConfig.rows[0]?.payload ?? DEFAULT_STRATEGY_CONFIG);
+  const nextStrategyConfigs = normalizeSettingsMap({
+    btc: legacyStrategyPayload,
+    eth: {
+      ...legacyStrategyPayload,
+      enableTrading: false,
+      shadowMode: true,
+    },
+  });
 
-export async function getWorkerState(pool: Pool): Promise<WorkerState> {
-  const result = await pool.query(
+  for (const asset of MARKET_ASSETS) {
+    await pool.query(
+      `
+        INSERT INTO strategy_configs (asset, payload, updated_at)
+        VALUES ($1, $2::jsonb, $3)
+        ON CONFLICT (asset) DO NOTHING
+      `,
+      [asset, JSON.stringify(nextStrategyConfigs[asset]), now],
+    );
+  }
+
+  const legacyWorkerState = await pool.query<{
+    phase: WorkerState["phase"];
+    current_slot_key: string | null;
+    last_scan_at: number | null;
+    last_execute_at: number | null;
+    last_reconcile_at: number | null;
+    last_error: string | null;
+    readiness_status: WorkerState["readinessStatus"];
+    readiness_json: WorkerState["readiness"];
+  }>(
     `
       SELECT phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
         last_error, readiness_status, readiness_json
       FROM worker_state
       WHERE id = 1
+      LIMIT 1
     `,
+  );
+
+  for (const asset of MARKET_ASSETS) {
+    const fallbackState =
+      asset === "btc" && legacyWorkerState.rows[0]
+        ? legacyWorkerState.rows[0]
+        : {
+            phase: "idle" as const,
+            current_slot_key: null,
+            last_scan_at: null,
+            last_execute_at: null,
+            last_reconcile_at: null,
+            last_error: null,
+            readiness_status: "blocked" as const,
+            readiness_json: [],
+          };
+
+    await pool.query(
+      `
+        INSERT INTO worker_states (
+          asset, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
+          last_error, readiness_status, readiness_json
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+        ON CONFLICT (asset) DO NOTHING
+      `,
+      [
+        asset,
+        fallbackState.phase,
+        fallbackState.current_slot_key,
+        fallbackState.last_scan_at,
+        fallbackState.last_execute_at,
+        fallbackState.last_reconcile_at,
+        fallbackState.last_error,
+        fallbackState.readiness_status,
+        JSON.stringify(fallbackState.readiness_json ?? []),
+      ],
+    );
+  }
+
+  for (const asset of MARKET_ASSETS) {
+    await pool.query(
+      `
+        INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
+        VALUES ($1, false, NULL, NULL, NULL)
+        ON CONFLICT (key) DO NOTHING
+      `,
+      [`asset:${asset}`],
+    );
+  }
+}
+
+export async function getStrategyConfig(pool: Pool, asset: MarketAsset): Promise<StrategyConfig> {
+  const result = await pool.query("SELECT payload FROM strategy_configs WHERE asset = $1 LIMIT 1", [asset]);
+  return normalizeSettings(result.rows[0]?.payload as Partial<StrategyConfig>);
+}
+
+export async function listStrategyConfigs(pool: Pool): Promise<StrategyConfigMap> {
+  const result = await pool.query<{ asset: MarketAsset; payload: Partial<StrategyConfig> }>(
+    "SELECT asset, payload FROM strategy_configs ORDER BY asset ASC",
+  );
+
+  const map = result.rows.reduce<Partial<StrategyConfigMap>>((accumulator, row) => {
+    accumulator[row.asset] = normalizeSettings(row.payload);
+    return accumulator;
+  }, {});
+
+  return normalizeSettingsMap(map);
+}
+
+export async function updateStrategyConfig(pool: Pool, asset: MarketAsset, payload: StrategyConfig) {
+  await pool.query(
+    `
+      INSERT INTO strategy_configs (asset, payload, updated_at)
+      VALUES ($1, $2::jsonb, $3)
+      ON CONFLICT (asset) DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [asset, JSON.stringify(payload), Date.now()],
+  );
+  return payload;
+}
+
+export async function getWorkerState(pool: Pool, asset: MarketAsset): Promise<WorkerState> {
+  const result = await pool.query(
+    `
+      SELECT phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
+        last_error, readiness_status, readiness_json
+      FROM worker_states
+      WHERE asset = $1
+    `,
+    [asset],
   );
   const row = result.rows[0];
   return {
+    asset,
     phase: row.phase,
     currentSlotKey: row.current_slot_key,
     lastScanAt: row.last_scan_at,
@@ -343,10 +597,63 @@ export async function getWorkerState(pool: Pool): Promise<WorkerState> {
   };
 }
 
-export async function updateWorkerState(pool: Pool, state: Partial<WorkerState>) {
+export async function listWorkerStates(pool: Pool): Promise<Record<MarketAsset, WorkerState>> {
+  const result = await pool.query<{
+    asset: MarketAsset;
+    phase: WorkerState["phase"];
+    current_slot_key: string | null;
+    last_scan_at: number | null;
+    last_execute_at: number | null;
+    last_reconcile_at: number | null;
+    last_error: string | null;
+    readiness_status: WorkerState["readinessStatus"];
+    readiness_json: WorkerState["readiness"];
+  }>(
+    `
+      SELECT asset, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
+        last_error, readiness_status, readiness_json
+      FROM worker_states
+      ORDER BY asset ASC
+    `,
+  );
+
+  const states = result.rows.reduce<Partial<Record<MarketAsset, WorkerState>>>((accumulator, row) => {
+    accumulator[row.asset] = {
+      asset: row.asset,
+      phase: row.phase,
+      currentSlotKey: row.current_slot_key,
+      lastScanAt: row.last_scan_at,
+      lastExecuteAt: row.last_execute_at,
+      lastReconcileAt: row.last_reconcile_at,
+      lastError: row.last_error,
+      readinessStatus: row.readiness_status,
+      readiness: row.readiness_json ?? [],
+    };
+    return accumulator;
+  }, {});
+
+  return Object.fromEntries(
+    MARKET_ASSETS.map((asset) => [
+      asset,
+      states[asset] ?? {
+        asset,
+        phase: "idle",
+        currentSlotKey: null,
+        lastScanAt: null,
+        lastExecuteAt: null,
+        lastReconcileAt: null,
+        lastError: null,
+        readinessStatus: "blocked",
+        readiness: [],
+      },
+    ]),
+  ) as Record<MarketAsset, WorkerState>;
+}
+
+export async function updateWorkerState(pool: Pool, asset: MarketAsset, state: Partial<WorkerState>) {
   await pool.query(
     `
-      UPDATE worker_state
+      UPDATE worker_states
       SET
         phase = COALESCE($1, phase),
         current_slot_key = COALESCE($2, current_slot_key),
@@ -356,7 +663,7 @@ export async function updateWorkerState(pool: Pool, state: Partial<WorkerState>)
         last_error = $6,
         readiness_status = COALESCE($7, readiness_status),
         readiness_json = COALESCE($8::jsonb, readiness_json)
-      WHERE id = 1
+      WHERE asset = $9
     `,
     [
       state.phase ?? null,
@@ -367,6 +674,7 @@ export async function updateWorkerState(pool: Pool, state: Partial<WorkerState>)
       state.lastError ?? null,
       state.readinessStatus ?? null,
       state.readiness ? JSON.stringify(state.readiness) : null,
+      asset,
     ],
   );
 }
@@ -374,6 +682,7 @@ export async function updateWorkerState(pool: Pool, state: Partial<WorkerState>)
 export async function insertOpportunitySnapshot(
   pool: Pool,
   snapshot: {
+    asset: MarketAsset;
     slotKey: string;
     slotStartTs: number;
     slotEndTs: number;
@@ -386,11 +695,12 @@ export async function insertOpportunitySnapshot(
   await pool.query(
     `
       INSERT INTO opportunity_snapshots (
-        slot_key, slot_start_ts, slot_end_ts, captured_at, polymarket_json, kalshi_json, opportunities_json
+        asset, slot_key, slot_start_ts, slot_end_ts, captured_at, polymarket_json, kalshi_json, opportunities_json
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb)
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb)
     `,
     [
+      snapshot.asset,
       snapshot.slotKey,
       snapshot.slotStartTs,
       snapshot.slotEndTs,
@@ -402,30 +712,30 @@ export async function insertOpportunitySnapshot(
   );
 }
 
-export async function getLatestOpportunitySnapshot(pool: Pool, slotKey?: string) {
+export async function getLatestOpportunitySnapshot(pool: Pool, asset: MarketAsset, slotKey?: string) {
   const result = await pool.query(
     `
       SELECT *
       FROM opportunity_snapshots
-      ${slotKey ? "WHERE slot_key = $1" : ""}
+      ${slotKey ? "WHERE asset = $1 AND slot_key = $2" : "WHERE asset = $1"}
       ORDER BY captured_at DESC
       LIMIT 1
     `,
-    slotKey ? [slotKey] : [],
+    slotKey ? [asset, slotKey] : [asset],
   );
 
   return result.rows[0] ? mapOpportunitySnapshotRow(result.rows[0]) : null;
 }
 
-export async function getOpportunitySnapshotsForSlot(pool: Pool, slotKey: string) {
+export async function getOpportunitySnapshotsForSlot(pool: Pool, asset: MarketAsset, slotKey: string) {
   const result = await pool.query(
     `
       SELECT *
       FROM opportunity_snapshots
-      WHERE slot_key = $1
+      WHERE asset = $1 AND slot_key = $2
       ORDER BY captured_at ASC
     `,
-    [slotKey],
+    [asset, slotKey],
   );
 
   return result.rows.map(mapOpportunitySnapshotRow);
@@ -481,7 +791,7 @@ export async function listVenueBalances(pool: Pool): Promise<VenueBalance[]> {
   }));
 }
 
-export async function getLastEntryCosts(pool: Pool, slotKey: string) {
+export async function getLastEntryCosts(pool: Pool, asset: MarketAsset, slotKey: string) {
   const result = await pool.query<{
     combination: PairCombination;
     gross_cost: number;
@@ -489,10 +799,10 @@ export async function getLastEntryCosts(pool: Pool, slotKey: string) {
     `
       SELECT combination, gross_cost
       FROM order_intents
-      WHERE slot_key = $1
+      WHERE asset = $1 AND slot_key = $2
       ORDER BY created_at DESC
     `,
-    [slotKey],
+    [asset, slotKey],
   );
 
   return result.rows.reduce<Partial<Record<PairCombination, number>>>((accumulator, row) => {
@@ -507,18 +817,19 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
   await pool.query(
     `
       INSERT INTO order_intents (
-        id, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
+        id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
         resolved_at, primary_venue, hedge_venue, gross_cost, target_notional_usd, max_slippage_bps,
         failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
         kalshi_resolution, legs_json
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15,
-        $16, $17, $18, $19, $20,
-        $21, $22::jsonb
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16,
+        $17, $18, $19, $20, $21,
+        $22, $23::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
+        asset = EXCLUDED.asset,
         status = EXCLUDED.status,
         updated_at = EXCLUDED.updated_at,
         resolved_at = EXCLUDED.resolved_at,
@@ -532,6 +843,7 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
     `,
     [
       intent.id,
+      intent.asset,
       intent.shadow,
       intent.slotKey,
       intent.slotStartTs,
@@ -557,27 +869,30 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
   );
 }
 
-export async function listOpenOrderIntents(pool: Pool): Promise<OrderIntent[]> {
+export async function listOpenOrderIntents(pool: Pool, asset?: MarketAsset): Promise<OrderIntent[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM order_intents
       WHERE status NOT IN ('settled', 'failed', 'canceled', 'unwound')
+        ${asset ? "AND asset = $1" : ""}
       ORDER BY updated_at DESC
     `,
+    asset ? [asset] : [],
   );
   return result.rows.map(mapOrderIntentRow);
 }
 
-export async function listRecentOrderIntents(pool: Pool, limit = 50): Promise<OrderIntent[]> {
+export async function listRecentOrderIntents(pool: Pool, limit = 50, asset?: MarketAsset): Promise<OrderIntent[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM order_intents
+      ${asset ? "WHERE asset = $2" : ""}
       ORDER BY created_at DESC
       LIMIT $1
     `,
-    [limit],
+    asset ? [limit, asset] : [limit],
   );
   return result.rows.map(mapOrderIntentRow);
 }
@@ -603,16 +918,17 @@ export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
   await pool.query(
     `
       INSERT INTO venue_orders (
-        id, shadow, intent_id, venue, venue_order_id, client_order_id, market_ref, token_id, side, outcome,
+        id, asset, shadow, intent_id, venue, venue_order_id, client_order_id, market_ref, token_id, side, outcome,
         order_type, requested_price, requested_size, filled_size, average_fill_price, fee_usd,
         status, created_at, updated_at, raw_json
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20::jsonb
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16, $17,
+        $18, $19, $20, $21::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
+        asset = EXCLUDED.asset,
         filled_size = EXCLUDED.filled_size,
         average_fill_price = EXCLUDED.average_fill_price,
         fee_usd = EXCLUDED.fee_usd,
@@ -622,6 +938,7 @@ export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
     `,
     [
       order.id,
+      order.asset,
       order.shadow,
       order.intentId,
       order.venue,
@@ -645,15 +962,16 @@ export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
   );
 }
 
-export async function listRecentVenueOrders(pool: Pool, limit = 50): Promise<LiveOrder[]> {
+export async function listRecentVenueOrders(pool: Pool, limit = 50, asset?: MarketAsset): Promise<LiveOrder[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM venue_orders
+      ${asset ? "WHERE asset = $2" : ""}
       ORDER BY updated_at DESC
       LIMIT $1
     `,
-    [limit],
+    asset ? [limit, asset] : [limit],
   );
   return result.rows.map(mapVenueOrderRow);
 }
@@ -676,14 +994,16 @@ export async function listVenueOrdersForIntentIds(pool: Pool, intentIds: string[
   return result.rows.map(mapVenueOrderRow);
 }
 
-export async function listOpenVenueOrders(pool: Pool) {
+export async function listOpenVenueOrders(pool: Pool, asset?: MarketAsset) {
   const result = await pool.query(
     `
       SELECT *
       FROM venue_orders
       WHERE status IN ('pending', 'live', 'partially_filled')
+        ${asset ? "AND asset = $1" : ""}
       ORDER BY updated_at DESC
     `,
+    asset ? [asset] : [],
   );
   return result.rows.map(mapVenueOrderRow);
 }
@@ -705,19 +1025,21 @@ export async function upsertFill(pool: Pool, fill: LiveFill) {
   await pool.query(
     `
       INSERT INTO fills (
-        id, shadow, intent_id, venue, venue_order_id, trade_id, market_ref, token_id, side,
+        id, asset, shadow, intent_id, venue, venue_order_id, trade_id, market_ref, token_id, side,
         outcome, price, size, fee_usd, liquidity, filled_at, raw_json
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-        $10, $11, $12, $13, $14, $15, $16::jsonb
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15, $16, $17::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
+        asset = EXCLUDED.asset,
         fee_usd = EXCLUDED.fee_usd,
         raw_json = EXCLUDED.raw_json
     `,
     [
       fill.id,
+      fill.asset,
       fill.shadow,
       fill.intentId,
       fill.venue,
@@ -737,15 +1059,16 @@ export async function upsertFill(pool: Pool, fill: LiveFill) {
   );
 }
 
-export async function listRecentFills(pool: Pool, limit = 100): Promise<LiveFill[]> {
+export async function listRecentFills(pool: Pool, limit = 100, asset?: MarketAsset): Promise<LiveFill[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM fills
+      ${asset ? "WHERE asset = $2" : ""}
       ORDER BY filled_at DESC
       LIMIT $1
     `,
-    [limit],
+    asset ? [limit, asset] : [limit],
   );
   return result.rows.map(mapFillRow);
 }
@@ -792,25 +1115,31 @@ export async function listFillsForIntentVenue(pool: Pool, intentId: string, venu
   return result.rows.map(mapFillRow);
 }
 
-export async function replaceVenuePositions(pool: Pool, venue: "polymarket" | "kalshi", positions: PositionSnapshot[]) {
+export async function replaceVenuePositions(
+  pool: Pool,
+  venue: "polymarket" | "kalshi",
+  asset: MarketAsset,
+  positions: PositionSnapshot[],
+) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
-    await client.query("DELETE FROM positions WHERE venue = $1", [venue]);
+    await client.query("DELETE FROM positions WHERE venue = $1 AND asset = $2", [venue, asset]);
     for (const position of positions) {
       await client.query(
         `
           INSERT INTO positions (
-            id, venue, market_ref, outcome, size, average_price, current_price, current_value_usd,
+            id, asset, venue, market_ref, outcome, size, average_price, current_price, current_value_usd,
             realized_pnl_usd, unrealized_pnl_usd, redeemable, mergeable, updated_at, raw_json
           )
           VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
-            $9, $10, $11, $12, $13, $14::jsonb
+            $1, $2, $3, $4, $5, $6, $7, $8, $9,
+            $10, $11, $12, $13, $14, $15::jsonb
           )
         `,
         [
           position.id,
+          position.asset,
           position.venue,
           position.marketRef,
           position.outcome,
@@ -836,19 +1165,22 @@ export async function replaceVenuePositions(pool: Pool, venue: "polymarket" | "k
   }
 }
 
-export async function listPositions(pool: Pool): Promise<PositionSnapshot[]> {
+export async function listPositions(pool: Pool, asset?: MarketAsset): Promise<PositionSnapshot[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM positions
+      ${asset ? "WHERE asset = $1" : ""}
       ORDER BY venue ASC, current_value_usd DESC
     `,
+    asset ? [asset] : [],
   );
   return result.rows.map(mapPositionRow);
 }
 
 export async function upsertSettlement(pool: Pool, settlement: {
   id: string;
+  asset: MarketAsset;
   intentId: string;
   venue: string;
   marketRef: string;
@@ -861,10 +1193,11 @@ export async function upsertSettlement(pool: Pool, settlement: {
   await pool.query(
     `
       INSERT INTO settlements (
-        id, intent_id, venue, market_ref, outcome, resolved_outcome, payout_usd, settled_at, raw_json
+        id, asset, intent_id, venue, market_ref, outcome, resolved_outcome, payout_usd, settled_at, raw_json
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb)
       ON CONFLICT (id) DO UPDATE SET
+        asset = EXCLUDED.asset,
         resolved_outcome = EXCLUDED.resolved_outcome,
         payout_usd = EXCLUDED.payout_usd,
         settled_at = EXCLUDED.settled_at,
@@ -872,6 +1205,7 @@ export async function upsertSettlement(pool: Pool, settlement: {
     `,
     [
       settlement.id,
+      settlement.asset,
       settlement.intentId,
       settlement.venue,
       settlement.marketRef,
@@ -1095,10 +1429,11 @@ export async function listRecentBridgeTransfers(pool: Pool, limit = 10): Promise
 export async function insertRunEvent(pool: Pool, event: RunEvent) {
   await pool.query(
     `
-      INSERT INTO run_events (level, event_type, message, payload_json, created_at)
-      VALUES ($1, $2, $3, $4::jsonb, $5)
+      INSERT INTO run_events (asset, level, event_type, message, payload_json, created_at)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6)
     `,
     [
+      event.asset ?? null,
       event.level,
       event.eventType,
       event.message,
@@ -1108,18 +1443,26 @@ export async function insertRunEvent(pool: Pool, event: RunEvent) {
   );
 }
 
-export async function listRecentRunEvents(pool: Pool, limit = 20): Promise<RunEvent[]> {
+export async function listRecentRunEvents(pool: Pool, limit = 20, asset?: MarketAsset | null): Promise<RunEvent[]> {
   const result = await pool.query(
     `
       SELECT *
       FROM run_events
+      ${
+        asset === undefined
+          ? ""
+          : asset === null
+            ? "WHERE asset IS NULL"
+            : "WHERE asset = $2 OR asset IS NULL"
+      }
       ORDER BY created_at DESC
       LIMIT $1
     `,
-    [limit],
+    asset === undefined ? [limit] : [limit, asset],
   );
   return result.rows.map((row) => ({
     id: row.id,
+    asset: row.asset,
     level: row.level,
     eventType: row.event_type,
     message: row.message,
@@ -1161,10 +1504,15 @@ export async function listCircuitBreakers(pool: Pool): Promise<CircuitBreaker[]>
 }
 
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
-  const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.key);
+  const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.asset, slot.key);
   const allBreakers = await listCircuitBreakers(pool);
+  const assetBreakerKey = `asset:${slot.asset}`;
+  const slotBreakerKey = `slot:${slot.key}`;
   const relevantBreakers = allBreakers.filter(
-    (breaker) => breaker.active || breaker.key === "global" || breaker.key === `slot:${slot.key}`,
+    (breaker) =>
+      breaker.key === "global" ||
+      breaker.key === assetBreakerKey ||
+      breaker.key === slotBreakerKey,
   );
   const pnl = await getLatestPnlSnapshot(pool);
   const [baselineEquityUsd, peakEquityUsd] = pnl
@@ -1173,29 +1521,76 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   return {
     fetchedAt: Date.now(),
     slot,
-    config: await getStrategyConfig(pool),
-    workerState: await getWorkerState(pool),
+    config: await getStrategyConfig(pool, slot.asset),
+    workerState: await getWorkerState(pool, slot.asset),
     latestSnapshot,
     feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
     opportunities: latestSnapshot?.opportunities ?? [],
     venueBalances: await listVenueBalances(pool),
-    openIntents: await listOpenOrderIntents(pool),
-    recentOrders: await listRecentVenueOrders(pool, 20),
-    recentFills: await listRecentFills(pool, 20),
-    positions: await listPositions(pool),
+    openIntents: await listOpenOrderIntents(pool, slot.asset),
+    recentOrders: await listRecentVenueOrders(pool, 20, slot.asset),
+    recentFills: await listRecentFills(pool, 20, slot.asset),
+    positions: await listPositions(pool, slot.asset),
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
     circuitBreakers: relevantBreakers,
-    runEvents: await listRecentRunEvents(pool, 10),
+    runEvents: await listRecentRunEvents(pool, 10, slot.asset),
   };
 }
 
-export async function buildTradesResponse(pool: Pool): Promise<TradesResponse> {
-  const intents = await listRecentOrderIntents(pool, 100);
+export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketSlot[]): Promise<PortfolioDashboardResponse> {
+  const pnl = await getLatestPnlSnapshot(pool);
+  const [baselineEquityUsd, peakEquityUsd] = pnl
+    ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
+    : [null, null];
+  const [configs, workerStates, breakers, venueBalances] = await Promise.all([
+    listStrategyConfigs(pool),
+    listWorkerStates(pool),
+    listCircuitBreakers(pool),
+    listVenueBalances(pool),
+  ]);
+  const snapshots = await Promise.all(slots.map((slot) => getLatestOpportunitySnapshot(pool, slot.asset, slot.key)));
+
+  return {
+    fetchedAt: Date.now(),
+    assets: slots.map((slot, index) => {
+      const latestSnapshot = snapshots[index];
+      const assetBreakerKey = `asset:${slot.asset}`;
+      const slotBreakerKey = `slot:${slot.key}`;
+      return {
+        asset: slot.asset,
+        slot,
+        config: configs[slot.asset],
+        workerState: workerStates[slot.asset],
+        latestSnapshot,
+        bestOpportunity:
+          latestSnapshot?.opportunities
+            ?.filter((opportunity: LiveOpportunity) => opportunity.grossCost !== null)
+            .sort(
+              (left: LiveOpportunity, right: LiveOpportunity) =>
+                (left.grossCost ?? Number.POSITIVE_INFINITY) - (right.grossCost ?? Number.POSITIVE_INFINITY),
+            )[0] ?? null,
+        feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
+        activeBreakers: breakers.filter(
+          (breaker) =>
+            breaker.active &&
+            (breaker.key === "global" || breaker.key === assetBreakerKey || breaker.key === slotBreakerKey),
+        ),
+      };
+    }),
+    venueBalances,
+    pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
+    activeBreakers: breakers.filter((breaker) => breaker.active),
+  };
+}
+
+export async function buildTradesResponse(pool: Pool, asset: MarketAsset | "all" = "all"): Promise<TradesResponse> {
+  const intents = await listRecentOrderIntents(pool, 100, asset === "all" ? undefined : asset);
   const intentIds = intents.map((intent) => intent.id);
 
   return {
     fetchedAt: Date.now(),
+    asset,
     intents,
     orders: await listVenueOrdersForIntentIds(pool, intentIds),
     fills: await listFillsForIntentIds(pool, intentIds),
@@ -1203,7 +1598,7 @@ export async function buildTradesResponse(pool: Pool): Promise<TradesResponse> {
 }
 
 export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<HistoryPoint[]> {
-  const snapshots = await getOpportunitySnapshotsForSlot(pool, slot.key);
+  const snapshots = await getOpportunitySnapshotsForSlot(pool, slot.asset, slot.key);
 
   return snapshots.map((snapshot) => {
     const first = snapshot.opportunities[0];
@@ -1225,7 +1620,7 @@ export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<
 function mapOpportunitySnapshotRow(row: any) {
   return {
     id: row.id,
-    shadow: row.shadow,
+    asset: row.asset,
     slotKey: row.slot_key,
     slotStartTs: row.slot_start_ts,
     slotEndTs: row.slot_end_ts,
@@ -1239,6 +1634,7 @@ function mapOpportunitySnapshotRow(row: any) {
 function mapOrderIntentRow(row: any): OrderIntent {
   return {
     id: row.id,
+    asset: row.asset,
     shadow: row.shadow,
     slotKey: row.slot_key,
     slotStartTs: row.slot_start_ts,
@@ -1266,6 +1662,7 @@ function mapOrderIntentRow(row: any): OrderIntent {
 function mapVenueOrderRow(row: any): LiveOrder {
   return {
     id: row.id,
+    asset: row.asset,
     shadow: row.shadow,
     intentId: row.intent_id,
     venue: row.venue,
@@ -1291,6 +1688,7 @@ function mapVenueOrderRow(row: any): LiveOrder {
 function mapFillRow(row: any): LiveFill {
   return {
     id: row.id,
+    asset: row.asset,
     shadow: row.shadow,
     intentId: row.intent_id,
     venue: row.venue,
@@ -1312,6 +1710,7 @@ function mapFillRow(row: any): LiveFill {
 function mapPositionRow(row: any): PositionSnapshot {
   return {
     id: row.id,
+    asset: row.asset,
     venue: row.venue,
     marketRef: row.market_ref,
     outcome: row.outcome,

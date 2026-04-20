@@ -1,3 +1,5 @@
+import type { StrategyConfigMap } from "@/lib/types";
+
 export const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
 export const KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2";
 export const KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2";
@@ -47,3 +49,14 @@ export const DEFAULT_STRATEGY_CONFIG = {
   maxVenueExposureUsd: DEFAULT_MAX_VENUE_EXPOSURE_USD,
   polyBridgeLowWaterUsdc: DEFAULT_POLY_BRIDGE_LOW_WATER_USDC,
 } as const;
+
+export const DEFAULT_STRATEGY_CONFIGS: StrategyConfigMap = {
+  btc: {
+    ...DEFAULT_STRATEGY_CONFIG,
+  },
+  eth: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: false,
+    shadowMode: true,
+  },
+};

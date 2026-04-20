@@ -27,7 +27,14 @@ export function RecoveryClient() {
     return <PanelMessage title="Erreur" message={recovery.error ?? "Impossible de charger la page Recup."} tone="rose" />;
   }
 
-  const globalBreakerActive = recovery.data.globalKillSwitchActive;
+  const recoveryData = recovery.data;
+  const globalBreakerActive = recoveryData.globalKillSwitchActive;
+  const groupedMarkets = (["btc", "eth"] as const)
+    .map((asset) => ({
+      asset,
+      markets: recoveryData.markets.filter((market) => market.asset === asset),
+    }))
+    .filter((group) => group.markets.length > 0);
 
   async function toggleKillSwitch() {
     setBusy("kill-switch");
@@ -152,7 +159,7 @@ export function RecoveryClient() {
           <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4 text-sm text-mist">
             <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">Settlement</div>
             <div className="mt-3 text-white">Polymarket: redeem ou merge manuel/direct selon le wallet.</div>
-            <div className="mt-2">Signature type: {recovery.data.signatureType}</div>
+            <div className="mt-2">Signature type: {recoveryData.signatureType}</div>
             <div className="mt-1">Kalshi: settlement automatique, aucun claim manuel requis.</div>
           </div>
         </div>
@@ -180,13 +187,13 @@ export function RecoveryClient() {
         </div>
 
         <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          {recovery.data.walletValidation.canDirectConversion
+          {recoveryData.walletValidation.canDirectConversion
             ? "Configuration wallet complete pour une conversion directe."
             : "Configuration wallet incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
         </div>
 
         <div className="mt-4 grid gap-3">
-          {recovery.data.walletValidation.checks.map((check) => (
+          {recoveryData.walletValidation.checks.map((check) => (
             <div key={check.key} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-white">{check.label}</div>
@@ -209,70 +216,79 @@ export function RecoveryClient() {
         </div>
 
         <div className="mt-4 grid gap-4">
-          {recovery.data.markets.length === 0 ? (
+          {recoveryData.markets.length === 0 ? (
             <EmptyState message="Aucune position Polymarket reclaimable ou mergeable pour l’instant." />
           ) : (
-            recovery.data.markets.map((market) => (
-              <div key={market.marketRef} className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
-                <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                  <div>
-                    <div className="text-white">{market.title}</div>
-                    <div className="mt-1 text-sm text-mist">
-                      {market.conditionId} {market.url ? "· lien marche disponible" : ""}
-                    </div>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {market.redeemable ? <Badge tone="cyan">redeemable</Badge> : null}
-                    {market.mergeable ? <Badge tone="amber">mergeable</Badge> : null}
-                    <Badge tone={market.directConversionSupported ? "cyan" : "default"}>
-                      {market.directConversionSupported ? "direct" : "manual"}
-                    </Badge>
-                  </div>
+            groupedMarkets.map((group) => (
+              <div key={group.asset} className="space-y-4">
+                <div className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3">
+                  <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{group.asset.toUpperCase()}</div>
+                  <div className="mt-2 text-sm text-white">{group.markets.length} marché(s) récupérable(s)</div>
                 </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  {market.outcomes.map((outcome) => (
-                    <div key={outcome.outcome} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
-                      <div className="text-white">{outcome.outcome}</div>
-                      <div className="mt-2">
-                        size {formatPrice(outcome.size, 2)} · valeur {formatCurrency(outcome.currentValueUsd)}
+                {group.markets.map((market) => (
+                  <div key={market.marketRef} className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
+                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                      <div>
+                        <div className="text-white">{market.title}</div>
+                        <div className="mt-1 text-sm text-mist">
+                          {market.conditionId} {market.url ? "· lien marche disponible" : ""}
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {market.redeemable ? <Badge tone="cyan">redeemable</Badge> : null}
+                        {market.mergeable ? <Badge tone="amber">mergeable</Badge> : null}
+                        <Badge tone={market.directConversionSupported ? "cyan" : "default"}>
+                          {market.directConversionSupported ? "direct" : "manual"}
+                        </Badge>
                       </div>
                     </div>
-                  ))}
-                </div>
 
-                {market.notes.length > 0 ? (
-                  <div className="mt-3 flex flex-wrap gap-2 text-sm text-mist">
-                    {market.notes.map((note) => (
-                      <span key={note} className="rounded-full border border-white/6 bg-white/[0.03] px-3 py-1">
-                        {note}
-                      </span>
-                    ))}
+                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                      {market.outcomes.map((outcome) => (
+                        <div key={outcome.outcome} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
+                          <div className="text-white">{outcome.outcome}</div>
+                          <div className="mt-2">
+                            size {formatPrice(outcome.size, 2)} · valeur {formatCurrency(outcome.currentValueUsd)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {market.notes.length > 0 ? (
+                      <div className="mt-3 flex flex-wrap gap-2 text-sm text-mist">
+                        {market.notes.map((note) => (
+                          <span key={note} className="rounded-full border border-white/6 bg-white/[0.03] px-3 py-1">
+                            {note}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+
+                    <div className="mt-4 flex flex-wrap gap-3">
+                      {market.conversionAction ? (
+                        <button
+                          type="button"
+                          onClick={() => convert(market.marketRef)}
+                          disabled={busy === market.marketRef}
+                          className="rounded-full border border-cyan/20 bg-cyan/10 px-4 py-2 text-xs uppercase tracking-[0.16em] text-cyan transition disabled:opacity-50"
+                        >
+                          {formatConversionLabel(market)}
+                        </button>
+                      ) : null}
+                      {market.url ? (
+                        <a
+                          href={market.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded-full border border-white/8 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-[0.16em] text-mist transition hover:text-white"
+                        >
+                          open market
+                        </a>
+                      ) : null}
+                    </div>
                   </div>
-                ) : null}
-
-                <div className="mt-4 flex flex-wrap gap-3">
-                  {market.conversionAction ? (
-                    <button
-                      type="button"
-                      onClick={() => convert(market.marketRef)}
-                      disabled={busy === market.marketRef}
-                      className="rounded-full border border-cyan/20 bg-cyan/10 px-4 py-2 text-xs uppercase tracking-[0.16em] text-cyan transition disabled:opacity-50"
-                    >
-                      {formatConversionLabel(market)}
-                    </button>
-                  ) : null}
-                  {market.url ? (
-                    <a
-                      href={market.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="rounded-full border border-white/8 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-[0.16em] text-mist transition hover:text-white"
-                    >
-                      open market
-                    </a>
-                  ) : null}
-                </div>
+                ))}
               </div>
             ))
           )}

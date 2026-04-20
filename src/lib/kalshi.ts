@@ -8,6 +8,7 @@ import {
 } from "@/lib/constants";
 import { hasKalshiCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
+import { getMarketCatalogEntry, inferKalshiAsset } from "@/lib/market-catalog";
 import type {
   ChartPriceSurface,
   ExecutionPriceSurface,
@@ -163,9 +164,10 @@ export function getKalshiWsUrl() {
 }
 
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
+  const marketConfig = getMarketCatalogEntry(slot.asset);
   const [list, series] = await Promise.all([
-    fetchKalshiMarkets(),
-    fetchKalshiSeries(),
+    fetchKalshiMarkets(slot.asset),
+    fetchKalshiSeries(slot.asset),
   ]);
 
   const market = resolveKalshiMarketForSlot(list.markets, slot);
@@ -186,13 +188,14 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
 
   return {
     ref: {
+      asset: slot.asset,
       venue: "kalshi",
       id: freshMarket.ticker,
-      slotKey: buildSlotKeyFromIso(freshMarket.open_time),
+      slotKey: buildSlotKeyFromIso(slot.asset, freshMarket.open_time),
       ticker: freshMarket.ticker,
       eventTicker: freshMarket.event_ticker,
       title: freshMarket.title,
-      url: `https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down/${freshMarket.event_ticker.toLowerCase()}`,
+      url: `https://kalshi.com/markets/${marketConfig.kalshiEventPath}/${freshMarket.event_ticker.toLowerCase()}`,
       startTime: freshMarket.open_time,
       endTime: freshMarket.close_time,
     },
@@ -200,6 +203,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     slotAligned: true,
     availabilityReason: null,
     feedHealth: createVenueFeedHealth({
+      asset: slot.asset,
       venue: "kalshi",
       feedStatus: "ready",
       source: "rest-bootstrap",
@@ -251,18 +255,22 @@ export async function fetchKalshiResolution(ticker: string) {
   return response.market.result === "yes" ? ("YES" as const) : ("NO" as const);
 }
 
-export async function fetchKalshiSeries() {
-  return fetchJson<KalshiSeriesResponse>(`${getKalshiMarketDataBaseUrl()}/series/KXBTC15M`);
+export async function fetchKalshiSeries(asset: MarketSlot["asset"]) {
+  const marketConfig = getMarketCatalogEntry(asset);
+  return fetchJson<KalshiSeriesResponse>(
+    `${getKalshiMarketDataBaseUrl()}/series/${marketConfig.kalshiSeriesTicker}`,
+  );
 }
 
-export async function fetchKalshiMarkets() {
+export async function fetchKalshiMarkets(asset: MarketSlot["asset"]) {
+  const marketConfig = getMarketCatalogEntry(asset);
   const markets: KalshiMarketSummary[] = [];
   const seenTickers = new Set<string>();
   let cursor: string | null | undefined = null;
 
   for (let page = 0; page < KALSHI_MARKETS_MAX_PAGES; page += 1) {
     const params = new URLSearchParams({
-      series_ticker: "KXBTC15M",
+      series_ticker: marketConfig.kalshiSeriesTicker,
       limit: String(KALSHI_MARKETS_PAGE_LIMIT),
     });
 
@@ -412,9 +420,11 @@ export function mapKalshiPosition(position: KalshiPosition, now = Date.now()): P
   const size = Math.abs(signedSize);
   const totalTradedUsd = Number(position.total_traded_dollars);
   const currentValueUsd = Number(position.market_exposure_dollars);
+  const asset = inferKalshiAsset(position.ticker);
 
   return {
     id: `kalshi:${position.ticker}`,
+    asset,
     venue: "kalshi",
     marketRef: position.ticker,
     outcome: signedSize >= 0 ? "YES" : "NO",
@@ -655,8 +665,10 @@ export function mapKalshiFillToLiveFill(
   order: Pick<LiveOrder, "intentId" | "venueOrderId" | "marketRef" | "side"> & { outcome: "YES" | "NO" },
   now = Date.now(),
 ): LiveFill {
+  const asset = inferKalshiAsset(order.marketRef);
   return {
     id: `kalshi-fill:${fill.trade_id}`,
+    asset,
     shadow: false,
     intentId: order.intentId,
     venue: "kalshi",
@@ -798,7 +810,9 @@ function createUnavailableKalshiQuote(
   series: KalshiSeriesResponse["series"],
   availabilityReason: string,
 ): KalshiQuote {
+  const marketConfig = getMarketCatalogEntry(slot.asset);
   const feedHealth = createVenueFeedHealth({
+    asset: slot.asset,
     venue: "kalshi",
     feedStatus: "blocked",
     source: "unavailable",
@@ -810,12 +824,13 @@ function createUnavailableKalshiQuote(
 
   return {
     ref: {
+      asset: slot.asset,
       venue: "kalshi",
-      id: `KXBTC15M-${slot.key}`,
+      id: `${marketConfig.kalshiSeriesTicker}-${slot.key}`,
       slotKey: slot.key,
       ticker: undefined,
       title: series.title,
-      url: "https://kalshi.com/markets/kxbtc15m/bitcoin-price-up-down",
+      url: `https://kalshi.com/markets/${marketConfig.kalshiEventPath}`,
       startTime: slot.startIso,
       endTime: slot.endIso,
     },
@@ -960,8 +975,8 @@ function createVenueFeedHealth(feed: KalshiQuote["feedHealth"]): KalshiQuote["fe
   return feed;
 }
 
-function buildSlotKeyFromIso(value: string) {
-  return String(Date.parse(value));
+function buildSlotKeyFromIso(asset: MarketSlot["asset"], value: string) {
+  return `${asset}:${Date.parse(value)}`;
 }
 
 function emptyOutcome(
@@ -1077,6 +1092,7 @@ function mapKalshiOrderResult(order: KalshiOrderResponse["order"]): VenueOrderRe
 }
 
 function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: string): LiveOrder {
+  const asset = inferKalshiAsset(order.ticker);
   const filledSize = Number(order.fill_count_fp ?? 0);
   const requestedSize = Number(order.initial_count_fp ?? filledSize);
   const remainingSize = Number(order.remaining_count_fp ?? 0);
@@ -1089,6 +1105,7 @@ function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: strin
 
   return {
     id: `kalshi:${order.order_id}`,
+    asset,
     shadow: false,
     intentId,
     venue: "kalshi",

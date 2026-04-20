@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { LineChart } from "@/components/line-chart";
 import { usePollingJson } from "@/components/use-polling-json";
+import { TradingToggle } from "@/components/trading-toggle";
 import {
   formatClock,
   formatCountdown,
@@ -17,14 +18,15 @@ import type {
   DashboardResponse,
   HistoryResponse,
   LiveOpportunity,
+  MarketAsset,
   OrderIntent,
   PositionSnapshot,
   VenueFeedHealth,
 } from "@/lib/types";
 
-export function DashboardClient() {
-  const dashboard = usePollingJson<DashboardResponse>("/api/dashboard", 1_000);
-  const history = usePollingJson<HistoryResponse>("/api/history/current-slot", 1_000);
+export function DashboardClient({ asset }: { asset: MarketAsset }) {
+  const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 1_000);
+  const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 1_000);
   const [showAllPositions, setShowAllPositions] = useState(false);
   const [showAllRecentFills, setShowAllRecentFills] = useState(false);
 
@@ -77,13 +79,14 @@ export function DashboardClient() {
       <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
         <div className="flex flex-col gap-4 border-b border-white/6 pb-4 lg:flex-row lg:items-start lg:justify-between">
           <div className="space-y-1">
-            <div className="text-[11px] uppercase tracking-[0.24em] text-mist/70">Live BTC 15m</div>
+            <div className="text-[11px] uppercase tracking-[0.24em] text-mist/70">Live {slot.asset.toUpperCase()} 15m</div>
             <div className="text-sm text-white">{slot.label}</div>
             <div className="text-xs text-mist/70">
               phase `{workerState.phase}` · readiness `{workerState.readinessStatus}`
             </div>
           </div>
           <div className="flex flex-wrap items-center justify-end gap-3">
+            <TradingToggle asset={slot.asset} />
             <div className="text-right">
               <div className="font-mono text-[40px] leading-none text-white">
                 {formatCountdown(slot.secondsRemaining)}

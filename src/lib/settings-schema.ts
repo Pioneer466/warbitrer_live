@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
-import type { StrategyConfig } from "@/lib/types";
+import { DEFAULT_STRATEGY_CONFIG, DEFAULT_STRATEGY_CONFIGS } from "@/lib/constants";
+import type { StrategyConfig, StrategyConfigMap } from "@/lib/types";
 
 export const settingsSchema = z.object({
   enableTrading: z.boolean(),
@@ -25,11 +25,33 @@ export const settingsSchema = z.object({
 
 export type SettingsInput = z.infer<typeof settingsSchema>;
 
+export const settingsMapSchema = z.object({
+  btc: settingsSchema,
+  eth: settingsSchema,
+});
+
+export type SettingsMapInput = z.infer<typeof settingsMapSchema>;
+
 export function normalizeSettings(
   input: Partial<StrategyConfig> | null | undefined,
 ): StrategyConfig {
   return settingsSchema.parse({
     ...DEFAULT_STRATEGY_CONFIG,
     ...(input ?? {}),
+  });
+}
+
+export function normalizeSettingsMap(
+  input: Partial<StrategyConfigMap> | null | undefined,
+): StrategyConfigMap {
+  return settingsMapSchema.parse({
+    btc: {
+      ...DEFAULT_STRATEGY_CONFIGS.btc,
+      ...(input?.btc ?? {}),
+    },
+    eth: {
+      ...DEFAULT_STRATEGY_CONFIGS.eth,
+      ...(input?.eth ?? {}),
+    },
   });
 }

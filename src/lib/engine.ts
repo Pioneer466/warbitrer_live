@@ -1,4 +1,4 @@
-import { fetchBtcSlotResolution, toKalshiResolution } from "@/lib/btc-resolution";
+import { toKalshiResolution } from "@/lib/btc-resolution";
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
   applySlippage,
@@ -17,6 +17,8 @@ import {
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
+import { getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
+import { fetchSlotResolution } from "@/lib/market-resolution";
 import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
@@ -80,6 +82,7 @@ import type {
   LiveFill,
   LiveOpportunity,
   LiveOrder,
+  MarketAsset,
   MarketSlot,
   OpportunitySnapshot,
   OrderIntent,
@@ -107,67 +110,88 @@ const polymarketAdapter = createPolymarketAdapter();
 const marketDataSupervisor = getMarketDataSupervisor();
 let lastDatabaseMaintenanceAttemptAt: number | null = null;
 
+function buildSlotBreakerKey(slotKey: string): CircuitBreaker["key"] {
+  return `slot:${slotKey}` as CircuitBreaker["key"];
+}
+
+function buildAssetBreakerKey(asset: MarketAsset): CircuitBreaker["key"] {
+  return `asset:${asset}` as CircuitBreaker["key"];
+}
+
+function buildPolymarketSlotSlug(asset: MarketAsset, slotStartTs: number) {
+  return `${getMarketCatalogEntry(asset).polymarketSlugPrefix}-${Math.floor(slotStartTs / 1000)}`;
+}
+
 export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
-  const settings = await readSettings();
-  const slot = getCurrentSlot(now);
-  let scanSucceeded = false;
-  let executeSucceeded = false;
-  let reconcileSucceeded = false;
-
-  await writeWorkerState({
-    phase: "scan",
-    currentSlotKey: slot.key,
-    lastError: null,
-  });
-
-  const coordinator = createExecutionCoordinator(settings);
   const errors: string[] = [];
+  for (const asset of MARKET_ASSETS) {
+    const settings = await readSettings(asset);
+    const slot = getCurrentSlot(asset, now);
+    let scanSucceeded = false;
+    let executeSucceeded = false;
+    let reconcileSucceeded = false;
+    const assetErrors: string[] = [];
 
-  try {
-    await coordinator.scan(slot, nowTs);
-    scanSucceeded = true;
-  } catch (error) {
-    errors.push(toErrorMessage(error));
-  }
-
-  try {
-    await writeWorkerState({
-      phase: "execute",
+    await writeWorkerState(asset, {
+      phase: "scan",
       currentSlotKey: slot.key,
+      lastError: null,
     });
-    await coordinator.execute(slot, nowTs);
-    executeSucceeded = true;
-  } catch (error) {
-    errors.push(toErrorMessage(error));
-  }
 
-  try {
-    await writeWorkerState({
-      phase: "reconcile",
+    const coordinator = createExecutionCoordinator(asset, settings);
+
+    try {
+      await coordinator.scan(slot, nowTs);
+      scanSucceeded = true;
+    } catch (error) {
+      const message = `[${asset}] ${toErrorMessage(error)}`;
+      assetErrors.push(message);
+      errors.push(message);
+    }
+
+    try {
+      await writeWorkerState(asset, {
+        phase: "execute",
+        currentSlotKey: slot.key,
+      });
+      await coordinator.execute(slot, nowTs);
+      executeSucceeded = true;
+    } catch (error) {
+      const message = `[${asset}] ${toErrorMessage(error)}`;
+      assetErrors.push(message);
+      errors.push(message);
+    }
+
+    try {
+      await writeWorkerState(asset, {
+        phase: "reconcile",
+        currentSlotKey: slot.key,
+      });
+      await coordinator.reconcile(slot, nowTs);
+      reconcileSucceeded = true;
+    } catch (error) {
+      const message = `[${asset}] ${toErrorMessage(error)}`;
+      assetErrors.push(message);
+      errors.push(message);
+    }
+
+    await writeWorkerState(asset, {
+      phase: "idle",
       currentSlotKey: slot.key,
+      lastScanAt: scanSucceeded ? nowTs : undefined,
+      lastExecuteAt: executeSucceeded ? nowTs : undefined,
+      lastReconcileAt: reconcileSucceeded ? nowTs : undefined,
+      lastError: assetErrors[0] ?? null,
     });
-    await coordinator.reconcile(slot, nowTs);
-    reconcileSucceeded = true;
-  } catch (error) {
-    errors.push(toErrorMessage(error));
   }
-
-  await writeWorkerState({
-    phase: "idle",
-    currentSlotKey: slot.key,
-    lastScanAt: scanSucceeded ? nowTs : undefined,
-    lastExecuteAt: executeSucceeded ? nowTs : undefined,
-    lastReconcileAt: reconcileSucceeded ? nowTs : undefined,
-    lastError: errors[0] ?? null,
-  });
 
   if (errors.length > 0) {
     throw new Error(errors.join(" | "));
   }
 }
 
-export function createExecutionCoordinator(settings: StrategyConfig): ExecutionCoordinator {
+export function createExecutionCoordinator(asset: MarketAsset, settings: StrategyConfig): ExecutionCoordinator {
   let latestScanSnapshot: OpportunitySnapshot | null = null;
 
   return {
@@ -184,11 +208,12 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         kalshi,
         settings,
         balances,
-        lastEntryCosts: await readLastEntryCosts(slot.key),
+        lastEntryCosts: await readLastEntryCosts(slot.asset, slot.key),
         secondsRemaining: slot.secondsRemaining,
       });
 
       await writeSnapshot({
+        asset: slot.asset,
         slotKey: slot.key,
         slotStartTs: slot.startTs,
         slotEndTs: slot.endTs,
@@ -200,7 +225,8 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
 
       await syncFeedCircuitBreaker(slot, [polymarket.feedHealth, kalshi.feedHealth], now);
 
-      latestScanSnapshot = {
+      const nextSnapshot: OpportunitySnapshot = {
+        asset: slot.asset,
         slotKey: slot.key,
         slotStartTs: slot.startTs,
         slotEndTs: slot.endTs,
@@ -210,23 +236,24 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         opportunities,
       };
 
-      return latestScanSnapshot;
+      latestScanSnapshot = nextSnapshot;
+      return nextSnapshot;
     },
 
     async execute(slot, now) {
       const snapshot = latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
-      const readiness = await computeReadiness(snapshot, now);
+      const readiness = await computeReadiness(snapshot, slot.asset, now);
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
-      const initialOpenIntents = await readOpenOrderIntents();
+      const initialOpenIntents = await readOpenOrderIntents(slot.asset);
       const resumed = await resumeInFlightIntents(
         initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
         slot,
         settings,
         now,
       );
-      const openIntents = await readOpenOrderIntents();
+      const openIntents = await readOpenOrderIntents(slot.asset);
 
-      await writeWorkerState({
+      await writeWorkerState(slot.asset, {
         readinessStatus: readiness.state.readinessStatus,
         readiness: readiness.state.readiness,
       });
@@ -254,7 +281,7 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
       const created: OrderIntent[] = [...resumed];
-      const positions = await readPositions();
+      const positions = await readPositions(slot.asset);
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
       const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
       let createdCount = 0;
@@ -265,13 +292,13 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
         }
 
         const currentBreakers = (await readCircuitBreakers()).filter(
-          (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.key),
+          (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.asset, slot.key),
         );
         if (currentBreakers.length > 0) {
           break;
         }
 
-        const currentOpenIntents = await readOpenOrderIntents();
+        const currentOpenIntents = await readOpenOrderIntents(slot.asset);
         if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
           break;
         }
@@ -365,74 +392,84 @@ export function createExecutionCoordinator(settings: StrategyConfig): ExecutionC
       ]);
 
       const reconcileErrors: string[] = [];
-      const allPositions = [...polyPositions, ...kalshiPositions];
+      const assetPolyPositions = polyPositions.filter((position) => position.asset === asset);
+      const assetKalshiPositions = kalshiPositions.filter((position) => position.asset === asset);
+      const allPositions = [...assetPolyPositions, ...assetKalshiPositions];
 
       reconcileErrors.push(
         ...(await runReconcileStep("replace_positions", now, async () => {
           await Promise.all([
-            replaceVenuePositions("polymarket", polyPositions),
-            replaceVenuePositions("kalshi", kalshiPositions),
+            replaceVenuePositions("polymarket", asset, assetPolyPositions),
+            replaceVenuePositions("kalshi", asset, assetKalshiPositions),
           ]);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_polymarket_convert_status", now, async () => {
-          await reconcilePolymarketProxyConversions(now);
+          if (asset === "btc") {
+            await reconcilePolymarketProxyConversions(now);
+          }
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("auto_convert_polymarket", now, async () => {
-          await autoConvertPolymarketIfConfigured(polyPositions, now);
+          if (asset === "btc") {
+            await autoConvertPolymarketIfConfigured(polyPositions, now);
+          }
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_venue_orders", now, async () => {
-          await reconcileVenueOrders(now);
+          await reconcileVenueOrders(asset, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_inflight_intents", now, async () => {
-          await reconcileInFlightIntentStates(now);
+          await reconcileInFlightIntentStates(asset, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("clear_recovered_intent_messages", now, async () => {
-          await clearRecoveredIntentFailureReasons(now);
+          await clearRecoveredIntentFailureReasons(asset, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_slot_end_polymarket_exits", now, async () => {
-          await reconcileSlotEndPolymarketExits(settings, now);
+          await reconcileSlotEndPolymarketExits(asset, settings, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_settlements", now, async () => {
-          await reconcileSettlements(settings, now);
+          await reconcileSettlements(asset, settings, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("backfill_unwound_pnl", now, async () => {
-          await backfillUnwoundIntentPnl(now);
+          await backfillUnwoundIntentPnl(asset, now);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("refresh_pnl", now, async () => {
-          await refreshPnl(now, allPositions);
+          if (asset === "btc") {
+            await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
+          }
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("database_maintenance", now, async () => {
-          await maybeRunDatabaseMaintenance(now);
+          if (asset === "btc") {
+            await maybeRunDatabaseMaintenance(now);
+          }
         })),
       );
 
@@ -478,11 +515,12 @@ async function refreshBalances(settings: StrategyConfig, now: number): Promise<V
 
 async function computeReadiness(
   snapshot: OpportunitySnapshot | null,
+  asset: MarketAsset,
   now: number,
 ): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
   const balances = await readVenueBalances();
   const slotKey = snapshot?.slotKey ?? null;
-  const breakers = (await readCircuitBreakers()).filter((breaker) => isBreakerRelevantToSlot(breaker, slotKey));
+  const breakers = (await readCircuitBreakers()).filter((breaker) => isBreakerRelevantToSlot(breaker, asset, slotKey));
   const checks = balances.map((balance) => ({
     key: `${balance.venue}:balance`,
     label: `${balance.venue} readiness`,
@@ -529,16 +567,23 @@ async function computeReadiness(
 }
 
 async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
-  const key = `slot:${slot.key}` as const;
+  const key = buildSlotBreakerKey(slot.key);
   const breakers = await readCircuitBreakers();
   for (const breaker of breakers) {
+    const breakerAsset = getBreakerAsset(breaker.key);
     const isFeedHealthBreaker =
       breaker.reason === "venue_error" &&
       breaker.payload !== null &&
       typeof breaker.payload === "object" &&
       Array.isArray((breaker.payload as { feeds?: unknown }).feeds);
 
-    if (breaker.active && breaker.key.startsWith("slot:") && breaker.key !== key && isFeedHealthBreaker) {
+    if (
+      breaker.active &&
+      breaker.key.startsWith("slot:") &&
+      breaker.key !== key &&
+      breakerAsset === slot.asset &&
+      isFeedHealthBreaker
+    ) {
       await writeCircuitBreaker({
         key: breaker.key,
         active: false,
@@ -598,7 +643,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       primarySubmission,
       settings.immediateOrderConfirmationTimeoutMs,
     );
-    primaryOrder = buildLiveOrderRecord(currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
+    primaryOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
     await writeVenueOrder(primaryOrder);
     await writeRunEvent({
       level: "info",
@@ -639,7 +684,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         createdAt: now,
       });
       await writeCircuitBreaker({
-        key: `slot:${currentIntent.slotKey}`,
+        key: buildSlotBreakerKey(currentIntent.slotKey),
         active: true,
         reason: "venue_error",
         triggeredAt: now,
@@ -678,7 +723,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     );
     await writeOrderIntent(currentIntent);
     await writeCircuitBreaker({
-      key: `slot:${currentIntent.slotKey}`,
+      key: buildSlotBreakerKey(currentIntent.slotKey),
       active: true,
       reason: "venue_error",
       triggeredAt: now,
@@ -720,7 +765,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         );
         await writeOrderIntent(currentIntent);
         await writeCircuitBreaker({
-          key: `slot:${currentIntent.slotKey}`,
+          key: buildSlotBreakerKey(currentIntent.slotKey),
           active: true,
           reason: "venue_error",
           triggeredAt: now,
@@ -747,7 +792,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     await writeOrderIntent(currentIntent);
     if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
       await writeCircuitBreaker({
-        key: `slot:${currentIntent.slotKey}`,
+        key: buildSlotBreakerKey(currentIntent.slotKey),
         active: true,
         reason: "venue_error",
         triggeredAt: now,
@@ -814,7 +859,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       hedgeSubmission,
       settings.immediateOrderConfirmationTimeoutMs,
     );
-    hedgeOrder = buildLiveOrderRecord(currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
+    hedgeOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
     await writeVenueOrder(hedgeOrder);
     await writeRunEvent({
       level: "info",
@@ -882,7 +927,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     );
     await writeOrderIntent(currentIntent);
     await writeCircuitBreaker({
-      key: `slot:${currentIntent.slotKey}`,
+      key: buildSlotBreakerKey(currentIntent.slotKey),
       active: true,
       reason: "hedge_failure",
       triggeredAt: now,
@@ -932,7 +977,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
         );
         await writeOrderIntent(currentIntent);
         await writeCircuitBreaker({
-          key: `slot:${currentIntent.slotKey}`,
+          key: buildSlotBreakerKey(currentIntent.slotKey),
           active: true,
           reason: "hedge_failure",
           triggeredAt: now,
@@ -1004,12 +1049,12 @@ async function executeShadowIntent(intent: OrderIntent, now: number) {
     throw new Error(`Intent ${intent.id} missing legs for shadow execution`);
   }
 
-  const primaryOrder = buildShadowOrder(currentIntent.id, primaryLeg, now, "primary");
-  const hedgeOrder = buildShadowOrder(currentIntent.id, hedgeLeg, now + 1, "hedge");
+  const primaryOrder = buildShadowOrder(currentIntent.asset, currentIntent.id, primaryLeg, now, "primary");
+  const hedgeOrder = buildShadowOrder(currentIntent.asset, currentIntent.id, hedgeLeg, now + 1, "hedge");
   await writeVenueOrder(primaryOrder);
   await writeVenueOrder(hedgeOrder);
-  await writeFill(buildShadowFill(currentIntent.id, primaryLeg, now, primaryOrder.venueOrderId));
-  await writeFill(buildShadowFill(currentIntent.id, hedgeLeg, now + 1, hedgeOrder.venueOrderId));
+  await writeFill(buildShadowFill(currentIntent.asset, currentIntent.id, primaryLeg, now, primaryOrder.venueOrderId));
+  await writeFill(buildShadowFill(currentIntent.asset, currentIntent.id, hedgeLeg, now + 1, hedgeOrder.venueOrderId));
 
   currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
   currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now + 1);
@@ -1069,7 +1114,7 @@ async function attachRecentPolymarketFillsSafely(
 }
 
 async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, settings: StrategyConfig, now: number) {
-  const recentOrders = await readRecentVenueOrders(200);
+  const recentOrders = await readRecentVenueOrders(200, slot.asset);
   const resumed: OrderIntent[] = [];
 
   for (const intent of intents) {
@@ -1144,7 +1189,7 @@ async function resolvePrimaryExitSize(
 }
 
 async function resolvePrimaryExitPrice(intent: OrderIntent, primaryLeg: OrderIntent["legs"][number], now: number) {
-  const slot = getCurrentSlot(new Date(intent.slotStartTs + 1));
+  const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
   const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
 
   if (primaryLeg.venue === "polymarket") {
@@ -1206,7 +1251,7 @@ async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, n
     submission,
     settings.immediateOrderConfirmationTimeoutMs,
   );
-  return buildLiveOrderRecord(intent.id, { ...primaryLeg, side: "SELL" }, request, result, now);
+  return buildLiveOrderRecord(intent.asset, intent.id, { ...primaryLeg, side: "SELL" }, request, result, now);
 }
 
 async function retryLegWithinExecutionBuffer(
@@ -1258,7 +1303,7 @@ async function retryLegWithinExecutionBuffer(
     submission,
     settings.immediateOrderConfirmationTimeoutMs,
   );
-  const order = buildLiveOrderRecord(repricedIntent.id, repricedLeg, request, result, now);
+  const order = buildLiveOrderRecord(repricedIntent.asset, repricedIntent.id, repricedLeg, request, result, now);
   await writeVenueOrder(order);
   await writeRunEvent({
     level: "info",
@@ -1815,9 +1860,9 @@ async function tripManualInterventionBreaker(
   });
 }
 
-async function reconcileVenueOrders(now: number) {
+async function reconcileVenueOrders(asset: MarketAsset, now: number) {
   const [recentOrders, polyOpenOrders, kalshiOrders, polyTrades, kalshiFills] = await Promise.all([
-    readRecentVenueOrders(200),
+    readRecentVenueOrders(200, asset),
     fetchPolymarketOpenOrders().catch(() => []),
     fetchKalshiOrders().catch(() => []),
     fetchPolymarketTrades().catch(() => []),
@@ -1932,7 +1977,7 @@ async function reconcileVenueOrders(now: number) {
     await syncIntentFromStoredVenueFills(intentId, venue);
   }
 
-  await reconcileLatePrimaryFillRescue(now);
+  await reconcileLatePrimaryFillRescue(asset, now);
 }
 
 async function writePolymarketFillSafely(
@@ -1960,8 +2005,11 @@ async function writePolymarketFillSafely(
   }
 }
 
-async function reconcileLatePrimaryFillRescue(now: number) {
-  const [recentIntents, recentOrders] = await Promise.all([readRecentOrderIntents(200), readRecentVenueOrders(200)]);
+async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
+  const [recentIntents, recentOrders] = await Promise.all([
+    readRecentOrderIntents(200, asset),
+    readRecentVenueOrders(200, asset),
+  ]);
 
   for (const intent of recentIntents) {
     if (intent.status !== "failed") {
@@ -2047,8 +2095,8 @@ async function reconcileLatePrimaryFillRescue(now: number) {
   }
 }
 
-async function reconcileSettlements(settings: StrategyConfig, now: number) {
-  const openIntents = await readOpenOrderIntents();
+async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig, now: number) {
+  const openIntents = await readOpenOrderIntents(asset);
   const settledCandidates = openIntents.filter(
     (intent) => intent.status === "hedged" && intent.slotEndTs + RESOLUTION_GRACE_MS <= now,
   );
@@ -2056,14 +2104,14 @@ async function reconcileSettlements(settings: StrategyConfig, now: number) {
   for (const intent of settledCandidates) {
     let referenceResolution: "UP" | "DOWN" | null = null;
     try {
-      referenceResolution = await fetchBtcSlotResolution(intent.slotStartTs, intent.slotEndTs);
+      referenceResolution = await fetchSlotResolution(intent.asset, intent.slotStartTs, intent.slotEndTs);
     } catch {
       referenceResolution = null;
     }
 
     const polyResolution =
       referenceResolution ??
-      (await fetchPolymarketResolution(`btc-updown-15m-${Math.floor(intent.slotStartTs / 1000)}`));
+      (await fetchPolymarketResolution(buildPolymarketSlotSlug(intent.asset, intent.slotStartTs)));
     const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
     const kalshiResolution =
       referenceResolution === null
@@ -2099,6 +2147,7 @@ async function reconcileSettlements(settings: StrategyConfig, now: number) {
       const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
       await writeSettlement({
         id: `${settled.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
+        asset: settled.asset,
         intentId: settled.id,
         venue: leg.venue,
         marketRef: leg.marketRef,
@@ -2119,8 +2168,8 @@ async function reconcileSettlements(settings: StrategyConfig, now: number) {
   }
 }
 
-async function reconcileSlotEndPolymarketExits(settings: StrategyConfig, now: number) {
-  const openIntents = await readOpenOrderIntents();
+async function reconcileSlotEndPolymarketExits(asset: MarketAsset, settings: StrategyConfig, now: number) {
+  const openIntents = await readOpenOrderIntents(asset);
   const candidates = openIntents.filter(
     (intent) =>
       !intent.shadow &&
@@ -2160,8 +2209,8 @@ async function reconcileSlotEndPolymarketExits(settings: StrategyConfig, now: nu
   }
 }
 
-async function clearRecoveredIntentFailureReasons(now: number) {
-  const openIntents = await readOpenOrderIntents();
+async function clearRecoveredIntentFailureReasons(asset: MarketAsset, now: number) {
+  const openIntents = await readOpenOrderIntents(asset);
   for (const intent of openIntents) {
     if (intent.status !== "hedged" || !intent.failureReason) {
       continue;
@@ -2175,8 +2224,8 @@ async function clearRecoveredIntentFailureReasons(now: number) {
   }
 }
 
-async function backfillUnwoundIntentPnl(now: number) {
-  const recentIntents = await readRecentOrderIntents(200);
+async function backfillUnwoundIntentPnl(asset: MarketAsset, now: number) {
+  const recentIntents = await readRecentOrderIntents(200, asset);
   for (const intent of recentIntents) {
     if (intent.shadow || intent.status !== "unwound" || intent.realizedPnlUsd !== null) {
       continue;
@@ -2215,7 +2264,7 @@ async function maybeExitPolymarketLegAtSlotEnd(
     return intent;
   }
 
-  const slot = getCurrentSlot(new Date(intent.slotStartTs + 1));
+  const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
   const { polymarket: polymarketState } = await marketDataSupervisor.readSlotState(slot, now);
   const outcome =
     polymarketLeg.outcome === "UP" ? polymarketState.quote.outcomes.up : polymarketState.quote.outcomes.down;
@@ -2254,7 +2303,7 @@ async function maybeExitPolymarketLegAtSlotEnd(
         submission,
         settings.immediateOrderConfirmationTimeoutMs,
       );
-      order = buildLiveOrderRecord(intent.id, exitLeg, request, result, Date.now());
+      order = buildLiveOrderRecord(intent.asset, intent.id, exitLeg, request, result, Date.now());
       lastOrder = order;
       await writeVenueOrder(order);
     } catch (error) {
@@ -2360,12 +2409,12 @@ async function maybeExitPolymarketLegAtSlotEnd(
   return intent;
 }
 
-async function reconcileInFlightIntentStates(now: number) {
+async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
   const [openIntents, recentOrders, settings, livePositions] = await Promise.all([
-    readOpenOrderIntents(),
-    readRecentVenueOrders(200),
-    readSettings(),
-    readPositions(),
+    readOpenOrderIntents(asset),
+    readRecentVenueOrders(200, asset),
+    readSettings(asset),
+    readPositions(asset),
   ]);
 
   for (const intent of openIntents) {
@@ -2410,7 +2459,7 @@ async function reconcileInFlightIntentStates(now: number) {
       if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
         const polyResolution =
           currentIntent.polyResolution ??
-          (await fetchPolymarketResolution(`btc-updown-15m-${Math.floor(currentIntent.slotStartTs / 1000)}`).catch(
+          (await fetchPolymarketResolution(buildPolymarketSlotSlug(currentIntent.asset, currentIntent.slotStartTs)).catch(
             () => null,
           ));
         if (polyResolution !== null) {
@@ -2588,7 +2637,7 @@ async function reconcileInFlightIntentStates(now: number) {
       );
       await writeOrderIntent(currentIntent);
       await writeCircuitBreaker({
-        key: `slot:${currentIntent.slotKey}`,
+        key: buildSlotBreakerKey(currentIntent.slotKey),
         active: true,
         reason: "venue_error",
         triggeredAt: now,
@@ -2727,7 +2776,7 @@ async function reconcileInFlightIntentStates(now: number) {
       );
       await writeOrderIntent(currentIntent);
       await writeCircuitBreaker({
-        key: `slot:${currentIntent.slotKey}`,
+        key: buildSlotBreakerKey(currentIntent.slotKey),
         active: true,
         reason: "hedge_failure",
         triggeredAt: now,
@@ -2776,10 +2825,10 @@ async function syncActiveHedgeFailureBreakers(now: number) {
   const unresolvedSlots = new Set(
     openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
   );
-  const currentSlotKey = getCurrentSlot(new Date(now)).key;
+  const currentSlotKeys = new Set(MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
 
   for (const breaker of breakers) {
-    if (shouldKeepHedgeFailureBreakerActive(breaker, now, currentSlotKey, unresolvedSlots)) {
+    if (shouldKeepHedgeFailureBreakerActive(breaker, now, currentSlotKeys, unresolvedSlots)) {
       continue;
     }
 
@@ -2861,6 +2910,7 @@ export function buildVenueOrderRequest(
 }
 
 function buildLiveOrderRecord(
+  asset: MarketAsset,
   intentId: string,
   leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" },
   request: VenueOrderRequest,
@@ -2869,6 +2919,7 @@ function buildLiveOrderRecord(
 ): LiveOrder {
   return {
     id: `${result.venue}:${result.venueOrderId}`,
+    asset,
     shadow: false,
     intentId,
     venue: result.venue,
@@ -2892,6 +2943,7 @@ function buildLiveOrderRecord(
 }
 
 function buildShadowOrder(
+  asset: MarketAsset,
   intentId: string,
   leg: OrderIntent["legs"][number],
   now: number,
@@ -2899,6 +2951,7 @@ function buildShadowOrder(
 ): LiveOrder {
   return {
     id: `shadow:${intentId}:${leg.venue}:${suffix}`,
+    asset,
     shadow: true,
     intentId,
     venue: leg.venue,
@@ -2924,6 +2977,7 @@ function buildShadowOrder(
 }
 
 function buildShadowFill(
+  asset: MarketAsset,
   intentId: string,
   leg: OrderIntent["legs"][number],
   now: number,
@@ -2931,6 +2985,7 @@ function buildShadowFill(
 ) {
   return {
     id: `shadow-fill:${intentId}:${leg.venue}:${leg.outcome}:${now}`,
+    asset,
     shadow: true,
     intentId,
     venue: leg.venue,
@@ -3133,7 +3188,7 @@ async function recoverKalshiOrderSubmissionForIntent(
     feeUsd: Number(recoveredOrder.taker_fees_dollars ?? recoveredOrder.maker_fees_dollars ?? 0),
     raw: recoveredOrder as unknown as Record<string, unknown>,
   };
-  const order = buildLiveOrderRecord(intent.id, leg, request, result, now);
+  const order = buildLiveOrderRecord(intent.asset, intent.id, leg, request, result, now);
   await writeVenueOrder(order);
   await writeRunEvent({
     level: "warn",
@@ -3161,15 +3216,20 @@ function isTerminalOrderStatus(status: LiveOrder["status"]) {
 
 export function isBreakerRelevantToSlot(
   breaker: Pick<CircuitBreaker, "key">,
+  asset: MarketAsset,
   slotKey: string | null,
 ) {
-  return breaker.key === "global" || (slotKey !== null && breaker.key === `slot:${slotKey}`);
+  return (
+    breaker.key === "global" ||
+    breaker.key === buildAssetBreakerKey(asset) ||
+    (slotKey !== null && breaker.key === buildSlotBreakerKey(slotKey))
+  );
 }
 
 export function shouldKeepHedgeFailureBreakerActive(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
-  currentSlotKey: string,
+  currentSlotKeys: Set<string>,
   unresolvedSlots: Set<string>,
 ) {
   if (!breaker.active || breaker.reason !== "hedge_failure") {
@@ -3194,7 +3254,7 @@ export function shouldKeepHedgeFailureBreakerActive(
     return true;
   }
 
-  return getPayloadBoolean(breaker.payload, "lockSlot") && slotKey === currentSlotKey;
+  return getPayloadBoolean(breaker.payload, "lockSlot") && currentSlotKeys.has(slotKey);
 }
 
 export function countRecentKalshiSoftHedgeNoFillEvents(
@@ -3288,7 +3348,7 @@ async function armHedgeFailureGuards(
   now: number,
 ) {
   await writeCircuitBreaker({
-    key: `slot:${intent.slotKey}`,
+      key: buildSlotBreakerKey(intent.slotKey),
     active: true,
     reason: "hedge_failure",
     triggeredAt: now,
@@ -3311,7 +3371,7 @@ async function armHedgeFailureGuards(
     return;
   }
 
-  const recentEvents = await readRunEvents(100);
+  const recentEvents = await readRunEvents(100, intent.asset);
   const recentSoftNoFills = recentEvents.filter((event) =>
     isRecentSoftHedgeNoFillEvent(event, now, KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS, intent.hedgeVenue),
   );
@@ -3384,6 +3444,28 @@ function countRecentSoftHedgeNoFillEvents(
   windowMs: number,
 ) {
   return events.filter((event) => isRecentSoftHedgeNoFillEvent(event, now, windowMs, venue)).length;
+}
+
+function getAssetFromSlotKey(slotKey: string | null | undefined): MarketAsset | null {
+  if (!slotKey) {
+    return null;
+  }
+
+  const [candidate] = slotKey.split(":");
+  return candidate && isMarketAsset(candidate) ? candidate : null;
+}
+
+function getBreakerAsset(key: CircuitBreaker["key"]): MarketAsset | null {
+  if (key.startsWith("asset:")) {
+    const candidate = key.slice("asset:".length);
+    return isMarketAsset(candidate) ? candidate : null;
+  }
+
+  if (key.startsWith("slot:")) {
+    return getAssetFromSlotKey(key.slice("slot:".length));
+  }
+
+  return null;
 }
 
 function getPayloadBoolean(payload: Record<string, unknown> | null, key: string) {
@@ -3464,7 +3546,7 @@ function wouldExceedVenueExposure(
 }
 
 async function refreshLatestSnapshot(slot: MarketSlot) {
-  return readLatestSnapshot(slot.key);
+  return readLatestSnapshot(slot.asset, slot.key);
 }
 
 function toErrorMessage(error: unknown) {
@@ -3648,7 +3730,7 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
   now: number,
   errorMessage: string,
 ) {
-  const slotSlug = `btc-updown-15m-${Math.floor(intent.slotStartTs / 1000)}`;
+  const slotSlug = buildPolymarketSlotSlug(intent.asset, intent.slotStartTs);
   const polyResolution = await fetchPolymarketResolution(slotSlug).catch(() => null);
   const failureReason =
     polyResolution === null

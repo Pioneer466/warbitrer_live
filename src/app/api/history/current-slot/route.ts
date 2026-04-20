@@ -1,18 +1,21 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { parseMarketAsset } from "@/lib/market-catalog";
 import { getCurrentSlot } from "@/lib/slot";
 import { readHistoryPoints, readLatestSnapshot } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const slot = getCurrentSlot();
+    const url = new URL(request.url);
+    const asset = parseMarketAsset(url.searchParams.get("asset"));
+    const slot = getCurrentSlot(asset);
     const [points, latestSnapshot] = await Promise.all([
       readHistoryPoints(slot),
-      readLatestSnapshot(slot.key),
+      readLatestSnapshot(asset, slot.key),
     ]);
     const fallbackPoints =
       points.length > 0 || !latestSnapshot

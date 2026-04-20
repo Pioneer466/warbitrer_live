@@ -1,6 +1,6 @@
 import { processTick } from "@/lib/engine";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
-import { readSettings, storageMode } from "@/lib/storage";
+import { readSettingsMap, storageMode } from "@/lib/storage";
 
 const WORKER_TICK_TIMEOUT_MS = 90_000;
 
@@ -36,8 +36,8 @@ function sleep(ms: number) {
 
 async function readPollingIntervalMs() {
   try {
-    const settings = await readSettings();
-    return settings.pollingIntervalMs;
+    const settings = await readSettingsMap();
+    return Math.min(settings.btc.pollingIntervalMs, settings.eth.pollingIntervalMs);
   } catch (error) {
     console.error("[worker] settings read failed, using default live polling interval", error);
     return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;

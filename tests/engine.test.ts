@@ -16,10 +16,11 @@ import {
 import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, RunEvent } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
-  return {
+  const base: OrderIntent = {
     id: "intent-1",
+    asset: "btc",
     shadow: false,
-    slotKey: "slot-1",
+    slotKey: "btc:slot-1",
     slotStartTs: 1,
     slotEndTs: 2,
     combination: "POLY_DOWN_KALSHI_YES",
@@ -77,13 +78,19 @@ function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
         resolvedOutcome: null,
       },
     ],
+  };
+
+  return {
+    ...base,
     ...overrides,
+    asset: overrides.asset ?? base.asset,
   };
 }
 
 function buildOrder(overrides: Partial<LiveOrder> = {}): LiveOrder {
-  return {
+  const base: LiveOrder = {
     id: "order-1",
+    asset: "btc",
     shadow: false,
     intentId: "intent-1",
     venue: "polymarket",
@@ -103,7 +110,12 @@ function buildOrder(overrides: Partial<LiveOrder> = {}): LiveOrder {
     createdAt: 1,
     updatedAt: 2,
     raw: {},
+  };
+
+  return {
+    ...base,
     ...overrides,
+    asset: overrides.asset ?? base.asset,
   };
 }
 
@@ -406,14 +418,15 @@ describe("retryable polymarket unwind errors", () => {
 
 describe("hedge failure breakers", () => {
   it("ignores slot breakers from old slots when evaluating the current slot", () => {
-    expect(isBreakerRelevantToSlot({ key: "global" }, "slot-2")).toBe(true);
-    expect(isBreakerRelevantToSlot({ key: "slot:slot-2" }, "slot-2")).toBe(true);
-    expect(isBreakerRelevantToSlot({ key: "slot:slot-1" }, "slot-2")).toBe(false);
+    expect(isBreakerRelevantToSlot({ key: "global" }, "btc", "btc:slot-2")).toBe(true);
+    expect(isBreakerRelevantToSlot({ key: "asset:btc" }, "btc", "btc:slot-2")).toBe(true);
+    expect(isBreakerRelevantToSlot({ key: "slot:btc:slot-2" }, "btc", "btc:slot-2")).toBe(true);
+    expect(isBreakerRelevantToSlot({ key: "slot:btc:slot-1" }, "btc", "btc:slot-2")).toBe(false);
   });
 
   it("keeps a slot hedge breaker active for the rest of the current slot", () => {
     const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
-      key: "slot:slot-1",
+      key: "slot:btc:slot-1",
       active: true,
       reason: "hedge_failure",
       payload: {
@@ -421,8 +434,8 @@ describe("hedge failure breakers", () => {
       },
     };
 
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, "slot-1", new Set())).toBe(true);
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, "slot-2", new Set())).toBe(false);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, new Set(["btc:slot-2"]), new Set())).toBe(false);
   });
 
   it("keeps a global hedge breaker active through its cooldown", () => {
@@ -435,8 +448,8 @@ describe("hedge failure breakers", () => {
       },
     };
 
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 150, "slot-1", new Set())).toBe(true);
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 250, "slot-1", new Set())).toBe(false);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 150, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 250, new Set(["btc:slot-1"]), new Set())).toBe(false);
   });
 });
 
@@ -525,6 +538,7 @@ describe("intent fill summaries", () => {
     const fills: LiveFill[] = [
       {
         id: "fill-buy",
+        asset: "btc",
         shadow: false,
         intentId: "intent-1",
         venue: "polymarket",
@@ -543,6 +557,7 @@ describe("intent fill summaries", () => {
       },
       {
         id: "fill-sell",
+        asset: "btc",
         shadow: false,
         intentId: "intent-1",
         venue: "polymarket",
@@ -575,6 +590,7 @@ describe("live remaining leg size", () => {
         [
           {
             id: "polymarket:token-1",
+            asset: "btc",
             venue: "polymarket",
             marketRef: "poly-market",
             outcome: "DOWN",

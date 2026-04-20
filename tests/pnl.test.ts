@@ -33,6 +33,7 @@ describe("pnl snapshot", () => {
     const positions: PositionSnapshot[] = [
       {
         id: "kalshi:one",
+        asset: "btc",
         venue: "kalshi",
         marketRef: "KXBTC15M-1",
         outcome: "YES",
@@ -89,6 +90,7 @@ describe("pnl snapshot", () => {
     const positions: PositionSnapshot[] = [
       {
         id: "polymarket:ghost",
+        asset: "btc",
         venue: "polymarket",
         marketRef: "ghost-market",
         outcome: "UP",

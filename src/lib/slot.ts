@@ -1,21 +1,28 @@
+import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
 import { FIFTEEN_MINUTES_MS } from "@/lib/constants";
-import type { MarketSlot } from "@/lib/types";
+import type { MarketAsset, MarketSlot } from "@/lib/types";
 
-export function getCurrentSlot(now = new Date()): MarketSlot {
+export function getCurrentSlot(asset: MarketAsset, now = new Date()): MarketSlot {
   const nowTs = now.getTime();
   const slotStartTs = Math.floor(nowTs / FIFTEEN_MINUTES_MS) * FIFTEEN_MINUTES_MS;
   const slotEndTs = slotStartTs + FIFTEEN_MINUTES_MS;
+  const market = getMarketCatalogEntry(asset);
 
   return {
-    key: String(slotStartTs),
+    asset,
+    key: `${asset}:${slotStartTs}`,
     startTs: slotStartTs,
     endTs: slotEndTs,
     startIso: new Date(slotStartTs).toISOString(),
     endIso: new Date(slotEndTs).toISOString(),
     label: formatSlotLabel(slotStartTs, slotEndTs),
-    polymarketSlug: `btc-updown-15m-${Math.floor(slotStartTs / 1000)}`,
+    polymarketSlug: `${market.polymarketSlugPrefix}-${Math.floor(slotStartTs / 1000)}`,
     secondsRemaining: Math.max(0, Math.floor((slotEndTs - nowTs) / 1000)),
   };
+}
+
+export function getCurrentSlots(now = new Date()): MarketSlot[] {
+  return MARKET_ASSETS.map((asset) => getCurrentSlot(asset, now));
 }
 
 export function formatSlotLabel(startTs: number, endTs: number) {

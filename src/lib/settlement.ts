@@ -34,6 +34,7 @@ export function createIntentFromOpportunity({
 
   return {
     id: intentId,
+    asset: opportunity.asset,
     shadow,
     slotKey: opportunity.slotKey,
     slotStartTs,
