@@ -1,4 +1,4 @@
-export type MarketAsset = "btc" | "eth";
+export type MarketAsset = "btc" | "eth" | "sol" | "xrp";
 export type AssetScoped<T> = Record<MarketAsset, T>;
 export type Venue = "polymarket" | "kalshi";
 export type PairCombination = "POLY_UP_KALSHI_NO" | "POLY_DOWN_KALSHI_YES";

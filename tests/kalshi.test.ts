@@ -270,6 +270,38 @@ describe("Kalshi quote derivation", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXETH15M");
   });
 
+  it("queries the SOL series when fetching SOL Kalshi markets", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        markets: [],
+        cursor: null,
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await fetchKalshiMarkets("sol");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXSOL15M");
+  });
+
+  it("queries the XRP series when fetching XRP Kalshi markets", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        markets: [],
+        cursor: null,
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await fetchKalshiMarkets("xrp");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXXRP15M");
+  });
+
   it("signs Kalshi authenticated requests with the full trade-api path", () => {
     expect(
       buildKalshiSigningPath(

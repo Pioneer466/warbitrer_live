@@ -59,4 +59,14 @@ export const DEFAULT_STRATEGY_CONFIGS: StrategyConfigMap = {
     enableTrading: false,
     shadowMode: true,
   },
+  sol: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: true,
+    shadowMode: true,
+  },
+  xrp: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: true,
+    shadowMode: true,
+  },
 };

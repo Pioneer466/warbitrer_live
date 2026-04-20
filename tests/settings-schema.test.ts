@@ -1,4 +1,4 @@
-import { normalizeSettings } from "@/lib/settings-schema";
+import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
 
 describe("settings schema", () => {
   it("applies execution defaults for confirmation timeout and price buffer", () => {
@@ -52,5 +52,20 @@ describe("settings schema", () => {
     });
 
     expect(settings.entryCutoffSeconds).toBe(300);
+  });
+
+  it("normalizes a four-asset settings map with SOL and XRP shadow defaults", () => {
+    const settingsMap = normalizeSettingsMap({
+      eth: normalizeSettings({
+        enableTrading: false,
+        shadowMode: true,
+        maxPairNotionalUsd: 150,
+      }),
+    });
+
+    expect(settingsMap.sol.enableTrading).toBe(true);
+    expect(settingsMap.sol.shadowMode).toBe(true);
+    expect(settingsMap.xrp.enableTrading).toBe(true);
+    expect(settingsMap.xrp.shadowMode).toBe(true);
   });
 });

@@ -1,4 +1,3 @@
-import { toKalshiResolution } from "@/lib/btc-resolution";
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
   applySlippage,
@@ -18,7 +17,7 @@ import {
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
 import { getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
-import { fetchSlotResolution } from "@/lib/market-resolution";
+import { fetchSlotResolution, toKalshiResolution } from "@/lib/market-resolution";
 import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
@@ -35,7 +34,12 @@ import {
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
 import { autoConvertPolymarketIfConfigured, reconcilePolymarketProxyConversions } from "@/lib/recovery";
-import { calculateVenueExposureUsd, countSlotExecutionBlockers, hasUnresolvedExposureBlocker } from "@/lib/risk";
+import {
+  applyVenueBalanceReservations,
+  calculateVenueExposureUsd,
+  countSlotExecutionBlockers,
+  hasUnresolvedExposureBlocker,
+} from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
 import {
   calculateWinningPayout,
@@ -197,6 +201,8 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
   return {
     async scan(slot, now) {
       const balances = await refreshBalances(settings, now);
+      const openIntents = await readOpenOrderIntents();
+      const effectiveBalances = applyVenueBalanceReservations(balances, openIntents);
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
       const polymarket = polymarketState.quote;
       const kalshi = kalshiState.quote;
@@ -207,7 +213,7 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
         polymarket,
         kalshi,
         settings,
-        balances,
+        balances: effectiveBalances,
         lastEntryCosts: await readLastEntryCosts(slot.asset, slot.key),
         secondsRemaining: slot.secondsRemaining,
       });
@@ -251,7 +257,8 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
         settings,
         now,
       );
-      const openIntents = await readOpenOrderIntents(slot.asset);
+      const openIntents = await readOpenOrderIntents();
+      const assetOpenIntents = openIntents.filter((intent) => intent.asset === slot.asset);
 
       await writeWorkerState(slot.asset, {
         readinessStatus: readiness.state.readinessStatus,
@@ -274,14 +281,14 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
         return resumed;
       }
 
-      const blockingOpenForSlot = countSlotExecutionBlockers(openIntents, slot.key);
+      const blockingOpenForSlot = countSlotExecutionBlockers(assetOpenIntents, slot.key);
       if (blockingOpenForSlot >= settings.maxOpenIntentsPerSlot) {
         return resumed;
       }
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
       const created: OrderIntent[] = [...resumed];
-      const positions = await readPositions(slot.asset);
+      const positions = await readPositions();
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
       const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
       let createdCount = 0;
@@ -298,12 +305,13 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
           break;
         }
 
-        const currentOpenIntents = await readOpenOrderIntents(slot.asset);
+        const currentOpenIntents = await readOpenOrderIntents();
+        const currentAssetOpenIntents = currentOpenIntents.filter((intent) => intent.asset === slot.asset);
         if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
           break;
         }
 
-        if (countSlotExecutionBlockers(currentOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
+        if (countSlotExecutionBlockers(currentAssetOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
           break;
         }
 
@@ -1856,6 +1864,7 @@ async function tripManualInterventionBreaker(
       venue: intent.primaryVenue,
       stage,
       hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      requiresManualClear: true,
     },
   });
 }
@@ -2078,6 +2087,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
         venue: intent.primaryVenue,
         orderId: primaryOrder.venueOrderId,
         stage: "late_primary_fill_after_close",
+        requiresManualClear: true,
       },
     });
     await writeRunEvent({
@@ -3242,6 +3252,10 @@ export function shouldKeepHedgeFailureBreakerActive(
   }
 
   if (breaker.key === "global") {
+    if (getPayloadBoolean(breaker.payload, "requiresManualClear")) {
+      return true;
+    }
+
     return unresolvedSlots.size > 0;
   }
 

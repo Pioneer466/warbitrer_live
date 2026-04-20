@@ -1,7 +1,10 @@
 import Link from "next/link";
 
+import { MARKET_ASSETS } from "@/lib/market-catalog";
+import type { MarketAsset } from "@/lib/types";
+
 type ShellProps = {
-  activePath: "/" | "/btc" | "/eth" | "/trades" | "/recovery";
+  activePath: "/" | `/${MarketAsset}` | "/trades" | "/recovery";
   children: React.ReactNode;
 };
 
@@ -14,16 +17,15 @@ export function Shell({ activePath, children }: ShellProps) {
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl border border-white/8 bg-[linear-gradient(180deg,rgba(133,115,255,0.95),rgba(91,123,255,0.95))] text-sm tracking-[0.2em] text-white shadow-[0_0_24px_rgba(102,123,255,0.18)]">
               W
             </div>
-            <nav className="flex items-center gap-1 rounded-2xl border border-white/8 bg-white/[0.03] p-1">
+            <nav className="flex flex-wrap items-center gap-1 rounded-2xl border border-white/8 bg-white/[0.03] p-1">
               <Tab href="/" active={activePath === "/"}>
                 Portfolio
               </Tab>
-              <Tab href="/btc" active={activePath === "/btc"}>
-                BTC
-              </Tab>
-              <Tab href="/eth" active={activePath === "/eth"}>
-                ETH
-              </Tab>
+              {MARKET_ASSETS.map((asset) => (
+                <Tab key={asset} href={`/${asset}`} active={activePath === `/${asset}`}>
+                  {asset.toUpperCase()}
+                </Tab>
+              ))}
               <Tab href="/trades" active={activePath === "/trades"}>
                 Trades
               </Tab>
@@ -33,7 +35,7 @@ export function Shell({ activePath, children }: ShellProps) {
             </nav>
           </div>
           <div className="flex items-center gap-2">
-            <Badge tone="amber">BTC + ETH 15m</Badge>
+            <Badge tone="amber">BTC + ETH + SOL + XRP 15m</Badge>
             <Badge tone="cyan">MULTI</Badge>
             <Badge tone="default">POSTGRES</Badge>
           </div>

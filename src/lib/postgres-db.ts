@@ -1,6 +1,6 @@
 import { Pool, PoolClient, types } from "pg";
 
-import { DEFAULT_STRATEGY_CONFIG, DEFAULT_STRATEGY_CONFIGS } from "@/lib/constants";
+import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { enrichPnlSnapshot } from "@/lib/pnl";
@@ -457,14 +457,13 @@ async function bootstrapDatabase(pool: Pool) {
     const legacyStrategyPayload = normalizeSettings(
       legacyStrategyConfig.rows[0]?.payload ?? DEFAULT_STRATEGY_CONFIG,
     );
-    const nextStrategyConfigs = normalizeSettingsMap({
-      btc: legacyStrategyPayload,
-      eth: {
-        ...legacyStrategyPayload,
-        enableTrading: false,
-        shadowMode: true,
-      },
-    });
+    const seededEthStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
+      "SELECT payload FROM strategy_configs WHERE asset = 'eth' LIMIT 1",
+    );
+    const nextStrategyConfigs = buildBootstrapStrategyConfigs(
+      legacyStrategyPayload,
+      seededEthStrategyConfig.rows[0]?.payload,
+    );
 
     for (const asset of MARKET_ASSETS) {
       await pool.query(
@@ -569,6 +568,34 @@ async function releaseBootstrapLock(client: PoolClient) {
   } catch {
     // Ignore unlock failures during shutdown/error paths.
   }
+}
+
+export function buildBootstrapStrategyConfigs(
+  legacyStrategyPayload: StrategyConfig,
+  existingEthStrategyPayload?: Partial<StrategyConfig> | null,
+): StrategyConfigMap {
+  const ethStrategyPayload = normalizeSettings(
+    existingEthStrategyPayload ?? {
+      ...legacyStrategyPayload,
+      enableTrading: false,
+      shadowMode: true,
+    },
+  );
+
+  return normalizeSettingsMap({
+    btc: legacyStrategyPayload,
+    eth: ethStrategyPayload,
+    sol: {
+      ...ethStrategyPayload,
+      enableTrading: true,
+      shadowMode: true,
+    },
+    xrp: {
+      ...ethStrategyPayload,
+      enableTrading: true,
+      shadowMode: true,
+    },
+  });
 }
 
 export async function getStrategyConfig(pool: Pool, asset: MarketAsset): Promise<StrategyConfig> {

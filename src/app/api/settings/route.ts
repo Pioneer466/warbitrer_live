@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { settingsMapSchema } from "@/lib/settings-schema";
 import { readSettingsMap, writeSettings } from "@/lib/storage";
 
@@ -33,10 +34,9 @@ export async function PUT(request: Request) {
       );
     }
 
-    await Promise.all([
-      writeSettings("btc", parsed.data.btc),
-      writeSettings("eth", parsed.data.eth),
-    ]);
+    await Promise.all(
+      MARKET_ASSETS.map((asset) => writeSettings(asset, parsed.data[asset])),
+    );
     return NextResponse.json(parsed.data);
   } catch (error) {
     return createApiErrorResponse(error);

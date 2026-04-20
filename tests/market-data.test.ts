@@ -1,10 +1,10 @@
 import * as polymarketLib from "@/lib/polymarket";
 import { deriveKalshiOutcomeQuotes, extractKalshiLastTradePrices } from "@/lib/kalshi";
 import { applyLevelDelta, chooseFeedSource, computeFeedStatus, MarketDataSupervisor } from "@/lib/market-data";
-import type { MarketSlot } from "@/lib/types";
+import type { MarketAsset, MarketSlot } from "@/lib/types";
 import { afterEach, vi } from "vitest";
 
-function buildSlot(asset: "btc" | "eth" = "btc"): MarketSlot {
+function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
   return {
     asset,
     key: `${asset}:1770000000000`,
@@ -110,10 +110,12 @@ describe("market data helpers", () => {
     expect(supervisor.feeds.btc.kalshi.buildState).toHaveBeenCalledWith(slot, 1770000005000);
   });
 
-  it("keeps separate feed instances per asset", async () => {
+  it("keeps separate feed instances per asset across all four markets", async () => {
     const supervisor = new MarketDataSupervisor() as any;
     const btcSlot = buildSlot("btc");
     const ethSlot = buildSlot("eth");
+    const solSlot = buildSlot("sol");
+    const xrpSlot = buildSlot("xrp");
 
     supervisor.feeds.btc.polymarket = {
       ensureSlot: vi.fn().mockResolvedValue(undefined),
@@ -131,13 +133,34 @@ describe("market data helpers", () => {
       ensureSlot: vi.fn().mockResolvedValue(undefined),
       buildState: vi.fn().mockReturnValue({ venue: "kalshi", quote: { ref: { id: "eth-kalshi" } } }),
     };
+    supervisor.feeds.sol.polymarket = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "polymarket", quote: { ref: { id: "sol-poly" } } }),
+    };
+    supervisor.feeds.sol.kalshi = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "kalshi", quote: { ref: { id: "sol-kalshi" } } }),
+    };
+    supervisor.feeds.xrp.polymarket = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "polymarket", quote: { ref: { id: "xrp-poly" } } }),
+    };
+    supervisor.feeds.xrp.kalshi = {
+      ensureSlot: vi.fn().mockResolvedValue(undefined),
+      buildState: vi.fn().mockReturnValue({ venue: "kalshi", quote: { ref: { id: "xrp-kalshi" } } }),
+    };
 
     await supervisor.readSlotState(btcSlot, 1770000005000);
     await supervisor.readSlotState(ethSlot, 1770000005001);
+    await supervisor.readSlotState(solSlot, 1770000005002);
+    await supervisor.readSlotState(xrpSlot, 1770000005003);
 
     expect(supervisor.feeds.btc.polymarket.ensureSlot).toHaveBeenCalledWith(btcSlot, 1770000005000);
     expect(supervisor.feeds.eth.polymarket.ensureSlot).toHaveBeenCalledWith(ethSlot, 1770000005001);
+    expect(supervisor.feeds.sol.polymarket.ensureSlot).toHaveBeenCalledWith(solSlot, 1770000005002);
+    expect(supervisor.feeds.xrp.polymarket.ensureSlot).toHaveBeenCalledWith(xrpSlot, 1770000005003);
     expect(supervisor.feeds.btc.polymarket).not.toBe(supervisor.feeds.eth.polymarket);
+    expect(supervisor.feeds.sol.polymarket).not.toBe(supervisor.feeds.xrp.polymarket);
   });
 
   it("uses nested Polymarket price_change payloads to keep the top of book aligned", () => {

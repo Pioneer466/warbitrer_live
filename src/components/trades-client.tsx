@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatDateTime, formatPrice } from "@/lib/format";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { LiveFill, LiveOrder, MarketAsset, OrderIntent, TradesResponse } from "@/lib/types";
 
 type OrderGroup = {
@@ -11,6 +12,8 @@ type OrderGroup = {
   label: string;
   orders: LiveOrder[];
 };
+
+const TRADE_FILTERS: Array<MarketAsset | "all"> = ["all", ...MARKET_ASSETS];
 
 export function TradesClient() {
   const [assetFilter, setAssetFilter] = useState<MarketAsset | "all">("all");
@@ -61,7 +64,7 @@ export function TradesClient() {
           </div>
         </div>
         <div className="mt-4 flex gap-2">
-          {(["all", "btc", "eth"] as const).map((value) => (
+          {TRADE_FILTERS.map((value) => (
             <button
               key={value}
               type="button"
@@ -236,7 +239,7 @@ function OrderRow({ order, intent }: { order: LiveOrder; intent: OrderIntent | n
       </div>
       {intent ? (
         <div className="mt-2">
-          intent {intent.combination} · {intent.status}
+          intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}
         </div>
       ) : null}
       <div className="mt-2">
@@ -259,7 +262,7 @@ function FillRow({ fill, intent }: { fill: LiveFill; intent: OrderIntent | null 
         </div>
         <div>{formatDateTime(fill.filledAt)}</div>
       </div>
-      {intent ? <div className="mt-2">intent {intent.combination} · {intent.status}</div> : null}
+      {intent ? <div className="mt-2">intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}</div> : null}
       <div className="mt-2">
         {formatPrice(fill.size, 2)} @ {formatPrice(fill.price, 4)} · fee {formatCurrency(fill.feeUsd)}
       </div>
@@ -343,8 +346,8 @@ function groupOrdersByPair(orders: LiveOrder[], intentsById: Map<string, OrderIn
 
   for (const order of orders) {
     const intent = intentsById.get(order.intentId) ?? null;
-    const label = intent?.combination ?? `${order.venue} ${order.outcome}`;
-    const key = `${label}:${order.shadow ? "shadow" : "live"}`;
+    const label = `${order.asset.toUpperCase()} · ${intent?.combination ?? `${order.venue} ${order.outcome}`}`;
+    const key = `${order.asset}:${intent?.combination ?? `${order.venue}:${order.outcome}`}:${order.shadow ? "shadow" : "live"}`;
     const existing = groups.get(key);
     if (existing) {
       existing.orders.push(order);

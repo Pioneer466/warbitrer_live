@@ -28,6 +28,8 @@ export type SettingsInput = z.infer<typeof settingsSchema>;
 export const settingsMapSchema = z.object({
   btc: settingsSchema,
   eth: settingsSchema,
+  sol: settingsSchema,
+  xrp: settingsSchema,
 });
 
 export type SettingsMapInput = z.infer<typeof settingsMapSchema>;
@@ -52,6 +54,14 @@ export function normalizeSettingsMap(
     eth: {
       ...DEFAULT_STRATEGY_CONFIGS.eth,
       ...(input?.eth ?? {}),
+    },
+    sol: {
+      ...DEFAULT_STRATEGY_CONFIGS.sol,
+      ...(input?.sol ?? {}),
+    },
+    xrp: {
+      ...DEFAULT_STRATEGY_CONFIGS.xrp,
+      ...(input?.xrp ?? {}),
     },
   });
 }

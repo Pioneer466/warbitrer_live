@@ -1,5 +1,9 @@
-import { calculateVenueExposureUsd, countSlotExecutionBlockers } from "@/lib/risk";
-import type { OrderIntent, PositionSnapshot } from "@/lib/types";
+import {
+  applyVenueBalanceReservations,
+  calculateVenueExposureUsd,
+  countSlotExecutionBlockers,
+} from "@/lib/risk";
+import type { OrderIntent, PositionSnapshot, VenueBalance } from "@/lib/types";
 
 describe("venue exposure", () => {
   it("combines current positions and open intent exposure by venue", () => {
@@ -243,5 +247,178 @@ describe("venue exposure", () => {
     ];
 
     expect(countSlotExecutionBlockers(openIntents, "btc:slot-1")).toBe(1);
+  });
+});
+
+describe("venue balance reservations", () => {
+  it("reserves in-flight venue cash globally across assets", () => {
+    const balances: VenueBalance[] = [
+      {
+        venue: "polymarket",
+        capturedAt: 1,
+        status: "ready",
+        currency: "USDC",
+        availableBalanceUsd: 100,
+        totalBalanceUsd: 100,
+        portfolioValueUsd: 100,
+        allowanceUsd: 100,
+        notes: [],
+        raw: {},
+      },
+      {
+        venue: "kalshi",
+        capturedAt: 1,
+        status: "ready",
+        currency: "USD",
+        availableBalanceUsd: 80,
+        totalBalanceUsd: 80,
+        portfolioValueUsd: 80,
+        allowanceUsd: null,
+        notes: [],
+        raw: {},
+      },
+    ];
+
+    const openIntents: OrderIntent[] = [
+      {
+        id: "intent-btc",
+        asset: "btc",
+        shadow: false,
+        slotKey: "btc:slot-1",
+        slotStartTs: 1,
+        slotEndTs: 2,
+        combination: "POLY_UP_KALSHI_NO",
+        status: "executing_primary",
+        createdAt: 1,
+        updatedAt: 1,
+        resolvedAt: null,
+        primaryVenue: "polymarket",
+        hedgeVenue: "kalshi",
+        grossCost: 0.9,
+        targetNotionalUsd: 50,
+        maxSlippageBps: 30,
+        failureReason: null,
+        projectedNetProfitUsd: 2,
+        realizedPnlUsd: null,
+        roi: null,
+        polyResolution: null,
+        kalshiResolution: null,
+        legs: [
+          {
+            id: "leg-btc-poly",
+            intentId: "intent-btc",
+            venue: "polymarket",
+            outcome: "UP",
+            marketRef: "poly-btc",
+            tokenId: "token-btc",
+            side: "BUY",
+            requestedPrice: 0.4,
+            requestedSize: 50,
+            requestedNotionalUsd: 20,
+            filledPrice: null,
+            filledSize: 0,
+            feeUsd: 0,
+            status: "pending",
+            venueOrderId: null,
+            payoutUsd: null,
+            resolvedOutcome: null,
+          },
+          {
+            id: "leg-btc-kalshi",
+            intentId: "intent-btc",
+            venue: "kalshi",
+            outcome: "NO",
+            marketRef: "kalshi-btc",
+            side: "BUY",
+            requestedPrice: 0.5,
+            requestedSize: 50,
+            requestedNotionalUsd: 25,
+            filledPrice: null,
+            filledSize: 0,
+            feeUsd: 0,
+            status: "submitted",
+            venueOrderId: "kalshi-btc-order",
+            payoutUsd: null,
+            resolvedOutcome: null,
+          },
+        ],
+      },
+      {
+        id: "intent-eth",
+        asset: "eth",
+        shadow: false,
+        slotKey: "eth:slot-1",
+        slotStartTs: 1,
+        slotEndTs: 2,
+        combination: "POLY_DOWN_KALSHI_YES",
+        status: "executing_primary",
+        createdAt: 1,
+        updatedAt: 1,
+        resolvedAt: null,
+        primaryVenue: "polymarket",
+        hedgeVenue: "kalshi",
+        grossCost: 0.9,
+        targetNotionalUsd: 50,
+        maxSlippageBps: 30,
+        failureReason: null,
+        projectedNetProfitUsd: 2,
+        realizedPnlUsd: null,
+        roi: null,
+        polyResolution: null,
+        kalshiResolution: null,
+        legs: [
+          {
+            id: "leg-eth-poly",
+            intentId: "intent-eth",
+            venue: "polymarket",
+            outcome: "DOWN",
+            marketRef: "poly-eth",
+            tokenId: "token-eth",
+            side: "BUY",
+            requestedPrice: 0.5,
+            requestedSize: 30,
+            requestedNotionalUsd: 15,
+            filledPrice: null,
+            filledSize: 0,
+            feeUsd: 0,
+            status: "submitted",
+            venueOrderId: "poly-eth-order",
+            payoutUsd: null,
+            resolvedOutcome: null,
+          },
+          {
+            id: "leg-eth-kalshi",
+            intentId: "intent-eth",
+            venue: "kalshi",
+            outcome: "YES",
+            marketRef: "kalshi-eth",
+            side: "BUY",
+            requestedPrice: 0.45,
+            requestedSize: 20,
+            requestedNotionalUsd: 10,
+            filledPrice: null,
+            filledSize: 0,
+            feeUsd: 0,
+            status: "pending",
+            venueOrderId: null,
+            payoutUsd: null,
+            resolvedOutcome: null,
+          },
+        ],
+      },
+    ];
+
+    expect(applyVenueBalanceReservations(balances, openIntents)).toEqual([
+      expect.objectContaining({
+        venue: "polymarket",
+        availableBalanceUsd: 65,
+        notes: ["Reserved for in-flight intents: 35.00 USD"],
+      }),
+      expect.objectContaining({
+        venue: "kalshi",
+        availableBalanceUsd: 45,
+        notes: ["Reserved for in-flight intents: 35.00 USD"],
+      }),
+    ]);
   });
 });

@@ -369,9 +369,11 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
     <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <div className="text-white">{intent.combination}</div>
+          <div className="text-white">
+            {intent.asset.toUpperCase()} · {intent.combination}
+          </div>
           <div className="mt-1 text-sm text-mist">
-            {intent.primaryVenue} {"->"} {intent.hedgeVenue} · {formatDateTime(intent.createdAt)}
+            {intent.primaryVenue} {"->"} {intent.hedgeVenue} · {intent.slotKey} · {formatDateTime(intent.createdAt)}
           </div>
         </div>
         <StatusBadge tone={intent.status === "hedged" ? "cyan" : intent.status === "failed" || intent.status === "unwound" ? "rose" : "amber"}>

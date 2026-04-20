@@ -1,11 +1,11 @@
-# Warbitrer Live BTC + ETH 15m
+# Warbitrer Live BTC + ETH + SOL + XRP 15m
 
-Cockpit et worker live pour la stratégie d’arbitrage BTC et ETH 15 minutes entre Polymarket et Kalshi.
+Cockpit et worker live pour la stratégie d’arbitrage BTC, ETH, SOL et XRP 15 minutes entre Polymarket et Kalshi.
 
 ## Ce que fait le système
 
 - market data live `WS-first` avec resync REST de secours sur Polymarket et Kalshi
-- scan des créneaux BTC et ETH 15m courants sur Polymarket et Kalshi
+- scan des créneaux BTC, ETH, SOL et XRP 15m courants sur Polymarket et Kalshi
 - calcul des opportunités `Poly Up + Kalshi No` et `Poly Down + Kalshi Yes`
 - exécution live `taker-only` avec jambe primaire puis hedge immédiat
 - reconciliation des ordres, fills, positions, P&L et settlements
@@ -82,8 +82,8 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `GET /api/dashboard`
 - `GET /api/dashboard/[asset]`
 - `GET /api/trades`
-- `GET /api/trades?asset=btc|eth|all`
-- `GET /api/history/current-slot?asset=btc|eth`
+- `GET /api/trades?asset=btc|eth|sol|xrp|all`
+- `GET /api/history/current-slot?asset=btc|eth|sol|xrp`
 - `GET /api/health`
 - `GET /api/recovery`
 - `GET /api/settings`
@@ -99,7 +99,7 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 - `enableTrading=true` et `shadowMode=true` : intents/ordres/fills synthétiques, même interface, aucune soumission aux venues
 - `enableTrading=true` et `shadowMode=false` : exécution live réelle
 
-Le dashboard `/` agrège le portefeuille global, `/btc` et `/eth` exposent les dashboards opérateur par actif, et `/trades` reste la vue transversale.
+Le dashboard `/` agrège le portefeuille global, `/btc`, `/eth`, `/sol` et `/xrp` exposent les dashboards opérateur par actif, et `/trades` reste la vue transversale.
 La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation wallet.
 
 ## Déploiement VPS

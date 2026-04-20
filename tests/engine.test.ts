@@ -451,6 +451,19 @@ describe("hedge failure breakers", () => {
     expect(shouldKeepHedgeFailureBreakerActive(breaker, 150, new Set(["btc:slot-1"]), new Set())).toBe(true);
     expect(shouldKeepHedgeFailureBreakerActive(breaker, 250, new Set(["btc:slot-1"]), new Set())).toBe(false);
   });
+
+  it("keeps a manual-clear global hedge breaker active until an operator clears it", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "global",
+      active: true,
+      reason: "hedge_failure",
+      payload: {
+        requiresManualClear: true,
+      },
+    };
+
+    expect(shouldKeepHedgeFailureBreakerActive(breaker, 1_000, new Set(["btc:slot-1"]), new Set())).toBe(true);
+  });
 });
 
 describe("kalshi soft no-fill escalation", () => {

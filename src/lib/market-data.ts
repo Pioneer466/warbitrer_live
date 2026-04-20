@@ -5,7 +5,7 @@ import {
   POLY_USER_WS_BASE,
 } from "@/lib/constants";
 import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
-import { getMarketCatalogEntry } from "@/lib/market-catalog";
+import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
 import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
@@ -1200,16 +1200,15 @@ export class MarketDataSupervisor {
       polymarket: PolymarketRealtimeFeed;
       kalshi: KalshiRealtimeFeed;
     }
-  > = {
-    btc: {
-      polymarket: new PolymarketRealtimeFeed(),
-      kalshi: new KalshiRealtimeFeed(),
-    },
-    eth: {
-      polymarket: new PolymarketRealtimeFeed(),
-      kalshi: new KalshiRealtimeFeed(),
-    },
-  };
+  > = Object.fromEntries(
+    MARKET_ASSETS.map((asset) => [
+      asset,
+      {
+        polymarket: new PolymarketRealtimeFeed(),
+        kalshi: new KalshiRealtimeFeed(),
+      },
+    ]),
+  ) as Record<MarketAsset, { polymarket: PolymarketRealtimeFeed; kalshi: KalshiRealtimeFeed }>;
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     const feeds = this.feeds[slot.asset];

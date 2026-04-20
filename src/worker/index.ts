@@ -1,5 +1,6 @@
 import { processTick } from "@/lib/engine";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { readSettingsMap, storageMode } from "@/lib/storage";
 
 const WORKER_TICK_TIMEOUT_MS = 90_000;
@@ -37,7 +38,7 @@ function sleep(ms: number) {
 async function readPollingIntervalMs() {
   try {
     const settings = await readSettingsMap();
-    return Math.min(settings.btc.pollingIntervalMs, settings.eth.pollingIntervalMs);
+    return Math.min(...MARKET_ASSETS.map((asset) => settings[asset].pollingIntervalMs));
   } catch (error) {
     console.error("[worker] settings read failed, using default live polling interval", error);
     return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;
