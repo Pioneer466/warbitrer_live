@@ -1,4 +1,4 @@
-import { Pool, types } from "pg";
+import { Pool, PoolClient, types } from "pg";
 
 import { DEFAULT_STRATEGY_CONFIG, DEFAULT_STRATEGY_CONFIGS } from "@/lib/constants";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
@@ -35,6 +35,8 @@ types.setTypeParser(20, (value) => Number(value));
 
 let poolSingleton: Pool | null = null;
 let bootstrapPromise: Promise<void> | null = null;
+const BOOTSTRAP_LOCK_NAMESPACE = 4_298;
+const BOOTSTRAP_LOCK_KEY = 1;
 
 export async function getPgDb() {
   if (!process.env.DATABASE_URL) {
@@ -62,9 +64,10 @@ export async function getPgDb() {
 }
 
 async function bootstrapDatabase(pool: Pool) {
-  const now = Date.now();
+  await withBootstrapLock(pool, async () => {
+    const now = Date.now();
 
-  await pool.query(`
+    await pool.query(`
     CREATE TABLE IF NOT EXISTS strategy_config (
       id INTEGER PRIMARY KEY,
       payload JSONB NOT NULL,
@@ -288,17 +291,17 @@ async function bootstrapDatabase(pool: Pool) {
     );
   `);
 
-  await pool.query(
-    `
+    await pool.query(
+      `
       INSERT INTO strategy_config (id, payload, updated_at)
       VALUES (1, $1::jsonb, $2)
       ON CONFLICT (id) DO NOTHING
     `,
-    [JSON.stringify(DEFAULT_STRATEGY_CONFIG), now],
-  );
+      [JSON.stringify(DEFAULT_STRATEGY_CONFIG), now],
+    );
 
-  await pool.query(
-    `
+    await pool.query(
+      `
       INSERT INTO worker_state (
         id, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
         last_error, readiness_status, readiness_json
@@ -306,208 +309,210 @@ async function bootstrapDatabase(pool: Pool) {
       VALUES (1, 'idle', NULL, NULL, NULL, NULL, NULL, 'blocked', '[]'::jsonb)
       ON CONFLICT (id) DO NOTHING
     `,
-  );
+    );
 
-  await pool.query(
-    `
+    await pool.query(
+      `
       INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
       VALUES ('global', false, NULL, NULL, NULL)
       ON CONFLICT (key) DO NOTHING
     `,
-  );
+    );
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE opportunity_snapshots
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE opportunity_snapshots
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE opportunity_snapshots
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS opportunity_snapshots_asset_slot_idx
     ON opportunity_snapshots(asset, slot_key, captured_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE order_intents
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE order_intents
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS order_intents_asset_slot_idx
     ON order_intents(asset, slot_key, created_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE venue_orders
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE venue_orders
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE venue_orders
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS venue_orders_asset_updated_idx
     ON venue_orders(asset, updated_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE fills
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE fills
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE fills
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS fills_asset_filled_idx
     ON fills(asset, filled_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE positions
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE positions
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE positions
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS positions_venue_asset_idx
     ON positions(venue, asset, updated_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE settlements
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     UPDATE settlements
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE settlements
     ALTER COLUMN asset SET NOT NULL
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS settlements_asset_settled_idx
     ON settlements(asset, settled_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE run_events
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-  await pool.query(`
+    await pool.query(`
     CREATE INDEX IF NOT EXISTS run_events_asset_created_idx
     ON run_events(asset, created_at DESC)
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE venue_orders
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-  await pool.query(`
+    await pool.query(`
     ALTER TABLE fills
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-  const legacyStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
-    "SELECT payload FROM strategy_config WHERE id = 1 LIMIT 1",
-  );
-  const legacyStrategyPayload = normalizeSettings(legacyStrategyConfig.rows[0]?.payload ?? DEFAULT_STRATEGY_CONFIG);
-  const nextStrategyConfigs = normalizeSettingsMap({
-    btc: legacyStrategyPayload,
-    eth: {
-      ...legacyStrategyPayload,
-      enableTrading: false,
-      shadowMode: true,
-    },
-  });
+    const legacyStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
+      "SELECT payload FROM strategy_config WHERE id = 1 LIMIT 1",
+    );
+    const legacyStrategyPayload = normalizeSettings(
+      legacyStrategyConfig.rows[0]?.payload ?? DEFAULT_STRATEGY_CONFIG,
+    );
+    const nextStrategyConfigs = normalizeSettingsMap({
+      btc: legacyStrategyPayload,
+      eth: {
+        ...legacyStrategyPayload,
+        enableTrading: false,
+        shadowMode: true,
+      },
+    });
 
-  for (const asset of MARKET_ASSETS) {
-    await pool.query(
-      `
+    for (const asset of MARKET_ASSETS) {
+      await pool.query(
+        `
         INSERT INTO strategy_configs (asset, payload, updated_at)
         VALUES ($1, $2::jsonb, $3)
         ON CONFLICT (asset) DO NOTHING
       `,
-      [asset, JSON.stringify(nextStrategyConfigs[asset]), now],
-    );
-  }
+        [asset, JSON.stringify(nextStrategyConfigs[asset]), now],
+      );
+    }
 
-  const legacyWorkerState = await pool.query<{
-    phase: WorkerState["phase"];
-    current_slot_key: string | null;
-    last_scan_at: number | null;
-    last_execute_at: number | null;
-    last_reconcile_at: number | null;
-    last_error: string | null;
-    readiness_status: WorkerState["readinessStatus"];
-    readiness_json: WorkerState["readiness"];
-  }>(
-    `
+    const legacyWorkerState = await pool.query<{
+      phase: WorkerState["phase"];
+      current_slot_key: string | null;
+      last_scan_at: number | null;
+      last_execute_at: number | null;
+      last_reconcile_at: number | null;
+      last_error: string | null;
+      readiness_status: WorkerState["readinessStatus"];
+      readiness_json: WorkerState["readiness"];
+    }>(
+      `
       SELECT phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
         last_error, readiness_status, readiness_json
       FROM worker_state
       WHERE id = 1
       LIMIT 1
     `,
-  );
+    );
 
-  for (const asset of MARKET_ASSETS) {
-    const fallbackState =
-      asset === "btc" && legacyWorkerState.rows[0]
-        ? legacyWorkerState.rows[0]
-        : {
-            phase: "idle" as const,
-            current_slot_key: null,
-            last_scan_at: null,
-            last_execute_at: null,
-            last_reconcile_at: null,
-            last_error: null,
-            readiness_status: "blocked" as const,
-            readiness_json: [],
-          };
+    for (const asset of MARKET_ASSETS) {
+      const fallbackState =
+        asset === "btc" && legacyWorkerState.rows[0]
+          ? legacyWorkerState.rows[0]
+          : {
+              phase: "idle" as const,
+              current_slot_key: null,
+              last_scan_at: null,
+              last_execute_at: null,
+              last_reconcile_at: null,
+              last_error: null,
+              readiness_status: "blocked" as const,
+              readiness_json: [],
+            };
 
-    await pool.query(
-      `
+      await pool.query(
+        `
         INSERT INTO worker_states (
           asset, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
           last_error, readiness_status, readiness_json
@@ -515,29 +520,54 @@ async function bootstrapDatabase(pool: Pool) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
         ON CONFLICT (asset) DO NOTHING
       `,
-      [
-        asset,
-        fallbackState.phase,
-        fallbackState.current_slot_key,
-        fallbackState.last_scan_at,
-        fallbackState.last_execute_at,
-        fallbackState.last_reconcile_at,
-        fallbackState.last_error,
-        fallbackState.readiness_status,
-        JSON.stringify(fallbackState.readiness_json ?? []),
-      ],
-    );
-  }
+        [
+          asset,
+          fallbackState.phase,
+          fallbackState.current_slot_key,
+          fallbackState.last_scan_at,
+          fallbackState.last_execute_at,
+          fallbackState.last_reconcile_at,
+          fallbackState.last_error,
+          fallbackState.readiness_status,
+          JSON.stringify(fallbackState.readiness_json ?? []),
+        ],
+      );
+    }
 
-  for (const asset of MARKET_ASSETS) {
-    await pool.query(
-      `
+    for (const asset of MARKET_ASSETS) {
+      await pool.query(
+        `
         INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
         VALUES ($1, false, NULL, NULL, NULL)
         ON CONFLICT (key) DO NOTHING
       `,
-      [`asset:${asset}`],
-    );
+        [`asset:${asset}`],
+      );
+    }
+  });
+}
+
+async function withBootstrapLock<T>(pool: Pool, work: () => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+
+  try {
+    await acquireBootstrapLock(client);
+    return await work();
+  } finally {
+    await releaseBootstrapLock(client);
+    client.release();
+  }
+}
+
+async function acquireBootstrapLock(client: PoolClient) {
+  await client.query("SELECT pg_advisory_lock($1, $2)", [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_KEY]);
+}
+
+async function releaseBootstrapLock(client: PoolClient) {
+  try {
+    await client.query("SELECT pg_advisory_unlock($1, $2)", [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_KEY]);
+  } catch {
+    // Ignore unlock failures during shutdown/error paths.
   }
 }
 
