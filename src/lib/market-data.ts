@@ -45,8 +45,9 @@ import type {
 
 const FEED_READY_MS = 4_000;
 const FEED_BLOCKED_MS = 10_000;
-const POLYMARKET_RESYNC_MS = 2_000;
-const KALSHI_RESYNC_MS = 1_000;
+const FEED_HEALTHY_REVALIDATE_MS = 60_000;
+const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
+const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 10_000;
@@ -121,6 +122,22 @@ export function chooseFeedSource(lastWsMessageAt: number | null, lastRestSyncAt:
     return "rest-bootstrap";
   }
   return "unavailable";
+}
+
+export function shouldRestResync(
+  lastRestSyncAt: number | null,
+  lastWsMessageAt: number | null,
+  now: number,
+  fallbackIntervalMs: number,
+  healthyIntervalMs = FEED_HEALTHY_REVALIDATE_MS,
+) {
+  if (lastRestSyncAt === null) {
+    return true;
+  }
+
+  const wsHealthy = lastWsMessageAt !== null && now - lastWsMessageAt <= FEED_READY_MS;
+  const targetIntervalMs = wsHealthy ? healthyIntervalMs : fallbackIntervalMs;
+  return now - lastRestSyncAt >= targetIntervalMs;
 }
 
 function buildFeedHealth(input: {
@@ -241,7 +258,14 @@ class PolymarketRealtimeFeed {
 
     if (!this.market || !this.tokenIds) {
       await this.bootstrap(slot, now);
-    } else if (this.lastRestSyncAt === null || now - this.lastRestSyncAt >= POLYMARKET_RESYNC_MS) {
+    } else if (
+      shouldRestResync(
+        this.lastRestSyncAt,
+        this.lastWsMessageAt,
+        now,
+        POLYMARKET_REST_FALLBACK_RESYNC_MS,
+      )
+    ) {
       void this.resync(slot, now);
     }
 
@@ -762,7 +786,14 @@ class KalshiRealtimeFeed {
 
     if (!this.market) {
       await this.bootstrap(slot, now);
-    } else if (this.lastRestSyncAt === null || now - this.lastRestSyncAt >= KALSHI_RESYNC_MS) {
+    } else if (
+      shouldRestResync(
+        this.lastRestSyncAt,
+        this.lastWsMessageAt,
+        now,
+        KALSHI_REST_FALLBACK_RESYNC_MS,
+      )
+    ) {
       void this.resync(now);
     }
 

@@ -66,6 +66,7 @@ import {
   readRecentOrderIntents,
   readRecentVenueOrders,
   readSettings,
+  readSettingsMap,
   readVenueBalances,
   replaceVenuePositions,
   runDatabaseMaintenance,
@@ -126,11 +127,23 @@ function buildPolymarketSlotSlug(asset: MarketAsset, slotStartTs: number) {
   return `${getMarketCatalogEntry(asset).polymarketSlugPrefix}-${Math.floor(slotStartTs / 1000)}`;
 }
 
+type TickSharedContext = {
+  venueBalances?: VenueBalance[];
+  venuePositions?: {
+    polymarket: PositionSnapshot[];
+    kalshi: PositionSnapshot[];
+  } | null;
+};
+
 export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
   const errors: string[] = [];
+  const settingsMap = await readSettingsMap();
+  const sharedVenueBalances = await refreshBalances(getGlobalPolyBridgeLowWaterUsdc(settingsMap), nowTs);
+  const sharedVenuePositions = await refreshVenuePositions();
+
   for (const asset of MARKET_ASSETS) {
-    const settings = await readSettings(asset);
+    const settings = settingsMap[asset];
     const slot = getCurrentSlot(asset, now);
     let scanSucceeded = false;
     let executeSucceeded = false;
@@ -143,7 +156,10 @@ export async function processTick(now = new Date()) {
       lastError: null,
     });
 
-    const coordinator = createExecutionCoordinator(asset, settings);
+    const coordinator = createExecutionCoordinator(asset, settings, {
+      venueBalances: sharedVenueBalances,
+      venuePositions: sharedVenuePositions,
+    });
 
     try {
       await coordinator.scan(slot, nowTs);
@@ -195,12 +211,16 @@ export async function processTick(now = new Date()) {
   }
 }
 
-export function createExecutionCoordinator(asset: MarketAsset, settings: StrategyConfig): ExecutionCoordinator {
+export function createExecutionCoordinator(
+  asset: MarketAsset,
+  settings: StrategyConfig,
+  sharedContext: TickSharedContext = {},
+): ExecutionCoordinator {
   let latestScanSnapshot: OpportunitySnapshot | null = null;
 
   return {
     async scan(slot, now) {
-      const balances = await refreshBalances(settings, now);
+      const balances = sharedContext.venueBalances ?? (await refreshBalances(settings.polyBridgeLowWaterUsdc, now));
       const openIntents = await readOpenOrderIntents();
       const effectiveBalances = applyVenueBalanceReservations(balances, openIntents);
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
@@ -288,7 +308,12 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
       const created: OrderIntent[] = [...resumed];
-      const positions = await readPositions();
+      const positions =
+        sharedContext.venuePositions === null
+          ? await readPositions()
+          : sharedContext.venuePositions
+            ? [...sharedContext.venuePositions.polymarket, ...sharedContext.venuePositions.kalshi]
+            : await readPositions();
       const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
       const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
       let createdCount = 0;
@@ -394,10 +419,9 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
     },
 
     async reconcile(slot, now) {
-      const [polyPositions, kalshiPositions] = await Promise.all([
-        polymarketAdapter.getPositions(now),
-        kalshiAdapter.getPositions(now),
-      ]);
+      const [polyPositions, kalshiPositions] = sharedContext.venuePositions
+        ? [sharedContext.venuePositions.polymarket, sharedContext.venuePositions.kalshi]
+        : await Promise.all([polymarketAdapter.getPositions(now), kalshiAdapter.getPositions(now)]);
 
       const reconcileErrors: string[] = [];
       const assetPolyPositions = polyPositions.filter((position) => position.asset === asset);
@@ -488,13 +512,13 @@ export function createExecutionCoordinator(asset: MarketAsset, settings: Strateg
   };
 }
 
-async function refreshBalances(settings: StrategyConfig, now: number): Promise<VenueBalance[]> {
+async function refreshBalances(polyBridgeLowWaterUsdc: number, now: number): Promise<VenueBalance[]> {
   const balances = await Promise.allSettled([polymarketAdapter.getBalance(), kalshiAdapter.getBalance()]);
   const mapped = balances.map((result, index) => {
     const venue = index === 0 ? "polymarket" : "kalshi";
     if (result.status === "fulfilled") {
       const balance = result.value;
-      if (venue === "polymarket" && balance.availableBalanceUsd < settings.polyBridgeLowWaterUsdc) {
+      if (venue === "polymarket" && balance.availableBalanceUsd < polyBridgeLowWaterUsdc) {
         balance.notes = [...balance.notes, "USDC disponible sous le seuil bridge configuré."];
       }
       return balance;
@@ -519,6 +543,28 @@ async function refreshBalances(settings: StrategyConfig, now: number): Promise<V
   }
 
   return mapped;
+}
+
+async function refreshVenuePositions(): Promise<
+  | {
+      polymarket: PositionSnapshot[];
+      kalshi: PositionSnapshot[];
+    }
+  | null
+> {
+  try {
+    const [polymarket, kalshi] = await Promise.all([
+      polymarketAdapter.getPositions(Date.now()),
+      kalshiAdapter.getPositions(Date.now()),
+    ]);
+    return { polymarket, kalshi };
+  } catch {
+    return null;
+  }
+}
+
+function getGlobalPolyBridgeLowWaterUsdc(settingsMap: Record<MarketAsset, StrategyConfig>) {
+  return Math.max(...MARKET_ASSETS.map((asset) => settingsMap[asset].polyBridgeLowWaterUsdc));
 }
 
 async function computeReadiness(

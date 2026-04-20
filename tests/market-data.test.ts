@@ -1,6 +1,12 @@
 import * as polymarketLib from "@/lib/polymarket";
 import { deriveKalshiOutcomeQuotes, extractKalshiLastTradePrices } from "@/lib/kalshi";
-import { applyLevelDelta, chooseFeedSource, computeFeedStatus, MarketDataSupervisor } from "@/lib/market-data";
+import {
+  applyLevelDelta,
+  chooseFeedSource,
+  computeFeedStatus,
+  MarketDataSupervisor,
+  shouldRestResync,
+} from "@/lib/market-data";
 import type { MarketAsset, MarketSlot } from "@/lib/types";
 import { afterEach, vi } from "vitest";
 
@@ -42,6 +48,12 @@ describe("market data helpers", () => {
     expect(chooseFeedSource(5_000, 4_000, 6_000)).toBe("ws");
     expect(chooseFeedSource(1_000, 11_000, 12_000)).toBe("rest-fallback");
     expect(chooseFeedSource(null, 11_000, 12_000)).toBe("rest-bootstrap");
+  });
+
+  it("only revalidates REST aggressively when websocket freshness is missing", () => {
+    expect(shouldRestResync(11_000, 68_000, 70_000, 4_000, 60_000)).toBe(false);
+    expect(shouldRestResync(10_000, 68_000, 70_000, 4_000, 60_000)).toBe(true);
+    expect(shouldRestResync(10_000, 5_000, 15_000, 4_000, 60_000)).toBe(true);
   });
 
   it("applies top-of-book level deltas and removes empty levels", () => {
