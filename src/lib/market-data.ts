@@ -41,8 +41,8 @@ import type {
   VenueSubscriptionState,
 } from "@/lib/types";
 
-const FEED_READY_MS = 2_000;
-const FEED_BLOCKED_MS = 5_000;
+const FEED_READY_MS = 4_000;
+const FEED_BLOCKED_MS = 10_000;
 const POLYMARKET_RESYNC_MS = 2_000;
 const KALSHI_RESYNC_MS = 1_000;
 const WS_RECONNECT_BASE_MS = 1_000;
@@ -373,18 +373,22 @@ class PolymarketRealtimeFeed {
     }
 
     this.resyncPromise = (async () => {
-      const [upBook, downBook] = await Promise.all([
-        fetchPolymarketBook(this.tokenIds!.up),
-        fetchPolymarketBook(this.tokenIds!.down),
-      ]);
-      this.books.set(this.tokenIds!.up, createPolymarketBookState(this.tokenIds!.up, upBook, now));
-      this.books.set(this.tokenIds!.down, createPolymarketBookState(this.tokenIds!.down, downBook, now));
-      const freshMarket = await fetchPolymarketMarket(slot.polymarketSlug).catch(() => null);
-      if (freshMarket) {
-        this.market = freshMarket;
+      try {
+        const [upBook, downBook] = await Promise.all([
+          fetchPolymarketBook(this.tokenIds!.up),
+          fetchPolymarketBook(this.tokenIds!.down),
+        ]);
+        this.books.set(this.tokenIds!.up, createPolymarketBookState(this.tokenIds!.up, upBook, now));
+        this.books.set(this.tokenIds!.down, createPolymarketBookState(this.tokenIds!.down, downBook, now));
+        const freshMarket = await fetchPolymarketMarket(slot.polymarketSlug).catch(() => null);
+        if (freshMarket) {
+          this.market = freshMarket;
+        }
+        this.lastRestSyncAt = now;
+        this.lastError = null;
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : "Resync Polymarket impossible";
       }
-      this.lastRestSyncAt = now;
-      this.lastError = null;
     })().finally(() => {
       this.resyncPromise = null;
     });
@@ -812,21 +816,25 @@ class KalshiRealtimeFeed {
     }
 
     this.resyncPromise = (async () => {
-      const [freshMarketResponse, orderbook, tradesResponse] = await Promise.all([
-        fetchKalshiMarket(this.market!.ticker).catch(() => null),
-        fetchKalshiOrderbook(this.market!.ticker).catch(() => null),
-        fetchKalshiTrades(this.market!.ticker).catch(() => ({ trades: [] })),
-      ]);
+      try {
+        const [freshMarketResponse, orderbook, tradesResponse] = await Promise.all([
+          fetchKalshiMarket(this.market!.ticker).catch(() => null),
+          fetchKalshiOrderbook(this.market!.ticker).catch(() => null),
+          fetchKalshiTrades(this.market!.ticker).catch(() => ({ trades: [] })),
+        ]);
 
-      if (freshMarketResponse?.market) {
-        this.market = freshMarketResponse.market;
+        if (freshMarketResponse?.market) {
+          this.market = freshMarketResponse.market;
+        }
+        if (orderbook) {
+          this.orderbook = createKalshiBookState(orderbook, now);
+        }
+        this.trades = tradesResponse.trades ?? this.trades;
+        this.lastRestSyncAt = now;
+        this.lastError = null;
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : "Resync Kalshi impossible";
       }
-      if (orderbook) {
-        this.orderbook = createKalshiBookState(orderbook, now);
-      }
-      this.trades = tradesResponse.trades ?? this.trades;
-      this.lastRestSyncAt = now;
-      this.lastError = null;
     })().finally(() => {
       this.resyncPromise = null;
     });

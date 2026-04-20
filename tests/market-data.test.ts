@@ -1,7 +1,12 @@
+import * as polymarketLib from "@/lib/polymarket";
 import { deriveKalshiOutcomeQuotes, extractKalshiLastTradePrices } from "@/lib/kalshi";
 import { applyLevelDelta, computeFeedStatus, MarketDataSupervisor } from "@/lib/market-data";
 import type { MarketSlot } from "@/lib/types";
-import { vi } from "vitest";
+import { afterEach, vi } from "vitest";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("market data helpers", () => {
   it("marks feeds ready, degraded, then blocked as staleness grows", () => {
@@ -9,13 +14,13 @@ describe("market data helpers", () => {
       status: "ready",
       stalenessMs: 1_000,
     });
-    expect(computeFeedStatus(1_000, true, 4_500)).toEqual({
+    expect(computeFeedStatus(1_000, true, 6_000)).toEqual({
       status: "degraded",
-      stalenessMs: 3_500,
+      stalenessMs: 5_000,
     });
-    expect(computeFeedStatus(1_000, true, 8_000)).toEqual({
+    expect(computeFeedStatus(1_000, true, 12_500)).toEqual({
       status: "blocked",
-      stalenessMs: 7_000,
+      stalenessMs: 11_500,
     });
   });
 
@@ -173,5 +178,77 @@ describe("market data helpers", () => {
     expect(state.quote.outcomes.up.buyPrice).toBe(0.53);
     expect(state.quote.outcomes.up.sellPrice).toBe(0.52);
     expect(state.quote.outcomes.up.chart.price).toBe(0.53);
+  });
+
+  it("keeps the existing Polymarket state when background resync fails", async () => {
+    const slot: MarketSlot = {
+      key: "1770000000000",
+      startTs: 1770000000000,
+      endTs: 1770000900000,
+      startIso: "2026-02-02T10:00:00.000Z",
+      endIso: "2026-02-02T10:15:00.000Z",
+      label: "Feb 2, 5:00 AM - Feb 2, 5:15 AM",
+      polymarketSlug: "btc-updown-15m-1770000000",
+      secondsRemaining: 120,
+    };
+
+    vi.spyOn(polymarketLib, "fetchPolymarketBook").mockRejectedValue(new Error("HTTP 502 on Polymarket book"));
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.polymarket as any;
+
+    feed.slotKey = slot.key;
+    feed.market = {
+      id: "market-1",
+      question: "BTC up/down 15m",
+      slug: slot.polymarketSlug,
+      startDate: slot.startIso,
+      endDate: slot.endIso,
+      conditionId: "condition-1",
+      closed: false,
+      outcomePrices: '["0.5","0.5"]',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["asset-up","asset-down"]',
+    };
+    feed.tokenIds = {
+      up: "asset-up",
+      down: "asset-down",
+    };
+    feed.books.set("asset-up", {
+      tokenId: "asset-up",
+      bids: new Map([["0.49", 100]]),
+      asks: new Map([["0.51", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.49,
+      bestBidSize: 100,
+      bestAskPrice: 0.51,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: 1770000004000,
+    });
+    feed.books.set("asset-down", {
+      tokenId: "asset-down",
+      bids: new Map([["0.48", 100]]),
+      asks: new Map([["0.52", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.48,
+      bestBidSize: 100,
+      bestAskPrice: 0.52,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: 1770000004000,
+    });
+    feed.lastRestSyncAt = 0;
+    feed.ensureWs = vi.fn();
+
+    await expect(feed.ensureSlot(slot, 5_000)).resolves.toBeUndefined();
+    const pendingResync = feed.resyncPromise;
+    await pendingResync;
+
+    expect(feed.market.slug).toBe(slot.polymarketSlug);
+    expect(feed.books.get("asset-up")?.bestAskPrice).toBe(0.51);
+    expect(feed.lastError).toContain("HTTP 502 on Polymarket book");
   });
 });
