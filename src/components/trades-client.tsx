@@ -167,6 +167,10 @@ function Panel({
 }
 
 function IntentRow({ intent }: { intent: OrderIntent }) {
+  const resolutionAlignment = getResolutionAlignment(intent);
+  const shouldShowResolutionSummary =
+    intent.status === "settled" || intent.polyResolution !== null || intent.kalshiResolution !== null;
+
   return (
     <div className="rounded-[24px] border border-white/6 px-4 py-4 text-sm text-mist">
       <div className="flex items-center justify-between gap-3">
@@ -178,6 +182,43 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
       <div className="mt-2">
         {intent.primaryVenue} {"->"} {intent.hedgeVenue} · notionnel {formatCurrency(intent.targetNotionalUsd)}
       </div>
+      {shouldShowResolutionSummary ? (
+        <div className={`mt-3 rounded-[18px] border px-3 py-3 ${
+          resolutionAlignment === "mismatch"
+            ? "border-rose/20 bg-rose/10"
+            : resolutionAlignment === "aligned"
+              ? "border-emerald-400/20 bg-emerald-400/10"
+              : "border-amber/20 bg-amber/10"
+        }`}>
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="text-white">Résolution</div>
+            <span
+              className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.14em] ${
+                resolutionAlignment === "mismatch"
+                  ? "border-rose/20 bg-black/10 text-rose"
+                  : resolutionAlignment === "aligned"
+                    ? "border-emerald-400/20 bg-black/10 text-emerald-300"
+                    : "border-amber/20 bg-black/10 text-amber"
+              }`}
+            >
+              {resolutionAlignment === "mismatch"
+                ? "mismatch"
+                : resolutionAlignment === "aligned"
+                  ? "aligné"
+                  : "incomplet"}
+            </span>
+          </div>
+          <div className="mt-2">
+            Polymarket {intent.polyResolution ?? "--"} · Kalshi {intent.kalshiResolution ?? "--"}
+          </div>
+          {intent.realizedPnlUsd !== null ? (
+            <div className={`mt-2 ${intent.realizedPnlUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
+              P&amp;L {formatCurrency(intent.realizedPnlUsd)}
+              {intent.roi !== null ? ` · ROI ${(intent.roi * 100).toFixed(2)}%` : ""}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
       <div className="mt-3 grid gap-3 sm:grid-cols-2">
         {intent.legs.map((leg) => (
           <div key={leg.id} className="rounded-[18px] border border-white/6 px-3 py-3">
@@ -193,6 +234,18 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
       {intent.failureReason ? <div className="mt-3 text-rose">{intent.failureReason}</div> : null}
     </div>
   );
+}
+
+function getResolutionAlignment(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
+  if (!intent.polyResolution || !intent.kalshiResolution) {
+    return null;
+  }
+
+  const aligned =
+    (intent.polyResolution === "UP" && intent.kalshiResolution === "YES") ||
+    (intent.polyResolution === "DOWN" && intent.kalshiResolution === "NO");
+
+  return aligned ? "aligned" : "mismatch";
 }
 
 function OrderGroupSection({

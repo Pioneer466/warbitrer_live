@@ -4,6 +4,7 @@ import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { enrichPnlSnapshot } from "@/lib/pnl";
+import { isRiskActivePosition } from "@/lib/positions";
 import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
 import type {
   MarketAsset,
@@ -1611,11 +1612,12 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
   const [baselineEquityUsd, peakEquityUsd] = pnl
     ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
     : [null, null];
-  const [configs, workerStates, breakers, venueBalances] = await Promise.all([
+  const [configs, workerStates, breakers, venueBalances, positions] = await Promise.all([
     listStrategyConfigs(pool),
     listWorkerStates(pool),
     listCircuitBreakers(pool),
     listVenueBalances(pool),
+    listPositions(pool),
   ]);
   const snapshots = await Promise.all(slots.map((slot) => getLatestOpportunitySnapshot(pool, slot.asset, slot.key)));
 
@@ -1646,6 +1648,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
         ),
       };
     }),
+    openPositionsCount: positions.filter(isRiskActivePosition).length,
     venueBalances,
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
     activeBreakers: breakers.filter((breaker) => breaker.active),

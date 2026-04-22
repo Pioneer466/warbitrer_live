@@ -525,6 +525,7 @@ export type AssetDashboardSummary = {
 export type PortfolioDashboardResponse = {
   fetchedAt: number;
   assets: AssetDashboardSummary[];
+  openPositionsCount: number;
   venueBalances: VenueBalance[];
   pnl: PnlSnapshot | null;
   activeBreakers: CircuitBreaker[];

@@ -3,10 +3,15 @@
 import Link from "next/link";
 
 import { usePollingJson } from "@/components/use-polling-json";
-import { formatCountdown, formatCurrency } from "@/lib/format";
+import { formatCountdown, formatCurrency, formatPrice } from "@/lib/format";
 import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus } from "@/lib/types";
 
 type Tone = "default" | "cyan" | "amber" | "rose" | "emerald" | "indigo";
+
+const ORANGE_ASSET_THEME = {
+  badge: "border-amber/[0.30] bg-amber/[0.12] text-amber shadow-[0_0_24px_rgba(255,184,79,0.18)]",
+  text: "text-amber",
+} as const;
 
 const ASSET_THEMES: Record<
   MarketAsset,
@@ -15,22 +20,10 @@ const ASSET_THEMES: Record<
     text: string;
   }
 > = {
-  btc: {
-    badge: "border-amber/[0.30] bg-amber/[0.12] text-amber shadow-[0_0_24px_rgba(255,184,79,0.18)]",
-    text: "text-amber",
-  },
-  eth: {
-    badge: "border-cyan/[0.30] bg-cyan/[0.12] text-cyan shadow-[0_0_24px_rgba(28,231,207,0.16)]",
-    text: "text-cyan",
-  },
-  sol: {
-    badge: "border-emerald-400/[0.30] bg-emerald-400/[0.12] text-emerald-300 shadow-[0_0_24px_rgba(52,211,153,0.16)]",
-    text: "text-emerald-300",
-  },
-  xrp: {
-    badge: "border-rose/[0.30] bg-rose/[0.12] text-rose shadow-[0_0_24px_rgba(255,122,92,0.16)]",
-    text: "text-rose",
-  },
+  btc: ORANGE_ASSET_THEME,
+  eth: ORANGE_ASSET_THEME,
+  sol: ORANGE_ASSET_THEME,
+  xrp: ORANGE_ASSET_THEME,
 };
 
 export function PortfolioClient() {
@@ -44,11 +37,12 @@ export function PortfolioClient() {
     return <PanelMessage title="Erreur" message={portfolio.error ?? "Aucune donnée portefeuille."} tone="rose" />;
   }
 
-  const { assets, pnl, venueBalances, activeBreakers } = portfolio.data;
+  const { assets, pnl, openPositionsCount, activeBreakers } = portfolio.data;
   const readyAssets = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const blockedAssets = assets.filter((asset) => asset.workerState.readinessStatus === "blocked").length;
   const liveAssets = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowAssets = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
+  const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
 
   return (
     <div className="space-y-5">
@@ -75,12 +69,17 @@ export function PortfolioClient() {
             tone={pnl && pnl.equityUsd >= (pnl.cashUsd ?? 0) ? "cyan" : "default"}
           />
           <SummaryCell label="Cash" value={pnl ? formatCurrency(pnl.cashUsd) : "--"} tone="amber" />
-          <SummaryCell label="Balances" value={String(venueBalances.length)} meta={`${readyAssets} actifs prêts`} tone="indigo" />
           <SummaryCell
-            label="Breakers"
-            value={String(activeBreakers.length)}
-            meta="globaux + asset"
-            tone={activeBreakers.length > 0 ? "rose" : "emerald"}
+            label="Positions ouvertes"
+            value={String(openPositionsCount)}
+            meta={pnl ? `${formatCurrency(pnl.positionsValueUsd)} exposés` : `${readyAssets} actifs prêts`}
+            tone="indigo"
+          />
+          <SummaryCell
+            label="P&L"
+            value={pnl ? formatCurrency(strategyPnlUsd ?? 0) : "--"}
+            meta={pnl ? `réalisé ${formatCurrency(pnl.realizedPnlUsd)} · latent ${formatCurrency(pnl.unrealizedPnlUsd)}` : "réalisé + latent"}
+            tone={pnl && (strategyPnlUsd ?? 0) >= 0 ? "cyan" : "rose"}
           />
         </div>
       </section>
@@ -144,6 +143,9 @@ export function PortfolioClient() {
                       </StatusPill>
                     </div>
                     <div className={theme.text}>signal prêt pour revue du slot</div>
+                    <div className="text-sm text-white/80">
+                      brut live {formatPrice(best.grossCost, 3)} · seuil {formatPrice(asset.config.grossEntryThreshold, 3)}
+                    </div>
                   </div>
                 ) : (
                   "Aucune opportunité calculée pour ce créneau."
