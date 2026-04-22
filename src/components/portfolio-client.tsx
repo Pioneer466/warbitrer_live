@@ -43,6 +43,7 @@ export function PortfolioClient() {
   const liveAssets = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowAssets = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
+  const accountPnlUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
 
   return (
     <div className="space-y-5">
@@ -77,9 +78,9 @@ export function PortfolioClient() {
           />
           <SummaryCell
             label="P&L"
-            value={pnl ? formatCurrency(strategyPnlUsd ?? 0) : "--"}
-            meta={pnl ? `réalisé ${formatCurrency(pnl.realizedPnlUsd)} · latent ${formatCurrency(pnl.unrealizedPnlUsd)}` : "réalisé + latent"}
-            tone={pnl && (strategyPnlUsd ?? 0) >= 0 ? "cyan" : "rose"}
+            value={pnl ? formatCurrency(accountPnlUsd ?? 0) : "--"}
+            meta={pnl ? `compte ${formatCurrency(accountPnlUsd ?? 0)} · stratégie ${formatCurrency(strategyPnlUsd ?? 0)}` : "delta compte"}
+            tone={pnl && (accountPnlUsd ?? 0) >= 0 ? "cyan" : "rose"}
           />
         </div>
       </section>
@@ -142,8 +143,7 @@ export function PortfolioClient() {
                         {best.eligible ? "eligible" : "watch"}
                       </StatusPill>
                     </div>
-                    <div className={theme.text}>signal prêt pour revue du slot</div>
-                    <div className="text-sm text-white/80">
+                    <div className={`text-sm ${theme.text}`}>
                       brut live {formatPrice(best.grossCost, 3)} · seuil {formatPrice(asset.config.grossEntryThreshold, 3)}
                     </div>
                   </div>

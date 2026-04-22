@@ -168,6 +168,7 @@ function Panel({
 
 function IntentRow({ intent }: { intent: OrderIntent }) {
   const resolutionAlignment = getResolutionAlignment(intent);
+  const normalizedDirection = getNormalizedResolutionDirection(intent);
   const shouldShowResolutionSummary =
     intent.status === "settled" || intent.polyResolution !== null || intent.kalshiResolution !== null;
 
@@ -211,6 +212,7 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
           <div className="mt-2">
             Polymarket {intent.polyResolution ?? "--"} · Kalshi {intent.kalshiResolution ?? "--"}
           </div>
+          {normalizedDirection ? <div className="mt-2">direction normalisée {normalizedDirection}</div> : null}
           {intent.realizedPnlUsd !== null ? (
             <div className={`mt-2 ${intent.realizedPnlUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
               P&amp;L {formatCurrency(intent.realizedPnlUsd)}
@@ -237,15 +239,48 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
 }
 
 function getResolutionAlignment(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
-  if (!intent.polyResolution || !intent.kalshiResolution) {
+  const normalized = getNormalizedResolutionDirection(intent);
+  if (normalized === null) {
     return null;
   }
 
-  const aligned =
-    (intent.polyResolution === "UP" && intent.kalshiResolution === "YES") ||
-    (intent.polyResolution === "DOWN" && intent.kalshiResolution === "NO");
+  const polyDirection = normalizePolymarketResolution(intent.polyResolution);
+  const kalshiDirection = normalizeKalshiResolution(intent.kalshiResolution);
+  if (polyDirection === null || kalshiDirection === null) {
+    return null;
+  }
 
-  return aligned ? "aligned" : "mismatch";
+  return polyDirection === kalshiDirection ? "aligned" : "mismatch";
+}
+
+function getNormalizedResolutionDirection(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
+  const polyDirection = normalizePolymarketResolution(intent.polyResolution);
+  const kalshiDirection = normalizeKalshiResolution(intent.kalshiResolution);
+
+  if (polyDirection !== null && kalshiDirection !== null) {
+    return polyDirection === kalshiDirection ? polyDirection : null;
+  }
+
+  return polyDirection ?? kalshiDirection;
+}
+
+function normalizePolymarketResolution(resolution: OrderIntent["polyResolution"]) {
+  if (resolution === "UP" || resolution === "DOWN") {
+    return resolution;
+  }
+
+  return null;
+}
+
+function normalizeKalshiResolution(resolution: OrderIntent["kalshiResolution"]) {
+  if (resolution === "YES") {
+    return "UP" as const;
+  }
+  if (resolution === "NO") {
+    return "DOWN" as const;
+  }
+
+  return null;
 }
 
 function OrderGroupSection({
