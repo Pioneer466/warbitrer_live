@@ -89,7 +89,7 @@ export function PortfolioClient() {
             label={portfolioHeadlineLabel}
             value={pnl ? formatCurrency(portfolioHeadlineValue) : "--"}
             meta={portfolioHeadlineMeta}
-            tone={pnl && portfolioHeadlineValue >= 0 ? "cyan" : "rose"}
+            tone={pnl && portfolioHeadlineValue >= 0 ? "emerald" : "rose"}
           />
         </div>
       </section>
@@ -182,10 +182,27 @@ function SummaryCell({
   return (
     <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
       <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{label}</div>
-      <div className="mt-3 font-mono text-[34px] leading-none text-white">{value}</div>
+      <div className={`mt-3 font-mono text-[34px] leading-none ${getSummaryValueToneClass(tone)}`}>{value}</div>
       {meta ? <div className="mt-2 text-xs text-mist/60">{meta}</div> : null}
     </div>
   );
+}
+
+function getSummaryValueToneClass(tone: Tone) {
+  switch (tone) {
+    case "cyan":
+      return "text-cyan";
+    case "amber":
+      return "text-amber";
+    case "rose":
+      return "text-rose";
+    case "emerald":
+      return "text-emerald-300";
+    case "indigo":
+      return "text-indigo-200";
+    default:
+      return "text-white";
+  }
 }
 
 function MiniStat({
