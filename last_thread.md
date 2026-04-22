@@ -1,258 +1,323 @@
+# Handoff – Guardrails / Safeguards / Portfolio UI / Runtime status
 
-# Handoff – Vérifier et finaliser l’implémentation multi-assets BTC + ETH 15m
+## Contexte général
 
-## Contexte
+Projet `warbitrer-live` de trading/arbitrage multi-assets entre **Kalshi** et **Polymarket** sur marchés directionnels courts (`UP/DOWN 15m`).
 
-Le projet `warbitrer-live` était initialement  **single-market BTC 15m** .
-Une refonte importante a été lancée pour supporter **BTC + ETH 15m** avec  **la même logique d’arbitrage** , dans  **un seul worker** , avec  **config/trading séparés par actif** .
+Le focus récent a été :
 
-Le thread précédent a crash pendant la compaction de contexte Cursor,  **après une grosse série de modifications** .
-Il faut donc  **partir du principe que l’implémentation est peut-être presque finie, mais pas encore validée de bout en bout** .
+1. stabilisation runtime du worker
+2. refonte UI du portfolio
+3. réduction du risque de mismatch d’outcome Kalshi vs Polymarket
+4. évolution progressive vers des guardrails plus pertinents
 
----
-
-## Ce qui a été entrepris
-
-Objectif d’architecture retenu :
-
-* introduire `MarketAsset = "btc" | "eth"`
-* créer un catalogue centralisé des marchés par actif
-* rendre `MarketSlot` asset-aware
-* namespacer `slotKey` en `${asset}:${slotStartTs}`
-* généraliser :
-  * `slot`
-  * `kalshi`
-  * `polymarket`
-  * `market-data`
-  * `signals`
-  * `settlement`
-  * `engine`
-  * résolution market / Coinbase
-* faire tourner `processTick()` sur `["btc", "eth"]`
-* rendre la DB asset-aware
-* rendre l’API asset-aware
-* rendre l’UI asset-aware avec :
-  * `/` = portfolio global
-  * `/btc` = dashboard BTC
-  * `/eth` = dashboard ETH
-  * `/trades` = global filtrable
-  * `/recovery` = global groupé par actif
+Le thread précédent a planté plusieurs fois à cause de la compaction de contexte Cursor/Codex.  
+Le but de ce document est de reprendre proprement avec un focus sur les guardrails.
 
 ---
 
-## Point crucial
+# 1. État global de l’application
 
-Le précédent assistant indiquait avoir déjà modifié  **environ 34 fichiers** , avec un état annoncé comme :
+## Déploiement VPS
 
-* backend presque en place
-* runtime principal proche de compiler
-* UI opérateur de base en place
-* **dernier gros bloc restant : fixtures/tests**
+Tout est OK :
 
-La dernière trace utile avant le crash disait en substance :
+- git pull OK  
+- npm ci OK  
+- typecheck OK  
+- tests OK  
+- build OK  
+- worker + web OK
 
-* la logique multi-assets semblait tenir
-* les tests / fixtures restaient probablement incomplets
-* le crash est intervenu pendant la phase finale de normalisation des tests
+Routes présentes :
 
-Donc :
+- /api/dashboard  
+- /api/dashboard/[asset]  
+- /api/health  
+- /api/history/current-slot  
+- /api/settings  
+- /api/settings/[asset]  
+- /api/trades  
+- /btc /eth /sol /xrp
 
-## hypothèse de travail
-
-L’implémentation est  **probablement largement faite** , mais  **pas forcément validée** .
-
-Il faut  **vérifier l’état réel du repo avant toute nouvelle modif fonctionnelle** .
-
----
-
-## Fichiers explicitement modifiés selon le thread
-
-La refonte multi-assets a touché au moins :
-
-* `app/api/.../route.ts` (plusieurs routes)
-* `app/.../page.tsx`
-* `layout.tsx`
-* `dashboard-client.tsx`
-* `portfolio-client.tsx`
-* `recovery-client.tsx`
-* `shell.tsx`
-* `trades-client.tsx`
-* `trading-toggle.tsx`
-* `src/lib/btc-resolution.ts`
-* `src/lib/constants.ts`
-* `src/lib/engine.ts`
-* `src/lib/kalshi.ts`
-* `src/lib/market-catalog.ts`
-* `src/lib/market-data.ts`
-* `src/lib/market-resolution.ts`
-* `src/lib/polymarket.ts`
-* `src/lib/postgres-db.ts`
-* `src/lib/recovery.ts`
-* `src/lib/settings-schema.ts`
-* `src/lib/settlement.ts`
-* `src/lib/signals.ts`
-* `src/lib/slot.ts`
-* `src/lib/storage.ts`
-* `src/lib/types.ts`
-* `src/worker/index.ts`
-
-Il y avait aussi des créations de nouvelles pages/composants pour le mode portfolio + dashboards par actif.
+👉 App fonctionnelle
 
 ---
 
-## Ce qu’il faut faire maintenant
+# 2. Problème runtime (worker)
 
-Ne pas repartir de zéro.
-Il faut **capitaliser sur les modifications déjà présentes** et faire un audit structuré.
+## Symptôme
 
-### Étape 1 — Vérifier l’état réel du workspace
+Warning récurrent :
 
-Commencer par :
+MaxListenersExceededWarning sur TLSSocket
 
-```bash
-git status --short
-git diff --stat
-npm run typecheck
-npm test
-npm run build
-```
+## Diagnostic
 
-Objectif :
+- pas de crash
+- mais surcharge réseau
+- accumulation de listeners
 
-* voir si le workspace contient encore les changements multi-assets
-* voir si ça compile
-* voir si les tests cassent
-* identifier si le refactor est “fini mais non validé” ou “encore cassé”
+## Causes probables
 
----
+- polling trop fréquent  
+- resync REST agressif  
+- refresh balances/positions répétés
 
-### Étape 2 — Vérifier les invariants d’architecture
+## Correctifs appliqués
 
-Confirmer dans le code que les points suivants sont bien en place :
+- mutualisation balances (1x par tick)
+- mutualisation positions
+- ralentissement REST
+- REST en fallback uniquement
 
-#### Domaine / types
+## Statut
 
-* `MarketAsset = "btc" | "eth"`
-* catalogue centralisé BTC/ETH
-* `MarketSlot` contient `asset`
-* `slotKey` namespacé en `${asset}:${slotStartTs}`
-
-#### Runtime
-
-* `processTick()` scanne bien BTC + ETH à chaque cycle
-* logique d’exécution/reconcile séparée par actif
-* pas de collision d’état entre BTC et ETH
-
-#### DB / storage
-
-* tables config/state par actif :
-  * `strategy_configs(asset primary key, ...)`
-  * `worker_states(asset primary key, ...)`
-* `asset` ajouté aux tables métier :
-  * `opportunity_snapshots`
-  * `order_intents`
-  * `venue_orders`
-  * `fills`
-  * `positions`
-  * `settlements`
-* `run_events.asset` nullable
-* `venue_balances`, `pnl_snapshots`, `bridge_transfers` restent globaux
-* circuit breakers normalisés :
-  * `global`
-  * `asset:btc`
-  * `asset:eth`
-  * `slot:btc:<slotKey>`
-  * `slot:eth:<slotKey>`
-
-#### API
-
-* `GET /api/dashboard` = résumé global portfolio
-* `GET /api/dashboard/[asset]`
-* `GET /api/history/current-slot?asset=...`
-* `GET /api/settings`
-* `GET/PUT /api/settings/[asset]`
-* `GET /api/trades?asset=btc|eth|all`
-* `GET /api/health` = état global + résumé par actif
-
-#### UI
-
-* `/` = portfolio global
-* `/btc` = dashboard BTC
-* `/eth` = dashboard ETH
-* `/trades` filtrable
-* `/recovery` groupé par actif
-* toggle de trading par actif, pas global
+✔ implémenté  
+❗ à vérifier en prod (logs)
 
 ---
 
-### Étape 3 — Vérifier le comportement de bootstrap / migration
+# 3. UI Portfolio
 
-Contrôler si le code fait bien ceci :
+## Objectif
 
-* ETH initialisé avec la config BTC
-* mais :
-  * `enableTrading=false`
-  * `shadowMode=true`
-* backfill de l’historique BTC avec `asset='btc'`
-* anciennes tables singleton laissées en place si rollback prévu
+UI lisible + sobre
 
-Si ce point n’est pas fini, le compléter.
+## Résultat attendu
 
----
+- encadrés noirs
+- texte blanc
+- couleurs seulement pour :
+  - asset
+  - mode
+  - readiness
+  - WATCH / ELIGIBLE
+- suppression net projeté
+- suppression meilleur brut
+- idle discret
 
-### Étape 4 — Vérifier les tests attendus
+## Statut
 
-Les tests à confirmer ou compléter :
-
-1. BTC et ETH partagent les bornes 15m mais ont :
-   * slotKey distinct
-   * slugs Polymarket distincts
-   * séries Kalshi distinctes
-   * produit Coinbase distinct
-2. découverte ETH correcte sur :
-   * `KXETH15M`
-   * `eth-updown-15m-*`
-3. un tick worker :
-   * scanne BTC et ETH
-   * écrit des snapshots séparés
-   * respecte `enableTrading` / `shadowMode` par actif
-4. migration / backfill :
-   * historique BTC visible avec `asset='btc'`
-   * settings/state lisibles/modifiables par actif
-5. UI/API :
-   * `/`
-   * `/btc`
-   * `/eth`
-   * `/trades?asset=...`
-   * `/api/history/current-slot?asset=...`
-   * toggles settings par actif
+✔ implémenté  
+❗ à vérifier visuellement
 
 ---
 
-## Ce qu’il ne faut PAS faire
-
-* ne pas réécrire toute l’architecture depuis zéro avant d’avoir vérifié l’existant
-* ne pas supposer que le refactor est fini juste parce que beaucoup de fichiers ont changé
-* ne pas supposer non plus qu’il est cassé partout : il est possible qu’il manque seulement les fixtures/tests ou quelques callsites
+# 4. Guardrails (PARTIE CRITIQUE)
 
 ---
 
-## Mission immédiate pour cette nouvelle conversation
+## 4.1 Problème métier
 
-Je veux que tu :
+Mismatch = Kalshi ≠ Polymarket
 
-1. **audites l’implémentation multi-assets déjà présente dans le repo**
-2. **me dises précisément si elle est terminée ou non**
-3. **m’indiques ce qui manque exactement**
-4. **finalises seulement les morceaux manquants**
-5. **me donnes ensuite la procédure de validation et de déploiement**
+Causes :
 
-Commence par :
+- CF Benchmark vs Chainlink  
+- prix open différents  
+- near-zero moves
 
-* lire l’état actuel du code
-* lancer les vérifications (`git diff`, `typecheck`, `test`, `build`)
-* puis me faire un diagnostic structuré :
-  * **fait**
-  * **partiellement fait**
-  * **manquant**
-  * **cassé**
+👉 risque majeur
+
+---
+
+## 4.2 Plan initial
+
+### Layer 1
+
+- alignement direction
+- minimum move threshold
+- spread tracking
+
+### Layer 2
+
+- divergence trigger
+- momentum check
+
+### Layer 3
+
+- position sizing
+
+### Layer 4
+
+- timing entrée tardif
+
+👉 clé = minimum move threshold
+
+---
+
+## 4.3 Implémentation v1
+
+### Ajouts
+
+- mismatchGuardEnabled
+- mismatchGuardMinElapsedSeconds
+- mismatchGuardMaxVenueDisagreementPct
+
+### Champs
+
+- mismatchRisk
+- venueDisagreementPct
+- secondsElapsedInSlot
+
+### Logique
+
+basée sur :
+
+différence de prix entre venues
+
+---
+
+## 4.4 Audit v1
+
+### Problème majeur
+
+❌ ne mesure PAS le vrai mismatch
+
+manque :
+
+- move depuis open
+- direction benchmark
+- filtre near-zero
+
+### Autres problèmes
+
+- incohérence par combo
+- pas visible UI
+- pas de tests
+
+### Verdict
+
+❌ insuffisant  
+✔ heuristique seulement
+
+---
+
+## 4.5 Blocage
+
+Accès benchmarks :
+
+- CF → payant
+- Chainlink → limité
+
+---
+
+## 4.6 Données disponibles
+
+### Kalshi
+
+✔ open target  
+❌ live benchmark
+
+### Polymarket
+
+✔ websocket chainlink  
+❌ priceToBeat fiable
+
+---
+
+## 4.7 Nouvelle stratégie (v2)
+
+Proxy guard basée sur :
+
+- Kalshi open
+- Polymarket chainlink live
+- snapshot open slot
+
+### Objectif
+
+guard slot-level basé sur :
+
+- temps écoulé
+- move réel
+- désaccord venues
+
+---
+
+## 4.8 Implémentation v2 (EN COURS)
+
+### Fichiers touchés
+
+- constants.ts
+- kalshi.ts
+- market-catalog.ts
+- market-data.ts
+- polymarket.ts
+- settings-schema.ts
+- signals.ts
+- types.ts
+
+### Changements
+
+- ajout RTDS
+- snapshot open
+- guard par slot
+- suppression incohérences
+
+---
+
+# 5. État actuel
+
+## Fait
+
+✔ design correct  
+✔ implémentation partielle  
+
+## Probable
+
+⚠ code incomplet  
+⚠ tests non alignés  
+⚠ UI pas branchée  
+
+## Non garanti
+
+- compile OK
+- tests OK
+- affichage OK
+- déploiement OK
+
+---
+
+# 6. Prochaines étapes
+
+## PRIORITÉ
+
+finaliser v2 (ne pas refaire)
+
+### Étapes
+
+1. audit repo
+2. typecheck / test / build
+3. corriger tests
+4. brancher UI
+5. vérifier logique slot-level
+
+---
+
+# 7. Mission Codex
+
+Faire :
+
+1. audit complet
+2. classifier :
+  - fait
+  - partiel
+  - cassé
+3. finaliser uniquement ce qui manque
+4. valider build + tests
+5. produire bilan final
+
+---
+
+# ⚡ TL;DR
+
+- app OK
+- worker amélioré (à vérifier)
+- UI OK
+- guardrails = chantier principal
+
+👉 v1 = insuffisante  
+👉 v2 = en cours mais non finalisée  
+
+👉 priorité = finir v2 proprement

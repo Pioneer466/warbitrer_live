@@ -144,6 +144,10 @@ export type PolymarketQuote = {
     up: string;
     down: string;
   };
+  chainlinkLivePriceUsd: number | null;
+  chainlinkLivePriceCapturedAt: number | null;
+  observedSlotOpenPriceUsd: number | null;
+  observedSlotOpenCapturedAt: number | null;
   feeRateBps: number;
   negRisk: boolean;
 };
@@ -161,6 +165,7 @@ export type KalshiQuote = {
     yes: OutcomeQuote;
     no: OutcomeQuote;
   };
+  targetPriceUsd: number | null;
   resolution: "YES" | "NO" | null;
   feeMultiplier: number;
   feeType: string;
@@ -186,6 +191,12 @@ export type StrategyConfig = {
   maxOpenIntentsPerSlot: number;
   maxVenueExposureUsd: number;
   polyBridgeLowWaterUsdc: number;
+  mismatchGuardEnabled: boolean;
+  mismatchGuardMinElapsedSeconds: number;
+  mismatchGuardMinMoveBps: number;
+  mismatchGuardPhase2StartSeconds: number;
+  mismatchGuardPhase2MinMoveBps: number;
+  mismatchGuardMaxVenueDisagreementPct: number;
 };
 
 export type StrategyConfigMap = AssetScoped<StrategyConfig>;
@@ -243,6 +254,14 @@ export type LiveOpportunity = {
   projectedNetReturn: number | null;
   reasons: string[];
   legs: [OpportunityLeg, OpportunityLeg];
+  mismatchRisk: "low" | "medium" | "high" | null;
+  venueDisagreementPct: number | null;
+  secondsElapsedInSlot: number | null;
+  chainlinkMoveBps: number | null;
+  openDriftBps: number | null;
+  chainlinkLivePriceUsd: number | null;
+  observedSlotOpenPriceUsd: number | null;
+  kalshiTargetPriceUsd: number | null;
 };
 
 export type OpportunitySnapshot = {

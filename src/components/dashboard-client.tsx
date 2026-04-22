@@ -10,7 +10,6 @@ import {
   formatCountdown,
   formatCurrency,
   formatDateTime,
-  formatPercent,
   formatPrice,
 } from "@/lib/format";
 import { isRiskActivePosition } from "@/lib/positions";
@@ -330,7 +329,7 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
           </div>
         </div>
         <StatusBadge tone={opportunity.eligible ? "cyan" : "amber"}>
-          {opportunity.eligible ? "eligible" : "blocked"}
+          {opportunity.eligible ? "eligible" : "watch"}
         </StatusBadge>
       </div>
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -345,9 +344,19 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
           </div>
         ))}
       </div>
-      <div className="mt-4 text-sm text-mist">
-        PnL projeté {opportunity.projectedNetProfitUsd === null ? "--" : formatCurrency(opportunity.projectedNetProfitUsd)}
-        {opportunity.projectedNetReturn === null ? "" : ` · ${formatPercent(opportunity.projectedNetReturn)}`}
+      <div className="mt-4 rounded-[18px] border border-white/6 bg-black/10 px-3 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-[11px] uppercase tracking-[0.16em] text-mist/60">Mismatch proxy</div>
+          <StatusBadge tone={getMismatchRiskTone(opportunity.mismatchRisk)}>
+            {opportunity.mismatchRisk ?? "n/a"}
+          </StatusBadge>
+        </div>
+        <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <CompactMetric label="Désaccord" value={formatMismatchPct(opportunity.venueDisagreementPct)} />
+          <CompactMetric label="Temps slot" value={formatSeconds(opportunity.secondsElapsedInSlot)} />
+          <CompactMetric label="Move Chainlink" value={formatBps(opportunity.chainlinkMoveBps)} />
+          <CompactMetric label="Drift open" value={formatBps(opportunity.openDriftBps)} />
+        </div>
       </div>
       {opportunity.reasons.length > 0 ? (
         <div className="mt-3 rounded-[18px] border border-amber/20 bg-amber/10 px-3 py-3 text-sm text-amber">
@@ -360,6 +369,15 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
           </div>
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function CompactMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-[16px] border border-white/6 bg-white/[0.02] px-3 py-3">
+      <div className="text-[11px] uppercase tracking-[0.14em] text-mist/55">{label}</div>
+      <div className="mt-2 text-sm text-white">{value}</div>
     </div>
   );
 }
@@ -567,6 +585,31 @@ function StatusBadge({
         : "border-rose/20 bg-rose/10 text-rose";
 
   return <span className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.16em] ${toneClass}`}>{children}</span>;
+}
+
+function getMismatchRiskTone(risk: LiveOpportunity["mismatchRisk"]) {
+  if (risk === "high") {
+    return "rose" as const;
+  }
+  if (risk === "medium") {
+    return "amber" as const;
+  }
+  if (risk === "low") {
+    return "cyan" as const;
+  }
+  return "indigo" as const;
+}
+
+function formatMismatchPct(value: number | null) {
+  return value === null ? "--" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatBps(value: number | null) {
+  return value === null ? "--" : `${value.toFixed(1)} bps`;
+}
+
+function formatSeconds(value: number | null) {
+  return value === null ? "--" : `${Math.round(value)}s`;
 }
 
 function formatFeedMeta(feedHealth: VenueFeedHealth | null) {

@@ -6,6 +6,7 @@ export type MarketCatalogEntry = {
   title: string;
   aliases: string[];
   polymarketSlugPrefix: string;
+  polymarketChainlinkSymbol: string;
   kalshiSeriesTicker: string;
   kalshiEventPath: string;
   coinbaseProductId: string;
@@ -18,6 +19,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     title: "Bitcoin Up or Down - 15 minutes",
     aliases: ["bitcoin", "btc"],
     polymarketSlugPrefix: "btc-updown-15m",
+    polymarketChainlinkSymbol: "btc/usd",
     kalshiSeriesTicker: "KXBTC15M",
     kalshiEventPath: "kxbtc15m/bitcoin-price-up-down",
     coinbaseProductId: "BTC-USD",
@@ -28,6 +30,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     title: "ETH Up or Down - 15 minutes",
     aliases: ["ethereum", "eth"],
     polymarketSlugPrefix: "eth-updown-15m",
+    polymarketChainlinkSymbol: "eth/usd",
     kalshiSeriesTicker: "KXETH15M",
     kalshiEventPath: "kxeth15m/eth-15m-price-up-down",
     coinbaseProductId: "ETH-USD",
@@ -38,6 +41,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     title: "Solana Up or Down - 15 minutes",
     aliases: ["solana", "sol"],
     polymarketSlugPrefix: "sol-updown-15m",
+    polymarketChainlinkSymbol: "sol/usd",
     kalshiSeriesTicker: "KXSOL15M",
     kalshiEventPath: "kxsol15m/solana-15-minutes",
     coinbaseProductId: "SOL-USD",
@@ -48,6 +52,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     title: "XRP Up or Down - 15 minutes",
     aliases: ["xrp", "ripple"],
     polymarketSlugPrefix: "xrp-updown-15m",
+    polymarketChainlinkSymbol: "xrp/usd",
     kalshiSeriesTicker: "KXXRP15M",
     kalshiEventPath: "kxxrp15m/xrp-15-minute",
     coinbaseProductId: "XRP-USD",

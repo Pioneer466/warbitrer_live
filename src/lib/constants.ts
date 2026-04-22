@@ -10,6 +10,7 @@ export const POLY_CLOB_BASE = "https://clob.polymarket.com";
 export const POLY_DATA_BASE = "https://data-api.polymarket.com";
 export const POLY_MARKET_WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 export const POLY_USER_WS_BASE = "wss://ws-subscriptions-clob.polymarket.com/ws/user";
+export const POLY_RTDS_WS_BASE = "wss://ws-live-data.polymarket.com";
 export const POLY_BRIDGE_BASE = "https://bridge.polymarket.com";
 export const POLY_CTF_ADDRESS = "0x4D97DCd97eC945f40cF65F87097ACe5EA0476045";
 export const POLY_USDCE_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
@@ -28,6 +29,12 @@ export const DEFAULT_MAX_VENUE_EXPOSURE_USD = 1_000;
 export const DEFAULT_POLY_BRIDGE_LOW_WATER_USDC = 250;
 export const DEFAULT_GROSS_ENTRY_THRESHOLD = 0.93;
 export const DEFAULT_MIN_ORDER_SIZE = 5;
+export const DEFAULT_MISMATCH_GUARD_ENABLED = true;
+export const DEFAULT_MISMATCH_GUARD_MIN_ELAPSED_SECONDS = 60;
+export const DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS = 5;
+export const DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS = 480;
+export const DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS = 10;
+export const DEFAULT_MISMATCH_GUARD_MAX_VENUE_DISAGREEMENT_PCT = 0.12;
 export const POLY_SIGNATURE_TYPES = ["EOA", "POLY_PROXY", "POLY_GNOSIS_SAFE"] as const;
 
 export const DEFAULT_STRATEGY_CONFIG = {
@@ -48,6 +55,12 @@ export const DEFAULT_STRATEGY_CONFIG = {
   maxOpenIntentsPerSlot: DEFAULT_MAX_OPEN_INTENTS_PER_SLOT,
   maxVenueExposureUsd: DEFAULT_MAX_VENUE_EXPOSURE_USD,
   polyBridgeLowWaterUsdc: DEFAULT_POLY_BRIDGE_LOW_WATER_USDC,
+  mismatchGuardEnabled: DEFAULT_MISMATCH_GUARD_ENABLED,
+  mismatchGuardMinElapsedSeconds: DEFAULT_MISMATCH_GUARD_MIN_ELAPSED_SECONDS,
+  mismatchGuardMinMoveBps: DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS,
+  mismatchGuardPhase2StartSeconds: DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS,
+  mismatchGuardPhase2MinMoveBps: DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS,
+  mismatchGuardMaxVenueDisagreementPct: DEFAULT_MISMATCH_GUARD_MAX_VENUE_DISAGREEMENT_PCT,
 } as const;
 
 export const DEFAULT_STRATEGY_CONFIGS: StrategyConfigMap = {

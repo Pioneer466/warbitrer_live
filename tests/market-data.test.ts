@@ -1,4 +1,5 @@
 import * as polymarketLib from "@/lib/polymarket";
+import { MARKET_CATALOG } from "@/lib/market-catalog";
 import { deriveKalshiOutcomeQuotes, extractKalshiLastTradePrices } from "@/lib/kalshi";
 import {
   applyLevelDelta,
@@ -26,6 +27,7 @@ function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  MARKET_CATALOG.btc.polymarketChainlinkSymbol = "btc/usd";
 });
 
 describe("market data helpers", () => {
@@ -245,6 +247,336 @@ describe("market data helpers", () => {
     expect(state.quote.outcomes.up.buyPrice).toBe(0.53);
     expect(state.quote.outcomes.up.sellPrice).toBe(0.52);
     expect(state.quote.outcomes.up.chart.price).toBe(0.53);
+  });
+
+  it("exposes Chainlink RTDS prices in the Polymarket quote and captures the slot open snapshot", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+
+    feed.slotKey = slot.key;
+    feed.slotStartTs = slot.startTs;
+    feed.market = {
+      id: "market-1",
+      question: "BTC up/down 15m",
+      slug: slot.polymarketSlug,
+      startDate: slot.startIso,
+      endDate: slot.endIso,
+      conditionId: "condition-1",
+      closed: false,
+      outcomePrices: '["0.5","0.5"]',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["asset-up","asset-down"]',
+    };
+    feed.tokenIds = {
+      up: "asset-up",
+      down: "asset-down",
+    };
+    feed.books.set("asset-up", {
+      tokenId: "asset-up",
+      bids: new Map([["0.49", 100]]),
+      asks: new Map([["0.51", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.49,
+      bestBidSize: 100,
+      bestAskPrice: 0.51,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 5_000,
+    });
+    feed.books.set("asset-down", {
+      tokenId: "asset-down",
+      bids: new Map([["0.48", 100]]),
+      asks: new Map([["0.52", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.48,
+      bestBidSize: 100,
+      bestAskPrice: 0.52,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 5_000,
+    });
+
+    feed.applyPriceEvent(
+      {
+        payload: {
+          symbol: "btc/usd",
+          value: "100123.45",
+          timestamp: "2026-02-02T02:40:10.000Z",
+        },
+      },
+      slot.startTs + 10_000,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 10_000);
+
+    expect(state.quote.chainlinkLivePriceUsd).toBe(100123.45);
+    expect(state.quote.chainlinkLivePriceCapturedAt).toBe(Date.parse("2026-02-02T02:40:10.000Z"));
+    expect(state.quote.observedSlotOpenPriceUsd).toBe(100123.45);
+    expect(state.quote.observedSlotOpenCapturedAt).toBe(Date.parse("2026-02-02T02:40:10.000Z"));
+  });
+
+  it("only captures the observed slot open price inside the configured open window", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+
+    feed.slotKey = slot.key;
+    feed.slotStartTs = slot.startTs;
+    feed.market = {
+      id: "market-1",
+      question: "BTC up/down 15m",
+      slug: slot.polymarketSlug,
+      startDate: slot.startIso,
+      endDate: slot.endIso,
+      conditionId: "condition-1",
+      closed: false,
+      outcomePrices: '["0.5","0.5"]',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["asset-up","asset-down"]',
+    };
+    feed.tokenIds = {
+      up: "asset-up",
+      down: "asset-down",
+    };
+    feed.books.set("asset-up", {
+      tokenId: "asset-up",
+      bids: new Map([["0.49", 100]]),
+      asks: new Map([["0.51", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.49,
+      bestBidSize: 100,
+      bestAskPrice: 0.51,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 31_000,
+    });
+    feed.books.set("asset-down", {
+      tokenId: "asset-down",
+      bids: new Map([["0.48", 100]]),
+      asks: new Map([["0.52", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.48,
+      bestBidSize: 100,
+      bestAskPrice: 0.52,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 31_000,
+    });
+
+    feed.applyPriceEvent(
+      {
+        payload: {
+          symbol: "btc/usd",
+          value: "100200",
+          timestamp: "2026-02-02T02:40:31.000Z",
+        },
+      },
+      slot.startTs + 31_000,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 31_000);
+
+    expect(state.quote.chainlinkLivePriceUsd).toBe(100200);
+    expect(state.quote.observedSlotOpenPriceUsd).toBeNull();
+    expect(state.quote.observedSlotOpenCapturedAt).toBeNull();
+  });
+
+  it("keeps the captured slot open price closest to the slot boundary", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+
+    feed.slotKey = slot.key;
+    feed.slotStartTs = slot.startTs;
+    feed.market = {
+      id: "market-1",
+      question: "BTC up/down 15m",
+      slug: slot.polymarketSlug,
+      startDate: slot.startIso,
+      endDate: slot.endIso,
+      conditionId: "condition-1",
+      closed: false,
+      outcomePrices: '["0.5","0.5"]',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["asset-up","asset-down"]',
+    };
+    feed.tokenIds = {
+      up: "asset-up",
+      down: "asset-down",
+    };
+    feed.books.set("asset-up", {
+      tokenId: "asset-up",
+      bids: new Map([["0.49", 100]]),
+      asks: new Map([["0.51", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.49,
+      bestBidSize: 100,
+      bestAskPrice: 0.51,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 12_000,
+    });
+    feed.books.set("asset-down", {
+      tokenId: "asset-down",
+      bids: new Map([["0.48", 100]]),
+      asks: new Map([["0.52", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.48,
+      bestBidSize: 100,
+      bestAskPrice: 0.52,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 12_000,
+    });
+
+    feed.applyPriceEvent(
+      {
+        payload: {
+          symbol: "btc/usd",
+          value: "100150",
+          timestamp: "2026-02-02T02:40:12.000Z",
+        },
+      },
+      slot.startTs + 12_000,
+    );
+    feed.applyPriceEvent(
+      {
+        payload: {
+          symbol: "btc/usd",
+          value: "100090",
+          timestamp: "2026-02-02T02:40:04.000Z",
+        },
+      },
+      slot.startTs + 12_500,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 12_500);
+
+    expect(state.quote.observedSlotOpenPriceUsd).toBe(100090);
+    expect(state.quote.observedSlotOpenCapturedAt).toBe(Date.parse("2026-02-02T02:40:04.000Z"));
+  });
+
+  it("matches Chainlink symbols case-insensitively against the market catalog", () => {
+    const slot = buildSlot();
+
+    MARKET_CATALOG.btc.polymarketChainlinkSymbol = "BTC/USD";
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+
+    feed.slotKey = slot.key;
+    feed.slotStartTs = slot.startTs;
+    feed.market = {
+      id: "market-1",
+      question: "BTC up/down 15m",
+      slug: slot.polymarketSlug,
+      startDate: slot.startIso,
+      endDate: slot.endIso,
+      conditionId: "condition-1",
+      closed: false,
+      outcomePrices: '["0.5","0.5"]',
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["asset-up","asset-down"]',
+    };
+    feed.tokenIds = {
+      up: "asset-up",
+      down: "asset-down",
+    };
+    feed.books.set("asset-up", {
+      tokenId: "asset-up",
+      bids: new Map([["0.49", 100]]),
+      asks: new Map([["0.51", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.49,
+      bestBidSize: 100,
+      bestAskPrice: 0.51,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 10_000,
+    });
+    feed.books.set("asset-down", {
+      tokenId: "asset-down",
+      bids: new Map([["0.48", 100]]),
+      asks: new Map([["0.52", 80]]),
+      tickSize: 0.001,
+      minOrderSize: 1,
+      bestBidPrice: 0.48,
+      bestBidSize: 100,
+      bestAskPrice: 0.52,
+      bestAskSize: 80,
+      lastTradePrice: null,
+      lastUpdatedAt: slot.startTs + 10_000,
+    });
+
+    feed.applyPriceEvent(
+      {
+        payload: {
+          symbol: "btc/usd",
+          value: "100123.45",
+          timestamp: "2026-02-02T02:40:10.000Z",
+        },
+      },
+      slot.startTs + 10_000,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 10_000);
+
+    expect(state.quote.chainlinkLivePriceUsd).toBe(100123.45);
+  });
+
+  it("parses the Kalshi floor strike into targetPriceUsd in slot state", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+
+    feed.slotKey = slot.key;
+    feed.series = {
+      ticker: "KXBTC15M",
+      fee_multiplier: 1,
+      fee_type: "quadratic",
+      title: "BTC 15m",
+    };
+    feed.market = {
+      ticker: "KXBTC15M-CURRENT",
+      event_ticker: "KXBTC15M-CURRENT",
+      title: "Current slot",
+      floor_strike: "101234.56",
+      open_time: slot.startIso,
+      close_time: slot.endIso,
+      status: "active",
+      yes_bid_dollars: "0.40",
+      yes_ask_dollars: "0.41",
+      no_bid_dollars: "0.58",
+      no_ask_dollars: "0.59",
+      yes_bid_size_fp: "10",
+      yes_ask_size_fp: "10",
+      no_bid_size_fp: "10",
+      no_ask_size_fp: "10",
+    };
+    feed.orderbook = {
+      yes: new Map([["0.40", 10]]),
+      no: new Map([["0.58", 10]]),
+      seq: 1,
+      lastUpdatedAt: slot.startTs + 5_000,
+    };
+    feed.trades = [];
+    feed.lastRestSyncAt = slot.startTs + 5_000;
+
+    const state = feed.buildState(slot, slot.startTs + 5_000);
+
+    expect(state.quote.targetPriceUsd).toBe(101234.56);
   });
 
   it("keeps the existing Polymarket state when background resync fails", async () => {

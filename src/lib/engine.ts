@@ -230,6 +230,7 @@ export function createExecutionCoordinator(
       const opportunities = buildSignals({
         slotKey: slot.key,
         now,
+        slotStartTs: slot.startTs,
         polymarket,
         kalshi,
         settings,

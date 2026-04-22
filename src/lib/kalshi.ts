@@ -31,6 +31,7 @@ export type KalshiMarketSummary = {
   event_ticker: string;
   title: string;
   updated_time?: string;
+  floor_strike?: string | number;
   open_time: string;
   close_time: string;
   status: string;
@@ -216,6 +217,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     stalenessMs: 0,
     source: "rest-bootstrap",
     outcomes: derived,
+    targetPriceUsd: parseNumeric(freshMarket.floor_strike),
     feeMultiplier: series.series.fee_multiplier,
     feeType: series.series.fee_type,
     lastTradeYesPrice,
@@ -845,6 +847,7 @@ function createUnavailableKalshiQuote(
       yes: emptyOutcome("YES", "unavailable", null),
       no: emptyOutcome("NO", "unavailable", null),
     },
+    targetPriceUsd: null,
     feeMultiplier: series.fee_multiplier,
     feeType: series.fee_type,
     lastTradeYesPrice: null,
@@ -867,15 +870,18 @@ function getBestLevel(levels: Array<[string, string]>) {
 }
 
 function parseMarketPrice(value: string | undefined) {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return parseNumeric(value);
 }
 
 function parseMarketSize(value: string | undefined) {
+  return parseNumeric(value);
+}
+
+function parseNumeric(value: string | number | undefined) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+
   if (!value) {
     return null;
   }

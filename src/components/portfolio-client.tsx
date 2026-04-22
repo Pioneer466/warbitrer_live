@@ -3,7 +3,7 @@
 import Link from "next/link";
 
 import { usePollingJson } from "@/components/use-polling-json";
-import { formatCountdown, formatCurrency, formatPrice } from "@/lib/format";
+import { formatCountdown, formatCurrency } from "@/lib/format";
 import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus } from "@/lib/types";
 
 type Tone = "default" | "cyan" | "amber" | "rose" | "emerald" | "indigo";
@@ -143,7 +143,7 @@ export function PortfolioClient() {
                         {best.eligible ? "eligible" : "watch"}
                       </StatusPill>
                     </div>
-                    <div className={theme.text}>brut {formatPrice(best.grossCost, 3)}</div>
+                    <div className={theme.text}>signal prêt pour revue du slot</div>
                   </div>
                 ) : (
                   "Aucune opportunité calculée pour ce créneau."

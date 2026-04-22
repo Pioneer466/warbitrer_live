@@ -147,6 +147,10 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
       up: upTokenId,
       down: downTokenId,
     },
+    chainlinkLivePriceUsd: null,
+    chainlinkLivePriceCapturedAt: null,
+    observedSlotOpenPriceUsd: null,
+    observedSlotOpenCapturedAt: null,
     feeRateBps: 0,
     negRisk: false,
   };
@@ -195,6 +199,10 @@ export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityR
       up: "",
       down: "",
     },
+    chainlinkLivePriceUsd: null,
+    chainlinkLivePriceCapturedAt: null,
+    observedSlotOpenPriceUsd: null,
+    observedSlotOpenCapturedAt: null,
     feeRateBps: 0,
     negRisk: false,
   };

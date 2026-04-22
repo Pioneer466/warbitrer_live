@@ -25,6 +25,14 @@ const opportunity: LiveOpportunity = {
   projectedNetProfitUsd: 4.2,
   projectedNetReturn: 0.08,
   reasons: [],
+  mismatchRisk: "low",
+  venueDisagreementPct: 0.07,
+  secondsElapsedInSlot: 60,
+  chainlinkMoveBps: 9,
+  openDriftBps: 1,
+  chainlinkLivePriceUsd: 100100,
+  observedSlotOpenPriceUsd: 100000,
+  kalshiTargetPriceUsd: 100010,
   legs: [
     {
       venue: "polymarket",

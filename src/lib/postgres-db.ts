@@ -476,6 +476,17 @@ async function bootstrapDatabase(pool: Pool) {
       );
     }
 
+    await pool.query(
+      `
+      UPDATE strategy_configs
+      SET
+        payload = jsonb_set(payload, '{mismatchGuardEnabled}', 'true'::jsonb, true),
+        updated_at = $1
+      WHERE NOT (payload ? 'mismatchGuardEnabled')
+    `,
+      [now],
+    );
+
     const legacyWorkerState = await pool.query<{
       phase: WorkerState["phase"];
       current_slot_key: string | null;

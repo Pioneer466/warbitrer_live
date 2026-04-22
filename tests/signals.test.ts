@@ -32,6 +32,12 @@ const settings: StrategyConfig = {
   maxOpenIntentsPerSlot: 1,
   maxVenueExposureUsd: 1_000,
   polyBridgeLowWaterUsdc: 100,
+  mismatchGuardEnabled: false,
+  mismatchGuardMinElapsedSeconds: 60,
+  mismatchGuardMinMoveBps: 5,
+  mismatchGuardPhase2StartSeconds: 480,
+  mismatchGuardPhase2MinMoveBps: 10,
+  mismatchGuardMaxVenueDisagreementPct: 0.12,
 };
 
 const balances: VenueBalance[] = [
@@ -147,6 +153,10 @@ const polymarket: PolymarketQuote = {
     up: "up-token",
     down: "down-token",
   },
+  chainlinkLivePriceUsd: 100100,
+  chainlinkLivePriceCapturedAt: 1774899060000,
+  observedSlotOpenPriceUsd: 100000,
+  observedSlotOpenCapturedAt: 1774899005000,
   feeRateBps: 10,
   negRisk: false,
 };
@@ -230,12 +240,26 @@ const kalshi: KalshiQuote = {
       },
     },
   },
+  targetPriceUsd: 100010,
   feeMultiplier: 1,
   feeType: "quadratic",
   lastTradeYesPrice: 0.35,
   lastTradeNoPrice: 0.65,
   resolution: null,
 };
+
+function buildV3Settings(overrides: Partial<StrategyConfig> = {}): StrategyConfig {
+  return {
+    ...settings,
+    mismatchGuardEnabled: true,
+    entryCutoffSeconds: 180,
+    mismatchGuardMinElapsedSeconds: 60,
+    mismatchGuardMinMoveBps: 5,
+    mismatchGuardPhase2StartSeconds: 480,
+    mismatchGuardPhase2MinMoveBps: 10,
+    ...overrides,
+  };
+}
 
 describe("live signal engine", () => {
   it("marks the sub-threshold pair as eligible and chooses a primary venue", () => {
@@ -447,5 +471,397 @@ describe("live signal engine", () => {
 
     expect(signal.eligible).toBe(false);
     expect(signal.reasons).toContain("Feed Polymarket stale");
+  });
+
+  it("shares the same slot-level mismatch metrics across both opportunities", () => {
+    const [first, second] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100120,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100015,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(first.mismatchRisk).toBe("low");
+    expect(second.mismatchRisk).toBe("low");
+    expect(second.venueDisagreementPct).toBe(first.venueDisagreementPct);
+    expect(second.secondsElapsedInSlot).toBe(first.secondsElapsedInSlot);
+    expect(second.chainlinkMoveBps).toBe(first.chainlinkMoveBps);
+    expect(second.openDriftBps).toBe(first.openDriftBps);
+    expect(second.chainlinkLivePriceUsd).toBe(first.chainlinkLivePriceUsd);
+    expect(second.observedSlotOpenPriceUsd).toBe(first.observedSlotOpenPriceUsd);
+    expect(second.kalshiTargetPriceUsd).toBe(first.kalshiTargetPriceUsd);
+  });
+
+  it("marks mismatch risk high when the slot is too recent", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899030000,
+      slotStartTs: 1774899000000,
+      polymarket,
+      kalshi,
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons.join(" | ")).toContain("créneau trop récent");
+  });
+
+  it("marks mismatch risk high when the Chainlink move is too small", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100040,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100010,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.chainlinkMoveBps).toBe(4);
+    expect(signal.reasons.join(" | ")).toContain("mouvement Chainlink trop faible");
+  });
+
+  it("marks mismatch risk high when open drift dominates the live move", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100110,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100120,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.chainlinkMoveBps).toBe(11);
+    expect(signal.openDriftBps).toBeCloseTo(11.9856, 4);
+    expect(signal.reasons.join(" | ")).toContain("écart d'ouverture dominant");
+  });
+
+  it("marks mismatch risk high when venue disagreement is too wide", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket,
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          yes: {
+            ...kalshi.outcomes.yes,
+            buyPrice: 0.24,
+            sellPrice: 0.23,
+            midPrice: 0.235,
+            bestBid: 0.23,
+            bestAsk: 0.24,
+            execution: {
+              ...kalshi.outcomes.yes.execution,
+              buyPrice: 0.24,
+              sellPrice: 0.23,
+              midPrice: 0.235,
+              bestBid: 0.23,
+              bestAsk: 0.24,
+            },
+            chart: {
+              ...kalshi.outcomes.yes.chart,
+              price: 0.24,
+            },
+          },
+        },
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.venueDisagreementPct).toBe(0.18);
+    expect(signal.reasons.join(" | ")).toContain("désaccord venues élevé");
+  });
+
+  it("marks mismatch risk medium on borderline proxy conditions without blocking the entry", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100065,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100014,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.eligible).toBe(true);
+    expect(signal.reasons).toEqual([]);
+  });
+
+  it("blocks when the Chainlink live reference is missing", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: null,
+        chainlinkLivePriceCapturedAt: null,
+      },
+      kalshi,
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.chainlinkMoveBps).toBeNull();
+    expect(signal.reasons.join(" | ")).toContain("données de référence indisponibles");
+  });
+
+  it("blocks when the observed slot open snapshot is missing", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        observedSlotOpenPriceUsd: null,
+        observedSlotOpenCapturedAt: null,
+      },
+      kalshi,
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.chainlinkMoveBps).toBeNull();
+    expect(signal.openDriftBps).toBeNull();
+    expect(signal.reasons.join(" | ")).toContain("données de référence indisponibles");
+  });
+
+  it("blocks before 60s and switches into the standard guard window at 60s", () => {
+    const [tooEarly] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899059000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100050,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    const [standardWindow] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100050,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(tooEarly.mismatchRisk).toBe("high");
+    expect(tooEarly.eligible).toBe(false);
+    expect(tooEarly.reasons.join(" | ")).toContain("créneau trop récent");
+    expect(standardWindow.mismatchRisk).toBe("medium");
+    expect(standardWindow.eligible).toBe(true);
+    expect(standardWindow.reasons).toEqual([]);
+  });
+
+  it("keeps the standard threshold before phase 2 starts", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899479000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100070,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.secondsElapsedInSlot).toBe(479);
+    expect(signal.chainlinkMoveBps).toBe(7);
+    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.eligible).toBe(true);
+  });
+
+  it("switches to the stricter late threshold at 480s", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899480000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100070,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.secondsElapsedInSlot).toBe(480);
+    expect(signal.chainlinkMoveBps).toBe(7);
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons.join(" | ")).toContain("fenêtre tardive");
+    expect(signal.reasons.join(" | ")).toContain("10.00 bps");
+  });
+
+  it("keeps the stricter late threshold active until the cutoff window", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899719000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100070,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.secondsElapsedInSlot).toBe(719);
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons.join(" | ")).toContain("10.00 bps");
+  });
+
+  it("blocks at 720s because the entry cutoff window starts", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899720000,
+      slotStartTs: 1774899000000,
+      secondsRemaining: 180,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100250,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.secondsElapsedInSlot).toBe(720);
+    expect(signal.mismatchRisk).toBe("low");
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Entrée bloquée sur les 180 dernières secondes");
+  });
+
+  it("allows a 7 bps move mid-slot but blocks the same move in the late window", () => {
+    const [midSlot] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899300000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100070,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    const [lateSlot] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899600000,
+      slotStartTs: 1774899000000,
+      polymarket: {
+        ...polymarket,
+        chainlinkLivePriceUsd: 100070,
+      },
+      kalshi: {
+        ...kalshi,
+        targetPriceUsd: 100005,
+      },
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(midSlot.secondsElapsedInSlot).toBe(300);
+    expect(midSlot.mismatchRisk).toBe("medium");
+    expect(midSlot.eligible).toBe(true);
+    expect(lateSlot.secondsElapsedInSlot).toBe(600);
+    expect(lateSlot.mismatchRisk).toBe("high");
+    expect(lateSlot.eligible).toBe(false);
+    expect(lateSlot.reasons.join(" | ")).toContain("10.00 bps");
   });
 });

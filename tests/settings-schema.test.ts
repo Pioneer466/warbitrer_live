@@ -9,6 +9,10 @@ describe("settings schema", () => {
     expect(settings.hedgeRetryAttempts).toBe(3);
     expect(settings.hedgeRetryDelayMs).toBe(350);
     expect(settings.entryCutoffSeconds).toBe(180);
+    expect(settings.mismatchGuardEnabled).toBe(true);
+    expect(settings.mismatchGuardMinMoveBps).toBe(5);
+    expect(settings.mismatchGuardPhase2StartSeconds).toBe(480);
+    expect(settings.mismatchGuardPhase2MinMoveBps).toBe(10);
   });
 
   it("accepts explicit execution buffer overrides", () => {
@@ -52,6 +56,33 @@ describe("settings schema", () => {
     });
 
     expect(settings.entryCutoffSeconds).toBe(300);
+  });
+
+  it("rejects a phase 2 start before the minimum elapsed window", () => {
+    expect(() =>
+      normalizeSettings({
+        mismatchGuardMinElapsedSeconds: 60,
+        mismatchGuardPhase2StartSeconds: 59,
+      }),
+    ).toThrow(/Phase 2 mismatch guard must start after the minimum elapsed guard window/);
+  });
+
+  it("rejects a phase 2 move threshold below the standard threshold", () => {
+    expect(() =>
+      normalizeSettings({
+        mismatchGuardMinMoveBps: 5,
+        mismatchGuardPhase2MinMoveBps: 4,
+      }),
+    ).toThrow(/Phase 2 mismatch guard move threshold must be >= the standard threshold/);
+  });
+
+  it("rejects a phase 2 start inside the entry cutoff window", () => {
+    expect(() =>
+      normalizeSettings({
+        entryCutoffSeconds: 180,
+        mismatchGuardPhase2StartSeconds: 720,
+      }),
+    ).toThrow(/Phase 2 mismatch guard must start before the entry cutoff window/);
   });
 
   it("normalizes a four-asset settings map with SOL and XRP shadow defaults", () => {

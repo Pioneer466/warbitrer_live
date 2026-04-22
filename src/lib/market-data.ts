@@ -2,6 +2,7 @@ import WebSocket from "ws";
 
 import {
   POLY_MARKET_WS_BASE,
+  POLY_RTDS_WS_BASE,
   POLY_USER_WS_BASE,
 } from "@/lib/constants";
 import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
@@ -49,6 +50,10 @@ const FEED_HEALTHY_REVALIDATE_MS = 60_000;
 const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
 const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
+const POLYMARKET_RTDS_HEARTBEAT_MS = 5_000;
+// Capture the best slot-open proxy during the first 30s, then wait longer before entry
+// so the mismatch guard evaluates against a settled reference instead of the boundary tick.
+const SLOT_OPEN_CAPTURE_WINDOW_MS = 30_000;
 const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 10_000;
 
@@ -233,28 +238,40 @@ function nextReconnectDelay(attempt: number) {
 
 class PolymarketRealtimeFeed {
   private slotKey: string | null = null;
+  private slotStartTs: number | null = null;
   private market: PolymarketMarketRecord | null = null;
   private tokenIds: { up: string; down: string } | null = null;
   private books = new Map<string, PolymarketBookState>();
   private ws: WebSocket | null = null;
   private userWs: WebSocket | null = null;
+  private priceWs: WebSocket | null = null;
   private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private userWsHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private priceWsHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private priceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private bootstrapPromise: Promise<void> | null = null;
   private resyncPromise: Promise<void> | null = null;
   private lastRestSyncAt: number | null = null;
   private lastWsMessageAt: number | null = null;
   private lastUserMessageAt: number | null = null;
+  private lastPriceMessageAt: number | null = null;
   private lastError: string | null = null;
+  private lastChainlinkError: string | null = null;
+  private chainlinkLivePriceUsd: number | null = null;
+  private chainlinkLivePriceCapturedAt: number | null = null;
+  private observedSlotOpenPriceUsd: number | null = null;
+  private observedSlotOpenCapturedAt: number | null = null;
   private reconnectAttempt = 0;
+  private priceReconnectAttempt = 0;
   private userReconnectAttempt = 0;
-  private subscriptions = emptySubscriptions(["market", "user"], "rest-bootstrap");
+  private subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     if (this.slotKey !== slot.key) {
       await this.reset();
       this.slotKey = slot.key;
     }
+    this.slotStartTs = slot.startTs;
 
     if (!this.market || !this.tokenIds) {
       await this.bootstrap(slot, now);
@@ -301,6 +318,9 @@ class PolymarketRealtimeFeed {
       details: [
         this.lastError ?? "Feed Polymarket actif",
         this.lastUserMessageAt ? "user channel connecte" : "user channel en fallback REST",
+        this.chainlinkLivePriceUsd === null
+          ? this.lastChainlinkError ?? "flux Chainlink live indisponible"
+          : `Chainlink live ${this.chainlinkLivePriceUsd.toFixed(4)} USD`,
       ],
       subscriptions: this.subscriptions,
     });
@@ -353,6 +373,10 @@ class PolymarketRealtimeFeed {
       },
       resolution: extractPolymarketResolution(this.market.outcomePrices),
       tokenIds: this.tokenIds,
+      chainlinkLivePriceUsd: this.chainlinkLivePriceUsd,
+      chainlinkLivePriceCapturedAt: this.chainlinkLivePriceCapturedAt,
+      observedSlotOpenPriceUsd: this.observedSlotOpenPriceUsd,
+      observedSlotOpenCapturedAt: this.observedSlotOpenCapturedAt,
       feeRateBps: 0,
       negRisk: false,
     };
@@ -430,11 +454,16 @@ class PolymarketRealtimeFeed {
   }
 
   private ensureWs(now: number) {
-    if (!this.tokenIds || this.ws) {
+    if (!this.tokenIds) {
       return;
     }
 
-    this.connectMarketWs(now);
+    if (!this.ws) {
+      this.connectMarketWs(now);
+    }
+    if (!this.priceWs) {
+      this.connectPriceWs();
+    }
     if (hasPolymarketCredentials()) {
       this.connectUserWs(now);
     }
@@ -528,6 +557,100 @@ class PolymarketRealtimeFeed {
           this.connectMarketWs(Date.now());
         }
       }, delay);
+    });
+  }
+
+  private connectPriceWs() {
+    const chainlinkSymbol = getMarketCatalogEntry(this.marketAsset()).polymarketChainlinkSymbol;
+    this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+      status: "connecting",
+      source: "ws",
+      details: `connexion flux Chainlink ${chainlinkSymbol}`,
+    });
+
+    const ws = new WebSocket(POLY_RTDS_WS_BASE);
+    this.priceWs = ws;
+
+    ws.on("open", () => {
+      this.clearPriceReconnectTimer();
+      this.priceReconnectAttempt = 0;
+      this.startPriceHeartbeat(ws);
+      this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+        status: "subscribed",
+        source: "ws",
+        details: `flux Chainlink ${chainlinkSymbol} actif`,
+      });
+      ws.send(
+        JSON.stringify({
+          action: "subscribe",
+          subscriptions: [
+            {
+              topic: "crypto_prices_chainlink",
+              type: "*",
+              filters: JSON.stringify({ symbol: chainlinkSymbol }),
+            },
+          ],
+        }),
+      );
+    });
+
+    ws.on("message", (buffer: Buffer) => {
+      const raw = buffer.toString();
+      const nowTs = Date.now();
+      if (raw === "PONG") {
+        this.lastPriceMessageAt = nowTs;
+        this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+          status: "subscribed",
+          source: "ws",
+          lastMessageAt: nowTs,
+          details: `flux Chainlink ${chainlinkSymbol} actif`,
+        });
+        return;
+      }
+
+      const payload = safeJsonParse(raw);
+      if (!payload) {
+        return;
+      }
+
+      const events = Array.isArray(payload) ? payload : [payload];
+      for (const event of events) {
+        this.applyPriceEvent(event, nowTs);
+      }
+    });
+
+    ws.on("error", (error: unknown) => {
+      this.stopPriceHeartbeat();
+      this.lastChainlinkError = error instanceof Error ? error.message : "Polymarket RTDS Chainlink error";
+      this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+        status: "error",
+        source: "ws",
+        details: this.lastChainlinkError,
+      });
+      if (this.priceWs === ws) {
+        this.priceWs = null;
+      }
+      try {
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close();
+        }
+      } catch {
+        // Ignore teardown failures while scheduling the reconnect.
+      }
+      this.schedulePriceReconnect();
+    });
+
+    ws.on("close", () => {
+      this.stopPriceHeartbeat();
+      if (this.priceWs === ws) {
+        this.priceWs = null;
+      }
+      this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+        status: "closed",
+        source: this.lastPriceMessageAt === null ? "unavailable" : "ws",
+        details: "flux Chainlink ferme, retry programme",
+      });
+      this.schedulePriceReconnect();
     });
   }
 
@@ -650,6 +773,71 @@ class PolymarketRealtimeFeed {
     }
   }
 
+  private startPriceHeartbeat(ws: WebSocket) {
+    this.stopPriceHeartbeat();
+    this.priceWsHeartbeat = setInterval(() => {
+      if (this.priceWs !== ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      ws.send("PING");
+    }, POLYMARKET_RTDS_HEARTBEAT_MS);
+  }
+
+  private stopPriceHeartbeat() {
+    if (this.priceWsHeartbeat) {
+      clearInterval(this.priceWsHeartbeat);
+      this.priceWsHeartbeat = null;
+    }
+  }
+
+  private clearPriceReconnectTimer() {
+    if (this.priceReconnectTimer) {
+      clearTimeout(this.priceReconnectTimer);
+      this.priceReconnectTimer = null;
+    }
+  }
+
+  private schedulePriceReconnect() {
+    if (this.priceReconnectTimer || !this.slotKey) {
+      return;
+    }
+
+    const delay = nextReconnectDelay(this.priceReconnectAttempt++);
+    this.priceReconnectTimer = setTimeout(() => {
+      this.priceReconnectTimer = null;
+      if (this.slotKey && !this.priceWs) {
+        this.connectPriceWs();
+      }
+    }, delay);
+  }
+
+  private applyPriceEvent(event: any, now: number) {
+    const payload = event?.payload ?? event;
+    const symbol = String(payload?.symbol ?? "").toLowerCase();
+    const expectedSymbol = getMarketCatalogEntry(this.marketAsset()).polymarketChainlinkSymbol.toLowerCase();
+    if (symbol !== expectedSymbol) {
+      return;
+    }
+
+    const price = parseNumeric(payload?.value);
+    if (price === null) {
+      return;
+    }
+
+    const priceTs = parseTimestamp(payload?.timestamp) ?? now;
+    this.chainlinkLivePriceUsd = price;
+    this.chainlinkLivePriceCapturedAt = priceTs;
+    this.lastPriceMessageAt = now;
+    this.lastChainlinkError = null;
+    this.captureObservedSlotOpenPrice(price, priceTs);
+    this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+      status: "subscribed",
+      source: "ws",
+      lastMessageAt: now,
+      details: `Chainlink ${symbol} ${price.toFixed(4)}`,
+    });
+  }
+
   private applyMarketEvent(event: any, now: number) {
     const eventType = String(event.event_type ?? event.type ?? "");
 
@@ -742,23 +930,67 @@ class PolymarketRealtimeFeed {
     }
   }
 
+  private captureObservedSlotOpenPrice(price: number, priceTs: number) {
+    if (this.slotStartTs === null) {
+      return;
+    }
+
+    if (priceTs < this.slotStartTs || priceTs > this.slotStartTs + SLOT_OPEN_CAPTURE_WINDOW_MS) {
+      return;
+    }
+
+    if (this.observedSlotOpenCapturedAt !== null) {
+      const existingDistance = Math.abs(this.observedSlotOpenCapturedAt - this.slotStartTs);
+      const nextDistance = Math.abs(priceTs - this.slotStartTs);
+      if (nextDistance > existingDistance) {
+        return;
+      }
+      if (nextDistance === existingDistance && priceTs >= this.observedSlotOpenCapturedAt) {
+        return;
+      }
+    }
+
+    this.observedSlotOpenPriceUsd = price;
+    this.observedSlotOpenCapturedAt = priceTs;
+  }
+
+  private marketAsset(): MarketAsset {
+    if (!this.slotKey) {
+      return "btc";
+    }
+
+    return this.slotKey.split(":")[0] as MarketAsset;
+  }
+
   private async reset() {
     this.ws?.close();
     this.userWs?.close();
+    this.priceWs?.close();
     this.stopMarketHeartbeat();
     this.stopUserHeartbeat();
+    this.stopPriceHeartbeat();
+    this.clearPriceReconnectTimer();
     this.ws = null;
     this.userWs = null;
+    this.priceWs = null;
+    this.slotStartTs = null;
     this.market = null;
     this.tokenIds = null;
     this.books.clear();
     this.lastRestSyncAt = null;
     this.lastWsMessageAt = null;
     this.lastUserMessageAt = null;
+    this.lastPriceMessageAt = null;
     this.lastError = null;
+    this.lastChainlinkError = null;
+    this.chainlinkLivePriceUsd = null;
+    this.chainlinkLivePriceCapturedAt = null;
+    this.observedSlotOpenPriceUsd = null;
+    this.observedSlotOpenCapturedAt = null;
     this.reconnectAttempt = 0;
+    this.priceReconnectAttempt = 0;
     this.userReconnectAttempt = 0;
-    this.subscriptions = emptySubscriptions(["market", "user"], "rest-bootstrap");
+    this.subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
   }
 }
 
@@ -867,6 +1099,7 @@ class KalshiRealtimeFeed {
       stalenessMs: feedHealth.stalenessMs,
       source: feedHealth.source,
       outcomes: activeQuotes,
+      targetPriceUsd: parseNumeric(this.market.floor_strike),
       feeMultiplier: this.series.fee_multiplier,
       feeType: this.series.fee_type,
       lastTradeYesPrice: tradePrices.yes,
@@ -1447,6 +1680,7 @@ function createBlockedKalshiQuote(
     stalenessMs: null,
     source: "unavailable",
     outcomes,
+    targetPriceUsd: null,
     feeMultiplier: series?.fee_multiplier ?? 0,
     feeType: series?.fee_type ?? "unknown",
     lastTradeYesPrice: null,
