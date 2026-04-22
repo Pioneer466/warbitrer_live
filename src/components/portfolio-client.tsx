@@ -43,7 +43,16 @@ export function PortfolioClient() {
   const liveAssets = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowAssets = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
-  const accountPnlUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
+  const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
+  const drawdownUsd = pnl?.drawdownUsd ?? 0;
+  const showDrawdownHeadline = pnl ? drawdownUsd <= -5 : false;
+  const portfolioHeadlineLabel = showDrawdownHeadline ? "Drawdown" : "Delta Compte";
+  const portfolioHeadlineValue = showDrawdownHeadline ? drawdownUsd : (accountDeltaUsd ?? 0);
+  const portfolioHeadlineMeta = pnl
+    ? showDrawdownHeadline
+      ? `Depuis pic ${formatCurrency(pnl.peakEquityUsd ?? pnl.equityUsd)} · Delta total ${formatCurrency(accountDeltaUsd ?? 0)} · Stratégie ${formatCurrency(strategyPnlUsd ?? 0)}`
+      : `DD ${formatCurrency(drawdownUsd)} · Stratégie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}`
+    : "delta compte";
 
   return (
     <div className="space-y-5">
@@ -77,10 +86,10 @@ export function PortfolioClient() {
             tone="indigo"
           />
           <SummaryCell
-            label="P&L"
-            value={pnl ? formatCurrency(accountPnlUsd ?? 0) : "--"}
-            meta={pnl ? `compte ${formatCurrency(accountPnlUsd ?? 0)} · stratégie ${formatCurrency(strategyPnlUsd ?? 0)}` : "delta compte"}
-            tone={pnl && (accountPnlUsd ?? 0) >= 0 ? "cyan" : "rose"}
+            label={portfolioHeadlineLabel}
+            value={pnl ? formatCurrency(portfolioHeadlineValue) : "--"}
+            meta={portfolioHeadlineMeta}
+            tone={pnl && portfolioHeadlineValue >= 0 ? "cyan" : "rose"}
           />
         </div>
       </section>
@@ -143,7 +152,7 @@ export function PortfolioClient() {
                         {best.eligible ? "eligible" : "watch"}
                       </StatusPill>
                     </div>
-                    <div className={`text-sm ${theme.text}`}>
+                    <div className="text-sm text-white/80">
                       brut live {formatPrice(best.grossCost, 3)} · seuil {formatPrice(asset.config.grossEntryThreshold, 3)}
                     </div>
                   </div>
