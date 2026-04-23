@@ -97,6 +97,7 @@ import type {
   VenueAdapter,
   VenueBalance,
   VenueFeedHealth,
+  Venue,
   VenueOrderRequest,
   WorkerState,
 } from "@/lib/types";
@@ -796,7 +797,17 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   if (isTerminalOrderStatus(primaryResult.status)) {
-    const retried = await retryLegWithinExecutionBuffer(currentIntent, primaryLeg, slot, settings, now, "primary");
+    const primaryRetryPlan = resolvePrimaryRetryPlan(currentIntent.primaryVenue, primaryResult, settings);
+    const retried = await retryLegWithinExecutionBufferWithAttempts(
+      currentIntent,
+      primaryLeg,
+      slot,
+      settings,
+      now,
+      "primary",
+      primaryRetryPlan.attempts,
+      primaryRetryPlan.retryDelayMs,
+    );
     if (retried) {
       currentIntent = retried.intent;
       primaryResult = retried.result;
@@ -1689,6 +1700,24 @@ function deriveEffectiveKalshiRetryOrderPrice(
   maxSlippageBps: number,
 ) {
   return normalizeKalshiOrderPrice(applySlippage(requestedPrice, maxSlippageBps, side), side);
+}
+
+export function resolvePrimaryRetryPlan(
+  primaryVenue: Venue,
+  result: Pick<Awaited<ReturnType<VenueAdapter["placeOrder"]>>, "raw">,
+  settings: Pick<StrategyConfig, "primaryRetryAttempts" | "primaryRetryDelayMs">,
+) {
+  if (primaryVenue === "kalshi" && Boolean(result.raw?.softNoFill)) {
+    return {
+      attempts: Math.max(1, settings.primaryRetryAttempts),
+      retryDelayMs: settings.primaryRetryDelayMs,
+    };
+  }
+
+  return {
+    attempts: 1,
+    retryDelayMs: 0,
+  };
 }
 
 function getRetryPriceLadderTicks(

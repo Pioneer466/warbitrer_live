@@ -27,6 +27,8 @@ export const settingsSchema = z
     maxSlippageBps: z.number().int().min(1).max(2_000),
     immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
     executionPriceBuffer: z.number().nonnegative().max(0.1),
+    primaryRetryAttempts: z.number().int().min(0).max(10),
+    primaryRetryDelayMs: z.number().int().min(0).max(5_000),
     hedgeRetryAttempts: z.number().int().min(0).max(10),
     hedgeRetryDelayMs: z.number().int().min(0).max(5_000),
     entryCutoffSeconds: z.number().int().min(1).max(300),

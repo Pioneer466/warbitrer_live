@@ -26,6 +26,8 @@ const settings: StrategyConfig = {
   maxSlippageBps: 30,
   immediateOrderConfirmationTimeoutMs: 8_000,
   executionPriceBuffer: 0.01,
+  primaryRetryAttempts: 2,
+  primaryRetryDelayMs: 200,
   hedgeRetryAttempts: 3,
   hedgeRetryDelayMs: 350,
   entryCutoffSeconds: 20,

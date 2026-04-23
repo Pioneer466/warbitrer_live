@@ -12,6 +12,7 @@ import {
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  resolvePrimaryRetryPlan,
   shouldManageFeedHealthBreaker,
   shouldKeepHedgeFailureBreakerActive,
   summarizeIntentLegFills,
@@ -515,6 +516,64 @@ describe("feed breaker management", () => {
         },
       }),
     ).toBe(true);
+  });
+});
+
+describe("primary retry plan", () => {
+  it("uses the configured multi-attempt retry plan for Kalshi soft no-fills", () => {
+    expect(
+      resolvePrimaryRetryPlan(
+        "kalshi",
+        {
+          raw: {
+            softNoFill: true,
+          },
+        },
+        {
+          primaryRetryAttempts: 2,
+          primaryRetryDelayMs: 200,
+        },
+      ),
+    ).toEqual({
+      attempts: 2,
+      retryDelayMs: 200,
+    });
+  });
+
+  it("keeps a single immediate retry for non-soft or non-Kalshi failures", () => {
+    expect(
+      resolvePrimaryRetryPlan(
+        "kalshi",
+        {
+          raw: {},
+        },
+        {
+          primaryRetryAttempts: 4,
+          primaryRetryDelayMs: 500,
+        },
+      ),
+    ).toEqual({
+      attempts: 1,
+      retryDelayMs: 0,
+    });
+
+    expect(
+      resolvePrimaryRetryPlan(
+        "polymarket",
+        {
+          raw: {
+            softNoFill: true,
+          },
+        },
+        {
+          primaryRetryAttempts: 4,
+          primaryRetryDelayMs: 500,
+        },
+      ),
+    ).toEqual({
+      attempts: 1,
+      retryDelayMs: 0,
+    });
   });
 });
 

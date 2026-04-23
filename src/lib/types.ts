@@ -185,6 +185,8 @@ export type StrategyConfig = {
   maxSlippageBps: number;
   immediateOrderConfirmationTimeoutMs: number;
   executionPriceBuffer: number;
+  primaryRetryAttempts: number;
+  primaryRetryDelayMs: number;
   hedgeRetryAttempts: number;
   hedgeRetryDelayMs: number;
   entryCutoffSeconds: number;
