@@ -14,7 +14,8 @@ import {
   isRetryablePolymarketInventorySyncError,
   resolvePrimaryRetryPlan,
   shouldManageFeedHealthBreaker,
-  shouldKeepHedgeFailureBreakerActive,
+  shouldKeepPolymarketLegForResolution,
+  shouldKeepSlotExecutionBreakerActive,
   summarizeIntentLegFills,
 } from "@/lib/engine";
 import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, RunEvent } from "@/lib/types";
@@ -171,6 +172,34 @@ describe("primary exit sizing", () => {
   });
 });
 
+describe("post-slot polymarket handling", () => {
+  it("keeps an in-the-money polymarket leg for resolution instead of forcing a market exit", () => {
+    expect(
+      shouldKeepPolymarketLegForResolution(
+        {
+          venue: "polymarket",
+          outcome: "DOWN",
+          filledSize: 10,
+          payoutUsd: null,
+        },
+        "DOWN",
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldKeepPolymarketLegForResolution(
+        {
+          venue: "polymarket",
+          outcome: "DOWN",
+          filledSize: 10,
+          payoutUsd: null,
+        },
+        "UP",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("remaining exposure sizing", () => {
   it("derives the net primary exposure after unwind fills", () => {
     expect(deriveRemainingExposureSize(22.68, 21.67)).toBe(1.01);
@@ -198,6 +227,7 @@ describe("hedge retry repricing", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 30,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
       ),
     ).toMatchObject({
@@ -226,6 +256,7 @@ describe("hedge retry repricing", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 0,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
         3,
       ),
@@ -255,8 +286,39 @@ describe("hedge retry repricing", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 30,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
         2,
+      ),
+    ).toBeNull();
+  });
+
+  it("refuses a Kalshi retry when displayed depth only matches the order size without headroom", () => {
+    const hedgeLeg = {
+      ...buildIntent({
+        primaryVenue: "polymarket",
+        hedgeVenue: "kalshi",
+      }).legs[1],
+      requestedPrice: 0.5,
+      requestedSize: 20,
+      requestedNotionalUsd: 10,
+    };
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.5,
+          depth: 20,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
+        },
       ),
     ).toBeNull();
   });
@@ -282,6 +344,7 @@ describe("hedge retry repricing", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 30,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
       ),
     ).toMatchObject({
@@ -315,6 +378,7 @@ describe("hedge retry repricing", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 30,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
         3,
       ),
@@ -347,6 +411,7 @@ describe("kalshi hedge safety guards", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 0,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
         3,
       ),
@@ -365,6 +430,7 @@ describe("kalshi hedge safety guards", () => {
           maxLegPrice: 0.49,
           maxSlippageBps: 30,
           minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
         },
         2,
       ),
@@ -420,7 +486,7 @@ describe("retryable polymarket unwind errors", () => {
   });
 });
 
-describe("hedge failure breakers", () => {
+describe("slot execution breakers", () => {
   it("ignores slot breakers from old slots when evaluating the current slot", () => {
     expect(isBreakerRelevantToSlot({ key: "global" }, "btc", "btc:slot-2")).toBe(true);
     expect(isBreakerRelevantToSlot({ key: "asset:btc" }, "btc", "btc:slot-2")).toBe(true);
@@ -438,8 +504,8 @@ describe("hedge failure breakers", () => {
       },
     };
 
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(true);
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 100, new Set(["btc:slot-2"]), new Set())).toBe(false);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-2"]), new Set())).toBe(false);
   });
 
   it("keeps a global hedge breaker active through its cooldown", () => {
@@ -452,8 +518,8 @@ describe("hedge failure breakers", () => {
       },
     };
 
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 150, new Set(["btc:slot-1"]), new Set())).toBe(true);
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 250, new Set(["btc:slot-1"]), new Set())).toBe(false);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 150, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 250, new Set(["btc:slot-1"]), new Set())).toBe(false);
   });
 
   it("keeps a manual-clear global hedge breaker active until an operator clears it", () => {
@@ -466,7 +532,22 @@ describe("hedge failure breakers", () => {
       },
     };
 
-    expect(shouldKeepHedgeFailureBreakerActive(breaker, 1_000, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 1_000, new Set(["btc:slot-1"]), new Set())).toBe(true);
+  });
+
+  it("keeps a primary no-fill slot breaker active only for the current slot", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "slot:eth:slot-1",
+      active: true,
+      reason: "primary_no_fill",
+      payload: {
+        lockSlot: true,
+        stage: "primary_no_fill_slot_lock",
+      },
+    };
+
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-2"]), new Set())).toBe(false);
   });
 });
 
@@ -499,7 +580,7 @@ describe("feed breaker management", () => {
     expect(
       shouldManageFeedHealthBreaker({
         active: true,
-        reason: "hedge_failure",
+        reason: "primary_no_fill",
         payload: {
           lockSlot: true,
           stage: "primary_no_fill_slot_lock",

@@ -38,6 +38,7 @@ export type CircuitBreakerKey = "global" | `asset:${MarketAsset}` | `slot:${Mark
 export type CircuitBreakerReason =
   | "manual"
   | "hedge_failure"
+  | "primary_no_fill"
   | "readiness_failed"
   | "venue_error"
   | "risk_limit";
@@ -185,6 +186,7 @@ export type StrategyConfig = {
   maxSlippageBps: number;
   immediateOrderConfirmationTimeoutMs: number;
   executionPriceBuffer: number;
+  kalshiDepthHeadroomContracts: number;
   primaryRetryAttempts: number;
   primaryRetryDelayMs: number;
   hedgeRetryAttempts: number;

@@ -2,6 +2,7 @@ import {
   calculateKalshiFee,
   calculatePolymarketFee,
   deriveVenueTargetSize,
+  getVenueExecutableDepth,
   getVenueMinimumOrderSize,
 } from "@/lib/fees";
 import type {
@@ -166,6 +167,11 @@ function buildSignal({
 }): LiveOpportunity {
   const targetLegNotionalUsd = settings.maxPairNotionalUsd / 2;
   const reasons: string[] = [];
+  const effectiveKalshiDepth = getVenueExecutableDepth(
+    "kalshi",
+    kalshiDepth,
+    settings.kalshiDepthHeadroomContracts,
+  );
 
   if (marketAlignmentReason) {
     reasons.push(marketAlignmentReason);
@@ -215,8 +221,12 @@ function buildSignal({
   if (polyDepth !== null && polyUnits > polyDepth) {
     reasons.push("Liquidité Polymarket insuffisante");
   }
-  if (kalshiDepth !== null && kalshiUnits > kalshiDepth) {
-    reasons.push("Liquidité Kalshi insuffisante");
+  if (effectiveKalshiDepth !== null && kalshiUnits > effectiveKalshiDepth + ORDER_SIZE_TOLERANCE) {
+    reasons.push(
+      settings.kalshiDepthHeadroomContracts > 0
+        ? `Liquidité Kalshi insuffisante après headroom (${settings.kalshiDepthHeadroomContracts} contrats)`
+        : "Liquidité Kalshi insuffisante",
+    );
   }
 
   const polyBalance = balances.find((balance) => balance.venue === "polymarket");

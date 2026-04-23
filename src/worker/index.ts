@@ -4,6 +4,7 @@ import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { readSettingsMap, storageMode } from "@/lib/storage";
 
 const WORKER_TICK_TIMEOUT_MS = 90_000;
+const WORKER_FATAL_EXIT_DELAY_MS = 5_000;
 
 async function run() {
   console.log(`[worker] storage=${storageMode()}`);
@@ -26,8 +27,9 @@ async function run() {
   }
 }
 
-run().catch((error) => {
+run().catch(async (error) => {
   console.error("[worker] fatal", error);
+  await sleep(WORKER_FATAL_EXIT_DELAY_MS);
   process.exit(1);
 });
 

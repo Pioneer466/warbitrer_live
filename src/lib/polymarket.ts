@@ -490,7 +490,9 @@ export async function confirmPolymarketOrderExecution(params: {
           result: {
             venue: "polymarket" as const,
             venueOrderId: params.orderId,
-            status: mappedOrder.status,
+            status: shouldTreatPolymarketTerminalOrderAsPending(tradeLifecycle.pendingTrades.length, confirmedTrades.filledSize)
+              ? "pending"
+              : mappedOrder.status,
             filledSize: confirmedTrades.filledSize,
             averageFillPrice: confirmedTrades.averageFillPrice,
             feeUsd: confirmedTrades.feeUsd,
@@ -545,6 +547,10 @@ export function getPolymarketSoftNoFillMessage(error: unknown) {
   }
 
   return null;
+}
+
+export function shouldTreatPolymarketTerminalOrderAsPending(pendingTradeCount: number, confirmedFilledSize: number) {
+  return pendingTradeCount > 0 && confirmedFilledSize <= 0;
 }
 
 async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promise<OutcomeQuote> {

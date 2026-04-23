@@ -7,6 +7,7 @@ import {
   DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS,
+  DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS,
   DEFAULT_STRATEGY_CONFIG,
   DEFAULT_STRATEGY_CONFIGS,
 } from "@/lib/constants";
@@ -27,6 +28,12 @@ export const settingsSchema = z
     maxSlippageBps: z.number().int().min(1).max(2_000),
     immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
     executionPriceBuffer: z.number().nonnegative().max(0.1),
+    kalshiDepthHeadroomContracts: z
+      .number()
+      .int()
+      .nonnegative()
+      .max(1_000)
+      .default(DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS),
     primaryRetryAttempts: z.number().int().min(0).max(10),
     primaryRetryDelayMs: z.number().int().min(0).max(5_000),
     hedgeRetryAttempts: z.number().int().min(0).max(10),

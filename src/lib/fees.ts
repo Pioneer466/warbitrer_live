@@ -75,6 +75,22 @@ export function deriveVenueTargetSize(
   return deriveTargetShares(notionalUsd, price, minOrderSize ?? fallbackMinOrderSize);
 }
 
+export function getVenueExecutableDepth(
+  venue: Venue,
+  displayedDepth: number | null,
+  kalshiDepthHeadroomContracts = 0,
+) {
+  if (displayedDepth === null) {
+    return null;
+  }
+
+  if (venue !== "kalshi") {
+    return displayedDepth;
+  }
+
+  return Math.max(0, displayedDepth - Math.max(0, kalshiDepthHeadroomContracts));
+}
+
 export function getVenueMinimumOrderSize(
   venue: Venue,
   minOrderSize: number | null,

@@ -13,6 +13,7 @@ import {
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
   microUsdcToUsd,
+  shouldTreatPolymarketTerminalOrderAsPending,
   summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
@@ -242,6 +243,12 @@ describe("Polymarket helpers", () => {
     expect(mapped.requestedSize).toBe(62.675);
     expect(mapped.createdAt).toBe(1775513261000);
     expect(mapped.updatedAt).toBe(1775513261000);
+  });
+
+  it("treats terminal orders with only pending trades as still pending", () => {
+    expect(shouldTreatPolymarketTerminalOrderAsPending(1, 0)).toBe(true);
+    expect(shouldTreatPolymarketTerminalOrderAsPending(0, 0)).toBe(false);
+    expect(shouldTreatPolymarketTerminalOrderAsPending(2, 5)).toBe(false);
   });
 
   it("maps numeric polymarket trade timestamps to millisecond fill times", () => {

@@ -6,6 +6,7 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
+    expect(settings.kalshiDepthHeadroomContracts).toBe(2);
     expect(settings.primaryRetryAttempts).toBe(2);
     expect(settings.primaryRetryDelayMs).toBe(200);
     expect(settings.hedgeRetryAttempts).toBe(3);
@@ -30,6 +31,7 @@ describe("settings schema", () => {
       maxSlippageBps: 30,
       immediateOrderConfirmationTimeoutMs: 12000,
       executionPriceBuffer: 0.02,
+      kalshiDepthHeadroomContracts: 3,
       primaryRetryAttempts: 4,
       primaryRetryDelayMs: 250,
       hedgeRetryAttempts: 5,
@@ -42,6 +44,7 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(12000);
     expect(settings.executionPriceBuffer).toBe(0.02);
+    expect(settings.kalshiDepthHeadroomContracts).toBe(3);
     expect(settings.primaryRetryAttempts).toBe(4);
     expect(settings.primaryRetryDelayMs).toBe(250);
     expect(settings.hedgeRetryAttempts).toBe(5);

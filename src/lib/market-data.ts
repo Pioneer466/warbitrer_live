@@ -999,6 +999,7 @@ class KalshiRealtimeFeed {
   private series: Awaited<ReturnType<typeof fetchKalshiSeries>>["series"] | null = null;
   private market: KalshiMarketSummary | null = null;
   private orderbook: KalshiBookState | null = null;
+  private orderbookInSync = true;
   private trades: KalshiTrade[] = [];
   private ws: WebSocket | null = null;
   private bootstrapPromise: Promise<void> | null = null;
@@ -1041,8 +1042,8 @@ class KalshiRealtimeFeed {
       lastMessageAt,
       lastWsMessageAt: this.lastWsMessageAt,
       lastRestSyncAt: this.lastRestSyncAt,
-      dataReady: Boolean(this.market && (this.orderbook || this.market)),
-      details: [this.lastError ?? "Feed Kalshi actif"],
+      dataReady: Boolean(this.market && this.series && this.orderbookInSync),
+      details: [this.lastError ?? (this.orderbookInSync ? "Feed Kalshi actif" : "Resync orderbook Kalshi en cours")],
       subscriptions: this.subscriptions,
     });
 
@@ -1138,6 +1139,7 @@ class KalshiRealtimeFeed {
         this.series = seriesResponse.series;
         this.market = freshMarketResponse.market;
         this.orderbook = orderbook ? createKalshiBookState(orderbook, now) : null;
+        this.orderbookInSync = true;
         this.trades = tradesResponse.trades ?? [];
         this.lastRestSyncAt = now;
         this.lastError = null;
@@ -1173,6 +1175,7 @@ class KalshiRealtimeFeed {
         if (orderbook) {
           this.orderbook = createKalshiBookState(orderbook, now);
         }
+        this.orderbookInSync = true;
         this.trades = tradesResponse.trades ?? this.trades;
         this.lastRestSyncAt = now;
         this.lastError = null;
@@ -1334,6 +1337,7 @@ class KalshiRealtimeFeed {
       const orderbook = normalizeKalshiWsOrderbook(message);
       if (orderbook) {
         this.orderbook = createKalshiBookState(orderbook, now);
+        this.orderbookInSync = true;
       }
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
@@ -1378,6 +1382,7 @@ class KalshiRealtimeFeed {
     const nextSeq = parseNumeric(message.seq);
     if (nextSeq !== null && this.orderbook.seq !== null && nextSeq !== this.orderbook.seq + 1) {
       this.lastError = `Gap sequence Kalshi detecte: attendu ${this.orderbook.seq + 1}, recu ${nextSeq}`;
+      this.orderbookInSync = false;
       void this.resync(now);
       return;
     }
@@ -1393,6 +1398,7 @@ class KalshiRealtimeFeed {
 
     this.orderbook.seq = nextSeq ?? this.orderbook.seq;
     this.orderbook.lastUpdatedAt = now;
+    this.orderbookInSync = true;
   }
 
   private subscribe(ws: WebSocket, channel: string, marketTicker: string) {
@@ -1422,6 +1428,7 @@ class KalshiRealtimeFeed {
     this.series = null;
     this.market = null;
     this.orderbook = null;
+    this.orderbookInSync = true;
     this.trades = [];
     this.lastRestSyncAt = null;
     this.lastWsMessageAt = null;
@@ -1432,7 +1439,7 @@ class KalshiRealtimeFeed {
   }
 
   private isLiveOrderbook(now: number) {
-    if (!this.orderbook) {
+    if (!this.orderbook || !this.orderbookInSync) {
       return false;
     }
 
@@ -1445,7 +1452,7 @@ class KalshiRealtimeFeed {
   }
 
   private hasFreshOrderbook(now: number) {
-    if (!this.orderbook || this.orderbook.lastUpdatedAt === null) {
+    if (!this.orderbook || !this.orderbookInSync || this.orderbook.lastUpdatedAt === null) {
       return false;
     }
 

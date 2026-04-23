@@ -2,6 +2,7 @@ import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
   applySlippage,
   deriveVenueTargetSize,
+  getVenueExecutableDepth,
   getVenueMinimumOrderSize,
 } from "@/lib/fees";
 import {
@@ -1474,6 +1475,21 @@ async function retryLegWithinExecutionBufferWithAttempts(
       attempt,
     );
     if (!retried) {
+      if (lastResult) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: `order.${stage}.retry_aborted`,
+          message: `${stage === "primary" ? "Primary" : "Hedge"} retry ${attempt}/${attempts} skipped because repricing was no longer valid`,
+          payload: {
+            intentId: currentIntent.id,
+            venue: leg.venue,
+            attempt,
+            attempts,
+            reason: "repricing_unavailable",
+          },
+          createdAt: Date.now(),
+        });
+      }
       return lastResult;
     }
 
@@ -1528,13 +1544,18 @@ async function repriceIntentWithinExecutionBuffer(
 
   const updatedLegs = intent.legs.map((leg) => {
     const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
+    const executableDepth = getVenueExecutableDepth(
+      leg.venue,
+      liveLeg.depth,
+      settings.kalshiDepthHeadroomContracts,
+    );
     const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
     const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, liveLeg.price, liveLeg.minOrderSize, fallbackMinOrderSize);
     const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
     if (
       size <= 0 ||
       size + ORDER_SIZE_TOLERANCE < minimumSize ||
-      (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)
+      (executableDepth !== null && size > executableDepth + ORDER_SIZE_TOLERANCE)
     ) {
       return null;
     }
@@ -1577,6 +1598,7 @@ async function repriceSingleHedgeLegWithinExecutionBuffer(
     maxLegPrice: settings.maxLegPrice,
     maxSlippageBps: settings.maxSlippageBps,
     minOrderSize: settings.minOrderSize,
+    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   }, retryAttempt);
 }
 
@@ -1625,7 +1647,10 @@ export function deriveBufferedRetryLeg<
     minOrderSize: number | null;
     tickSize?: number | null;
   },
-  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize">,
+  settings: Pick<
+    StrategyConfig,
+    "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize" | "kalshiDepthHeadroomContracts"
+  >,
   retryAttempt = 1,
 ) {
   if (liveLeg.price === null) {
@@ -1646,13 +1671,18 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
+  const executableDepth = getVenueExecutableDepth(
+    leg.venue,
+    liveLeg.depth,
+    settings.kalshiDepthHeadroomContracts,
+  );
   const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
   const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, requestedPrice, liveLeg.minOrderSize, fallbackMinOrderSize);
   const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
   if (
     size <= 0 ||
     size + ORDER_SIZE_TOLERANCE < minimumSize ||
-    (liveLeg.depth !== null && size > liveLeg.depth + ORDER_SIZE_TOLERANCE)
+    (executableDepth !== null && size > executableDepth + ORDER_SIZE_TOLERANCE)
   ) {
     return null;
   }
@@ -1718,6 +1748,23 @@ export function resolvePrimaryRetryPlan(
     attempts: 1,
     retryDelayMs: 0,
   };
+}
+
+export function shouldKeepPolymarketLegForResolution(
+  leg:
+    | Pick<OrderIntent["legs"][number], "venue" | "outcome" | "filledSize" | "payoutUsd">
+    | null
+    | undefined,
+  resolvedOutcome: "UP" | "DOWN" | null | undefined,
+) {
+  return (
+    leg?.venue === "polymarket" &&
+    leg.filledSize > 0 &&
+    leg.payoutUsd === null &&
+    resolvedOutcome !== null &&
+    resolvedOutcome !== undefined &&
+    leg.outcome === resolvedOutcome
+  );
 }
 
 function getRetryPriceLadderTicks(
@@ -2216,11 +2263,7 @@ async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig
       continue;
     }
 
-    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(
-      intent,
-      settings,
-      now,
-    );
+    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now, polyResolution);
     if (exitAdjustedIntent.status !== "hedged") {
       continue;
     }
@@ -2341,6 +2384,7 @@ async function maybeExitPolymarketLegAtSlotEnd(
   intent: OrderIntent,
   settings: StrategyConfig,
   now: number,
+  resolvedOutcome?: "UP" | "DOWN" | null,
 ) {
   if (intent.shadow) {
     return intent;
@@ -2353,6 +2397,10 @@ async function maybeExitPolymarketLegAtSlotEnd(
     polymarketLeg.payoutUsd !== null ||
     now < intent.slotEndTs + RESOLUTION_GRACE_MS
   ) {
+    return intent;
+  }
+
+  if (shouldKeepPolymarketLegForResolution(polymarketLeg, resolvedOutcome)) {
     return intent;
   }
 
@@ -2909,10 +2957,10 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
   }
 
-  await syncActiveHedgeFailureBreakers(now);
+  await syncActiveSlotExecutionBreakers(now);
 }
 
-async function syncActiveHedgeFailureBreakers(now: number) {
+async function syncActiveSlotExecutionBreakers(now: number) {
   const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
   const unresolvedSlots = new Set(
     openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
@@ -2920,11 +2968,11 @@ async function syncActiveHedgeFailureBreakers(now: number) {
   const currentSlotKeys = new Set(MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
 
   for (const breaker of breakers) {
-    if (shouldKeepHedgeFailureBreakerActive(breaker, now, currentSlotKeys, unresolvedSlots)) {
+    if (shouldKeepSlotExecutionBreakerActive(breaker, now, currentSlotKeys, unresolvedSlots)) {
       continue;
     }
 
-    if (!breaker.active || breaker.reason !== "hedge_failure") {
+    if (!breaker.active || !isSlotExecutionBreakerReason(breaker.reason)) {
       continue;
     }
 
@@ -3207,6 +3255,23 @@ async function confirmImmediateOrderExecution(
       orderType: request.orderType,
       timeoutMs,
     });
+    if (request.orderType === "FOK" && confirmation.result.status === "live") {
+      await polymarketAdapter.cancelOrder(submission.venueOrderId).catch(() => null);
+      const canceledConfirmation = await confirmPolymarketOrderExecution({
+        orderId: submission.venueOrderId,
+        expectedSize: request.size,
+        orderType: request.orderType,
+        timeoutMs: Math.min(1_000, timeoutMs),
+      });
+      return {
+        ...canceledConfirmation.result,
+        raw: {
+          ...(canceledConfirmation.result.raw ?? {}),
+          cancelAttemptedAfterTimeout: true,
+        },
+      };
+    }
+
     return confirmation.result;
   }
 
@@ -3225,6 +3290,17 @@ async function confirmImmediateOrderExecution(
       }
     }
     await sleep(200);
+  }
+
+  if (request.orderType === "FOK" && (latest.status === "live" || latest.status === "pending")) {
+    await kalshiAdapter.cancelOrder(submission.venueOrderId).catch(() => null);
+    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId).catch(() => null);
+    if (liveOrder) {
+      latest = normalizeOrderResultFromLiveOrder(liveOrder, {
+        ...(latest.raw ?? {}),
+        cancelAttemptedAfterTimeout: true,
+      });
+    }
   }
 
   return latest;
@@ -3335,13 +3411,17 @@ export function shouldManageFeedHealthBreaker(
   return !breaker?.active || isFeedHealthBreaker(breaker);
 }
 
-export function shouldKeepHedgeFailureBreakerActive(
+function isSlotExecutionBreakerReason(reason: CircuitBreaker["reason"]): reason is "hedge_failure" | "primary_no_fill" {
+  return reason === "hedge_failure" || reason === "primary_no_fill";
+}
+
+export function shouldKeepSlotExecutionBreakerActive(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
   currentSlotKeys: Set<string>,
   unresolvedSlots: Set<string>,
 ) {
-  if (!breaker.active || breaker.reason !== "hedge_failure") {
+  if (!breaker.active || !isSlotExecutionBreakerReason(breaker.reason)) {
     return false;
   }
 
@@ -3397,7 +3477,10 @@ export function hasKalshiHedgeRetryCapacity(
     minOrderSize: number | null;
     tickSize?: number | null;
   },
-  settings: Pick<StrategyConfig, "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize">,
+  settings: Pick<
+    StrategyConfig,
+    "executionPriceBuffer" | "maxLegPrice" | "maxSlippageBps" | "minOrderSize" | "kalshiDepthHeadroomContracts"
+  >,
   hedgeRetryAttempts: number,
 ) {
   return deriveBufferedRetryLeg(leg, liveLeg, settings, Math.max(1, hedgeRetryAttempts)) !== null;
@@ -3457,6 +3540,7 @@ async function canSafelyLeadWithPolymarket(intent: OrderIntent, slot: MarketSlot
       maxLegPrice: settings.maxLegPrice,
       maxSlippageBps: settings.maxSlippageBps,
       minOrderSize: settings.minOrderSize,
+      kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
     },
     settings.hedgeRetryAttempts,
   );
@@ -3475,7 +3559,7 @@ async function armPrimarySoftNoFillGuard(
   await writeCircuitBreaker({
     key: buildSlotBreakerKey(intent.slotKey),
     active: true,
-    reason: "hedge_failure",
+    reason: "primary_no_fill",
     triggeredAt: now,
     payload: {
       intentId: intent.id,

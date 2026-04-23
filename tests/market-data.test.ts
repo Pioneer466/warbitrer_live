@@ -641,4 +641,59 @@ describe("market data helpers", () => {
     expect(feed.books.get("asset-up")?.bestAskPrice).toBe(0.51);
     expect(feed.lastError).toContain("HTTP 502 on Polymarket book");
   });
+
+  it("blocks Kalshi feed readiness during an orderbook seq-gap resync", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+
+    feed.slotKey = slot.key;
+    feed.series = {
+      ticker: "KXBTC15M",
+      fee_multiplier: 1,
+      fee_type: "quadratic",
+      title: "BTC 15m",
+    };
+    feed.market = {
+      ticker: "KXBTC15M-CURRENT",
+      event_ticker: "KXBTC15M-CURRENT",
+      title: "Current slot",
+      floor_strike: "101234.56",
+      open_time: slot.startIso,
+      close_time: slot.endIso,
+      status: "active",
+      yes_bid_dollars: "0.40",
+      yes_ask_dollars: "0.41",
+      no_bid_dollars: "0.58",
+      no_ask_dollars: "0.59",
+      yes_bid_size_fp: "10",
+      yes_ask_size_fp: "10",
+      no_bid_size_fp: "10",
+      no_ask_size_fp: "10",
+    };
+    feed.orderbook = {
+      yes: new Map([["0.40", 10]]),
+      no: new Map([["0.58", 10]]),
+      seq: 1,
+      lastUpdatedAt: slot.startTs + 5_000,
+    };
+    feed.lastRestSyncAt = slot.startTs + 5_000;
+    feed.resync = vi.fn(() => new Promise(() => {}));
+
+    feed.applyKalshiDelta(
+      {
+        seq: 3,
+        side: "yes",
+        price_dollars: "0.40",
+        delta_fp: "1",
+      },
+      slot.startTs + 6_000,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 6_000);
+
+    expect(state.quote.feedHealth.feedStatus).toBe("blocked");
+    expect(state.quote.feedHealth.details[0]).toContain("Gap sequence Kalshi");
+  });
 });
