@@ -1,15 +1,18 @@
 import {
   buildVenueOrderRequest,
   countRecentKalshiSoftHedgeNoFillEvents,
+  countRecentKalshiSoftPrimaryNoFillEvents,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   hasKalshiHedgeRetryCapacity,
+  isFeedHealthBreaker,
   isBreakerRelevantToSlot,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  shouldManageFeedHealthBreaker,
   shouldKeepHedgeFailureBreakerActive,
   summarizeIntentLegFills,
 } from "@/lib/engine";
@@ -466,6 +469,55 @@ describe("hedge failure breakers", () => {
   });
 });
 
+describe("feed breaker management", () => {
+  it("recognizes feed-health slot breakers from their payload shape", () => {
+    expect(
+      isFeedHealthBreaker({
+        reason: "venue_error",
+        payload: {
+          feeds: [
+            {
+              venue: "kalshi",
+            },
+          ],
+        },
+      }),
+    ).toBe(true);
+
+    expect(
+      isFeedHealthBreaker({
+        reason: "hedge_failure",
+        payload: {
+          lockSlot: true,
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it("does not let feed sync overwrite an active execution slot lock", () => {
+    expect(
+      shouldManageFeedHealthBreaker({
+        active: true,
+        reason: "hedge_failure",
+        payload: {
+          lockSlot: true,
+          stage: "primary_no_fill_slot_lock",
+        },
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldManageFeedHealthBreaker({
+        active: true,
+        reason: "venue_error",
+        payload: {
+          feeds: [],
+        },
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("kalshi soft no-fill escalation", () => {
   it("counts only recent Kalshi soft hedge no-fills toward the global breaker threshold", () => {
     const events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[] = [
@@ -531,6 +583,49 @@ describe("kalshi soft no-fill escalation", () => {
     ];
 
     expect(countRecentKalshiSoftHedgeNoFillEvents(events, 2_500, 2_000)).toBe(0);
+  });
+
+  it("counts only recent Kalshi soft primary no-fills toward the primary slot lock telemetry", () => {
+    const events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[] = [
+      {
+        createdAt: 1_000,
+        eventType: "order.primary.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: true,
+          slotKey: "slot-1",
+        },
+      },
+      {
+        createdAt: 2_000,
+        eventType: "order.primary.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: true,
+          slotKey: "slot-2",
+        },
+      },
+      {
+        createdAt: 2_100,
+        eventType: "order.primary.no_fill",
+        payload: {
+          venue: "polymarket",
+          softNoFill: true,
+          slotKey: "slot-3",
+        },
+      },
+      {
+        createdAt: 2_200,
+        eventType: "order.primary.no_fill",
+        payload: {
+          venue: "kalshi",
+          softNoFill: false,
+          slotKey: "slot-4",
+        },
+      },
+    ];
+
+    expect(countRecentKalshiSoftPrimaryNoFillEvents(events, 2_500, 2_000)).toBe(2);
   });
 });
 

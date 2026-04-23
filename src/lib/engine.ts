@@ -624,20 +624,16 @@ async function computeReadiness(
 async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
   const key = buildSlotBreakerKey(slot.key);
   const breakers = await readCircuitBreakers();
+  const currentBreaker = breakers.find((breaker) => breaker.key === key) ?? null;
   for (const breaker of breakers) {
     const breakerAsset = getBreakerAsset(breaker.key);
-    const isFeedHealthBreaker =
-      breaker.reason === "venue_error" &&
-      breaker.payload !== null &&
-      typeof breaker.payload === "object" &&
-      Array.isArray((breaker.payload as { feeds?: unknown }).feeds);
 
     if (
       breaker.active &&
       breaker.key.startsWith("slot:") &&
       breaker.key !== key &&
       breakerAsset === slot.asset &&
-      isFeedHealthBreaker
+      isFeedHealthBreaker(breaker)
     ) {
       await writeCircuitBreaker({
         key: breaker.key,
@@ -651,6 +647,9 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
   const blockedFeeds = feedHealth.filter((feed) => feed.feedStatus === "blocked");
 
   if (blockedFeeds.length === 0) {
+    if (!shouldManageFeedHealthBreaker(currentBreaker)) {
+      return;
+    }
     await writeCircuitBreaker({
       key,
       active: false,
@@ -658,6 +657,10 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
       triggeredAt: null,
       payload: null,
     });
+    return;
+  }
+
+  if (!shouldManageFeedHealthBreaker(currentBreaker)) {
     return;
   }
 
@@ -859,16 +862,19 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         },
       });
     } else {
+      await armPrimarySoftNoFillGuard(currentIntent, primaryOrder, primaryResult, now);
       await writeRunEvent({
         level: "warn",
-        eventType: "intent.failed.primary_no_fill",
+        eventType: "order.primary.no_fill",
         message: `Intent ${currentIntent.id} closed after primary order was killed without fill`,
         payload: {
           intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
           venue: currentIntent.primaryVenue,
           orderId: primaryOrder.venueOrderId,
           orderStatus: primaryResult.status,
           detail: extractTerminalNoFillDetail(primaryResult),
+          softNoFill: Boolean(primaryResult.raw?.softNoFill),
         },
         createdAt: now,
       });
@@ -3283,6 +3289,23 @@ export function isBreakerRelevantToSlot(
   );
 }
 
+export function isFeedHealthBreaker(
+  breaker: Pick<CircuitBreaker, "reason" | "payload"> | null | undefined,
+) {
+  return (
+    breaker?.reason === "venue_error" &&
+    breaker.payload !== null &&
+    typeof breaker.payload === "object" &&
+    Array.isArray((breaker.payload as { feeds?: unknown }).feeds)
+  );
+}
+
+export function shouldManageFeedHealthBreaker(
+  breaker: Pick<CircuitBreaker, "active" | "reason" | "payload"> | null | undefined,
+) {
+  return !breaker?.active || isFeedHealthBreaker(breaker);
+}
+
 export function shouldKeepHedgeFailureBreakerActive(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
@@ -3324,6 +3347,14 @@ export function countRecentKalshiSoftHedgeNoFillEvents(
   windowMs = KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
 ) {
   return countRecentSoftHedgeNoFillEvents(events, now, "kalshi", windowMs);
+}
+
+export function countRecentKalshiSoftPrimaryNoFillEvents(
+  events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[],
+  now: number,
+  windowMs = KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
+) {
+  return countRecentSoftPrimaryNoFillEvents(events, now, "kalshi", windowMs);
 }
 
 export function hasKalshiHedgeRetryCapacity(
@@ -3400,6 +3431,33 @@ async function canSafelyLeadWithPolymarket(intent: OrderIntent, slot: MarketSlot
     },
     settings.hedgeRetryAttempts,
   );
+}
+
+async function armPrimarySoftNoFillGuard(
+  intent: OrderIntent,
+  primaryOrder: LiveOrder,
+  primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
+  now: number,
+) {
+  if (!Boolean(primaryResult.raw?.softNoFill)) {
+    return;
+  }
+
+  await writeCircuitBreaker({
+    key: buildSlotBreakerKey(intent.slotKey),
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.primaryVenue,
+      stage: "primary_no_fill_slot_lock",
+      primaryOrderId: primaryOrder.venueOrderId,
+      lockSlot: true,
+      softNoFill: true,
+    },
+  });
 }
 
 async function armHedgeFailureGuards(
@@ -3505,6 +3563,29 @@ function countRecentSoftHedgeNoFillEvents(
   windowMs: number,
 ) {
   return events.filter((event) => isRecentSoftHedgeNoFillEvent(event, now, windowMs, venue)).length;
+}
+
+function isRecentSoftPrimaryNoFillEvent(
+  event: Pick<RunEvent, "createdAt" | "eventType" | "payload">,
+  now: number,
+  windowMs: number,
+  venue?: "kalshi" | "polymarket",
+) {
+  return (
+    event.eventType === "order.primary.no_fill" &&
+    event.createdAt >= now - windowMs &&
+    (venue === undefined || getPayloadString(event.payload, "venue") === venue) &&
+    getPayloadBoolean(event.payload, "softNoFill")
+  );
+}
+
+function countRecentSoftPrimaryNoFillEvents(
+  events: Pick<RunEvent, "createdAt" | "eventType" | "payload">[],
+  now: number,
+  venue: "kalshi" | "polymarket",
+  windowMs: number,
+) {
+  return events.filter((event) => isRecentSoftPrimaryNoFillEvent(event, now, windowMs, venue)).length;
 }
 
 function getAssetFromSlotKey(slotKey: string | null | undefined): MarketAsset | null {
