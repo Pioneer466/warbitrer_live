@@ -1,9 +1,10 @@
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
   applySlippage,
-  deriveVenueTargetSize,
+  deriveAlignedPairSize,
   getVenueExecutableDepth,
   getVenueMinimumOrderSize,
+  normalizeVenueTargetSize,
 } from "@/lib/fees";
 import {
   createKalshiAdapter,
@@ -1542,21 +1543,38 @@ async function repriceIntentWithinExecutionBuffer(
     return null;
   }
 
+  const polyLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  if (!polyLeg || !kalshiLeg) {
+    return null;
+  }
+
+  const desiredPairSize = Math.min(polyLeg.requestedSize, kalshiLeg.requestedSize);
+  const alignedSizing = deriveAlignedPairSize({
+    targetLegNotionalUsd: settings.maxPairNotionalUsd / 2,
+    pairSizeCap: desiredPairSize,
+    polymarket: {
+      price: pair.poly.price,
+      depth: pair.poly.depth,
+      minOrderSize: pair.poly.minOrderSize,
+      fallbackMinOrderSize: settings.minOrderSize,
+    },
+    kalshi: {
+      price: pair.kalshi.price,
+      depth: pair.kalshi.depth,
+      minOrderSize: pair.kalshi.minOrderSize,
+      fallbackMinOrderSize: 1,
+    },
+    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
+  });
+  if (alignedSizing.commonSize <= 0) {
+    return null;
+  }
+
   const updatedLegs = intent.legs.map((leg) => {
     const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
-    const executableDepth = getVenueExecutableDepth(
-      leg.venue,
-      liveLeg.depth,
-      settings.kalshiDepthHeadroomContracts,
-    );
-    const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
-    const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, liveLeg.price, liveLeg.minOrderSize, fallbackMinOrderSize);
-    const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
-    if (
-      size <= 0 ||
-      size + ORDER_SIZE_TOLERANCE < minimumSize ||
-      (executableDepth !== null && size > executableDepth + ORDER_SIZE_TOLERANCE)
-    ) {
+    const size = leg.venue === "polymarket" ? alignedSizing.polySize : alignedSizing.kalshiSize;
+    if (size <= 0 || liveLeg.price === null) {
       return null;
     }
 
@@ -1564,6 +1582,7 @@ async function repriceIntentWithinExecutionBuffer(
       ...leg,
       requestedPrice: liveLeg.price,
       requestedSize: size,
+      requestedNotionalUsd: round4(size * liveLeg.price),
     };
   });
 
@@ -1671,26 +1690,36 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
+  const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
+  const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
+  const normalizedRequestedSize = normalizeVenueTargetSize(
+    leg.venue,
+    leg.requestedSize,
+    liveLeg.minOrderSize,
+    fallbackMinOrderSize,
+  );
+  if (
+    normalizedRequestedSize <= 0 ||
+    normalizedRequestedSize + ORDER_SIZE_TOLERANCE < minimumSize ||
+    normalizedRequestedSize + ORDER_SIZE_TOLERANCE < leg.requestedSize
+  ) {
+    return null;
+  }
+
   const executableDepth = getVenueExecutableDepth(
     leg.venue,
     liveLeg.depth,
     settings.kalshiDepthHeadroomContracts,
   );
-  const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
-  const size = deriveVenueTargetSize(leg.venue, leg.requestedNotionalUsd, requestedPrice, liveLeg.minOrderSize, fallbackMinOrderSize);
-  const minimumSize = getVenueMinimumOrderSize(leg.venue, liveLeg.minOrderSize, fallbackMinOrderSize);
-  if (
-    size <= 0 ||
-    size + ORDER_SIZE_TOLERANCE < minimumSize ||
-    (executableDepth !== null && size > executableDepth + ORDER_SIZE_TOLERANCE)
-  ) {
+  if (executableDepth !== null && normalizedRequestedSize > executableDepth + ORDER_SIZE_TOLERANCE) {
     return null;
   }
 
   return {
     ...leg,
     requestedPrice,
-    requestedSize: size,
+    requestedSize: normalizedRequestedSize,
+    requestedNotionalUsd: round4(normalizedRequestedSize * requestedPrice),
   };
 }
 

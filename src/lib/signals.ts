@@ -1,9 +1,9 @@
 import {
   calculateKalshiFee,
   calculatePolymarketFee,
+  deriveAlignedPairSize,
   deriveVenueTargetSize,
   getVenueExecutableDepth,
-  getVenueMinimumOrderSize,
 } from "@/lib/fees";
 import type {
   KalshiQuote,
@@ -165,7 +165,7 @@ function buildSignal({
   marketAlignmentReason: string | null;
   mismatchGuard: MismatchGuardMetrics;
 }): LiveOpportunity {
-  const targetLegNotionalUsd = settings.maxPairNotionalUsd / 2;
+  const targetLegBudgetUsd = settings.maxPairNotionalUsd / 2;
   const reasons: string[] = [];
   const effectiveKalshiDepth = getVenueExecutableDepth(
     "kalshi",
@@ -188,15 +188,30 @@ function buildSignal({
   const safePolyPrice = polyPrice ?? 0;
   const safeKalshiPrice = kalshiPrice ?? 0;
   const grossCost = polyPrice !== null && kalshiPrice !== null ? round4(polyPrice + kalshiPrice) : null;
-  const polyUnits =
+  const alignedSizing = deriveAlignedPairSize({
+    targetLegNotionalUsd: targetLegBudgetUsd,
+    polymarket: {
+      price: polyPrice,
+      depth: polyDepth,
+      minOrderSize: polyMinOrderSize,
+      fallbackMinOrderSize: settings.minOrderSize,
+    },
+    kalshi: {
+      price: kalshiPrice,
+      depth: kalshiDepth,
+      minOrderSize: kalshiMinOrderSize,
+      fallbackMinOrderSize: 1,
+    },
+    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
+  });
+  const polyBudgetUnits =
     polyPrice === null
       ? 0
-      : deriveVenueTargetSize("polymarket", targetLegNotionalUsd, polyPrice, polyMinOrderSize, settings.minOrderSize);
-  const kalshiUnits =
-    kalshiPrice === null
-      ? 0
-      : deriveVenueTargetSize("kalshi", targetLegNotionalUsd, kalshiPrice, kalshiMinOrderSize, 1);
-  const minimumPolyUnits = getVenueMinimumOrderSize("polymarket", polyMinOrderSize, settings.minOrderSize);
+      : deriveVenueTargetSize("polymarket", targetLegBudgetUsd, polyPrice, polyMinOrderSize, settings.minOrderSize);
+  const polyUnits = alignedSizing.polySize;
+  const kalshiUnits = alignedSizing.kalshiSize;
+  const polyTargetNotionalUsd = polyPrice === null ? 0 : round4(polyUnits * polyPrice);
+  const kalshiTargetNotionalUsd = kalshiPrice === null ? 0 : round4(kalshiUnits * kalshiPrice);
   const estimatedFees =
     calculatePolymarketFee({
       shares: polyUnits,
@@ -215,13 +230,13 @@ function buildSignal({
   if (safePolyPrice > settings.maxLegPrice || safeKalshiPrice > settings.maxLegPrice) {
     reasons.push(`Une jambe dépasse ${settings.maxLegPrice.toFixed(2)}`);
   }
-  if (polyUnits > 0 && polyUnits + ORDER_SIZE_TOLERANCE < minimumPolyUnits) {
+  if (polyBudgetUnits > 0 && alignedSizing.polyMaxSize <= 0) {
     reasons.push("Taille minimum Polymarket non atteinte");
   }
-  if (polyDepth !== null && polyUnits > polyDepth) {
+  if (alignedSizing.polyMaxSize <= 0 && polyDepth !== null) {
     reasons.push("Liquidité Polymarket insuffisante");
   }
-  if (effectiveKalshiDepth !== null && kalshiUnits > effectiveKalshiDepth + ORDER_SIZE_TOLERANCE) {
+  if (alignedSizing.kalshiMaxSize <= 0 && effectiveKalshiDepth !== null) {
     reasons.push(
       settings.kalshiDepthHeadroomContracts > 0
         ? `Liquidité Kalshi insuffisante après headroom (${settings.kalshiDepthHeadroomContracts} contrats)`
@@ -231,10 +246,10 @@ function buildSignal({
 
   const polyBalance = balances.find((balance) => balance.venue === "polymarket");
   const kalshiBalance = balances.find((balance) => balance.venue === "kalshi");
-  if (!polyBalance || polyBalance.availableBalanceUsd < targetLegNotionalUsd) {
+  if (!polyBalance || polyBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < polyTargetNotionalUsd) {
     reasons.push("Solde Polymarket insuffisant");
   }
-  if (!kalshiBalance || kalshiBalance.availableBalanceUsd < targetLegNotionalUsd) {
+  if (!kalshiBalance || kalshiBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < kalshiTargetNotionalUsd) {
     reasons.push("Solde Kalshi insuffisant");
   }
   if (polyBalance?.status === "blocked" || kalshiBalance?.status === "blocked") {
@@ -264,7 +279,7 @@ function buildSignal({
   }
 
   const minimumWinningPayout = Math.min(polyUnits, kalshiUnits);
-  const capitalDeployed = settings.maxPairNotionalUsd + estimatedFees;
+  const capitalDeployed = round4(polyTargetNotionalUsd + kalshiTargetNotionalUsd + estimatedFees);
   const projectedNetProfitUsd =
     grossCost === null ? null : round4(minimumWinningPayout - capitalDeployed);
   const projectedNetReturn =
@@ -307,7 +322,7 @@ function buildSignal({
         tokenId: polyTokenId,
         price: polyPrice,
         depth: polyDepth,
-        targetNotionalUsd: targetLegNotionalUsd,
+        targetNotionalUsd: polyTargetNotionalUsd,
         size: polyUnits,
         tickSize: polymarket.outcomes[polyOutcome === "UP" ? "up" : "down"].tickSize,
         minOrderSize: polyMinOrderSize,
@@ -325,7 +340,7 @@ function buildSignal({
         marketRef: kalshi.ref.id,
         price: kalshiPrice,
         depth: kalshiDepth,
-        targetNotionalUsd: targetLegNotionalUsd,
+        targetNotionalUsd: kalshiTargetNotionalUsd,
         size: kalshiUnits,
         tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,
         minOrderSize: kalshiMinOrderSize,

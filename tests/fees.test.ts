@@ -3,8 +3,10 @@ import {
   calculateBinaryPositionPayout,
   calculateKalshiFee,
   calculatePolymarketFee,
+  deriveAlignedPairSize,
   derivePolymarketTargetShares,
   deriveTargetShares,
+  deriveVenueExecutableSize,
 } from "@/lib/fees";
 
 describe("live fee and sizing helpers", () => {
@@ -22,6 +24,47 @@ describe("live fee and sizing helpers", () => {
 
   it("estimates polymarket buy shares at cent precision", () => {
     expect(derivePolymarketTargetShares(10, 0.42)).toBeCloseTo(23.8, 2);
+  });
+
+  it("clips Kalshi executable size by a fixed headroom before using displayed depth", () => {
+    expect(
+      deriveVenueExecutableSize({
+        venue: "kalshi",
+        targetNotionalUsd: 10,
+        price: 0.5,
+        displayedDepth: 20,
+        minOrderSize: 1,
+        fallbackMinOrderSize: 1,
+        kalshiDepthHeadroomContracts: 2,
+      }),
+    ).toBe(18);
+  });
+
+  it("aligns pair sizing to the smallest executable leg instead of forcing the full budget on both sides", () => {
+    expect(
+      deriveAlignedPairSize({
+        targetLegNotionalUsd: 10,
+        polymarket: {
+          price: 0.4,
+          depth: 100,
+          minOrderSize: 0.01,
+          fallbackMinOrderSize: 5,
+        },
+        kalshi: {
+          price: 0.5,
+          depth: 20,
+          minOrderSize: 1,
+          fallbackMinOrderSize: 1,
+        },
+        kalshiDepthHeadroomContracts: 2,
+      }),
+    ).toMatchObject({
+      commonSize: 18,
+      polySize: 18,
+      kalshiSize: 18,
+      polyMaxSize: 25,
+      kalshiMaxSize: 18,
+    });
   });
 
   it("applies slippage in basis points for buys", () => {

@@ -310,8 +310,9 @@ describe("live signal engine", () => {
     });
 
     expect(signal.eligible).toBe(true);
-    expect(signal.legs[0].targetNotionalUsd).toBe(10);
-    expect(signal.legs[0].size).toBeCloseTo(23.8, 2);
+    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(8.4, 4);
+    expect(signal.legs[0].size).toBe(20);
+    expect(signal.legs[1].size).toBe(20);
   });
 
   it("still prefers Kalshi as the primary venue even when Polymarket looks shallower on displayed depth", () => {
@@ -351,7 +352,7 @@ describe("live signal engine", () => {
     expect(signal.primaryVenue).toBe("kalshi");
   });
 
-  it("blocks a Kalshi entry when displayed depth only matches the order size without headroom", () => {
+  it("clips the pair size to safe Kalshi executable depth instead of blocking the opportunity", () => {
     const [, signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899060000,
@@ -387,24 +388,24 @@ describe("live signal engine", () => {
           ...kalshi.outcomes,
           yes: {
             ...kalshi.outcomes.yes,
-            buyPrice: 0.5,
-            sellPrice: 0.49,
-            midPrice: 0.495,
-            bestBid: 0.49,
-            bestAsk: 0.5,
+            buyPrice: 0.49,
+            sellPrice: 0.48,
+            midPrice: 0.485,
+            bestBid: 0.48,
+            bestAsk: 0.49,
             depth: 20,
             execution: {
               ...kalshi.outcomes.yes.execution,
-              buyPrice: 0.5,
-              sellPrice: 0.49,
-              midPrice: 0.495,
-              bestBid: 0.49,
-              bestAsk: 0.5,
+              buyPrice: 0.49,
+              sellPrice: 0.48,
+              midPrice: 0.485,
+              bestBid: 0.48,
+              bestAsk: 0.49,
               depth: 20,
             },
             chart: {
               ...kalshi.outcomes.yes.chart,
-              price: 0.5,
+              price: 0.49,
             },
           },
         },
@@ -420,9 +421,12 @@ describe("live signal engine", () => {
     });
 
     expect(signal.combination).toBe("POLY_DOWN_KALSHI_YES");
-    expect(signal.legs[1].size).toBe(20);
-    expect(signal.eligible).toBe(false);
-    expect(signal.reasons).toContain("Liquidité Kalshi insuffisante après headroom (2 contrats)");
+    expect(signal.legs[0].size).toBe(18);
+    expect(signal.legs[1].size).toBe(18);
+    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(7.2, 4);
+    expect(signal.legs[1].targetNotionalUsd).toBeCloseTo(8.82, 4);
+    expect(signal.eligible).toBe(true);
+    expect(signal.reasons).not.toContain("Liquidité Kalshi insuffisante après headroom (2 contrats)");
   });
 
   it("blocks entries when the polymarket budget cannot satisfy the venue minimum size", () => {

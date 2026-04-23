@@ -228,7 +228,7 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
               {leg.venue} · {leg.outcome}
             </div>
             <div className="mt-2">
-              target {formatCurrency(leg.requestedNotionalUsd)} · req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
+              notionnel {formatCurrency(leg.requestedNotionalUsd)} · req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
             </div>
           </div>
         ))}

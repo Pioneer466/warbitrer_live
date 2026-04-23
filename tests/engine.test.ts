@@ -299,7 +299,7 @@ describe("hedge retry repricing", () => {
         primaryVenue: "polymarket",
         hedgeVenue: "kalshi",
       }).legs[1],
-      requestedPrice: 0.5,
+      requestedPrice: 0.48,
       requestedSize: 20,
       requestedNotionalUsd: 10,
     };
@@ -308,7 +308,7 @@ describe("hedge retry repricing", () => {
       deriveBufferedRetryLeg(
         hedgeLeg,
         {
-          price: 0.5,
+          price: 0.48,
           depth: 20,
           minOrderSize: 1,
         },
@@ -323,7 +323,7 @@ describe("hedge retry repricing", () => {
     ).toBeNull();
   });
 
-  it("reprices a polymarket retry in shares while keeping the usd budget fixed", () => {
+  it("reprices a polymarket hedge retry while preserving the size to cover", () => {
     const primaryLeg = {
       ...buildIntent().legs[0],
       requestedPrice: 0.45,
@@ -351,8 +351,8 @@ describe("hedge retry repricing", () => {
       id: primaryLeg.id,
       venue: "polymarket",
       requestedPrice: 0.47,
-      requestedSize: 21.27,
-      requestedNotionalUsd: 10,
+      requestedSize: 22.22,
+      requestedNotionalUsd: 10.4434,
     });
   });
 
@@ -386,7 +386,8 @@ describe("hedge retry repricing", () => {
       id: primaryLeg.id,
       venue: "polymarket",
       requestedPrice: 0.472,
-      requestedNotionalUsd: 10,
+      requestedSize: 22.22,
+      requestedNotionalUsd: 10.4878,
     });
   });
 });

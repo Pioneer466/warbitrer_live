@@ -75,7 +75,10 @@ describe("live intent settlement", () => {
 
     expect(intent.primaryVenue).toBe("kalshi");
     expect(intent.hedgeVenue).toBe("polymarket");
-    expect(intent.legs[0].requestedNotionalUsd + intent.legs[1].requestedNotionalUsd).toBe(50);
+    expect(intent.legs[0].requestedNotionalUsd + intent.legs[1].requestedNotionalUsd).toBeCloseTo(
+      opportunity.legs[0].targetNotionalUsd + opportunity.legs[1].targetNotionalUsd,
+      4,
+    );
   });
 
   it("does not trust a stale snapshot primary venue when rebuilding a live intent", () => {
