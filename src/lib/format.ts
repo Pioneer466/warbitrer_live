@@ -1,3 +1,5 @@
+const DISPLAY_TIME_ZONE = "Europe/Paris";
+
 export function formatCurrency(value: number, digits = 2) {
   return new Intl.NumberFormat("fr-FR", {
     style: "currency",
@@ -27,7 +29,7 @@ export function formatDateTime(ts: number) {
   return new Intl.DateTimeFormat("fr-FR", {
     dateStyle: "medium",
     timeStyle: "short",
-    timeZone: "UTC",
+    timeZone: DISPLAY_TIME_ZONE,
   }).format(ts);
 }
 
