@@ -71,6 +71,11 @@ export type KalshiOrderbook = {
   seq?: number | string;
 };
 
+export type KalshiNumericOrderbookLevels = {
+  yesBids: Array<[number, number]>;
+  noBids: Array<[number, number]>;
+};
+
 type KalshiOrderbookResponse = {
   orderbook?: KalshiOrderbook;
   orderbook_fp?: KalshiOrderbook;
@@ -415,6 +420,49 @@ export function deriveKalshiOutcomeQuotes(
       lastUpdatedAt,
     }),
   };
+}
+
+export function normalizeKalshiNumericOrderbookLevels(orderbook: {
+  yes_dollars: Array<[string, string]>;
+  no_dollars: Array<[string, string]>;
+}): KalshiNumericOrderbookLevels {
+  return {
+    yesBids: normalizeKalshiLevelPairs(orderbook.yes_dollars),
+    noBids: normalizeKalshiLevelPairs(orderbook.no_dollars),
+  };
+}
+
+export function computeKalshiBuyDepthWithinPriceRange(
+  levels: KalshiNumericOrderbookLevels | null | undefined,
+  outcome: "YES" | "NO",
+  maxBuyPrice: number | null,
+) {
+  if (!levels || maxBuyPrice === null || maxBuyPrice <= 0) {
+    return null;
+  }
+
+  const executableDepth = deriveKalshiBuyPriceLevels(levels, outcome).reduce((sum, [price, size]) => {
+    if (price > maxBuyPrice + 1e-9) {
+      return sum;
+    }
+    return sum + size;
+  }, 0);
+
+  return round4(executableDepth);
+}
+
+export function deriveKalshiBuyPriceLevels(
+  levels: KalshiNumericOrderbookLevels | null | undefined,
+  outcome: "YES" | "NO",
+) {
+  if (!levels) {
+    return [];
+  }
+
+  const sourceLevels = outcome === "YES" ? levels.noBids : levels.yesBids;
+  return sourceLevels
+    .map(([price, size]) => [round4(1 - price), size] as [number, number])
+    .sort((left, right) => left[0] - right[0]);
 }
 
 export function mapKalshiPosition(position: KalshiPosition, now = Date.now()): PositionSnapshot {
@@ -1028,6 +1076,13 @@ export function normalizeKalshiOrderPrice(value: number | null, side: OrderSide 
   const scaled = value / KALSHI_ORDER_PRICE_STEP_USD;
   const rounded = side === "SELL" ? Math.floor(scaled + 1e-9) : Math.ceil(scaled - 1e-9);
   return round4(rounded * KALSHI_ORDER_PRICE_STEP_USD);
+}
+
+function normalizeKalshiLevelPairs(levels: Array<[string, string]>) {
+  return levels
+    .map(([price, size]) => [Number(price), Number(size)] as [number, number])
+    .filter(([price, size]) => Number.isFinite(price) && Number.isFinite(size) && size > 0)
+    .sort((left, right) => right[0] - left[0]);
 }
 
 function formatPrice(value: number | null) {

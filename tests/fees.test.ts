@@ -4,9 +4,11 @@ import {
   calculateKalshiFee,
   calculatePolymarketFee,
   deriveAlignedPairSize,
+  deriveKalshiPrimaryClipPlan,
   derivePolymarketTargetShares,
   deriveTargetShares,
   deriveVenueExecutableSize,
+  getKalshiPrimaryMultiClipCapacity,
 } from "@/lib/fees";
 
 describe("live fee and sizing helpers", () => {
@@ -65,6 +67,16 @@ describe("live fee and sizing helpers", () => {
       polyMaxSize: 25,
       kalshiMaxSize: 18,
     });
+  });
+
+  it("builds a fee-aware Kalshi clip plan with the fewest balanced clips under the size cap", () => {
+    expect(deriveKalshiPrimaryClipPlan(22, 10, 4)).toEqual([8, 7, 7]);
+    expect(deriveKalshiPrimaryClipPlan(40, 10, 4)).toEqual([10, 10, 10, 10]);
+  });
+
+  it("caps total Kalshi primary size by the configured clip capacity", () => {
+    expect(getKalshiPrimaryMultiClipCapacity(10, 4)).toBe(40);
+    expect(deriveKalshiPrimaryClipPlan(55, 10, 4)).toEqual([10, 10, 10, 10]);
   });
 
   it("applies slippage in basis points for buys", () => {

@@ -16,6 +16,9 @@ import {
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
   shouldKeepSlotExecutionBreakerActive,
+  shouldTreatPrimaryExecutionAsFilled,
+  shouldTreatPrimaryOrderAsFilled,
+  summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
 import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, RunEvent } from "@/lib/types";
@@ -455,7 +458,7 @@ describe("venue order request sizing", () => {
     expect(request.maxCostUsd).toBe(10);
   });
 
-  it("keeps kalshi max cost slippage-adjusted", () => {
+  it("keeps kalshi max cost aligned to the derived order limit", () => {
     const kalshiLeg = {
       ...buildIntent().legs[1],
       requestedPrice: 0.42,
@@ -466,7 +469,68 @@ describe("venue order request sizing", () => {
     const request = buildVenueOrderRequest(kalshiLeg, 30, "FOK", false);
 
     expect(request.price).toBe(0.43);
-    expect(request.maxCostUsd).toBeCloseTo(10.03, 4);
+    expect(request.maxCostUsd).toBeCloseTo(8.6, 4);
+  });
+
+  it("can widen a Kalshi primary buy by whole ticks instead of only by basis points", () => {
+    const kalshiLeg = {
+      ...buildIntent().legs[1],
+      requestedPrice: 0.48,
+      requestedSize: 20,
+      requestedNotionalUsd: 9.6,
+    };
+
+    const request = buildVenueOrderRequest(kalshiLeg, 30, "IOC", false, {
+      kalshiPriceTicksSlippage: 2,
+    });
+
+    expect(request.price).toBe(0.5);
+    expect(request.maxCostUsd).toBe(10);
+  });
+});
+
+describe("Kalshi primary IOC handling", () => {
+  it("treats a partial Kalshi primary order as hedgable when contracts actually filled", () => {
+    expect(
+      shouldTreatPrimaryOrderAsFilled(
+        { primaryVenue: "kalshi" },
+        {
+          filledSize: 3,
+          status: "partially_filled",
+        },
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldTreatPrimaryExecutionAsFilled(
+        { primaryVenue: "kalshi" },
+        {
+          venue: "kalshi",
+          venueOrderId: "kal-1",
+          filledSize: 3,
+          averageFillPrice: 0.48,
+          feeUsd: 0.01,
+          status: "partially_filled",
+          raw: {},
+        },
+        {
+          filledSize: 3,
+          status: "partially_filled",
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat a partial Polymarket primary order as filled", () => {
+    expect(
+      shouldTreatPrimaryOrderAsFilled(
+        { primaryVenue: "polymarket" },
+        {
+          filledSize: 3,
+          status: "partially_filled",
+        },
+      ),
+    ).toBe(false);
   });
 });
 
@@ -782,6 +846,90 @@ describe("polymarket closed orderbook errors", () => {
 });
 
 describe("intent fill summaries", () => {
+  it("aggregates multiple primary entry orders for the same leg", () => {
+    const kalshiLeg = buildIntent({
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      legs: [
+        {
+          id: "leg-hedge",
+          intentId: "intent-1",
+          venue: "polymarket",
+          outcome: "DOWN",
+          marketRef: "poly-market",
+          tokenId: "token-1",
+          side: "BUY",
+          requestedPrice: 0.45,
+          requestedSize: 22,
+          requestedNotionalUsd: 9.9,
+          filledPrice: null,
+          filledSize: 0,
+          feeUsd: 0,
+          status: "pending",
+          venueOrderId: null,
+          payoutUsd: null,
+          resolvedOutcome: null,
+        },
+        {
+          id: "leg-primary",
+          intentId: "intent-1",
+          venue: "kalshi",
+          outcome: "YES",
+          marketRef: "kalshi-market",
+          side: "BUY",
+          requestedPrice: 0.45,
+          requestedSize: 22,
+          requestedNotionalUsd: 9.9,
+          filledPrice: null,
+          filledSize: 0,
+          feeUsd: 0,
+          status: "pending",
+          venueOrderId: null,
+          payoutUsd: null,
+          resolvedOutcome: null,
+        },
+      ],
+    }).legs[1];
+
+    const summary = summarizeIntentLegOrders(
+      [
+        buildOrder({
+          venue: "kalshi",
+          side: "BUY",
+          outcome: "YES",
+          marketRef: "kalshi-market",
+          venueOrderId: "kalshi-clip-2",
+          filledSize: 7,
+          averageFillPrice: 0.46,
+          feeUsd: 0.13,
+          status: "filled",
+          updatedAt: 2,
+        }),
+        buildOrder({
+          venue: "kalshi",
+          side: "BUY",
+          outcome: "YES",
+          marketRef: "kalshi-market",
+          venueOrderId: "kalshi-clip-1",
+          filledSize: 8,
+          averageFillPrice: 0.45,
+          feeUsd: 0.14,
+          status: "filled",
+          updatedAt: 1,
+        }),
+      ],
+      kalshiLeg,
+      "entry",
+    );
+
+    expect(summary).toEqual({
+      filledSize: 15,
+      averageFillPrice: 0.4547,
+      feeUsd: 0.27,
+      venueOrderId: "kalshi-clip-2",
+    });
+  });
+
   it("separates entry fills from unwind fills on the same venue", () => {
     const leg = buildIntent().legs[0];
     const fills: LiveFill[] = [

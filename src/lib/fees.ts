@@ -109,6 +109,45 @@ export function getVenueExecutableDepth(
   return Math.max(0, displayedDepth - Math.max(0, kalshiDepthHeadroomContracts));
 }
 
+export function getKalshiPrimaryMultiClipCapacity(
+  maxClipContracts: number,
+  maxClips: number,
+) {
+  if (!Number.isFinite(maxClipContracts) || !Number.isFinite(maxClips)) {
+    return null;
+  }
+
+  const normalizedMaxClipContracts = Math.max(1, Math.floor(maxClipContracts));
+  const normalizedMaxClips = Math.max(1, Math.floor(maxClips));
+  return normalizedMaxClipContracts * normalizedMaxClips;
+}
+
+export function deriveKalshiPrimaryClipPlan(
+  requestedContracts: number,
+  maxClipContracts: number,
+  maxClips: number,
+) {
+  const normalizedRequestedContracts = normalizeVenueTargetSize("kalshi", requestedContracts, 1, 1);
+  if (normalizedRequestedContracts <= 0) {
+    return [];
+  }
+
+  const normalizedMaxClipContracts = Math.max(1, Math.floor(maxClipContracts));
+  const normalizedMaxClips = Math.max(1, Math.floor(maxClips));
+  const totalCapacity = normalizedMaxClipContracts * normalizedMaxClips;
+  const cappedRequestedContracts = Math.min(normalizedRequestedContracts, totalCapacity);
+  const clipCount = Math.min(
+    normalizedMaxClips,
+    Math.max(1, Math.ceil(cappedRequestedContracts / normalizedMaxClipContracts)),
+  );
+  const baseClipSize = Math.floor(cappedRequestedContracts / clipCount);
+  const remainder = cappedRequestedContracts - baseClipSize * clipCount;
+
+  return Array.from({ length: clipCount }, (_, index) => baseClipSize + (index < remainder ? 1 : 0)).filter(
+    (clipSize) => clipSize > 0,
+  );
+}
+
 export function deriveVenueExecutableSize(input: {
   venue: Venue;
   targetNotionalUsd?: number | null;

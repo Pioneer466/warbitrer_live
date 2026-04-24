@@ -3,8 +3,14 @@ import {
   calculatePolymarketFee,
   deriveAlignedPairSize,
   deriveVenueTargetSize,
+  getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
 } from "@/lib/fees";
+import {
+  computeKalshiBuyDepthWithinPriceRange,
+  KALSHI_ORDER_PRICE_STEP_USD,
+  normalizeKalshiOrderPrice,
+} from "@/lib/kalshi";
 import type {
   KalshiQuote,
   LiveOpportunity,
@@ -187,9 +193,25 @@ function buildSignal({
 
   const safePolyPrice = polyPrice ?? 0;
   const safeKalshiPrice = kalshiPrice ?? 0;
+  const kalshiMaxBuyPrice =
+    kalshiPrice === null
+      ? null
+      : normalizeKalshiOrderPrice(
+          kalshiPrice + settings.kalshiPrimaryPriceTicksSlippage * KALSHI_ORDER_PRICE_STEP_USD,
+          "BUY",
+        );
+  const cumulativeKalshiDepth =
+    kalshiPrice === null
+      ? null
+      : computeKalshiBuyDepthWithinPriceRange(kalshi.orderbookLevels, kalshiOutcome, kalshiMaxBuyPrice);
+  const sizingKalshiDepth = cumulativeKalshiDepth ?? kalshiDepth;
   const grossCost = polyPrice !== null && kalshiPrice !== null ? round4(polyPrice + kalshiPrice) : null;
   const alignedSizing = deriveAlignedPairSize({
     targetLegNotionalUsd: targetLegBudgetUsd,
+    pairSizeCap: getKalshiPrimaryMultiClipCapacity(
+      settings.kalshiPrimaryMaxClipContracts,
+      settings.kalshiPrimaryMaxClips,
+    ),
     polymarket: {
       price: polyPrice,
       depth: polyDepth,
@@ -198,7 +220,7 @@ function buildSignal({
     },
     kalshi: {
       price: kalshiPrice,
-      depth: kalshiDepth,
+      depth: sizingKalshiDepth,
       minOrderSize: kalshiMinOrderSize,
       fallbackMinOrderSize: 1,
     },
@@ -236,7 +258,7 @@ function buildSignal({
   if (alignedSizing.polyMaxSize <= 0 && polyDepth !== null) {
     reasons.push("Liquidité Polymarket insuffisante");
   }
-  if (alignedSizing.kalshiMaxSize <= 0 && effectiveKalshiDepth !== null) {
+  if (alignedSizing.kalshiMaxSize <= 0 && (effectiveKalshiDepth !== null || cumulativeKalshiDepth !== null)) {
     reasons.push(
       settings.kalshiDepthHeadroomContracts > 0
         ? `Liquidité Kalshi insuffisante après headroom (${settings.kalshiDepthHeadroomContracts} contrats)`
@@ -339,7 +361,7 @@ function buildSignal({
         outcome: kalshiOutcome,
         marketRef: kalshi.ref.id,
         price: kalshiPrice,
-        depth: kalshiDepth,
+        depth: sizingKalshiDepth,
         targetNotionalUsd: kalshiTargetNotionalUsd,
         size: kalshiUnits,
         tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,

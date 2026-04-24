@@ -172,6 +172,10 @@ export type KalshiQuote = {
   feeType: string;
   lastTradeYesPrice: number | null;
   lastTradeNoPrice: number | null;
+  orderbookLevels?: {
+    yesBids: Array<[number, number]>;
+    noBids: Array<[number, number]>;
+  } | null;
 };
 
 export type StrategyConfig = {
@@ -187,6 +191,9 @@ export type StrategyConfig = {
   immediateOrderConfirmationTimeoutMs: number;
   executionPriceBuffer: number;
   kalshiDepthHeadroomContracts: number;
+  kalshiPrimaryPriceTicksSlippage: number;
+  kalshiPrimaryMaxClipContracts: number;
+  kalshiPrimaryMaxClips: number;
   primaryRetryAttempts: number;
   primaryRetryDelayMs: number;
   hedgeRetryAttempts: number;

@@ -18,6 +18,7 @@ import {
   fetchKalshiSeries,
   fetchKalshiTrades,
   getKalshiWsUrl,
+  normalizeKalshiNumericOrderbookLevels,
   resolveKalshiMarketForSlot,
   type KalshiMarketSummary,
   type KalshiOrderbook,
@@ -1073,6 +1074,12 @@ class KalshiRealtimeFeed {
           this.orderbook.lastUpdatedAt,
         )
       : null;
+    const orderbookLevels = this.orderbook
+      ? normalizeKalshiNumericOrderbookLevels({
+          yes_dollars: serializeLevelMap(this.orderbook.yes, "desc"),
+          no_dollars: serializeLevelMap(this.orderbook.no, "desc"),
+        })
+      : null;
     const activeQuotes = this.hasFreshOrderbook(now) ? orderbookQuotes ?? marketQuotes : marketQuotes;
     const tradePrices = extractKalshiLastTradePrices(
       this.trades,
@@ -1105,6 +1112,7 @@ class KalshiRealtimeFeed {
       feeType: this.series.fee_type,
       lastTradeYesPrice: tradePrices.yes,
       lastTradeNoPrice: tradePrices.no,
+      orderbookLevels,
       resolution: null,
     };
 
@@ -1692,6 +1700,7 @@ function createBlockedKalshiQuote(
     feeType: series?.fee_type ?? "unknown",
     lastTradeYesPrice: null,
     lastTradeNoPrice: null,
+    orderbookLevels: null,
     resolution: null,
   };
 }

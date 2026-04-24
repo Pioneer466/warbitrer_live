@@ -7,6 +7,9 @@ describe("settings schema", () => {
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
+    expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(2);
+    expect(settings.kalshiPrimaryMaxClipContracts).toBe(10);
+    expect(settings.kalshiPrimaryMaxClips).toBe(4);
     expect(settings.primaryRetryAttempts).toBe(2);
     expect(settings.primaryRetryDelayMs).toBe(200);
     expect(settings.hedgeRetryAttempts).toBe(3);
@@ -32,6 +35,9 @@ describe("settings schema", () => {
       immediateOrderConfirmationTimeoutMs: 12000,
       executionPriceBuffer: 0.02,
       kalshiDepthHeadroomContracts: 3,
+      kalshiPrimaryPriceTicksSlippage: 3,
+      kalshiPrimaryMaxClipContracts: 8,
+      kalshiPrimaryMaxClips: 3,
       primaryRetryAttempts: 4,
       primaryRetryDelayMs: 250,
       hedgeRetryAttempts: 5,
@@ -45,6 +51,9 @@ describe("settings schema", () => {
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(12000);
     expect(settings.executionPriceBuffer).toBe(0.02);
     expect(settings.kalshiDepthHeadroomContracts).toBe(3);
+    expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(3);
+    expect(settings.kalshiPrimaryMaxClipContracts).toBe(8);
+    expect(settings.kalshiPrimaryMaxClips).toBe(3);
     expect(settings.primaryRetryAttempts).toBe(4);
     expect(settings.primaryRetryDelayMs).toBe(250);
     expect(settings.hedgeRetryAttempts).toBe(5);
