@@ -14,6 +14,7 @@ export async function POST(request: Request) {
       intentId?: string;
       lookbackHours?: number;
       limit?: number;
+      includeShadow?: boolean;
     };
 
     const asset =
@@ -33,6 +34,7 @@ export async function POST(request: Request) {
         intentId: body.intentId,
         lookbackHours: body.lookbackHours,
         limit: body.limit,
+        includeShadow: body.includeShadow,
       }),
       {
         headers: {

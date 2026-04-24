@@ -239,11 +239,6 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
 }
 
 function getResolutionAlignment(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
-  const normalized = getNormalizedResolutionDirection(intent);
-  if (normalized === null) {
-    return null;
-  }
-
   const polyDirection = normalizePolymarketResolution(intent.polyResolution);
   const kalshiDirection = normalizeKalshiResolution(intent.kalshiResolution);
   if (polyDirection === null || kalshiDirection === null) {

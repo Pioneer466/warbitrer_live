@@ -3115,11 +3115,13 @@ export async function repairSettledIntentResolutions(options?: {
   intentId?: string;
   lookbackHours?: number;
   limit?: number;
+  includeShadow?: boolean;
   now?: number;
 }) {
   const now = options?.now ?? Date.now();
   const lookbackMs = Math.max(1, options?.lookbackHours ?? 24) * 60 * 60 * 1000;
   const limit = Math.max(1, options?.limit ?? SETTLED_RESOLUTION_REPAIR_LIMIT);
+  const includeShadow = options?.includeShadow === true;
 
   if (options?.intentId) {
     const intent = await findOrderIntent(options.intentId);
@@ -3148,7 +3150,7 @@ export async function repairSettledIntentResolutions(options?: {
     const intents = await readRecentSettledOrderIntents(limit, asset);
     const candidates = intents.filter(
       (intent) =>
-        !intent.shadow &&
+        (includeShadow || !intent.shadow) &&
         intent.resolvedAt !== null &&
         now - intent.resolvedAt <= lookbackMs,
     );
@@ -3177,6 +3179,7 @@ export async function repairSettledIntentResolutions(options?: {
     mode: "batch",
     lookbackHours: lookbackMs / (60 * 60 * 1000),
     limit,
+    includeShadow,
     assets: summaries,
   };
 }
