@@ -802,6 +802,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
     currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
     await writeOrderIntent(currentIntent);
+    await writeLiveTradeRunEvent(currentIntent, now);
     if (primaryResult.status !== "filled") {
       await writeRunEvent({
         level: "warn",
@@ -847,6 +848,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
         currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
         await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, now);
         if (primaryResult.status !== "filled") {
           await writeRunEvent({
             level: "warn",
@@ -1006,6 +1008,7 @@ async function executeKalshiPrimaryMultiClip(
       if (currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0 > 0) {
         currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, clipAttemptNow), "primary_filled", clipAttemptNow);
         await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, clipAttemptNow);
         await writeRunEvent({
           level: "warn",
           eventType: "order.primary.multi_clip_stopped",
@@ -1240,6 +1243,7 @@ async function executeKalshiPrimaryMultiClip(
       if (totalFilledSize > 0) {
         currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, Date.now()), "primary_filled", Date.now());
         await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, Date.now());
         await writeRunEvent({
           level: "warn",
           eventType: "order.primary.multi_clip_stopped",
@@ -1334,6 +1338,7 @@ async function executeKalshiPrimaryMultiClip(
 
   currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, Date.now()), "primary_filled", Date.now());
   await writeOrderIntent(currentIntent);
+  await writeLiveTradeRunEvent(currentIntent, Date.now());
   await writeRunEvent({
     level: "info",
     eventType: "order.primary.multi_clip_completed",
@@ -1457,6 +1462,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
     currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
     await writeOrderIntent(currentIntent);
+    await writeLiveTradeRunEvent(currentIntent, now, "hedged");
     return currentIntent;
   }
 
@@ -1469,6 +1475,11 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       `Hedge order partially filled or not final (${hedgeResult.status}); manual intervention required`,
     );
     await writeOrderIntent(currentIntent);
+    await writeManualInterventionRunEvent(currentIntent, now, "hedge_partial_fill", {
+      venue: currentIntent.hedgeVenue,
+      orderId: hedgeOrder.venueOrderId,
+      orderStatus: hedgeResult.status,
+    });
     await writeCircuitBreaker({
       key: buildSlotBreakerKey(currentIntent.slotKey),
       active: true,
@@ -1507,6 +1518,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
         currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
         currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
         await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, now, "hedged");
         return currentIntent;
       }
 
@@ -1519,6 +1531,11 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
           `Hedge retry partially filled or not final (${hedgeResult.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await writeManualInterventionRunEvent(currentIntent, now, "hedge_retry_partial_fill", {
+          venue: currentIntent.hedgeVenue,
+          orderId: hedgeOrder.venueOrderId,
+          orderStatus: hedgeResult.status,
+        });
         await writeCircuitBreaker({
           key: buildSlotBreakerKey(currentIntent.slotKey),
           active: true,
@@ -1678,6 +1695,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
       currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, primaryOrderSummary, now);
       currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
       await writeOrderIntent(currentIntent);
+      await writeLiveTradeRunEvent(currentIntent, now);
 
       const latestHedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, hedgeLeg);
       if (latestHedgeOrder) {
@@ -1708,6 +1726,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
     currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
     await writeOrderIntent(currentIntent);
+    await writeLiveTradeRunEvent(currentIntent, now);
 
     if (currentIntent.primaryVenue === "polymarket") {
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
@@ -2500,6 +2519,10 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         `Primary unwind submission failed (${errorMessage}); manual intervention required`,
       );
       await writeOrderIntent(currentIntent);
+      await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_submit_failed", {
+        venue: currentIntent.primaryVenue,
+        error: errorMessage,
+      });
       await writeRunEvent({
         level: "error",
         eventType: "order.unwind.submit_failed",
@@ -2548,6 +2571,11 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
       );
       await writeOrderIntent(currentIntent);
+      await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_partial_fill", {
+        venue: currentIntent.primaryVenue,
+        orderId: unwindResult.venueOrderId,
+        orderStatus: unwindResult.status,
+      });
       await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill");
       break;
     }
@@ -2593,6 +2621,11 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       `Primary unwind failed (${unwindResult.status}); manual intervention required`,
     );
     await writeOrderIntent(currentIntent);
+    await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_failed", {
+      venue: currentIntent.primaryVenue,
+      orderId: unwindResult.venueOrderId,
+      orderStatus: unwindResult.status,
+    });
     await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_failed");
   }
 
@@ -2814,6 +2847,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
     if (intent.slotEndTs + RESOLUTION_GRACE_MS > now) {
       rescued = markIntentStatus(rescued, "primary_filled", now, "Late primary fill detected; resuming hedge");
       await writeOrderIntent(rescued);
+      await writeLiveTradeRunEvent(rescued, now);
       await writeRunEvent({
         level: "error",
         eventType: "intent.reopened.late_primary_fill",
@@ -2836,6 +2870,10 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
       "Late primary fill detected after intent had already failed; manual intervention required",
     );
     await writeOrderIntent(rescued);
+    await writeManualInterventionRunEvent(rescued, now, "late_primary_fill_after_failure", {
+      venue: intent.primaryVenue,
+      orderId: primaryOrder?.venueOrderId ?? primaryOrderSummary?.venueOrderId ?? null,
+    });
     await writeCircuitBreaker({
       key: "global",
       active: true,
@@ -3163,6 +3201,11 @@ async function maybeExitPolymarketLegAtSlotEnd(
       `Polymarket slot-end exit partially filled (${lastOrder.status}); manual intervention required`,
     );
     await writeOrderIntent(failed);
+    await writeManualInterventionRunEvent(failed, now, "polymarket_slot_end_exit_partial_fill", {
+      venue: "polymarket",
+      orderId: lastOrder.venueOrderId,
+      orderStatus: lastOrder.status,
+    });
     await writeCircuitBreaker({
       key: "global",
       active: true,
@@ -3339,6 +3382,11 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           `Primary unwind partially filled (${unwindOrder.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_partial_fill_reconcile", {
+          venue: currentIntent.primaryVenue,
+          orderId: unwindOrder.venueOrderId,
+          orderStatus: unwindOrder.status,
+        });
         await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_partial_fill_reconcile");
         continue;
       }
@@ -3351,6 +3399,11 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           `Primary unwind not completed (${unwindOrder.status}); manual intervention required`,
         );
         await writeOrderIntent(currentIntent);
+        await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_not_completed", {
+          venue: currentIntent.primaryVenue,
+          orderId: unwindOrder.venueOrderId,
+          orderStatus: unwindOrder.status,
+        });
         await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_not_completed");
       }
       continue;
@@ -3362,6 +3415,9 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
         currentIntent = markIntentStatus(currentIntent, hedgeOrder ? "hedging" : "primary_filled", now);
       }
       await writeOrderIntent(currentIntent);
+      if (currentIntent.status === "primary_filled" || currentIntent.status === "hedging") {
+        await writeLiveTradeRunEvent(currentIntent, now, "primary_filled");
+      }
     }
 
     if (!primaryOrder && !primaryOrderSummary) {
@@ -3414,6 +3470,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
       ) {
         currentIntent = markIntentStatus(currentIntent, hedgeOrder ? "hedging" : "primary_filled", now);
         await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, now, "primary_filled");
       }
 
       if (!primaryOrderSummary && isTerminalOrderStatus(primaryOrder.status) && stale) {
@@ -3530,6 +3587,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
       currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
       currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
       await writeOrderIntent(currentIntent);
+      await writeLiveTradeRunEvent(currentIntent, now, "hedged");
       continue;
     }
 
@@ -3542,6 +3600,11 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
         `Hedge order partially filled or not final (${hedgeOrder.status}); manual intervention required`,
       );
       await writeOrderIntent(currentIntent);
+      await writeManualInterventionRunEvent(currentIntent, now, "hedge_partial_fill_reconcile", {
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        orderStatus: hedgeOrder.status,
+      });
       await writeCircuitBreaker({
         key: buildSlotBreakerKey(currentIntent.slotKey),
         active: true,
@@ -4253,6 +4316,75 @@ export function shouldTreatPrimaryExecutionAsFilled(
   }
 
   return intent.primaryVenue === "kalshi" && result.status === "partially_filled" && order.filledSize > 0;
+}
+
+async function writeLiveTradeRunEvent(
+  intent: Pick<
+    OrderIntent,
+    "id" | "asset" | "shadow" | "slotKey" | "combination" | "primaryVenue" | "hedgeVenue" | "grossCost" | "targetNotionalUsd" | "legs"
+  >,
+  now: number,
+  stage: "primary_filled" | "hedged" = "primary_filled",
+) {
+  if (intent.shadow) {
+    return;
+  }
+
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue) ?? null;
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "info",
+    eventType: "intent.live_traded",
+    message: `Live trade engaged for intent ${intent.id}`,
+    payload: {
+      intentId: intent.id,
+      asset: intent.asset,
+      slotKey: intent.slotKey,
+      combination: intent.combination,
+      primaryVenue: intent.primaryVenue,
+      hedgeVenue: intent.hedgeVenue,
+      grossCost: intent.grossCost,
+      targetNotionalUsd: intent.targetNotionalUsd,
+      stage,
+      primaryFilledSize: primaryLeg?.filledSize ?? null,
+      primaryFilledPrice: primaryLeg?.filledPrice ?? null,
+      primaryRequestedSize: primaryLeg?.requestedSize ?? null,
+    },
+    createdAt: now,
+  });
+}
+
+async function writeManualInterventionRunEvent(
+  intent: Pick<
+    OrderIntent,
+    "id" | "asset" | "shadow" | "slotKey" | "combination" | "primaryVenue" | "hedgeVenue" | "failureReason"
+  >,
+  now: number,
+  stage: string,
+  extraPayload: Record<string, unknown> = {},
+) {
+  if (intent.shadow || !intent.failureReason?.includes("manual intervention required")) {
+    return;
+  }
+
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "error",
+    eventType: "intent.manual_intervention_required",
+    message: `Manual intervention required for intent ${intent.id}`,
+    payload: {
+      intentId: intent.id,
+      asset: intent.asset,
+      slotKey: intent.slotKey,
+      combination: intent.combination,
+      primaryVenue: intent.primaryVenue,
+      hedgeVenue: intent.hedgeVenue,
+      failureReason: intent.failureReason,
+      stage,
+      ...extraPayload,
+    },
+    createdAt: now,
+  });
 }
 
 function extractTerminalNoFillDetail(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {

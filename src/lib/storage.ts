@@ -1,5 +1,6 @@
 import * as postgres from "@/lib/postgres-db";
 import { isMarketAsset } from "@/lib/market-catalog";
+import { queueRunEventNotification } from "@/lib/notifications";
 import type {
   MarketAsset,
   BridgeTransfer,
@@ -11,6 +12,7 @@ import type {
   LiveFill,
   LiveOrder,
   MarketSlot,
+  NotificationDelivery,
   OpportunitySnapshot,
   OrderIntent,
   PortfolioDashboardResponse,
@@ -176,14 +178,38 @@ export async function writeRunEvent(event: RunEvent) {
     logger(`[run-event] ${event.eventType}: ${event.message}`, event.payload ?? {});
   }
 
-  return postgres.insertRunEvent(await db(), {
+  const resolvedEvent = {
     ...event,
     asset: await inferRunEventAsset(event),
-  });
+  };
+  await postgres.insertRunEvent(await db(), resolvedEvent);
+  try {
+    await queueRunEventNotification(resolvedEvent);
+  } catch (error) {
+    console.warn("[notifications] queue failed", error);
+  }
 }
 
 export async function readRunEvents(limit?: number, asset?: MarketAsset | null) {
   return postgres.listRecentRunEvents(await db(), limit, asset);
+}
+
+export async function writeNotificationDelivery(
+  delivery: Omit<NotificationDelivery, "id" | "status" | "updatedAt" | "sentAt" | "error">,
+) {
+  return postgres.enqueueNotificationDelivery(await db(), delivery);
+}
+
+export async function readPendingNotificationDeliveries(limit?: number) {
+  return postgres.listPendingNotificationDeliveries(await db(), limit);
+}
+
+export async function markNotificationDeliverySent(id: number, sentAt: number) {
+  return postgres.markNotificationDeliverySent(await db(), id, sentAt);
+}
+
+export async function markNotificationDeliveryFailed(id: number, error: string, updatedAt: number) {
+  return postgres.markNotificationDeliveryFailed(await db(), id, error, updatedAt);
 }
 
 export async function readDatabaseMetrics(): Promise<DatabaseMetrics> {

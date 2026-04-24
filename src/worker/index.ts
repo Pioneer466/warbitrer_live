@@ -1,6 +1,7 @@
 import { processTick } from "@/lib/engine";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
+import { schedulePendingNotificationFlush } from "@/lib/notifications";
 import { readSettingsMap, storageMode } from "@/lib/storage";
 
 const WORKER_TICK_TIMEOUT_MS = 90_000;
@@ -19,6 +20,8 @@ async function run() {
         throw error;
       }
     }
+
+    schedulePendingNotificationFlush();
 
     const elapsed = Date.now() - startedAt;
     const pollingIntervalMs = await readPollingIntervalMs();

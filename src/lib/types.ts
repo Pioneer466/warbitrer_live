@@ -44,6 +44,9 @@ export type CircuitBreakerReason =
   | "risk_limit";
 export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" | "failed";
 export type RunEventLevel = "info" | "warn" | "error";
+export type NotificationKind = "trade_live" | "manual_intervention";
+export type NotificationChannel = "telegram";
+export type NotificationDeliveryStatus = "pending" | "sent" | "failed";
 
 export type MarketSlot = {
   asset: MarketAsset;
@@ -454,6 +457,21 @@ export type RunEvent = {
   message: string;
   payload: Record<string, unknown> | null;
   createdAt: number;
+};
+
+export type NotificationDelivery = {
+  id?: number;
+  asset?: MarketAsset | null;
+  channel: NotificationChannel;
+  kind: NotificationKind;
+  dedupeKey: string;
+  message: string;
+  payload: Record<string, unknown> | null;
+  status: NotificationDeliveryStatus;
+  createdAt: number;
+  updatedAt: number;
+  sentAt: number | null;
+  error: string | null;
 };
 
 export type DatabaseTableMetric = {

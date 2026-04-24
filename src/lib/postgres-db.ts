@@ -19,6 +19,7 @@ import type {
   LiveOpportunity,
   LiveOrder,
   MarketSlot,
+  NotificationDelivery,
   OrderIntent,
   PairCombination,
   PnlSnapshot,
@@ -257,6 +258,7 @@ async function bootstrapDatabase(pool: Pool) {
 
     CREATE TABLE IF NOT EXISTS run_events (
       id BIGSERIAL PRIMARY KEY,
+      asset TEXT,
       level TEXT NOT NULL,
       event_type TEXT NOT NULL,
       message TEXT NOT NULL,
@@ -264,6 +266,23 @@ async function bootstrapDatabase(pool: Pool) {
       created_at BIGINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS run_events_created_idx ON run_events(created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS notification_deliveries (
+      id BIGSERIAL PRIMARY KEY,
+      asset TEXT,
+      channel TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      message TEXT NOT NULL,
+      payload_json JSONB,
+      status TEXT NOT NULL,
+      error TEXT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      sent_at BIGINT
+    );
+    CREATE INDEX IF NOT EXISTS notification_deliveries_status_created_idx
+      ON notification_deliveries(status, created_at ASC);
 
     CREATE TABLE IF NOT EXISTS circuit_breakers (
       key TEXT PRIMARY KEY,
@@ -1538,6 +1557,91 @@ export async function listRecentRunEvents(pool: Pool, limit = 20, asset?: Market
     payload: row.payload_json,
     createdAt: row.created_at,
   }));
+}
+
+function mapNotificationDeliveryRow(row: any): NotificationDelivery {
+  return {
+    id: row.id,
+    asset: row.asset,
+    channel: row.channel,
+    kind: row.kind,
+    dedupeKey: row.dedupe_key,
+    message: row.message,
+    payload: row.payload_json,
+    status: row.status,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    sentAt: row.sent_at,
+  };
+}
+
+export async function enqueueNotificationDelivery(
+  pool: Pool,
+  delivery: Omit<NotificationDelivery, "id" | "status" | "updatedAt" | "sentAt" | "error">,
+) {
+  const result = await pool.query(
+    `
+      INSERT INTO notification_deliveries (
+        asset, channel, kind, dedupe_key, message, payload_json, status, error, created_at, updated_at, sent_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'pending', NULL, $7, $7, NULL)
+      ON CONFLICT (dedupe_key) DO NOTHING
+      RETURNING *
+    `,
+    [
+      delivery.asset ?? null,
+      delivery.channel,
+      delivery.kind,
+      delivery.dedupeKey,
+      delivery.message,
+      JSON.stringify(delivery.payload),
+      delivery.createdAt,
+    ],
+  );
+
+  return result.rows[0] ? mapNotificationDeliveryRow(result.rows[0]) : null;
+}
+
+export async function listPendingNotificationDeliveries(pool: Pool, limit = 10): Promise<NotificationDelivery[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM notification_deliveries
+      WHERE status IN ('pending', 'failed')
+      ORDER BY created_at ASC, id ASC
+      LIMIT $1
+    `,
+    [limit],
+  );
+  return result.rows.map(mapNotificationDeliveryRow);
+}
+
+export async function markNotificationDeliverySent(pool: Pool, id: number, sentAt: number) {
+  await pool.query(
+    `
+      UPDATE notification_deliveries
+      SET status = 'sent',
+          error = NULL,
+          sent_at = $2,
+          updated_at = $2
+      WHERE id = $1
+    `,
+    [id, sentAt],
+  );
+}
+
+export async function markNotificationDeliveryFailed(pool: Pool, id: number, error: string, updatedAt: number) {
+  await pool.query(
+    `
+      UPDATE notification_deliveries
+      SET status = 'failed',
+          error = $2,
+          updated_at = $3
+      WHERE id = $1
+    `,
+    [id, error, updatedAt],
+  );
 }
 
 export async function upsertCircuitBreaker(pool: Pool, breaker: CircuitBreaker) {

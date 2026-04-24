@@ -26,6 +26,9 @@ Voir `.env.example`.
 Variables principales:
 
 - `DATABASE_URL`
+- `TELEGRAM_ENABLED`
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
 - `KALSHI_API_KEY_ID`
 - `KALSHI_PRIVATE_KEY_PEM`
 - `KALSHI_PRIVATE_KEY_PATH`
@@ -168,4 +171,5 @@ Pourquoi pas Vercel seul:
 - le trading live reste désactivé tant que `enableTrading` est `false` dans la config
 - le mode recommandé pour la montée en charge est d’abord `enableTrading=true` avec `shadowMode=true`
 - si une venue est non prête ou si un circuit breaker est actif, le worker refuse d’ouvrir de nouveaux intents
+- si Telegram est configuré, le worker n’envoie que 2 types de notifications: `trade_live` quand un intent live engage réellement du capital, et `manual_intervention_required` quand une action humaine est requise
 - le rebalance automatique entre cash Kalshi et USDC Polygon n’est pas implémenté; le périmètre treasury est limité au bridge officiel Polymarket
