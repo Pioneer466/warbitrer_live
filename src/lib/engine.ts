@@ -13,6 +13,7 @@ import {
   computeKalshiBuyDepthWithinPriceRange,
   createKalshiAdapter,
   deriveKalshiBuyPriceLevels,
+  fetchKalshiOrderbook,
   fetchKalshiFills,
   fetchKalshiOrders,
   fetchKalshiResolution,
@@ -21,6 +22,7 @@ import {
   mapKalshiFillToLiveFill,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
+  normalizeKalshiNumericOrderbookLevels,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
 import { getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
@@ -755,6 +757,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       payload: {
         intentId: currentIntent.id,
         venue: currentIntent.primaryVenue,
+        orderType: primaryRequest.orderType,
         requestedPrice: primaryLeg.requestedPrice,
         orderPrice: primaryRequest.price,
         requestedSize: primaryRequest.size,
@@ -910,6 +913,25 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         },
       });
     } else {
+      const failureKalshiBookWs =
+        currentIntent.primaryVenue === "kalshi"
+          ? await buildKalshiPrimaryBookTelemetry(
+              slot,
+              primaryLeg,
+              settings,
+              now,
+              primaryOrder.requestedPrice,
+              primaryOrder.requestedSize,
+            )
+          : null;
+      const failureKalshiBookRest =
+        currentIntent.primaryVenue === "kalshi"
+          ? await buildKalshiPrimaryRestFailureBookTelemetry(
+              primaryLeg,
+              primaryOrder.requestedPrice,
+              primaryOrder.requestedSize,
+            )
+          : null;
       await armPrimarySoftNoFillGuard(currentIntent, primaryOrder, primaryResult, now);
       await writeRunEvent({
         level: "warn",
@@ -921,8 +943,11 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
           venue: currentIntent.primaryVenue,
           orderId: primaryOrder.venueOrderId,
           orderStatus: primaryResult.status,
+          orderType: primaryOrder.orderType,
           detail: extractTerminalNoFillDetail(primaryResult),
           softNoFill: Boolean(primaryResult.raw?.softNoFill),
+          kalshiBookWsAtFailure: failureKalshiBookWs,
+          kalshiBookRestAtFailure: failureKalshiBookRest,
         },
         createdAt: now,
       });
@@ -1113,6 +1138,7 @@ async function executeKalshiPrimaryMultiClip(
         payload: {
           intentId: currentIntent.id,
           venue: currentIntent.primaryVenue,
+          orderType: primaryRequest.orderType,
           clipIndex: clipIndex + 1,
           clipCount: clipPlan.length,
           clipSize,
@@ -1299,6 +1325,19 @@ async function executeKalshiPrimaryMultiClip(
           },
         });
       } else {
+        const failureKalshiBookWs = await buildKalshiPrimaryBookTelemetry(
+          slot,
+          repricedPrimaryLeg,
+          settings,
+          Date.now(),
+          primaryOrder.requestedPrice,
+          primaryOrder.requestedSize,
+        );
+        const failureKalshiBookRest = await buildKalshiPrimaryRestFailureBookTelemetry(
+          repricedPrimaryLeg,
+          primaryOrder.requestedPrice,
+          primaryOrder.requestedSize,
+        );
         await armPrimarySoftNoFillGuard(currentIntent, primaryOrder, primaryResult, Date.now());
         await writeRunEvent({
           level: "warn",
@@ -1310,10 +1349,13 @@ async function executeKalshiPrimaryMultiClip(
             venue: currentIntent.primaryVenue,
             orderId: primaryOrder.venueOrderId,
             orderStatus: primaryResult.status,
+            orderType: primaryOrder.orderType,
             detail: extractTerminalNoFillDetail(primaryResult),
             softNoFill: Boolean(primaryResult.raw?.softNoFill),
             clipIndex: clipIndex + 1,
             clipCount: clipPlan.length,
+            kalshiBookWsAtFailure: failureKalshiBookWs,
+            kalshiBookRestAtFailure: failureKalshiBookRest,
           },
           createdAt: Date.now(),
         });
@@ -1937,6 +1979,7 @@ async function retryLegWithinExecutionBuffer(
       venue: repricedLeg.venue,
       orderId: order.venueOrderId,
       orderStatus: result.status,
+      orderType: request.orderType,
       retryAttempt,
       retryPriceLadderTicks,
       requestedPrice: repricedLeg.requestedPrice,
@@ -2454,6 +2497,43 @@ async function buildKalshiPrimaryBookTelemetry(
     ticksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     topLevels,
   };
+}
+
+async function buildKalshiPrimaryRestFailureBookTelemetry(
+  leg: Pick<OrderIntent["legs"][number], "marketRef" | "outcome" | "side" | "venue">,
+  orderPrice: number | null,
+  requestedSize: number,
+) {
+  if (leg.venue !== "kalshi" || leg.side !== "BUY") {
+    return null;
+  }
+
+  try {
+    const orderbook = await fetchKalshiOrderbook(leg.marketRef);
+    const levels = normalizeKalshiNumericOrderbookLevels(orderbook);
+    const kalshiOutcome = leg.outcome === "YES" ? "YES" : "NO";
+    const topLevels = deriveKalshiBuyPriceLevels(levels, kalshiOutcome)
+      .slice(0, 3)
+      .map(([price, size]) => ({ price, size }));
+
+    return {
+      source: "rest-direct",
+      topPrice: topLevels[0]?.price ?? null,
+      topDepth: topLevels[0]?.size ?? null,
+      limitPrice: orderPrice,
+      requestedSize,
+      cumulativeDepthWithinLimit: computeKalshiBuyDepthWithinPriceRange(levels, kalshiOutcome, orderPrice),
+      topLevels,
+      seq: orderbook.seq ?? null,
+    };
+  } catch (error) {
+    return {
+      source: "rest-direct",
+      limitPrice: orderPrice,
+      requestedSize,
+      error: toErrorMessage(error),
+    };
+  }
 }
 
 async function attemptPrimaryUnwindAfterHedgeFailure(
