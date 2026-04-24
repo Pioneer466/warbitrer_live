@@ -100,6 +100,10 @@ export async function readRecentOrderIntents(limit?: number, asset?: MarketAsset
   return postgres.listRecentOrderIntents(await db(), limit, asset);
 }
 
+export async function readRecentSettledOrderIntents(limit?: number, asset?: MarketAsset) {
+  return postgres.listRecentSettledOrderIntents(await db(), limit, asset);
+}
+
 export async function findOrderIntent(intentId: string) {
   return postgres.findOrderIntent(await db(), intentId);
 }

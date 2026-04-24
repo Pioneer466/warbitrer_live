@@ -985,6 +985,21 @@ export async function listRecentOrderIntents(pool: Pool, limit = 50, asset?: Mar
   return result.rows.map(mapOrderIntentRow);
 }
 
+export async function listRecentSettledOrderIntents(pool: Pool, limit = 200, asset?: MarketAsset): Promise<OrderIntent[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM order_intents
+      WHERE status = 'settled'
+        ${asset ? "AND asset = $2" : ""}
+      ORDER BY resolved_at DESC NULLS LAST, updated_at DESC
+      LIMIT $1
+    `,
+    asset ? [limit, asset] : [limit],
+  );
+  return result.rows.map(mapOrderIntentRow);
+}
+
 export async function findOrderIntent(pool: Pool, intentId: string) {
   const result = await pool.query("SELECT * FROM order_intents WHERE id = $1 LIMIT 1", [intentId]);
   return result.rows[0] ? mapOrderIntentRow(result.rows[0]) : null;

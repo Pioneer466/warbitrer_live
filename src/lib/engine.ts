@@ -70,6 +70,7 @@ import {
   readRunEvents,
   readRecentFills,
   readRecentOrderIntents,
+  readRecentSettledOrderIntents,
   readRecentVenueOrders,
   readSettings,
   readSettingsMap,
@@ -118,7 +119,7 @@ const KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD = 2;
 const KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
-const SETTLED_RESOLUTION_REPAIR_LIMIT = 50;
+const SETTLED_RESOLUTION_REPAIR_LIMIT = 500;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -2976,11 +2977,10 @@ async function repairRecentSettledIntentResolutions(asset: MarketAsset, now: num
   }
   lastSettledResolutionRepairAtByAsset[asset] = now;
 
-  const recentIntents = await readRecentOrderIntents(SETTLED_RESOLUTION_REPAIR_LIMIT, asset);
-  const candidates = recentIntents.filter(
+  const recentSettledIntents = await readRecentSettledOrderIntents(SETTLED_RESOLUTION_REPAIR_LIMIT, asset);
+  const candidates = recentSettledIntents.filter(
     (intent) =>
       !intent.shadow &&
-      intent.status === "settled" &&
       intent.resolvedAt !== null &&
       now - intent.resolvedAt <= SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS,
   );
