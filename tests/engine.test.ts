@@ -4,6 +4,7 @@ import {
   countRecentKalshiSoftPrimaryNoFillEvents,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
+  deriveSettledVenueResolutions,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   hasKalshiHedgeRetryCapacity,
@@ -150,6 +151,27 @@ describe("late primary fill rescue eligibility", () => {
         [buildOrder()],
       ),
     ).toBe(false);
+  });
+});
+
+describe("settlement venue resolutions", () => {
+  it("requires actual venue outcomes instead of falling back to an external reference", () => {
+    expect(
+      deriveSettledVenueResolutions({
+        polymarketResolution: "DOWN",
+        kalshiResolution: "YES",
+      }),
+    ).toEqual({
+      polyResolution: "DOWN",
+      kalshiResolution: "YES",
+    });
+
+    expect(
+      deriveSettledVenueResolutions({
+        polymarketResolution: "DOWN",
+        kalshiResolution: null,
+      }),
+    ).toBeNull();
   });
 });
 

@@ -24,7 +24,6 @@ import {
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
 import { getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
-import { fetchSlotResolution, toKalshiResolution } from "@/lib/market-resolution";
 import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
@@ -117,11 +116,15 @@ const RECONCILE_STEP_TIMEOUT_MS = 30_000;
 const KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD = 2;
 const KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000;
+const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
+const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
+const SETTLED_RESOLUTION_REPAIR_LIMIT = 50;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
 const marketDataSupervisor = getMarketDataSupervisor();
 let lastDatabaseMaintenanceAttemptAt: number | null = null;
+const lastSettledResolutionRepairAtByAsset: Partial<Record<MarketAsset, number>> = {};
 
 function buildSlotBreakerKey(slotKey: string): CircuitBreaker["key"] {
   return `slot:${slotKey}` as CircuitBreaker["key"];
@@ -489,6 +492,12 @@ export function createExecutionCoordinator(
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_settlements", now, async () => {
           await reconcileSettlements(asset, settings, now);
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("repair_recent_settled_resolutions", now, async () => {
+          await repairRecentSettledIntentResolutions(asset, now);
         })),
       );
 
@@ -2910,44 +2919,32 @@ async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig
   );
 
   for (const intent of settledCandidates) {
-    let referenceResolution: "UP" | "DOWN" | null = null;
-    try {
-      referenceResolution = await fetchSlotResolution(intent.asset, intent.slotStartTs, intent.slotEndTs);
-    } catch {
-      referenceResolution = null;
-    }
-
-    const polyResolution =
-      referenceResolution ??
-      (await fetchPolymarketResolution(buildPolymarketSlotSlug(intent.asset, intent.slotStartTs)));
-    const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
-    const kalshiResolution =
-      referenceResolution === null
-        ? kalshiLeg?.marketRef
-          ? await fetchKalshiResolution(kalshiLeg.marketRef)
-          : null
-        : toKalshiResolution(referenceResolution);
-
-    if (!polyResolution || !kalshiResolution) {
+    const venueResolutions = await fetchVenueSettlementResolutions(intent);
+    if (!venueResolutions) {
       continue;
     }
 
-    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now, polyResolution);
+    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now, venueResolutions.polyResolution);
     if (exitAdjustedIntent.status !== "hedged") {
       continue;
     }
 
-    const payoutUsd = calculateWinningPayout(exitAdjustedIntent.legs, polyResolution, kalshiResolution);
+    const payoutUsd = calculateWinningPayout(
+      exitAdjustedIntent.legs,
+      venueResolutions.polyResolution,
+      venueResolutions.kalshiResolution,
+    );
     const settled = finalizeIntent({
       intent: exitAdjustedIntent,
-      polyResolution,
-      kalshiResolution,
+      polyResolution: venueResolutions.polyResolution,
+      kalshiResolution: venueResolutions.kalshiResolution,
       payoutUsd,
       now,
     });
     await writeOrderIntent(settled);
     for (const leg of settled.legs) {
-      const resolvedOutcome = leg.venue === "polymarket" ? polyResolution : kalshiResolution;
+      const resolvedOutcome =
+        leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
       const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
       await writeSettlement({
         id: `${settled.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
@@ -2964,12 +2961,137 @@ async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig
           filledSize: leg.filledSize,
           filledPrice: leg.filledPrice,
           legPayoutUsd,
-          polyResolution,
-          kalshiResolution,
+          polyResolution: venueResolutions.polyResolution,
+          kalshiResolution: venueResolutions.kalshiResolution,
         },
       });
     }
   }
+}
+
+async function repairRecentSettledIntentResolutions(asset: MarketAsset, now: number) {
+  const lastRepairAt = lastSettledResolutionRepairAtByAsset[asset];
+  if (lastRepairAt !== undefined && now - lastRepairAt < SETTLED_RESOLUTION_REPAIR_INTERVAL_MS) {
+    return;
+  }
+  lastSettledResolutionRepairAtByAsset[asset] = now;
+
+  const recentIntents = await readRecentOrderIntents(SETTLED_RESOLUTION_REPAIR_LIMIT, asset);
+  const candidates = recentIntents.filter(
+    (intent) =>
+      !intent.shadow &&
+      intent.status === "settled" &&
+      intent.resolvedAt !== null &&
+      now - intent.resolvedAt <= SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS,
+  );
+
+  for (const intent of candidates) {
+    const venueResolutions = await fetchVenueSettlementResolutions(intent);
+    if (!venueResolutions) {
+      continue;
+    }
+
+    if (
+      intent.polyResolution === venueResolutions.polyResolution &&
+      intent.kalshiResolution === venueResolutions.kalshiResolution
+    ) {
+      continue;
+    }
+
+    const payoutUsd = calculateWinningPayout(intent.legs, venueResolutions.polyResolution, venueResolutions.kalshiResolution);
+    const repaired = finalizeIntent({
+      intent,
+      polyResolution: venueResolutions.polyResolution,
+      kalshiResolution: venueResolutions.kalshiResolution,
+      payoutUsd,
+      now: intent.resolvedAt ?? now,
+    });
+
+    const repairedIntent: OrderIntent = {
+      ...repaired,
+      updatedAt: now,
+      resolvedAt: intent.resolvedAt ?? repaired.resolvedAt,
+    };
+
+    await writeOrderIntent(repairedIntent);
+    for (const leg of repairedIntent.legs) {
+      const resolvedOutcome =
+        leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
+      const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
+      await writeSettlement({
+        id: `${repairedIntent.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
+        asset: repairedIntent.asset,
+        intentId: repairedIntent.id,
+        venue: leg.venue,
+        marketRef: leg.marketRef,
+        outcome: leg.outcome,
+        resolvedOutcome,
+        payoutUsd: legPayoutUsd,
+        settledAt: repairedIntent.resolvedAt ?? now,
+        raw: {
+          slotKey: repairedIntent.slotKey,
+          filledSize: leg.filledSize,
+          filledPrice: leg.filledPrice,
+          legPayoutUsd,
+          polyResolution: venueResolutions.polyResolution,
+          kalshiResolution: venueResolutions.kalshiResolution,
+          repairedFrom: {
+            polyResolution: intent.polyResolution,
+            kalshiResolution: intent.kalshiResolution,
+            realizedPnlUsd: intent.realizedPnlUsd,
+          },
+        },
+      });
+    }
+
+    await writeRunEvent({
+      level: "warn",
+      eventType: "intent.settlement.repaired",
+      message: `Intent ${intent.id} settlement corrected from venue outcomes`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        previousPolyResolution: intent.polyResolution,
+        previousKalshiResolution: intent.kalshiResolution,
+        repairedPolyResolution: venueResolutions.polyResolution,
+        repairedKalshiResolution: venueResolutions.kalshiResolution,
+        previousRealizedPnlUsd: intent.realizedPnlUsd,
+        repairedRealizedPnlUsd: repairedIntent.realizedPnlUsd,
+      },
+      createdAt: now,
+    });
+  }
+}
+
+async function fetchVenueSettlementResolutions(intent: OrderIntent) {
+  const slotSlug = buildPolymarketSlotSlug(intent.asset, intent.slotStartTs);
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  const [polymarketResolution, kalshiResolution] = await Promise.all([
+    fetchPolymarketResolution(slotSlug).catch(() => null),
+    kalshiLeg?.marketRef ? fetchKalshiResolution(kalshiLeg.marketRef).catch(() => null) : Promise.resolve(null),
+  ]);
+
+  return deriveSettledVenueResolutions({
+    polymarketResolution,
+    kalshiResolution,
+  });
+}
+
+export function deriveSettledVenueResolutions({
+  polymarketResolution,
+  kalshiResolution,
+}: {
+  polymarketResolution: "UP" | "DOWN" | null;
+  kalshiResolution: "YES" | "NO" | null;
+}) {
+  if (!polymarketResolution || !kalshiResolution) {
+    return null;
+  }
+
+  return {
+    polyResolution: polymarketResolution,
+    kalshiResolution,
+  };
 }
 
 async function reconcileSlotEndPolymarketExits(asset: MarketAsset, settings: StrategyConfig, now: number) {

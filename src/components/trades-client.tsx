@@ -188,24 +188,24 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
           resolutionAlignment === "mismatch"
             ? "border-rose/20 bg-rose/10"
             : resolutionAlignment === "aligned"
-              ? "border-emerald-400/20 bg-emerald-400/10"
+              ? "border-amber/20 bg-amber/10"
               : "border-amber/20 bg-amber/10"
         }`}>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-white">Résolution</div>
+            <div className="text-white">Résolutions venues</div>
             <span
               className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.14em] ${
                 resolutionAlignment === "mismatch"
                   ? "border-rose/20 bg-black/10 text-rose"
                   : resolutionAlignment === "aligned"
-                    ? "border-emerald-400/20 bg-black/10 text-emerald-300"
+                    ? "border-amber/20 bg-black/10 text-amber"
                     : "border-amber/20 bg-black/10 text-amber"
               }`}
             >
               {resolutionAlignment === "mismatch"
                 ? "mismatch"
                 : resolutionAlignment === "aligned"
-                  ? "aligné"
+                  ? "même direction"
                   : "incomplet"}
             </span>
           </div>
@@ -213,6 +213,39 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
             Polymarket {intent.polyResolution ?? "--"} · Kalshi {intent.kalshiResolution ?? "--"}
           </div>
           {normalizedDirection ? <div className="mt-2">direction normalisée {normalizedDirection}</div> : null}
+          <div className="mt-2 text-xs text-mist/80">
+            compare uniquement la résolution des deux venues, pas le résultat de tes jambes détenues
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2">
+            {intent.legs.map((leg) => {
+              const settlement = getLegSettlementSummary(intent, leg);
+              return (
+                <div key={`${intent.id}:${leg.id}:settlement`} className="rounded-[14px] border border-white/6 px-3 py-2">
+                  <div className="text-white">
+                    {leg.venue} · {leg.outcome}
+                  </div>
+                  <div className="mt-1 text-xs text-mist">
+                    résolu {settlement.resolvedOutcome ?? "--"} ·{" "}
+                    <span
+                      className={
+                        settlement.status === "won"
+                          ? "text-emerald-300"
+                          : settlement.status === "lost"
+                            ? "text-rose"
+                            : "text-mist"
+                      }
+                    >
+                      {settlement.status === "won"
+                        ? "jambe gagnante"
+                        : settlement.status === "lost"
+                          ? "jambe perdante"
+                          : "issue inconnue"}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
           {intent.realizedPnlUsd !== null ? (
             <div className={`mt-2 ${intent.realizedPnlUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
               P&amp;L {formatCurrency(intent.realizedPnlUsd)}
@@ -281,6 +314,24 @@ function normalizeKalshiResolution(resolution: OrderIntent["kalshiResolution"]) 
   }
 
   return null;
+}
+
+function getLegSettlementSummary(
+  intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">,
+  leg: Pick<OrderIntent["legs"][number], "venue" | "outcome">,
+) {
+  const resolvedOutcome = leg.venue === "polymarket" ? intent.polyResolution : intent.kalshiResolution;
+  if (resolvedOutcome === null) {
+    return {
+      resolvedOutcome: null,
+      status: null as "won" | "lost" | null,
+    };
+  }
+
+  return {
+    resolvedOutcome,
+    status: leg.outcome === resolvedOutcome ? ("won" as const) : ("lost" as const),
+  };
 }
 
 function OrderGroupSection({
