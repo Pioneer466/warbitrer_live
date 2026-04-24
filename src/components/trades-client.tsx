@@ -167,8 +167,8 @@ function Panel({
 }
 
 function IntentRow({ intent }: { intent: OrderIntent }) {
-  const pairSettlement = getPairSettlementSummary(intent);
-  const venueResolutionStatus = getVenueResolutionStatus(intent);
+  const resolutionAlignment = getResolutionAlignment(intent);
+  const normalizedDirection = getNormalizedResolutionDirection(intent);
   const shouldShowResolutionSummary =
     intent.status === "settled" || intent.polyResolution !== null || intent.kalshiResolution !== null;
 
@@ -185,76 +185,34 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
       </div>
       {shouldShowResolutionSummary ? (
         <div className={`mt-3 rounded-[18px] border px-3 py-3 ${
-          pairSettlement.status === "double_win"
-            ? "border-emerald-400/20 bg-emerald-400/10"
-            : pairSettlement.status === "double_loss"
-              ? "border-rose/20 bg-rose/10"
+          resolutionAlignment === "mismatch"
+            ? "border-rose/20 bg-rose/10"
+            : resolutionAlignment === "aligned"
+              ? "border-emerald-400/20 bg-emerald-400/10"
               : "border-amber/20 bg-amber/10"
         }`}>
           <div className="flex flex-wrap items-center gap-2">
-            <div className="text-white">Résolutions venues</div>
+            <div className="text-white">Résolution</div>
             <span
               className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.14em] ${
-                venueResolutionStatus === "complete"
-                  ? "border-white/10 bg-black/10 text-mist"
-                  : "border-amber/20 bg-black/10 text-amber"
+                resolutionAlignment === "mismatch"
+                  ? "border-rose/20 bg-black/10 text-rose"
+                  : resolutionAlignment === "aligned"
+                    ? "border-emerald-400/20 bg-black/10 text-emerald-300"
+                    : "border-amber/20 bg-black/10 text-amber"
               }`}
             >
-              {venueResolutionStatus === "complete" ? "confirmées" : "incomplètes"}
+              {resolutionAlignment === "mismatch"
+                ? "mismatch"
+                : resolutionAlignment === "aligned"
+                  ? "aligné"
+                  : "incomplet"}
             </span>
           </div>
           <div className="mt-2">
             Polymarket {intent.polyResolution ?? "--"} · Kalshi {intent.kalshiResolution ?? "--"}
           </div>
-          <div className="mt-2 text-xs text-mist/80">
-            affichage brut des résolutions venues; ne présume pas que la paire était parfaitement couverte
-          </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="text-white">Résultat paire</div>
-            <span
-              className={`rounded-full border px-2 py-1 text-[11px] uppercase tracking-[0.14em] ${
-                pairSettlement.status === "double_win"
-                  ? "border-emerald-400/20 bg-black/10 text-emerald-300"
-                  : pairSettlement.status === "double_loss"
-                    ? "border-rose/20 bg-black/10 text-rose"
-                    : pairSettlement.status === "split"
-                      ? "border-amber/20 bg-black/10 text-amber"
-                      : "border-white/10 bg-black/10 text-mist"
-              }`}
-            >
-              {pairSettlement.label}
-            </span>
-          </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2">
-            {intent.legs.map((leg) => {
-              const settlement = getLegSettlementSummary(intent, leg);
-              return (
-                <div key={`${intent.id}:${leg.id}:settlement`} className="rounded-[14px] border border-white/6 px-3 py-2">
-                  <div className="text-white">
-                    {leg.venue} · {leg.outcome}
-                  </div>
-                  <div className="mt-1 text-xs text-mist">
-                    résolu {settlement.resolvedOutcome ?? "--"} ·{" "}
-                    <span
-                      className={
-                        settlement.status === "won"
-                          ? "text-emerald-300"
-                          : settlement.status === "lost"
-                            ? "text-rose"
-                            : "text-mist"
-                      }
-                    >
-                      {settlement.status === "won"
-                        ? "jambe gagnante"
-                        : settlement.status === "lost"
-                          ? "jambe perdante"
-                          : "issue inconnue"}
-                    </span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          {normalizedDirection ? <div className="mt-2">direction normalisée {normalizedDirection}</div> : null}
           {intent.realizedPnlUsd !== null ? (
             <div className={`mt-2 ${intent.realizedPnlUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
               P&amp;L {formatCurrency(intent.realizedPnlUsd)}
@@ -280,55 +238,49 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
   );
 }
 
-function getLegSettlementSummary(
-  intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">,
-  leg: Pick<OrderIntent["legs"][number], "venue" | "outcome">,
-) {
-  const resolvedOutcome = leg.venue === "polymarket" ? intent.polyResolution : intent.kalshiResolution;
-  if (resolvedOutcome === null) {
-    return {
-      resolvedOutcome: null,
-      status: null as "won" | "lost" | null,
-    };
+function getResolutionAlignment(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
+  const normalized = getNormalizedResolutionDirection(intent);
+  if (normalized === null) {
+    return null;
   }
 
-  return {
-    resolvedOutcome,
-    status: leg.outcome === resolvedOutcome ? ("won" as const) : ("lost" as const),
-  };
+  const polyDirection = normalizePolymarketResolution(intent.polyResolution);
+  const kalshiDirection = normalizeKalshiResolution(intent.kalshiResolution);
+  if (polyDirection === null || kalshiDirection === null) {
+    return null;
+  }
+
+  return polyDirection === kalshiDirection ? "aligned" : "mismatch";
 }
 
-function getPairSettlementSummary(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution" | "legs">) {
-  const legResults = intent.legs.map((leg) => getLegSettlementSummary(intent, leg));
-  if (legResults.some((result) => result.status === null)) {
-    return {
-      status: "incomplete" as const,
-      label: "issue incomplète",
-    };
+function getNormalizedResolutionDirection(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
+  const polyDirection = normalizePolymarketResolution(intent.polyResolution);
+  const kalshiDirection = normalizeKalshiResolution(intent.kalshiResolution);
+
+  if (polyDirection !== null && kalshiDirection !== null) {
+    return polyDirection === kalshiDirection ? polyDirection : null;
   }
 
-  const wonCount = legResults.filter((result) => result.status === "won").length;
-  if (wonCount === legResults.length) {
-    return {
-      status: "double_win" as const,
-      label: "double gain",
-    };
-  }
-  if (wonCount === 0) {
-    return {
-      status: "double_loss" as const,
-      label: "double perte",
-    };
-  }
-
-  return {
-    status: "split" as const,
-    label: "une gagnante · une perdante",
-  };
+  return polyDirection ?? kalshiDirection;
 }
 
-function getVenueResolutionStatus(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {
-  return intent.polyResolution !== null && intent.kalshiResolution !== null ? "complete" : "incomplete";
+function normalizePolymarketResolution(resolution: OrderIntent["polyResolution"]) {
+  if (resolution === "UP" || resolution === "DOWN") {
+    return resolution;
+  }
+
+  return null;
+}
+
+function normalizeKalshiResolution(resolution: OrderIntent["kalshiResolution"]) {
+  if (resolution === "YES") {
+    return "UP" as const;
+  }
+  if (resolution === "NO") {
+    return "DOWN" as const;
+  }
+
+  return null;
 }
 
 function OrderGroupSection({

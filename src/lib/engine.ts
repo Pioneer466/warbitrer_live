@@ -2986,80 +2986,7 @@ async function repairRecentSettledIntentResolutions(asset: MarketAsset, now: num
   );
 
   for (const intent of candidates) {
-    const venueResolutions = await fetchVenueSettlementResolutions(intent);
-    if (!venueResolutions) {
-      continue;
-    }
-
-    if (
-      intent.polyResolution === venueResolutions.polyResolution &&
-      intent.kalshiResolution === venueResolutions.kalshiResolution
-    ) {
-      continue;
-    }
-
-    const payoutUsd = calculateWinningPayout(intent.legs, venueResolutions.polyResolution, venueResolutions.kalshiResolution);
-    const repaired = finalizeIntent({
-      intent,
-      polyResolution: venueResolutions.polyResolution,
-      kalshiResolution: venueResolutions.kalshiResolution,
-      payoutUsd,
-      now: intent.resolvedAt ?? now,
-    });
-
-    const repairedIntent: OrderIntent = {
-      ...repaired,
-      updatedAt: now,
-      resolvedAt: intent.resolvedAt ?? repaired.resolvedAt,
-    };
-
-    await writeOrderIntent(repairedIntent);
-    for (const leg of repairedIntent.legs) {
-      const resolvedOutcome =
-        leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
-      const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
-      await writeSettlement({
-        id: `${repairedIntent.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
-        asset: repairedIntent.asset,
-        intentId: repairedIntent.id,
-        venue: leg.venue,
-        marketRef: leg.marketRef,
-        outcome: leg.outcome,
-        resolvedOutcome,
-        payoutUsd: legPayoutUsd,
-        settledAt: repairedIntent.resolvedAt ?? now,
-        raw: {
-          slotKey: repairedIntent.slotKey,
-          filledSize: leg.filledSize,
-          filledPrice: leg.filledPrice,
-          legPayoutUsd,
-          polyResolution: venueResolutions.polyResolution,
-          kalshiResolution: venueResolutions.kalshiResolution,
-          repairedFrom: {
-            polyResolution: intent.polyResolution,
-            kalshiResolution: intent.kalshiResolution,
-            realizedPnlUsd: intent.realizedPnlUsd,
-          },
-        },
-      });
-    }
-
-    await writeRunEvent({
-      level: "warn",
-      eventType: "intent.settlement.repaired",
-      message: `Intent ${intent.id} settlement corrected from venue outcomes`,
-      payload: {
-        intentId: intent.id,
-        slotKey: intent.slotKey,
-        previousPolyResolution: intent.polyResolution,
-        previousKalshiResolution: intent.kalshiResolution,
-        repairedPolyResolution: venueResolutions.polyResolution,
-        repairedKalshiResolution: venueResolutions.kalshiResolution,
-        previousRealizedPnlUsd: intent.realizedPnlUsd,
-        repairedRealizedPnlUsd: repairedIntent.realizedPnlUsd,
-      },
-      createdAt: now,
-    });
+    await repairSettledIntentResolution(intent, now);
   }
 }
 
@@ -3091,6 +3018,165 @@ export function deriveSettledVenueResolutions({
   return {
     polyResolution: polymarketResolution,
     kalshiResolution,
+  };
+}
+
+async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
+  const venueResolutions = await fetchVenueSettlementResolutions(intent);
+  if (!venueResolutions) {
+    return {
+      status: "unavailable" as const,
+      intent,
+    };
+  }
+
+  if (
+    intent.polyResolution === venueResolutions.polyResolution &&
+    intent.kalshiResolution === venueResolutions.kalshiResolution
+  ) {
+    return {
+      status: "unchanged" as const,
+      intent,
+    };
+  }
+
+  const payoutUsd = calculateWinningPayout(intent.legs, venueResolutions.polyResolution, venueResolutions.kalshiResolution);
+  const repaired = finalizeIntent({
+    intent,
+    polyResolution: venueResolutions.polyResolution,
+    kalshiResolution: venueResolutions.kalshiResolution,
+    payoutUsd,
+    now: intent.resolvedAt ?? now,
+  });
+
+  const repairedIntent: OrderIntent = {
+    ...repaired,
+    updatedAt: now,
+    resolvedAt: intent.resolvedAt ?? repaired.resolvedAt,
+  };
+
+  await writeOrderIntent(repairedIntent);
+  for (const leg of repairedIntent.legs) {
+    const resolvedOutcome =
+      leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
+    const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
+    await writeSettlement({
+      id: `${repairedIntent.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
+      asset: repairedIntent.asset,
+      intentId: repairedIntent.id,
+      venue: leg.venue,
+      marketRef: leg.marketRef,
+      outcome: leg.outcome,
+      resolvedOutcome,
+      payoutUsd: legPayoutUsd,
+      settledAt: repairedIntent.resolvedAt ?? now,
+      raw: {
+        slotKey: repairedIntent.slotKey,
+        filledSize: leg.filledSize,
+        filledPrice: leg.filledPrice,
+        legPayoutUsd,
+        polyResolution: venueResolutions.polyResolution,
+        kalshiResolution: venueResolutions.kalshiResolution,
+        repairedFrom: {
+          polyResolution: intent.polyResolution,
+          kalshiResolution: intent.kalshiResolution,
+          realizedPnlUsd: intent.realizedPnlUsd,
+        },
+      },
+    });
+  }
+
+  await writeRunEvent({
+    level: "warn",
+    eventType: "intent.settlement.repaired",
+    message: `Intent ${intent.id} settlement corrected from venue outcomes`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      previousPolyResolution: intent.polyResolution,
+      previousKalshiResolution: intent.kalshiResolution,
+      repairedPolyResolution: venueResolutions.polyResolution,
+      repairedKalshiResolution: venueResolutions.kalshiResolution,
+      previousRealizedPnlUsd: intent.realizedPnlUsd,
+      repairedRealizedPnlUsd: repairedIntent.realizedPnlUsd,
+    },
+    createdAt: now,
+  });
+
+  return {
+    status: "repaired" as const,
+    intent: repairedIntent,
+  };
+}
+
+export async function repairSettledIntentResolutions(options?: {
+  asset?: MarketAsset | "all";
+  intentId?: string;
+  lookbackHours?: number;
+  limit?: number;
+  now?: number;
+}) {
+  const now = options?.now ?? Date.now();
+  const lookbackMs = Math.max(1, options?.lookbackHours ?? 24) * 60 * 60 * 1000;
+  const limit = Math.max(1, options?.limit ?? SETTLED_RESOLUTION_REPAIR_LIMIT);
+
+  if (options?.intentId) {
+    const intent = await findOrderIntent(options.intentId);
+    if (!intent) {
+      throw new Error(`Intent ${options.intentId} introuvable`);
+    }
+    if (intent.status !== "settled") {
+      throw new Error(`Intent ${options.intentId} n'est pas settled`);
+    }
+
+    const result = await repairSettledIntentResolution(intent, now);
+    return {
+      mode: "intent",
+      intentId: options.intentId,
+      result: result.status,
+      polyResolution: result.intent.polyResolution,
+      kalshiResolution: result.intent.kalshiResolution,
+      realizedPnlUsd: result.intent.realizedPnlUsd,
+    };
+  }
+
+  const assets = options?.asset && options.asset !== "all" ? [options.asset] : MARKET_ASSETS;
+  const summaries = [];
+
+  for (const asset of assets) {
+    const intents = await readRecentSettledOrderIntents(limit, asset);
+    const candidates = intents.filter(
+      (intent) =>
+        !intent.shadow &&
+        intent.resolvedAt !== null &&
+        now - intent.resolvedAt <= lookbackMs,
+    );
+
+    let repaired = 0;
+    let unchanged = 0;
+    let unavailable = 0;
+
+    for (const intent of candidates) {
+      const result = await repairSettledIntentResolution(intent, now);
+      if (result.status === "repaired") repaired += 1;
+      else if (result.status === "unchanged") unchanged += 1;
+      else unavailable += 1;
+    }
+
+    summaries.push({
+      asset,
+      scanned: candidates.length,
+      repaired,
+      unchanged,
+      unavailable,
+    });
+  }
+
+  return {
+    mode: "batch",
+    lookbackHours: lookbackMs / (60 * 60 * 1000),
+    limit,
+    assets: summaries,
   };
 }
 
