@@ -29,7 +29,7 @@ import type {
   VenueOrderStatus,
 } from "@/lib/types";
 
-type GammaMarketResponse = Array<{
+type GammaMarket = {
   id: string;
   conditionId?: string;
   question: string;
@@ -45,6 +45,13 @@ type GammaMarketResponse = Array<{
   bestAsk?: number;
   enableOrderBook: boolean;
   outcomePrices: string;
+};
+
+type GammaMarketResponse = GammaMarket[];
+type GammaEventResponse = Array<{
+  id: string;
+  slug: string;
+  markets?: GammaMarket[];
 }>;
 
 type CLOBBook = {
@@ -208,8 +215,8 @@ export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityR
   };
 }
 
-export async function fetchPolymarketResolution(slug: string) {
-  const market = await fetchPolymarketMarket(slug);
+export async function fetchPolymarketResolution(slug: string, conditionId?: string) {
+  const market = await fetchPolymarketMarket(slug, conditionId);
   if (!market || !market.closed) {
     return null;
   }
@@ -586,9 +593,35 @@ export async function fetchPolymarketBook(tokenId: string) {
   return fetchJson<CLOBBook>(`${POLY_CLOB_BASE}/book?token_id=${tokenId}`);
 }
 
-export async function fetchPolymarketMarket(slug: string) {
+export async function fetchPolymarketMarket(slug: string, conditionId?: string) {
   const markets = await fetchJson<GammaMarketResponse>(`${POLY_GAMMA_BASE}/markets?slug=${slug}`);
-  return markets[0] ?? null;
+  const directMatch = selectGammaMarket(markets, slug, conditionId);
+  if (directMatch) {
+    return directMatch;
+  }
+
+  // Historical recurring crypto markets are not always returned by /markets?slug once closed,
+  // but the parent event still exposes the nested market entry via /events?slug.
+  const events = await fetchJson<GammaEventResponse>(`${POLY_GAMMA_BASE}/events?slug=${slug}`);
+  for (const event of events) {
+    const eventMatch = selectGammaMarket(event.markets ?? [], slug, conditionId);
+    if (eventMatch) {
+      return eventMatch;
+    }
+  }
+
+  return null;
+}
+
+function selectGammaMarket(markets: GammaMarket[], slug: string, conditionId?: string) {
+  if (conditionId) {
+    const byConditionId = markets.find((market) => (market.conditionId ?? market.id) === conditionId);
+    if (byConditionId) {
+      return byConditionId;
+    }
+  }
+
+  return markets.find((market) => market.slug === slug) ?? null;
 }
 
 export function derivePolymarketOutcomeTokens(market: NonNullable<Awaited<ReturnType<typeof fetchPolymarketMarket>>>) {

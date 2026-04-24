@@ -2992,9 +2992,10 @@ async function repairRecentSettledIntentResolutions(asset: MarketAsset, now: num
 
 async function fetchVenueSettlementResolutions(intent: OrderIntent) {
   const slotSlug = buildPolymarketSlotSlug(intent.asset, intent.slotStartTs);
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
   const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
   const [polymarketResolution, kalshiResolution] = await Promise.all([
-    fetchPolymarketResolution(slotSlug).catch(() => null),
+    fetchPolymarketResolution(slotSlug, polymarketLeg?.marketRef).catch(() => null),
     kalshiLeg?.marketRef ? fetchKalshiResolution(kalshiLeg.marketRef).catch(() => null) : Promise.resolve(null),
   ]);
 
@@ -3483,9 +3484,10 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
       if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
         const polyResolution =
           currentIntent.polyResolution ??
-          (await fetchPolymarketResolution(buildPolymarketSlotSlug(currentIntent.asset, currentIntent.slotStartTs)).catch(
-            () => null,
-          ));
+          (await fetchPolymarketResolution(
+            buildPolymarketSlotSlug(currentIntent.asset, currentIntent.slotStartTs),
+            primaryLeg.marketRef,
+          ).catch(() => null));
         if (polyResolution !== null) {
           const residualPayoutUsd = primaryLeg.outcome === polyResolution ? remainingExposureSize : 0;
           const payoutUsd = round4(exitFilledSize * exitAverageFillPrice - exitFeeUsd + residualPayoutUsd);
@@ -5091,7 +5093,7 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
   errorMessage: string,
 ) {
   const slotSlug = buildPolymarketSlotSlug(intent.asset, intent.slotStartTs);
-  const polyResolution = await fetchPolymarketResolution(slotSlug).catch(() => null);
+  const polyResolution = await fetchPolymarketResolution(slotSlug, primaryLeg.marketRef).catch(() => null);
   const failureReason =
     polyResolution === null
       ? `Primary unwind impossible after Polymarket market close (${errorMessage}); waiting for venue settlement / reclaim`

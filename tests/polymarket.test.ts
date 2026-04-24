@@ -5,6 +5,8 @@ import {
   extractPolymarketCollateralAllowanceInfo,
   extractPolymarketCollateralAllowanceUsd,
   extractPolymarketPositionValueUsd,
+  fetchPolymarketMarket,
+  fetchPolymarketResolution,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
   getPolymarketSoftNoFillMessage,
@@ -17,12 +19,84 @@ import {
   summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
+import { vi } from "vitest";
 
 describe("Polymarket helpers", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   it("detects resolution from terminal outcome prices", () => {
     expect(extractPolymarketResolution('["1","0"]')).toBe("UP");
     expect(extractPolymarketResolution('["0","1"]')).toBe("DOWN");
     expect(extractPolymarketResolution('["0.61","0.39"]')).toBeNull();
+  });
+
+  it("falls back to Gamma events for historical recurring markets missing from /markets", async () => {
+    const historicalEventResponse = [
+      {
+        id: "409301",
+        slug: "eth-updown-15m-1777022100",
+        markets: [
+          {
+            id: "2058859",
+            conditionId: "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
+            question: "Ethereum Up or Down - April 24, 5:15AM-5:30AM ET",
+            slug: "eth-updown-15m-1777022100",
+            endDate: "2026-04-24T09:30:00Z",
+            startDate: "2026-04-23T09:23:19.988613Z",
+            outcomes: '["Up","Down"]',
+            clobTokenIds:
+              '["50568372059988782577905600550368228208982764013889510480059438629092033192000","109025557218839786829770351242082471908150399808536036632532627608105781407868"]',
+            feeType: "crypto_fees_v2",
+            active: true,
+            closed: true,
+            enableOrderBook: true,
+            outcomePrices: '["0","1"]',
+          },
+        ],
+      },
+    ];
+
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/markets?slug=eth-updown-15m-1777022100")) {
+        return {
+          ok: true,
+          json: async () => [],
+        };
+      }
+      if (url.includes("/events?slug=eth-updown-15m-1777022100")) {
+        return {
+          ok: true,
+          json: async () => historicalEventResponse,
+        };
+      }
+      throw new Error(`Unexpected fetch url: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchPolymarketResolution(
+        "eth-updown-15m-1777022100",
+        "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
+      ),
+    ).resolves.toBe("DOWN");
+
+    await expect(
+      fetchPolymarketMarket(
+        "eth-updown-15m-1777022100",
+        "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
+      ),
+    ).resolves.toMatchObject({
+      slug: "eth-updown-15m-1777022100",
+      conditionId: "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
+    });
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/markets?slug=eth-updown-15m-1777022100");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/events?slug=eth-updown-15m-1777022100");
   });
 
   it("classifies Polymarket FOK kill responses as soft no-fill errors", () => {
