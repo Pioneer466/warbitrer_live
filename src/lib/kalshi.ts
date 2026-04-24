@@ -255,7 +255,9 @@ export function resolveKalshiMarketForSlot(
 
 export async function fetchKalshiResolution(ticker: string) {
   const response = await fetchJson<KalshiMarketResponse>(`${getKalshiMarketDataBaseUrl()}/markets/${ticker}`);
-  if (response.market.status !== "finalized" || !response.market.result) {
+  const status = response.market.status?.toLowerCase?.() ?? "";
+  const terminalStatuses = new Set(["determined", "settled", "finalized"]);
+  if (!terminalStatuses.has(status) || !response.market.result) {
     return null;
   }
 

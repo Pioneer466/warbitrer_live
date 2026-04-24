@@ -3,6 +3,7 @@ import {
   buildKalshiSigningPath,
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
+  fetchKalshiResolution,
   fetchKalshiMarkets,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
@@ -300,6 +301,36 @@ describe("Kalshi quote derivation", () => {
     await fetchKalshiMarkets("xrp");
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXXRP15M");
+  });
+
+  it("accepts determined and settled Kalshi markets as resolved", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXETH15M-DETERMINED",
+            status: "determined",
+            result: "yes",
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXETH15M-SETTLED",
+            status: "settled",
+            result: "no",
+          },
+        }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(fetchKalshiResolution("KXETH15M-DETERMINED")).resolves.toBe("YES");
+    await expect(fetchKalshiResolution("KXETH15M-SETTLED")).resolves.toBe("NO");
   });
 
   it("signs Kalshi authenticated requests with the full trade-api path", () => {
