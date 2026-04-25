@@ -194,6 +194,7 @@ export type StrategyConfig = {
   immediateOrderConfirmationTimeoutMs: number;
   executionPriceBuffer: number;
   kalshiDepthHeadroomContracts: number;
+  kalshiPrimaryDepthSafetyFactor: number;
   kalshiPrimaryPriceTicksSlippage: number;
   kalshiPrimaryMaxClipContracts: number;
   kalshiPrimaryMaxClips: number;

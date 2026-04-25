@@ -109,6 +109,25 @@ export function getVenueExecutableDepth(
   return Math.max(0, displayedDepth - Math.max(0, kalshiDepthHeadroomContracts));
 }
 
+export function applyKalshiPrimaryDepthSafetyFactor(
+  displayedDepth: number | null,
+  safetyFactor: number,
+) {
+  if (displayedDepth === null) {
+    return null;
+  }
+
+  if (!Number.isFinite(displayedDepth) || displayedDepth <= 0) {
+    return 0;
+  }
+
+  const normalizedSafetyFactor = Number.isFinite(safetyFactor)
+    ? Math.min(1, Math.max(0, safetyFactor))
+    : 1;
+
+  return displayedDepth * normalizedSafetyFactor;
+}
+
 export function getKalshiPrimaryMultiClipCapacity(
   maxClipContracts: number,
   maxClips: number,

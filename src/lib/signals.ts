@@ -1,4 +1,5 @@
 import {
+  applyKalshiPrimaryDepthSafetyFactor,
   calculateKalshiFee,
   calculatePolymarketFee,
   deriveAlignedPairSize,
@@ -173,11 +174,6 @@ function buildSignal({
 }): LiveOpportunity {
   const targetLegBudgetUsd = settings.maxPairNotionalUsd / 2;
   const reasons: string[] = [];
-  const effectiveKalshiDepth = getVenueExecutableDepth(
-    "kalshi",
-    kalshiDepth,
-    settings.kalshiDepthHeadroomContracts,
-  );
 
   if (marketAlignmentReason) {
     reasons.push(marketAlignmentReason);
@@ -205,6 +201,15 @@ function buildSignal({
       ? null
       : computeKalshiBuyDepthWithinPriceRange(kalshi.orderbookLevels, kalshiOutcome, kalshiMaxBuyPrice);
   const sizingKalshiDepth = cumulativeKalshiDepth ?? kalshiDepth;
+  const safetyAdjustedKalshiDepth = applyKalshiPrimaryDepthSafetyFactor(
+    sizingKalshiDepth,
+    settings.kalshiPrimaryDepthSafetyFactor,
+  );
+  const effectiveKalshiDepth = getVenueExecutableDepth(
+    "kalshi",
+    safetyAdjustedKalshiDepth,
+    settings.kalshiDepthHeadroomContracts,
+  );
   const grossCost = polyPrice !== null && kalshiPrice !== null ? round4(polyPrice + kalshiPrice) : null;
   const alignedSizing = deriveAlignedPairSize({
     targetLegNotionalUsd: targetLegBudgetUsd,
@@ -220,7 +225,7 @@ function buildSignal({
     },
     kalshi: {
       price: kalshiPrice,
-      depth: sizingKalshiDepth,
+      depth: safetyAdjustedKalshiDepth,
       minOrderSize: kalshiMinOrderSize,
       fallbackMinOrderSize: 1,
     },

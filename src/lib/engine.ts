@@ -1,5 +1,6 @@
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
+  applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateKalshiFee,
   deriveAlignedPairSize,
@@ -928,6 +929,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         currentIntent.primaryVenue === "kalshi"
           ? await buildKalshiPrimaryRestFailureBookTelemetry(
               primaryLeg,
+              settings,
               primaryOrder.requestedPrice,
               primaryOrder.requestedSize,
             )
@@ -1335,6 +1337,7 @@ async function executeKalshiPrimaryMultiClip(
         );
         const failureKalshiBookRest = await buildKalshiPrimaryRestFailureBookTelemetry(
           repricedPrimaryLeg,
+          settings,
           primaryOrder.requestedPrice,
           primaryOrder.requestedSize,
         );
@@ -2432,13 +2435,22 @@ function getLivePairSnapshot(
   intent: OrderIntent,
   polymarket: OpportunitySnapshot["polymarket"],
   kalshi: OpportunitySnapshot["kalshi"],
-  settings: Pick<StrategyConfig, "kalshiPrimaryPriceTicksSlippage">,
+  settings: Pick<StrategyConfig, "kalshiPrimaryPriceTicksSlippage" | "kalshiPrimaryDepthSafetyFactor">,
 ) {
   const isDownYes = intent.combination === "POLY_DOWN_KALSHI_YES";
   const polyOutcome = isDownYes ? polymarket.outcomes.down : polymarket.outcomes.up;
   const kalshiOutcome = isDownYes ? kalshi.outcomes.yes : kalshi.outcomes.no;
   const polyPrice = polyOutcome.buyPrice;
   const kalshiPrice = kalshiOutcome.buyPrice;
+  const kalshiSizingDepth = applyKalshiPrimaryDepthSafetyFactor(
+    resolveKalshiPrimarySizingDepth(
+      kalshi,
+      isDownYes ? "YES" : "NO",
+      kalshiPrice,
+      settings.kalshiPrimaryPriceTicksSlippage,
+    ) ?? kalshiOutcome.depth,
+    settings.kalshiPrimaryDepthSafetyFactor,
+  );
 
   if (polyPrice === null || kalshiPrice === null) {
     return null;
@@ -2453,12 +2465,7 @@ function getLivePairSnapshot(
     },
     kalshi: {
       price: kalshiPrice,
-      depth: resolveKalshiPrimarySizingDepth(
-        kalshi,
-        isDownYes ? "YES" : "NO",
-        kalshiPrice,
-        settings.kalshiPrimaryPriceTicksSlippage,
-      ) ?? kalshiOutcome.depth,
+      depth: kalshiSizingDepth,
       minOrderSize: kalshiOutcome.minOrderSize,
     },
   };
@@ -2467,7 +2474,7 @@ function getLivePairSnapshot(
 async function buildKalshiPrimaryBookTelemetry(
   slot: MarketSlot,
   leg: Pick<OrderIntent["legs"][number], "outcome" | "side" | "venue">,
-  settings: Pick<StrategyConfig, "kalshiPrimaryPriceTicksSlippage">,
+  settings: Pick<StrategyConfig, "kalshiPrimaryPriceTicksSlippage" | "kalshiPrimaryDepthSafetyFactor">,
   now: number,
   orderPrice: number | null,
   requestedSize: number,
@@ -2482,6 +2489,10 @@ async function buildKalshiPrimaryBookTelemetry(
   const topDepth = kalshi.quote.outcomes[outcomeKey].depth;
   const topPrice = kalshi.quote.outcomes[outcomeKey].buyPrice;
   const cumulativeDepth = computeKalshiBuyDepthWithinPriceRange(kalshi.quote.orderbookLevels, kalshiOutcome, orderPrice);
+  const safetyAdjustedCumulativeDepth = applyKalshiPrimaryDepthSafetyFactor(
+    cumulativeDepth ?? topDepth,
+    settings.kalshiPrimaryDepthSafetyFactor,
+  );
   const topLevels = deriveKalshiBuyPriceLevels(kalshi.quote.orderbookLevels, kalshiOutcome)
     .slice(0, 3)
     .map(([price, size]) => ({ price, size }));
@@ -2494,6 +2505,8 @@ async function buildKalshiPrimaryBookTelemetry(
     limitPrice: orderPrice,
     requestedSize,
     cumulativeDepthWithinLimit: cumulativeDepth,
+    depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+    safetyAdjustedCumulativeDepthWithinLimit: safetyAdjustedCumulativeDepth,
     ticksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     topLevels,
   };
@@ -2501,6 +2514,7 @@ async function buildKalshiPrimaryBookTelemetry(
 
 async function buildKalshiPrimaryRestFailureBookTelemetry(
   leg: Pick<OrderIntent["legs"][number], "marketRef" | "outcome" | "side" | "venue">,
+  settings: Pick<StrategyConfig, "kalshiPrimaryDepthSafetyFactor">,
   orderPrice: number | null,
   requestedSize: number,
 ) {
@@ -2515,6 +2529,7 @@ async function buildKalshiPrimaryRestFailureBookTelemetry(
     const topLevels = deriveKalshiBuyPriceLevels(levels, kalshiOutcome)
       .slice(0, 3)
       .map(([price, size]) => ({ price, size }));
+    const cumulativeDepth = computeKalshiBuyDepthWithinPriceRange(levels, kalshiOutcome, orderPrice);
 
     return {
       source: "rest-direct",
@@ -2522,7 +2537,12 @@ async function buildKalshiPrimaryRestFailureBookTelemetry(
       topDepth: topLevels[0]?.size ?? null,
       limitPrice: orderPrice,
       requestedSize,
-      cumulativeDepthWithinLimit: computeKalshiBuyDepthWithinPriceRange(levels, kalshiOutcome, orderPrice),
+      cumulativeDepthWithinLimit: cumulativeDepth,
+      depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+      safetyAdjustedCumulativeDepthWithinLimit: applyKalshiPrimaryDepthSafetyFactor(
+        cumulativeDepth ?? topLevels[0]?.size ?? null,
+        settings.kalshiPrimaryDepthSafetyFactor,
+      ),
       topLevels,
       seq: orderbook.seq ?? null,
     };

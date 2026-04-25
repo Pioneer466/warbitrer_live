@@ -1,4 +1,5 @@
 import {
+  applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateBinaryPositionPayout,
   calculateKalshiFee,
@@ -40,6 +41,11 @@ describe("live fee and sizing helpers", () => {
         kalshiDepthHeadroomContracts: 2,
       }),
     ).toBe(18);
+  });
+
+  it("discounts Kalshi primary depth before sizing into the displayed book", () => {
+    expect(applyKalshiPrimaryDepthSafetyFactor(25, 0.7)).toBe(17.5);
+    expect(applyKalshiPrimaryDepthSafetyFactor(null, 0.7)).toBeNull();
   });
 
   it("aligns pair sizing to the smallest executable leg instead of forcing the full budget on both sides", () => {

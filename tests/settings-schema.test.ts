@@ -7,6 +7,7 @@ describe("settings schema", () => {
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
+    expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.7);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(2);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(10);
     expect(settings.kalshiPrimaryMaxClips).toBe(4);
@@ -35,6 +36,7 @@ describe("settings schema", () => {
       immediateOrderConfirmationTimeoutMs: 12000,
       executionPriceBuffer: 0.02,
       kalshiDepthHeadroomContracts: 3,
+      kalshiPrimaryDepthSafetyFactor: 0.6,
       kalshiPrimaryPriceTicksSlippage: 3,
       kalshiPrimaryMaxClipContracts: 8,
       kalshiPrimaryMaxClips: 3,
@@ -51,6 +53,7 @@ describe("settings schema", () => {
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(12000);
     expect(settings.executionPriceBuffer).toBe(0.02);
     expect(settings.kalshiDepthHeadroomContracts).toBe(3);
+    expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.6);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(3);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(8);
     expect(settings.kalshiPrimaryMaxClips).toBe(3);

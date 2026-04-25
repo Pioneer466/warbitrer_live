@@ -8,6 +8,7 @@ import {
   DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS,
   DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS,
+  DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR,
   DEFAULT_KALSHI_PRIMARY_PRICE_TICKS_SLIPPAGE,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIPS,
@@ -37,6 +38,11 @@ export const settingsSchema = z
       .nonnegative()
       .max(1_000)
       .default(DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS),
+    kalshiPrimaryDepthSafetyFactor: z
+      .number()
+      .positive()
+      .max(1)
+      .default(DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR),
     kalshiPrimaryPriceTicksSlippage: z
       .number()
       .int()

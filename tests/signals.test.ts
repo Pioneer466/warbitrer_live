@@ -27,6 +27,7 @@ const settings: StrategyConfig = {
   immediateOrderConfirmationTimeoutMs: 8_000,
   executionPriceBuffer: 0.01,
   kalshiDepthHeadroomContracts: 2,
+  kalshiPrimaryDepthSafetyFactor: 0.7,
   kalshiPrimaryPriceTicksSlippage: 2,
   kalshiPrimaryMaxClipContracts: 10,
   kalshiPrimaryMaxClips: 4,
@@ -425,10 +426,10 @@ describe("live signal engine", () => {
     });
 
     expect(signal.combination).toBe("POLY_DOWN_KALSHI_YES");
-    expect(signal.legs[0].size).toBe(18);
-    expect(signal.legs[1].size).toBe(18);
-    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(7.2, 4);
-    expect(signal.legs[1].targetNotionalUsd).toBeCloseTo(8.82, 4);
+    expect(signal.legs[0].size).toBe(12);
+    expect(signal.legs[1].size).toBe(12);
+    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(4.8, 4);
+    expect(signal.legs[1].targetNotionalUsd).toBeCloseTo(5.88, 4);
     expect(signal.eligible).toBe(true);
     expect(signal.reasons).not.toContain("Liquidité Kalshi insuffisante après headroom (2 contrats)");
   });
@@ -481,6 +482,7 @@ describe("live signal engine", () => {
         ...settings,
         maxPairNotionalUsd: 20,
         kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 0.7,
         kalshiPrimaryPriceTicksSlippage: 2,
       },
       balances,
@@ -489,9 +491,9 @@ describe("live signal engine", () => {
     });
 
     expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
-    expect(signal.legs[0].size).toBe(20);
-    expect(signal.legs[1].size).toBe(20);
-    expect(signal.legs[1].targetNotionalUsd).toBeCloseTo(9.8, 4);
+    expect(signal.legs[0].size).toBe(17);
+    expect(signal.legs[1].size).toBe(17);
+    expect(signal.legs[1].targetNotionalUsd).toBeCloseTo(8.33, 4);
     expect(signal.eligible).toBe(true);
   });
 
@@ -537,6 +539,7 @@ describe("live signal engine", () => {
         kalshiPrimaryMaxClipContracts: 10,
         kalshiPrimaryMaxClips: 4,
         kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
       },
       balances,
       lastEntryCosts: {},
