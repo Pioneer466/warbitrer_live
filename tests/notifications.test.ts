@@ -17,8 +17,15 @@ describe("telegram notification mapping", () => {
         hedgeVenue: "polymarket",
         targetNotionalUsd: 20,
         grossCost: 0.93,
+        stage: "hedged",
         primaryFilledSize: 10,
         primaryFilledPrice: 0.44,
+        polymarketOutcome: "DOWN",
+        polymarketRequestedNotionalUsd: 8.8,
+        polymarketFilledSize: 20,
+        kalshiOutcome: "YES",
+        kalshiRequestedNotionalUsd: 11.2,
+        kalshiFilledSize: 20,
       },
       createdAt: 1_777_000_000_000,
     };
@@ -30,8 +37,35 @@ describe("telegram notification mapping", () => {
       kind: "trade_live",
       dedupeKey: "trade_live:intent-1",
     });
-    expect(notification?.message).toContain("LIVE TRADE");
-    expect(notification?.message).toContain("ETH · POLY_DOWN_KALSHI_YES");
+    expect(notification?.message).toBe(
+      [
+        "TRADE",
+        "ETH - Poly DOWN Kalshi YES",
+        "Traded : 20.00$",
+        "Gross : 0.93",
+        "",
+        "NOTIONNEL",
+        "Poly : 8.80$ - filled : 20.00",
+        "Kalshi : 11.20$ - filled : 20.00",
+      ].join("\n"),
+    );
+  });
+
+  it("waits for the hedged live trade stage before queueing the trade notification", () => {
+    const event: RunEvent = {
+      asset: "eth",
+      level: "info",
+      eventType: "intent.live_traded",
+      message: "Live trade engaged for intent intent-1",
+      payload: {
+        intentId: "intent-1",
+        asset: "eth",
+        stage: "primary_filled",
+      },
+      createdAt: 1_777_000_000_000,
+    };
+
+    expect(buildQueuedNotificationFromRunEvent(event)).toBeNull();
   });
 
   it("maps a manual intervention event to one deduped incident notification", () => {

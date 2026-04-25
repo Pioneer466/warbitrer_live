@@ -6,7 +6,7 @@ import {
   markNotificationDeliverySent,
 } from "@/lib/postgres-db";
 import { isTruthyEnv, readEnv } from "@/lib/env";
-import { formatCurrency, formatDateTime, formatPrice } from "@/lib/format";
+import { formatDateTime, formatPrice } from "@/lib/format";
 import type { NotificationKind, RunEvent } from "@/lib/types";
 
 type TelegramConfig = {
@@ -38,6 +38,10 @@ export function buildQueuedNotificationFromRunEvent(event: RunEvent): QueuedNoti
   }
 
   if (event.eventType === "intent.live_traded") {
+    if (payload.stage !== "hedged") {
+      return null;
+    }
+
     return {
       asset: event.asset ?? null,
       kind: "trade_live",
@@ -153,21 +157,47 @@ function buildTradeLiveMessage(event: RunEvent) {
   const payload = event.payload as Record<string, unknown>;
   const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
-  const slotKey = typeof payload.slotKey === "string" ? payload.slotKey : "--";
-  const primaryVenue = typeof payload.primaryVenue === "string" ? payload.primaryVenue : "--";
-  const hedgeVenue = typeof payload.hedgeVenue === "string" ? payload.hedgeVenue : "--";
   const targetNotionalUsd = typeof payload.targetNotionalUsd === "number" ? payload.targetNotionalUsd : null;
   const grossCost = typeof payload.grossCost === "number" ? payload.grossCost : null;
-  const primaryFilledSize = typeof payload.primaryFilledSize === "number" ? payload.primaryFilledSize : null;
-  const primaryFilledPrice = typeof payload.primaryFilledPrice === "number" ? payload.primaryFilledPrice : null;
+  const polymarketOutcome = typeof payload.polymarketOutcome === "string" ? payload.polymarketOutcome : null;
+  const kalshiOutcome = typeof payload.kalshiOutcome === "string" ? payload.kalshiOutcome : null;
+  const polymarketRequestedNotionalUsd =
+    typeof payload.polymarketRequestedNotionalUsd === "number" ? payload.polymarketRequestedNotionalUsd : null;
+  const polymarketFilledSize = typeof payload.polymarketFilledSize === "number" ? payload.polymarketFilledSize : null;
+  const kalshiRequestedNotionalUsd =
+    typeof payload.kalshiRequestedNotionalUsd === "number" ? payload.kalshiRequestedNotionalUsd : null;
+  const kalshiFilledSize = typeof payload.kalshiFilledSize === "number" ? payload.kalshiFilledSize : null;
+  const pairLabel =
+    polymarketOutcome && kalshiOutcome
+      ? `Poly ${polymarketOutcome} Kalshi ${kalshiOutcome}`
+      : formatCombinationLabel(combination);
 
   return [
-    "LIVE TRADE",
-    `${asset} · ${combination}`,
-    `${formatDateTime(event.createdAt)} · ${slotKey}`,
-    `${primaryVenue} -> ${hedgeVenue}${targetNotionalUsd !== null ? ` · notionnel ${formatCurrency(targetNotionalUsd)}` : ""}`,
-    `primaire ${primaryFilledSize !== null ? formatPrice(primaryFilledSize, 2) : "--"} @ ${formatPrice(primaryFilledPrice, 4)}${grossCost !== null ? ` · gross ${formatPrice(grossCost, 3)}` : ""}`,
+    "TRADE",
+    `${asset} - ${pairLabel}`,
+    `Traded : ${formatTelegramUsd(targetNotionalUsd)}`,
+    `Gross : ${grossCost !== null ? formatPrice(grossCost, 2) : "--"}`,
+    "",
+    "NOTIONNEL",
+    `Poly : ${formatTelegramUsd(polymarketRequestedNotionalUsd)} - filled : ${formatPrice(polymarketFilledSize, 2)}`,
+    `Kalshi : ${formatTelegramUsd(kalshiRequestedNotionalUsd)} - filled : ${formatPrice(kalshiFilledSize, 2)}`,
   ].join("\n");
+}
+
+function formatCombinationLabel(combination: string) {
+  if (combination === "POLY_UP_KALSHI_NO") {
+    return "Poly UP Kalshi NO";
+  }
+
+  if (combination === "POLY_DOWN_KALSHI_YES") {
+    return "Poly DOWN Kalshi YES";
+  }
+
+  return combination;
+}
+
+function formatTelegramUsd(value: number | null) {
+  return value === null ? "--" : `${value.toFixed(2)}$`;
 }
 
 function buildManualInterventionMessage(event: RunEvent) {

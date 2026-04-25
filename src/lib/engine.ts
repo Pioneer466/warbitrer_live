@@ -4644,6 +4644,8 @@ async function writeLiveTradeRunEvent(
   }
 
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue) ?? null;
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket") ?? null;
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi") ?? null;
   await writeRunEvent({
     asset: intent.asset,
     level: "info",
@@ -4662,6 +4664,12 @@ async function writeLiveTradeRunEvent(
       primaryFilledSize: primaryLeg?.filledSize ?? null,
       primaryFilledPrice: primaryLeg?.filledPrice ?? null,
       primaryRequestedSize: primaryLeg?.requestedSize ?? null,
+      polymarketOutcome: polymarketLeg?.outcome ?? null,
+      polymarketRequestedNotionalUsd: polymarketLeg?.requestedNotionalUsd ?? null,
+      polymarketFilledSize: polymarketLeg?.filledSize ?? null,
+      kalshiOutcome: kalshiLeg?.outcome ?? null,
+      kalshiRequestedNotionalUsd: kalshiLeg?.requestedNotionalUsd ?? null,
+      kalshiFilledSize: kalshiLeg?.filledSize ?? null,
     },
     createdAt: now,
   });
