@@ -715,6 +715,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     primaryLeg.requestedSize,
     settings.kalshiPrimaryMaxClipContracts,
     settings.kalshiPrimaryMaxClips,
+    settings.kalshiPrimaryProbeClipContracts,
   );
   if (currentIntent.primaryVenue === "kalshi" && primaryClipPlan.length > 1) {
     const multiClipResult = await executeKalshiPrimaryMultiClip(
@@ -726,6 +727,9 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       primaryClipPlan,
     );
     currentIntent = multiClipResult.intent;
+    if (multiClipResult.outcome === "hedged") {
+      return currentIntent;
+    }
     if (multiClipResult.outcome === "filled") {
       return executeHedgeLeg(currentIntent, slot, settings, now);
     }
@@ -981,7 +985,7 @@ async function executeKalshiPrimaryMultiClip(
   settings: StrategyConfig,
   now: number,
   clipPlan: number[],
-): Promise<{ intent: OrderIntent; outcome: "filled" | "failed" | "awaiting_confirmation" }> {
+): Promise<{ intent: OrderIntent; outcome: "filled" | "hedged" | "failed" | "awaiting_confirmation" }> {
   let currentIntent = intent;
   const requestedPrimarySize = primaryLeg.requestedSize;
   const estimatedSingleFee =
@@ -1018,6 +1022,7 @@ async function executeKalshiPrimaryMultiClip(
       requestedSize: requestedPrimarySize,
       clipPlan,
       clipCount: clipPlan.length,
+      probeClipContracts: settings.kalshiPrimaryProbeClipContracts,
       maxClipContracts: settings.kalshiPrimaryMaxClipContracts,
       maxClips: settings.kalshiPrimaryMaxClips,
       estimatedSingleFeeUsd: estimatedSingleFee,
@@ -1043,9 +1048,16 @@ async function executeKalshiPrimaryMultiClip(
 
     if (!repricedIntent) {
       if (currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0 > 0) {
-        currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, clipAttemptNow), "primary_filled", clipAttemptNow);
-        await writeOrderIntent(currentIntent);
-        await writeLiveTradeRunEvent(currentIntent, clipAttemptNow);
+        const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+        if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
+          currentIntent = markIntentStatus(currentIntent, "hedged", clipAttemptNow, null);
+          await writeOrderIntent(currentIntent);
+          await writeLiveTradeRunEvent(currentIntent, clipAttemptNow, "hedged");
+        } else {
+          currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, clipAttemptNow), "primary_filled", clipAttemptNow);
+          await writeOrderIntent(currentIntent);
+          await writeLiveTradeRunEvent(currentIntent, clipAttemptNow);
+        }
         await writeRunEvent({
           level: "warn",
           eventType: "order.primary.multi_clip_stopped",
@@ -1062,7 +1074,7 @@ async function executeKalshiPrimaryMultiClip(
         });
         return {
           intent: currentIntent,
-          outcome: "filled",
+          outcome: unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "filled",
         };
       }
 
@@ -1102,6 +1114,7 @@ async function executeKalshiPrimaryMultiClip(
       };
     }
 
+    let primaryExecutionIntent = repricedIntent;
     const primaryRequest = buildVenueOrderRequest(repricedPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
       kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     });
@@ -1204,7 +1217,7 @@ async function executeKalshiPrimaryMultiClip(
     }
 
     if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
-      currentIntent = accumulateIntentLegOrder(currentIntent, primaryLeg.id, primaryOrder, "filled", clipAttemptNow);
+      currentIntent = accumulateIntentLegOrder(primaryExecutionIntent, primaryLeg.id, primaryOrder, "filled", clipAttemptNow);
       await writeOrderIntent(currentIntent);
       await writeRunEvent({
         level: primaryResult.status === "filled" ? "info" : "warn",
@@ -1222,6 +1235,36 @@ async function executeKalshiPrimaryMultiClip(
           orderId: primaryOrder.venueOrderId,
           clipFilledSize: primaryOrder.filledSize,
           totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+        },
+        createdAt: clipAttemptNow,
+      });
+      const incrementalHedge = await executeIncrementalHedgeLeg(
+        currentIntent,
+        slot,
+        settings,
+        Date.now(),
+        {
+          clipIndex: clipIndex + 1,
+          clipCount: clipPlan.length,
+          clipSize,
+          retried: false,
+        },
+      );
+      currentIntent = incrementalHedge.intent;
+      if (incrementalHedge.outcome !== "hedged") {
+        return incrementalHedge;
+      }
+      await writeRunEvent({
+        level: "info",
+        eventType: "order.primary.clip_hedged",
+        message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged; continuing ladder`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          clipIndex: clipIndex + 1,
+          clipCount: clipPlan.length,
+          totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+          totalHedgedSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
         },
         createdAt: clipAttemptNow,
       });
@@ -1245,12 +1288,13 @@ async function executeKalshiPrimaryMultiClip(
         },
       );
       if (retried) {
+        primaryExecutionIntent = retried.intent;
         primaryResult = retried.result;
         primaryOrder = retried.order;
       }
 
       if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
-        currentIntent = accumulateIntentLegOrder(currentIntent, primaryLeg.id, primaryOrder, "filled", Date.now());
+        currentIntent = accumulateIntentLegOrder(primaryExecutionIntent, primaryLeg.id, primaryOrder, "filled", Date.now());
         await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: primaryResult.status === "filled" ? "info" : "warn",
@@ -1272,6 +1316,37 @@ async function executeKalshiPrimaryMultiClip(
           },
           createdAt: Date.now(),
         });
+        const incrementalHedge = await executeIncrementalHedgeLeg(
+          currentIntent,
+          slot,
+          settings,
+          Date.now(),
+          {
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            clipSize,
+            retried: true,
+          },
+        );
+        currentIntent = incrementalHedge.intent;
+        if (incrementalHedge.outcome !== "hedged") {
+          return incrementalHedge;
+        }
+        await writeRunEvent({
+          level: "info",
+          eventType: "order.primary.clip_hedged",
+          message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged after retry; continuing ladder`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+            totalHedgedSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
+            retried: true,
+          },
+          createdAt: Date.now(),
+        });
         continue;
       }
     }
@@ -1279,9 +1354,18 @@ async function executeKalshiPrimaryMultiClip(
     if (isTerminalOrderStatus(primaryResult.status)) {
       const totalFilledSize = currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0;
       if (totalFilledSize > 0) {
-        currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, Date.now()), "primary_filled", Date.now());
+        const stopNow = Date.now();
+        const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+        currentIntent =
+          unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE
+            ? markIntentStatus(currentIntent, "hedged", stopNow, null)
+            : markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, stopNow), "primary_filled", stopNow);
         await writeOrderIntent(currentIntent);
-        await writeLiveTradeRunEvent(currentIntent, Date.now());
+        await writeLiveTradeRunEvent(
+          currentIntent,
+          stopNow,
+          unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+        );
         await writeRunEvent({
           level: "warn",
           eventType: "order.primary.multi_clip_stopped",
@@ -1295,12 +1379,14 @@ async function executeKalshiPrimaryMultiClip(
             orderStatus: primaryResult.status,
             detail: extractTerminalNoFillDetail(primaryResult),
             totalFilledSize,
+            totalHedgedSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
+            unhedgedPrimarySize,
           },
-          createdAt: Date.now(),
+          createdAt: stopNow,
         });
         return {
           intent: currentIntent,
-          outcome: "filled",
+          outcome: unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "filled",
         };
       }
 
@@ -1391,9 +1477,18 @@ async function executeKalshiPrimaryMultiClip(
     };
   }
 
-  currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, Date.now()), "primary_filled", Date.now());
+  const completedNow = Date.now();
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+  currentIntent =
+    unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE
+      ? markIntentStatus(currentIntent, "hedged", completedNow, null)
+      : markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, completedNow), "primary_filled", completedNow);
   await writeOrderIntent(currentIntent);
-  await writeLiveTradeRunEvent(currentIntent, Date.now());
+  await writeLiveTradeRunEvent(
+    currentIntent,
+    completedNow,
+    unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+  );
   await writeRunEvent({
     level: "info",
     eventType: "order.primary.multi_clip_completed",
@@ -1404,12 +1499,390 @@ async function executeKalshiPrimaryMultiClip(
       clipPlan,
       clipCount: clipPlan.length,
       totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+      totalHedgedSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
+      unhedgedPrimarySize,
     },
-    createdAt: Date.now(),
+    createdAt: completedNow,
   });
   return {
     intent: currentIntent,
-    outcome: "filled",
+    outcome: unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "filled",
+  };
+}
+
+async function executeIncrementalHedgeLeg(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  clip: {
+    clipIndex: number;
+    clipCount: number;
+    clipSize: number;
+    retried: boolean;
+  },
+): Promise<{ intent: OrderIntent; outcome: "hedged" | "failed" | "awaiting_confirmation" }> {
+  const resizedIntent = resizeHedgeLegToUnhedgedPrimary(intent, now);
+  const primaryLeg = resizedIntent.legs.find((leg) => leg.venue === resizedIntent.primaryVenue);
+  const hedgeLeg = resizedIntent.legs.find((leg) => leg.venue === resizedIntent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    throw new Error(`Intent ${intent.id} missing legs for incremental hedge execution`);
+  }
+
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(resizedIntent);
+  if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
+    const currentIntent = markIntentStatus(resizedIntent, "hedged", now, null);
+    await writeOrderIntent(currentIntent);
+    return {
+      intent: currentIntent,
+      outcome: "hedged",
+    };
+  }
+
+  const hedgeMinimumSize = getVenueMinimumOrderSize(hedgeLeg.venue, null, settings.minOrderSize);
+  if (hedgeLeg.requestedSize + ORDER_SIZE_TOLERANCE < hedgeMinimumSize) {
+    const currentIntent = markIntentStatus(
+      resizedIntent,
+      "failed",
+      now,
+      `Incremental hedge size ${hedgeLeg.requestedSize} below ${hedgeLeg.venue} minimum ${hedgeMinimumSize}; manual intervention required`,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeManualInterventionRunEvent(currentIntent, now, "incremental_hedge_below_minimum", {
+      hedgeVenue: hedgeLeg.venue,
+      hedgeRequestedSize: hedgeLeg.requestedSize,
+      hedgeMinimumSize,
+      primaryVenue: primaryLeg.venue,
+      primaryFilledSize: primaryLeg.filledSize,
+      hedgeFilledSize: hedgeLeg.filledSize,
+      unhedgedPrimarySize,
+      clipIndex: clip.clipIndex,
+      clipCount: clip.clipCount,
+    });
+    await writeCircuitBreaker({
+      key: buildSlotBreakerKey(currentIntent.slotKey),
+      active: true,
+      reason: "hedge_failure",
+      triggeredAt: now,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.hedgeVenue,
+        stage: "incremental_hedge_below_minimum",
+        unhedgedPrimarySize,
+      },
+    });
+    return {
+      intent: currentIntent,
+      outcome: "failed",
+    };
+  }
+
+  let currentIntent = markIntentStatus(resizedIntent, "hedging", now);
+  await writeOrderIntent(currentIntent);
+
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
+  let hedgeOrder: LiveOrder;
+  try {
+    const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
+    hedgeResult = await confirmImmediateOrderExecution(
+      currentIntent.hedgeVenue,
+      hedgeRequest,
+      hedgeSubmission,
+      settings.immediateOrderConfirmationTimeoutMs,
+    );
+    hedgeOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
+    await writeVenueOrder(hedgeOrder);
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.hedge.incremental_submitted",
+      message: `Incremental hedge ${currentIntent.hedgeVenue} order ${hedgeOrder.venueOrderId}`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        requestedSize: hedgeRequest.size,
+        unhedgedPrimarySize,
+        clipIndex: clip.clipIndex,
+        clipCount: clip.clipCount,
+        primaryClipRetried: clip.retried,
+      },
+      createdAt: now,
+    });
+  } catch (error) {
+    const recovered = await recoverKalshiOrderSubmissionForIntent(
+      currentIntent,
+      hedgeLeg,
+      hedgeRequest,
+      now,
+      "hedge",
+    );
+    if (!recovered) {
+      return failIncrementalHedge(
+        currentIntent,
+        null,
+        settings,
+        now,
+        `Incremental hedge submission failed (${toErrorMessage(error)})`,
+        "incremental_hedge_submit_failed",
+        {
+          venue: currentIntent.hedgeVenue,
+          clientOrderId: hedgeRequest.clientOrderId,
+          error: toErrorMessage(error),
+          unhedgedPrimarySize,
+          clipIndex: clip.clipIndex,
+          clipCount: clip.clipCount,
+        },
+      );
+    }
+
+    hedgeResult = recovered.result;
+    hedgeOrder = recovered.order;
+  }
+
+  if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
+    currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "hedged", now);
+    const remainingUnhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+    currentIntent = markIntentStatus(
+      currentIntent,
+      remainingUnhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+      now,
+      null,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.hedge.incremental_filled",
+      message: `Incremental hedge filled for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        hedgeFilledSize: hedgeOrder.filledSize,
+        totalPrimaryFilledSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue)?.filledSize ?? 0,
+        totalHedgeFilledSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
+        remainingUnhedgedPrimarySize,
+        clipIndex: clip.clipIndex,
+        clipCount: clip.clipCount,
+      },
+      createdAt: now,
+    });
+    return {
+      intent: currentIntent,
+      outcome: "hedged",
+    };
+  }
+
+  if (hedgeOrder.filledSize > 0) {
+    currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "failed", now);
+    return failIncrementalHedge(
+      currentIntent,
+      hedgeOrder,
+      settings,
+      now,
+      `Incremental hedge partially filled or not final (${hedgeResult.status}); manual intervention required`,
+      "incremental_hedge_partial_fill",
+      {
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        orderStatus: hedgeResult.status,
+        unhedgedPrimarySize: deriveUnhedgedPrimarySize(currentIntent),
+        clipIndex: clip.clipIndex,
+        clipCount: clip.clipCount,
+      },
+      hedgeResult,
+    );
+  }
+
+  if (isTerminalOrderStatus(hedgeResult.status)) {
+    const retried = await retryLegWithinExecutionBufferWithAttempts(
+      currentIntent,
+      hedgeLeg,
+      slot,
+      settings,
+      now,
+      "hedge",
+      settings.hedgeRetryAttempts,
+      settings.hedgeRetryDelayMs,
+    );
+    if (retried) {
+      currentIntent = retried.intent;
+      hedgeResult = retried.result;
+      hedgeOrder = retried.order;
+
+      if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
+        currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "hedged", Date.now());
+        const remainingUnhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+        currentIntent = markIntentStatus(
+          currentIntent,
+          remainingUnhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+          Date.now(),
+          null,
+        );
+        await writeOrderIntent(currentIntent);
+        await writeRunEvent({
+          level: "info",
+          eventType: "order.hedge.incremental_filled",
+          message: `Incremental hedge filled after retry for intent ${currentIntent.id}`,
+          payload: {
+            intentId: currentIntent.id,
+            venue: currentIntent.hedgeVenue,
+            orderId: hedgeOrder.venueOrderId,
+            hedgeFilledSize: hedgeOrder.filledSize,
+            totalPrimaryFilledSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue)?.filledSize ?? 0,
+            totalHedgeFilledSize: currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue)?.filledSize ?? 0,
+            remainingUnhedgedPrimarySize,
+            clipIndex: clip.clipIndex,
+            clipCount: clip.clipCount,
+            retried: true,
+          },
+          createdAt: Date.now(),
+        });
+        return {
+          intent: currentIntent,
+          outcome: "hedged",
+        };
+      }
+
+      if (hedgeOrder.filledSize > 0) {
+        currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "failed", Date.now());
+        return failIncrementalHedge(
+          currentIntent,
+          hedgeOrder,
+          settings,
+          Date.now(),
+          `Incremental hedge retry partially filled or not final (${hedgeResult.status}); manual intervention required`,
+          "incremental_hedge_retry_partial_fill",
+          {
+            venue: currentIntent.hedgeVenue,
+            orderId: hedgeOrder.venueOrderId,
+            orderStatus: hedgeResult.status,
+            unhedgedPrimarySize: deriveUnhedgedPrimarySize(currentIntent),
+            clipIndex: clip.clipIndex,
+            clipCount: clip.clipCount,
+          },
+          hedgeResult,
+        );
+      }
+    }
+  }
+
+  if (!isTerminalOrderStatus(hedgeResult.status)) {
+    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.hedge.incremental_awaiting_confirmation",
+      message: `Incremental hedge ${currentIntent.hedgeVenue} order ${hedgeOrder.venueOrderId} awaiting authoritative confirmation`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        orderStatus: hedgeResult.status,
+        unhedgedPrimarySize,
+        clipIndex: clip.clipIndex,
+        clipCount: clip.clipCount,
+      },
+      createdAt: now,
+    });
+    return {
+      intent: currentIntent,
+      outcome: "awaiting_confirmation",
+    };
+  }
+
+  await writeRunEvent({
+    level: shouldTripBreakerForTerminalNoFill(hedgeResult) ? "error" : "warn",
+    eventType: "order.hedge.incremental_no_fill",
+    message: `Incremental hedge ${currentIntent.hedgeVenue} order ended without fill for intent ${currentIntent.id}`,
+    payload: {
+      intentId: currentIntent.id,
+      venue: currentIntent.hedgeVenue,
+      orderId: hedgeOrder.venueOrderId,
+      orderStatus: hedgeResult.status,
+      detail: extractTerminalNoFillDetail(hedgeResult),
+      softNoFill: Boolean(hedgeResult.raw?.softNoFill),
+      unhedgedPrimarySize,
+      clipIndex: clip.clipIndex,
+      clipCount: clip.clipCount,
+    },
+    createdAt: now,
+  });
+
+  return failIncrementalHedge(
+    currentIntent,
+    hedgeOrder,
+    settings,
+    now,
+    describeTerminalNoFill("Incremental hedge", hedgeResult),
+    "incremental_hedge_no_fill",
+    {
+      venue: currentIntent.hedgeVenue,
+      orderId: hedgeOrder.venueOrderId,
+      orderStatus: hedgeResult.status,
+      unhedgedPrimarySize,
+      clipIndex: clip.clipIndex,
+      clipCount: clip.clipCount,
+    },
+    hedgeResult,
+  );
+}
+
+async function failIncrementalHedge(
+  intent: OrderIntent,
+  hedgeOrder: LiveOrder | null,
+  settings: StrategyConfig,
+  now: number,
+  failureReason: string,
+  stage: string,
+  payload: Record<string, unknown>,
+  hedgeResult?: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
+): Promise<{ intent: OrderIntent; outcome: "failed" }> {
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  const alreadyHedgedSize = hedgeLeg?.filledSize ?? 0;
+  if (alreadyHedgedSize <= ORDER_SIZE_TOLERANCE) {
+    const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+    if (primaryLeg && hedgeLeg) {
+      return {
+        intent: await attemptPrimaryUnwindAfterHedgeFailure(
+          intent,
+          primaryLeg,
+          hedgeLeg,
+          hedgeOrder,
+          settings,
+          now,
+          failureReason,
+          hedgeResult,
+        ),
+        outcome: "failed",
+      };
+    }
+  }
+
+  let currentIntent =
+    hedgeOrder && alreadyHedgedSize <= ORDER_SIZE_TOLERANCE
+      ? updateIntentLeg(intent, intent.hedgeVenue, hedgeOrder, "failed", now)
+      : intent;
+  currentIntent = markIntentStatus(currentIntent, "failed", now, failureReason);
+  await writeOrderIntent(currentIntent);
+  await writeManualInterventionRunEvent(currentIntent, now, stage, payload);
+  await writeCircuitBreaker({
+    key: buildSlotBreakerKey(currentIntent.slotKey),
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      stage,
+      requiresManualClear: true,
+      ...payload,
+    },
+  });
+
+  return {
+    intent: currentIntent,
+    outcome: "failed",
   };
 }
 
@@ -4304,6 +4777,48 @@ function resizeHedgeLegToFilledPrimary(intent: OrderIntent, now: number) {
   const resizedHedgeSize = normalizeVenueTargetSize(
     hedgeLeg.venue,
     primaryLeg.filledSize,
+    null,
+    hedgeLeg.venue === "polymarket" ? 0.01 : 1,
+  );
+  if (resizedHedgeSize <= 0) {
+    return intent;
+  }
+
+  return {
+    ...intent,
+    updatedAt: now,
+    legs: intent.legs.map((leg) =>
+      leg.id === hedgeLeg.id
+        ? {
+            ...leg,
+            requestedSize: resizedHedgeSize,
+            requestedNotionalUsd: round4(resizedHedgeSize * (leg.requestedPrice ?? 0)),
+          }
+        : leg,
+    ) as OrderIntent["legs"],
+  };
+}
+
+function deriveUnhedgedPrimarySize(intent: Pick<OrderIntent, "primaryVenue" | "hedgeVenue" | "legs">) {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    return 0;
+  }
+
+  return roundToSixDecimals(Math.max(0, primaryLeg.filledSize - hedgeLeg.filledSize));
+}
+
+function resizeHedgeLegToUnhedgedPrimary(intent: OrderIntent, now: number) {
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!hedgeLeg) {
+    return intent;
+  }
+
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
+  const resizedHedgeSize = normalizeVenueTargetSize(
+    hedgeLeg.venue,
+    unhedgedPrimarySize,
     null,
     hedgeLeg.venue === "polymarket" ? 0.01 : 1,
   );

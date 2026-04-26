@@ -196,6 +196,7 @@ export type StrategyConfig = {
   kalshiDepthHeadroomContracts: number;
   kalshiPrimaryDepthSafetyFactor: number;
   kalshiPrimaryPriceTicksSlippage: number;
+  kalshiPrimaryProbeClipContracts: number;
   kalshiPrimaryMaxClipContracts: number;
   kalshiPrimaryMaxClips: number;
   primaryRetryAttempts: number;

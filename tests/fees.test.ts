@@ -80,6 +80,12 @@ describe("live fee and sizing helpers", () => {
     expect(deriveKalshiPrimaryClipPlan(40, 10, 4)).toEqual([10, 10, 10, 10]);
   });
 
+  it("can lead Kalshi primary execution with a smaller probe clip", () => {
+    expect(deriveKalshiPrimaryClipPlan(22, 10, 4, 5)).toEqual([5, 9, 8]);
+    expect(deriveKalshiPrimaryClipPlan(10, 10, 4, 5)).toEqual([5, 5]);
+    expect(deriveKalshiPrimaryClipPlan(40, 10, 4, 5)).toEqual([10, 10, 10, 10]);
+  });
+
   it("caps total Kalshi primary size by the configured clip capacity", () => {
     expect(getKalshiPrimaryMultiClipCapacity(10, 4)).toBe(40);
     expect(deriveKalshiPrimaryClipPlan(55, 10, 4)).toEqual([10, 10, 10, 10]);

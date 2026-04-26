@@ -10,6 +10,7 @@ import {
   DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR,
   DEFAULT_KALSHI_PRIMARY_PRICE_TICKS_SLIPPAGE,
+  DEFAULT_KALSHI_PRIMARY_PROBE_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIPS,
   DEFAULT_STRATEGY_CONFIG,
@@ -49,6 +50,12 @@ export const settingsSchema = z
       .nonnegative()
       .max(10)
       .default(DEFAULT_KALSHI_PRIMARY_PRICE_TICKS_SLIPPAGE),
+    kalshiPrimaryProbeClipContracts: z
+      .number()
+      .int()
+      .min(1)
+      .max(1_000)
+      .default(DEFAULT_KALSHI_PRIMARY_PROBE_CLIP_CONTRACTS),
     kalshiPrimaryMaxClipContracts: z
       .number()
       .int()

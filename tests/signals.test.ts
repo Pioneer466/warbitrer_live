@@ -29,6 +29,7 @@ const settings: StrategyConfig = {
   kalshiDepthHeadroomContracts: 2,
   kalshiPrimaryDepthSafetyFactor: 0.7,
   kalshiPrimaryPriceTicksSlippage: 2,
+  kalshiPrimaryProbeClipContracts: 5,
   kalshiPrimaryMaxClipContracts: 10,
   kalshiPrimaryMaxClips: 4,
   primaryRetryAttempts: 2,

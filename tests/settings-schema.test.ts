@@ -9,6 +9,7 @@ describe("settings schema", () => {
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.7);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(2);
+    expect(settings.kalshiPrimaryProbeClipContracts).toBe(5);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(10);
     expect(settings.kalshiPrimaryMaxClips).toBe(4);
     expect(settings.primaryRetryAttempts).toBe(2);
@@ -38,6 +39,7 @@ describe("settings schema", () => {
       kalshiDepthHeadroomContracts: 3,
       kalshiPrimaryDepthSafetyFactor: 0.6,
       kalshiPrimaryPriceTicksSlippage: 3,
+      kalshiPrimaryProbeClipContracts: 6,
       kalshiPrimaryMaxClipContracts: 8,
       kalshiPrimaryMaxClips: 3,
       primaryRetryAttempts: 4,
@@ -55,6 +57,7 @@ describe("settings schema", () => {
     expect(settings.kalshiDepthHeadroomContracts).toBe(3);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.6);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(3);
+    expect(settings.kalshiPrimaryProbeClipContracts).toBe(6);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(8);
     expect(settings.kalshiPrimaryMaxClips).toBe(3);
     expect(settings.primaryRetryAttempts).toBe(4);

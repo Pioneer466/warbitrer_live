@@ -145,6 +145,7 @@ export function deriveKalshiPrimaryClipPlan(
   requestedContracts: number,
   maxClipContracts: number,
   maxClips: number,
+  probeClipContracts?: number | null,
 ) {
   const normalizedRequestedContracts = normalizeVenueTargetSize("kalshi", requestedContracts, 1, 1);
   if (normalizedRequestedContracts <= 0) {
@@ -155,6 +156,36 @@ export function deriveKalshiPrimaryClipPlan(
   const normalizedMaxClips = Math.max(1, Math.floor(maxClips));
   const totalCapacity = normalizedMaxClipContracts * normalizedMaxClips;
   const cappedRequestedContracts = Math.min(normalizedRequestedContracts, totalCapacity);
+
+  if (probeClipContracts !== null && probeClipContracts !== undefined) {
+    const normalizedProbeClipContracts = Math.max(1, Math.floor(probeClipContracts));
+    const remainingClipCapacity = normalizedMaxClipContracts * Math.max(0, normalizedMaxClips - 1);
+    const firstClipSize = Math.min(
+      normalizedMaxClipContracts,
+      cappedRequestedContracts,
+      Math.max(normalizedProbeClipContracts, cappedRequestedContracts - remainingClipCapacity),
+    );
+    const remainingContracts = cappedRequestedContracts - firstClipSize;
+    if (remainingContracts <= 0 || normalizedMaxClips === 1) {
+      return [firstClipSize];
+    }
+
+    const remainingClipCount = Math.min(
+      normalizedMaxClips - 1,
+      Math.max(1, Math.ceil(remainingContracts / normalizedMaxClipContracts)),
+    );
+    const baseRemainingClipSize = Math.floor(remainingContracts / remainingClipCount);
+    const remainingRemainder = remainingContracts - baseRemainingClipSize * remainingClipCount;
+
+    return [
+      firstClipSize,
+      ...Array.from(
+        { length: remainingClipCount },
+        (_, index) => baseRemainingClipSize + (index < remainingRemainder ? 1 : 0),
+      ),
+    ].filter((clipSize) => clipSize > 0);
+  }
+
   const clipCount = Math.min(
     normalizedMaxClips,
     Math.max(1, Math.ceil(cappedRequestedContracts / normalizedMaxClipContracts)),
