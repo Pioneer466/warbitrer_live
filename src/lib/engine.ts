@@ -116,6 +116,7 @@ const RESOLUTION_GRACE_MS = 5_000;
 const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
+const POLYMARKET_SLOT_EXIT_DUST_CONTRACTS = 0.5;
 const RECONCILE_STEP_TIMEOUT_MS = 30_000;
 const KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD = 2;
@@ -751,10 +752,6 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     );
     primaryOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
     await writeVenueOrder(primaryOrder);
-    const primaryBookTelemetry =
-      currentIntent.primaryVenue === "kalshi"
-        ? await buildKalshiPrimaryBookTelemetry(slot, primaryLeg, settings, now, primaryRequest.price, primaryRequest.size)
-        : null;
     await writeRunEvent({
       level: "info",
       eventType: "order.primary.submitted",
@@ -766,7 +763,6 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         requestedPrice: primaryLeg.requestedPrice,
         orderPrice: primaryRequest.price,
         requestedSize: primaryRequest.size,
-        kalshiBook: primaryBookTelemetry,
       },
       createdAt: now,
     });
@@ -1138,14 +1134,6 @@ async function executeKalshiPrimaryMultiClip(
         clipAttemptNow,
       );
       await writeVenueOrder(primaryOrder);
-      const primaryBookTelemetry = await buildKalshiPrimaryBookTelemetry(
-        slot,
-        repricedPrimaryLeg,
-        settings,
-        clipAttemptNow,
-        primaryRequest.price,
-        primaryRequest.size,
-      );
       await writeRunEvent({
         level: "info",
         eventType: "order.primary.clip_submitted",
@@ -1160,7 +1148,6 @@ async function executeKalshiPrimaryMultiClip(
           orderId: primaryOrder.venueOrderId,
           requestedPrice: repricedPrimaryLeg.requestedPrice,
           orderPrice: primaryRequest.price,
-          kalshiBook: primaryBookTelemetry,
         },
         createdAt: clipAttemptNow,
       });
@@ -1395,7 +1382,10 @@ async function executeKalshiPrimaryMultiClip(
         currentIntent,
         "failed",
         Date.now(),
-        describeTerminalNoFill("Primary", primaryResult),
+        `${describeTerminalNoFill(
+          `Primary clip ${clipIndex + 1}/${clipPlan.length}`,
+          primaryResult,
+        )}; requested ${primaryOrder.requestedSize.toFixed(2)}`,
       );
       await writeOrderIntent(currentIntent);
       if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
@@ -2442,10 +2432,6 @@ async function retryLegWithinExecutionBuffer(
   );
   const order = buildLiveOrderRecord(repricedIntent.asset, repricedIntent.id, repricedLeg, request, result, now);
   await writeVenueOrder(order);
-  const primaryBookTelemetry =
-    stage === "primary" && repricedLeg.venue === "kalshi"
-      ? await buildKalshiPrimaryBookTelemetry(slot, repricedLeg, settings, now, request.price, request.size)
-      : null;
   await writeRunEvent({
     level: "info",
     eventType: `order.${stage}.resubmitted`,
@@ -2460,7 +2446,6 @@ async function retryLegWithinExecutionBuffer(
       retryPriceLadderTicks,
       requestedPrice: repricedLeg.requestedPrice,
       orderPrice: request.price,
-      kalshiBook: primaryBookTelemetry,
     },
     createdAt: now,
   });
@@ -3930,7 +3915,8 @@ async function maybeExitPolymarketLegAtSlotEnd(
       continue;
     }
 
-    if (order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= exitLeg.requestedSize) {
+    const remainingExitSize = derivePolymarketSlotExitRemainingSize(order.filledSize, exitLeg.requestedSize);
+    if (isPolymarketSlotExitFillAcceptable(order, exitLeg.requestedSize)) {
       const averageExitPrice = order.averageFillPrice ?? permissivePrice;
       const payoutUsd = round4(order.filledSize * averageExitPrice - (order.feeUsd ?? 0));
       const updated = {
@@ -3954,7 +3940,10 @@ async function maybeExitPolymarketLegAtSlotEnd(
         payload: {
           intentId: intent.id,
           orderId: order.venueOrderId,
+          requestedSize: exitLeg.requestedSize,
           filledSize: order.filledSize,
+          remainingSize: remainingExitSize,
+          dustThresholdContracts: POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
           averageExitPrice,
           payoutUsd,
         },
@@ -3973,23 +3962,31 @@ async function maybeExitPolymarketLegAtSlotEnd(
         attempts: settings.hedgeRetryAttempts,
         orderId: order.venueOrderId,
         orderStatus: order.status,
+        requestedSize: exitLeg.requestedSize,
+        filledSize: order.filledSize,
+        remainingSize: derivePolymarketSlotExitRemainingSize(order.filledSize, exitLeg.requestedSize),
       },
       createdAt: now,
     });
   }
 
   if (lastOrder?.filledSize && lastOrder.filledSize > ORDER_SIZE_TOLERANCE) {
+    const remainingSize = derivePolymarketSlotExitRemainingSize(lastOrder.filledSize, exitLeg.requestedSize);
     const failed = markIntentStatus(
       intent,
       "failed",
       now,
-      `Polymarket slot-end exit partially filled (${lastOrder.status}); manual intervention required`,
+      `Polymarket slot-end exit partially filled (${lastOrder.status}, filled ${lastOrder.filledSize.toFixed(2)}/${exitLeg.requestedSize.toFixed(2)}, remaining ${remainingSize.toFixed(2)}); manual intervention required`,
     );
     await writeOrderIntent(failed);
     await writeManualInterventionRunEvent(failed, now, "polymarket_slot_end_exit_partial_fill", {
       venue: "polymarket",
       orderId: lastOrder.venueOrderId,
       orderStatus: lastOrder.status,
+      requestedSize: exitLeg.requestedSize,
+      filledSize: lastOrder.filledSize,
+      remainingSize,
+      dustThresholdContracts: POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
     });
     await writeCircuitBreaker({
       key: "global",
@@ -4000,6 +3997,9 @@ async function maybeExitPolymarketLegAtSlotEnd(
         intentId: intent.id,
         stage: "polymarket_slot_exit_partial_fill",
         orderId: lastOrder.venueOrderId,
+        requestedSize: exitLeg.requestedSize,
+        filledSize: lastOrder.filledSize,
+        remainingSize,
       },
     });
     return failed;
@@ -4885,6 +4885,7 @@ async function confirmImmediateOrderExecution(
     const confirmation = await confirmPolymarketOrderExecution({
       orderId: submission.venueOrderId,
       expectedSize: request.size,
+      expectedSizeIsExact: request.side === "SELL",
       orderType: request.orderType,
       timeoutMs,
     });
@@ -4893,6 +4894,7 @@ async function confirmImmediateOrderExecution(
       const canceledConfirmation = await confirmPolymarketOrderExecution({
         orderId: submission.venueOrderId,
         expectedSize: request.size,
+        expectedSizeIsExact: request.side === "SELL",
         orderType: request.orderType,
         timeoutMs: Math.min(1_000, timeoutMs),
       });
@@ -5644,6 +5646,22 @@ export function derivePrimaryExitSize(params: {
   }
 
   return floorToSixDecimals(Math.min(...candidates));
+}
+
+export function derivePolymarketSlotExitRemainingSize(filledSize: number, requestedSize: number) {
+  return roundToSixDecimals(Math.max(0, requestedSize - filledSize));
+}
+
+export function isPolymarketSlotExitFillAcceptable(
+  order: Pick<LiveOrder, "filledSize">,
+  requestedSize: number,
+  dustThresholdContracts = POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
+) {
+  if (order.filledSize <= ORDER_SIZE_TOLERANCE) {
+    return false;
+  }
+
+  return derivePolymarketSlotExitRemainingSize(order.filledSize, requestedSize) <= dustThresholdContracts + ORDER_SIZE_TOLERANCE;
 }
 
 export function deriveRemainingExposureSize(entryFilledSize: number, exitFilledSize: number) {

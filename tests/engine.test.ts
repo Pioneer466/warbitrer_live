@@ -4,6 +4,7 @@ import {
   countRecentKalshiSoftPrimaryNoFillEvents,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
+  derivePolymarketSlotExitRemainingSize,
   deriveSettledVenueResolutions,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
@@ -11,6 +12,7 @@ import {
   isFeedHealthBreaker,
   isBreakerRelevantToSlot,
   isLatePrimaryFillRescueEligible,
+  isPolymarketSlotExitFillAcceptable,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
   resolvePrimaryRetryPlan,
@@ -1030,5 +1032,16 @@ describe("live remaining leg size", () => {
         leg,
       ),
     ).toBe(1.01);
+  });
+});
+
+describe("polymarket slot-end exit dust", () => {
+  it("accepts a near-complete exit instead of requiring manual intervention for dust", () => {
+    expect(derivePolymarketSlotExitRemainingSize(5, 5.21)).toBe(0.21);
+    expect(isPolymarketSlotExitFillAcceptable({ filledSize: 5 }, 5.21)).toBe(true);
+  });
+
+  it("still rejects material partial slot-end exits", () => {
+    expect(isPolymarketSlotExitFillAcceptable({ filledSize: 3 }, 5.21)).toBe(false);
   });
 });

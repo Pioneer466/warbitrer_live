@@ -443,6 +443,7 @@ export async function fetchPolymarketTrades(after?: string) {
 export async function confirmPolymarketOrderExecution(params: {
   orderId: string;
   expectedSize?: number;
+  expectedSizeIsExact?: boolean;
   orderType?: string | null;
   timeoutMs?: number;
 }): Promise<{ result: VenueOrderResult; order: OpenOrder | null; trades: Trade[] }> {
@@ -464,7 +465,9 @@ export async function confirmPolymarketOrderExecution(params: {
       const effectiveOrderType = order?.order_type ?? params.orderType ?? null;
       const authoritativeExpectedSize =
         effectiveOrderType === "FOK"
-          ? confirmedTrades.filledSize
+          ? params.expectedSizeIsExact
+            ? (params.expectedSize ?? (order ? Number(order.original_size) : confirmedTrades.filledSize))
+            : confirmedTrades.filledSize
           : order
             ? Number(order.original_size)
             : params.expectedSize ?? confirmedTrades.filledSize;

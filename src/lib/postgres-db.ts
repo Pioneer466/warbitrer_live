@@ -25,6 +25,7 @@ import type {
   PnlSnapshot,
   PositionSnapshot,
   RunEvent,
+  StablePnlChange,
   StrategyConfig,
   StrategyConfigMap,
   TradesResponse,
@@ -1377,6 +1378,66 @@ export async function getLatestPnlSnapshot(pool: Pool): Promise<PnlSnapshot | nu
   return result.rows[0] ? mapPnlSnapshotRow(result.rows[0]) : null;
 }
 
+export async function listStablePnlChanges(
+  pool: Pool,
+  limit = 5,
+  asset?: MarketAsset,
+): Promise<StablePnlChange[]> {
+  const result = await pool.query(
+    `
+      WITH settled_intents AS (
+        SELECT
+          id AS intent_id,
+          asset,
+          combination,
+          COALESCE(resolved_at, updated_at) AS changed_at,
+          realized_pnl_usd,
+          roi,
+          target_notional_usd
+        FROM order_intents
+        WHERE shadow = false
+          AND status = 'settled'
+          AND realized_pnl_usd IS NOT NULL
+          ${asset ? "AND asset = $2" : ""}
+      ),
+      running AS (
+        SELECT
+          *,
+          SUM(realized_pnl_usd) OVER (
+            ORDER BY changed_at ASC, intent_id ASC
+          ) AS cumulative_realized_pnl_usd
+        FROM settled_intents
+      ),
+      enriched AS (
+        SELECT
+          *,
+          MAX(cumulative_realized_pnl_usd) OVER (
+            ORDER BY changed_at ASC, intent_id ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+          ) AS peak_realized_pnl_usd
+        FROM running
+      )
+      SELECT
+        intent_id,
+        asset,
+        combination,
+        changed_at,
+        realized_pnl_usd,
+        cumulative_realized_pnl_usd,
+        peak_realized_pnl_usd,
+        cumulative_realized_pnl_usd - peak_realized_pnl_usd AS drawdown_usd,
+        roi,
+        target_notional_usd
+      FROM enriched
+      ORDER BY changed_at DESC, intent_id DESC
+      LIMIT $1
+    `,
+    asset ? [limit, asset] : [limit],
+  );
+
+  return result.rows.map(mapStablePnlChangeRow);
+}
+
 async function getFirstTrackedEquityUsd(pool: Pool) {
   const result = await pool.query<{ equity_usd: number }>(
     `
@@ -1742,6 +1803,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     recentFills: await listRecentFills(pool, 20, slot.asset),
     positions: await listPositions(pool, slot.asset),
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
+    stablePnlChanges: await listStablePnlChanges(pool, 5, slot.asset),
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
     circuitBreakers: relevantBreakers,
     runEvents: await listRecentRunEvents(pool, 10, slot.asset),
@@ -1792,6 +1854,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
     openPositionsCount: positions.filter(isRiskActivePosition).length,
     venueBalances,
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
+    stablePnlChanges: await listStablePnlChanges(pool, 5),
     activeBreakers: breakers.filter((breaker) => breaker.active),
   };
 }
@@ -1951,6 +2014,21 @@ function mapPnlSnapshotRow(row: any): PnlSnapshot {
     feesUsd: row.fees_usd,
     venueBreakdown: row.venue_breakdown_json,
   });
+}
+
+function mapStablePnlChangeRow(row: any): StablePnlChange {
+  return {
+    intentId: row.intent_id,
+    asset: row.asset,
+    combination: row.combination,
+    changedAt: row.changed_at,
+    realizedPnlUsd: Number(row.realized_pnl_usd),
+    cumulativeRealizedPnlUsd: Number(row.cumulative_realized_pnl_usd),
+    peakRealizedPnlUsd: Number(row.peak_realized_pnl_usd),
+    drawdownUsd: Number(row.drawdown_usd),
+    roi: row.roi === null || row.roi === undefined ? null : Number(row.roi),
+    targetNotionalUsd: Number(row.target_notional_usd),
+  };
 }
 
 function mapBridgeTransferRow(row: any): BridgeTransfer {

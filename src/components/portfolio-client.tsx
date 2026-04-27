@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 
+import { StablePnlChangesPanel } from "@/components/stable-pnl-changes-panel";
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCountdown, formatCurrency, formatPrice } from "@/lib/format";
 import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus } from "@/lib/types";
@@ -37,7 +38,7 @@ export function PortfolioClient() {
     return <PanelMessage title="Erreur" message={portfolio.error ?? "Aucune donnée portefeuille."} tone="rose" />;
   }
 
-  const { assets, pnl, openPositionsCount, activeBreakers } = portfolio.data;
+  const { assets, pnl, stablePnlChanges, openPositionsCount, activeBreakers } = portfolio.data;
   const readyAssets = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const blockedAssets = assets.filter((asset) => asset.workerState.readinessStatus === "blocked").length;
   const liveAssets = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
@@ -93,6 +94,12 @@ export function PortfolioClient() {
           />
         </div>
       </section>
+
+      <StablePnlChangesPanel
+        changes={stablePnlChanges}
+        meta="5 derniers trades settled"
+        showAsset
+      />
 
       <section className="grid gap-4 xl:grid-cols-2">
         {assets.map((asset) => {

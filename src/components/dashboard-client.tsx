@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { LineChart } from "@/components/line-chart";
+import { StablePnlChangesPanel } from "@/components/stable-pnl-changes-panel";
 import { usePollingJson } from "@/components/use-polling-json";
 import { TradingToggle } from "@/components/trading-toggle";
 import {
@@ -43,7 +44,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
     );
   }
 
-  const { config, workerState, latestSnapshot, feedHealth, slot, venueBalances, opportunities, openIntents, positions, pnl, recentFills, circuitBreakers, runEvents } =
+  const { config, workerState, latestSnapshot, feedHealth, slot, venueBalances, opportunities, openIntents, positions, pnl, stablePnlChanges, recentFills, circuitBreakers, runEvents } =
     dashboard.data;
 
   const historyPoints = history.data?.points ?? [];
@@ -118,6 +119,11 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
           <VenueBalanceCard key={balance.venue} balance={balance} />
         ))}
       </section>
+
+      <StablePnlChangesPanel
+        changes={stablePnlChanges}
+        meta={`${slot.asset.toUpperCase()} · 5 derniers trades settled`}
+      />
 
       <section className="grid gap-4 xl:grid-cols-2">
         <ChartPanel

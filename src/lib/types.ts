@@ -430,6 +430,19 @@ export type PnlSnapshot = {
   venueBreakdown: VenueBalance[];
 };
 
+export type StablePnlChange = {
+  intentId: string;
+  asset: MarketAsset;
+  combination: PairCombination;
+  changedAt: number;
+  realizedPnlUsd: number;
+  cumulativeRealizedPnlUsd: number;
+  peakRealizedPnlUsd: number;
+  drawdownUsd: number;
+  roi: number | null;
+  targetNotionalUsd: number;
+};
+
 export type BridgeTransfer = {
   id: string;
   venue: "polymarket";
@@ -537,6 +550,7 @@ export type DashboardResponse = {
   recentFills: LiveFill[];
   positions: PositionSnapshot[];
   pnl: PnlSnapshot | null;
+  stablePnlChanges: StablePnlChange[];
   bridgeTransfers: BridgeTransfer[];
   circuitBreakers: CircuitBreaker[];
   runEvents: RunEvent[];
@@ -559,6 +573,7 @@ export type PortfolioDashboardResponse = {
   openPositionsCount: number;
   venueBalances: VenueBalance[];
   pnl: PnlSnapshot | null;
+  stablePnlChanges: StablePnlChange[];
   activeBreakers: CircuitBreaker[];
 };
 
