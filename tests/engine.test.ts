@@ -2,6 +2,7 @@ import {
   buildVenueOrderRequest,
   countRecentKalshiSoftHedgeNoFillEvents,
   countRecentKalshiSoftPrimaryNoFillEvents,
+  deriveKalshiPrimaryFallbackClipPlan,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
   derivePolymarketSlotExitRemainingSize,
@@ -560,6 +561,12 @@ describe("venue order request sizing", () => {
 });
 
 describe("Kalshi primary IOC handling", () => {
+  it("builds descending fallback clips around 20, 10, then 5 contracts", () => {
+    expect(deriveKalshiPrimaryFallbackClipPlan(22)).toEqual([20, 10, 5]);
+    expect(deriveKalshiPrimaryFallbackClipPlan(16)).toEqual([16, 10, 5]);
+    expect(deriveKalshiPrimaryFallbackClipPlan(7)).toEqual([7, 5]);
+  });
+
   it("treats a partial Kalshi primary order as hedgable when contracts actually filled", () => {
     expect(
       shouldTreatPrimaryOrderAsFilled(

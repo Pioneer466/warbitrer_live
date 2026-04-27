@@ -135,6 +135,23 @@ const marketDataSupervisor = getMarketDataSupervisor();
 let lastDatabaseMaintenanceAttemptAt: number | null = null;
 const lastSettledResolutionRepairAtByAsset: Partial<Record<MarketAsset, number>> = {};
 
+export function deriveKalshiPrimaryFallbackClipPlan(requestedContracts: number) {
+  const normalizedRequestedContracts = normalizeVenueTargetSize("kalshi", requestedContracts, 1, 1);
+  if (normalizedRequestedContracts <= 0) {
+    return [];
+  }
+
+  const preferredClipSizes = [20, 10, 5];
+  const plan = [
+    Math.min(normalizedRequestedContracts, preferredClipSizes[0]),
+    ...preferredClipSizes.slice(1).filter((clipSize) => clipSize < normalizedRequestedContracts),
+  ];
+
+  return [...new Set(plan)]
+    .filter((clipSize) => clipSize > 0)
+    .sort((left, right) => right - left);
+}
+
 function buildSlotBreakerKey(slotKey: string): CircuitBreaker["key"] {
   return `slot:${slotKey}` as CircuitBreaker["key"];
 }
@@ -725,12 +742,15 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   let currentIntent = markIntentStatus(intent, "executing_primary", now);
   await writeOrderIntent(currentIntent);
 
-  const primaryClipPlan = deriveKalshiPrimaryClipPlan(
-    primaryLeg.requestedSize,
-    settings.kalshiPrimaryMaxClipContracts,
-    settings.kalshiPrimaryMaxClips,
-    settings.kalshiPrimaryProbeClipContracts,
-  );
+  const primaryClipPlan =
+    currentIntent.primaryVenue === "kalshi"
+      ? deriveKalshiPrimaryFallbackClipPlan(primaryLeg.requestedSize)
+      : deriveKalshiPrimaryClipPlan(
+          primaryLeg.requestedSize,
+          settings.kalshiPrimaryMaxClipContracts,
+          settings.kalshiPrimaryMaxClips,
+          settings.kalshiPrimaryProbeClipContracts,
+        );
   if (currentIntent.primaryVenue === "kalshi" && primaryClipPlan.length > 1) {
     const multiClipResult = await executeKalshiPrimaryMultiClip(
       currentIntent,
@@ -997,7 +1017,7 @@ async function executeKalshiPrimaryMultiClip(
 ): Promise<{ intent: OrderIntent; outcome: "filled" | "hedged" | "failed" | "awaiting_confirmation" }> {
   let currentIntent = intent;
   const requestedPrimarySize = primaryLeg.requestedSize;
-  const estimatedSingleFee =
+  const estimatedRequestedSizeFee =
     primaryLeg.requestedPrice === null
       ? null
       : calculateKalshiFee({
@@ -1005,44 +1025,43 @@ async function executeKalshiPrimaryMultiClip(
           price: primaryLeg.requestedPrice,
           feeMultiplier: 1,
         });
-  const estimatedMultiClipFee =
+  const estimatedFallbackFeeByClip =
     primaryLeg.requestedPrice === null
       ? null
-      : round4(
-          clipPlan.reduce(
-            (sum, clipSize) =>
-              sum +
-              calculateKalshiFee({
-                contracts: clipSize,
-                price: primaryLeg.requestedPrice ?? 0,
-                feeMultiplier: 1,
-              }),
-            0,
-          ),
-        );
+      : clipPlan.map((clipSize) => ({
+          clipSize,
+          feeUsd: calculateKalshiFee({
+            contracts: clipSize,
+            price: primaryLeg.requestedPrice ?? 0,
+            feeMultiplier: 1,
+          }),
+        }));
 
   await writeRunEvent({
     level: "info",
     eventType: "order.primary.multi_clip_plan",
-    message: `Primary Kalshi multi-clip plan armed for intent ${intent.id}`,
+    message: `Primary Kalshi fallback clip plan armed for intent ${intent.id}`,
     payload: {
       intentId: intent.id,
       slotKey: intent.slotKey,
+      mode: "descending_fallback",
       requestedSize: requestedPrimarySize,
       clipPlan,
       clipCount: clipPlan.length,
-      probeClipContracts: settings.kalshiPrimaryProbeClipContracts,
-      maxClipContracts: settings.kalshiPrimaryMaxClipContracts,
-      maxClips: settings.kalshiPrimaryMaxClips,
-      estimatedSingleFeeUsd: estimatedSingleFee,
-      estimatedMultiClipFeeUsd: estimatedMultiClipFee,
-      estimatedExtraFeeUsd:
-        estimatedSingleFee === null || estimatedMultiClipFee === null
-          ? null
-          : round4(estimatedMultiClipFee - estimatedSingleFee),
+      estimatedRequestedSizeFeeUsd: estimatedRequestedSizeFee,
+      estimatedFallbackFeeUsdByClip: estimatedFallbackFeeByClip,
     },
     createdAt: now,
   });
+
+  let totalPrimaryOrderAttempts = 0;
+  const failedClipSummaries: Array<{
+    clipIndex: number;
+    requestedSize: number;
+    attempts: number;
+    status: LiveOrder["status"];
+    detail: string | null;
+  }> = [];
 
   for (let clipIndex = 0; clipIndex < clipPlan.length; clipIndex += 1) {
     const clipAttemptNow = Date.now();
@@ -1087,6 +1106,25 @@ async function executeKalshiPrimaryMultiClip(
         };
       }
 
+      if (clipIndex < clipPlan.length - 1) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.primary.clip_fallback",
+          message: `Primary Kalshi fallback moved from clip ${clipIndex + 1}/${clipPlan.length} before submission`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            clipSize,
+            nextClipSize: clipPlan[clipIndex + 1],
+            reason: "pair_outside_execution_window",
+          },
+          createdAt: clipAttemptNow,
+        });
+        continue;
+      }
+
       currentIntent = markIntentStatus(
         currentIntent,
         "failed",
@@ -1127,6 +1165,7 @@ async function executeKalshiPrimaryMultiClip(
     const primaryRequest = buildVenueOrderRequest(repricedPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
       kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     });
+    let primaryOrderAttempts = 1;
     let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
     let primaryOrder: LiveOrder;
 
@@ -1257,7 +1296,7 @@ async function executeKalshiPrimaryMultiClip(
       await writeRunEvent({
         level: "info",
         eventType: "order.primary.clip_hedged",
-        message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged; continuing ladder`,
+        message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged; fallback plan complete`,
         payload: {
           intentId: currentIntent.id,
           slotKey: currentIntent.slotKey,
@@ -1268,7 +1307,10 @@ async function executeKalshiPrimaryMultiClip(
         },
         createdAt: clipAttemptNow,
       });
-      continue;
+      return {
+        intent: currentIntent,
+        outcome: "hedged",
+      };
     }
 
     if (isTerminalOrderStatus(primaryResult.status)) {
@@ -1288,6 +1330,7 @@ async function executeKalshiPrimaryMultiClip(
         },
       );
       if (retried) {
+        primaryOrderAttempts += retried.attemptsSubmitted;
         primaryExecutionIntent = retried.intent;
         primaryResult = retried.result;
         primaryOrder = retried.order;
@@ -1335,7 +1378,7 @@ async function executeKalshiPrimaryMultiClip(
         await writeRunEvent({
           level: "info",
           eventType: "order.primary.clip_hedged",
-          message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged after retry; continuing ladder`,
+          message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} hedged after retry; fallback plan complete`,
           payload: {
             intentId: currentIntent.id,
             slotKey: currentIntent.slotKey,
@@ -1347,11 +1390,22 @@ async function executeKalshiPrimaryMultiClip(
           },
           createdAt: Date.now(),
         });
-        continue;
+        return {
+          intent: currentIntent,
+          outcome: "hedged",
+        };
       }
     }
 
     if (isTerminalOrderStatus(primaryResult.status)) {
+      totalPrimaryOrderAttempts += primaryOrderAttempts;
+      failedClipSummaries.push({
+        clipIndex: clipIndex + 1,
+        requestedSize: primaryOrder.requestedSize,
+        attempts: primaryOrderAttempts,
+        status: primaryOrder.status,
+        detail: extractTerminalNoFillDetail(primaryResult),
+      });
       const totalFilledSize = currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0;
       if (totalFilledSize > 0) {
         const stopNow = Date.now();
@@ -1390,6 +1444,30 @@ async function executeKalshiPrimaryMultiClip(
         };
       }
 
+      if (clipIndex < clipPlan.length - 1) {
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.primary.clip_fallback",
+          message: `Primary Kalshi fallback reducing after clip ${clipIndex + 1}/${clipPlan.length} received no fill`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            clipSize,
+            requestedSize: primaryOrder.requestedSize,
+            orderAttempts: primaryOrderAttempts,
+            totalOrderAttempts: totalPrimaryOrderAttempts,
+            orderId: primaryOrder.venueOrderId,
+            orderStatus: primaryResult.status,
+            detail: extractTerminalNoFillDetail(primaryResult),
+            nextClipSize: clipPlan[clipIndex + 1],
+          },
+          createdAt: Date.now(),
+        });
+        continue;
+      }
+
       currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", Date.now());
       currentIntent = markIntentStatus(
         currentIntent,
@@ -1398,7 +1476,7 @@ async function executeKalshiPrimaryMultiClip(
         `${describeTerminalNoFill(
           `Primary clip ${clipIndex + 1}/${clipPlan.length}`,
           primaryResult,
-        )}; requested ${primaryOrder.requestedSize.toFixed(2)}`,
+        )}; attempted ${totalPrimaryOrderAttempts} order${totalPrimaryOrderAttempts === 1 ? "" : "s"} across fallback clips ${clipPlan.join(" -> ")}; last requested ${primaryOrder.requestedSize.toFixed(2)}`,
       );
       await writeOrderIntent(currentIntent);
       if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
@@ -1446,6 +1524,10 @@ async function executeKalshiPrimaryMultiClip(
             softNoFill: Boolean(primaryResult.raw?.softNoFill),
             clipIndex: clipIndex + 1,
             clipCount: clipPlan.length,
+            orderAttempts: primaryOrderAttempts,
+            totalOrderAttempts: totalPrimaryOrderAttempts,
+            clipPlan,
+            failedClipSummaries,
             kalshiBookWsAtFailure: failureKalshiBookWs,
             kalshiBookRestAtFailure: failureKalshiBookRest,
           },
@@ -2532,6 +2614,7 @@ async function retryLegWithinExecutionBufferWithAttempts(
 
   let currentIntent = intent;
   let lastResult: Awaited<ReturnType<typeof retryLegWithinExecutionBuffer>> = null;
+  let attemptsSubmitted = 0;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (attempt > 1 && retryDelayMs > 0) {
@@ -2564,14 +2647,15 @@ async function retryLegWithinExecutionBufferWithAttempts(
           createdAt: Date.now(),
         });
       }
-      return lastResult;
+      return lastResult ? { ...lastResult, attemptsSubmitted } : null;
     }
 
+    attemptsSubmitted += 1;
     lastResult = retried;
     currentIntent = retried.intent;
 
     if (!isTerminalOrderStatus(retried.result.status) || retried.order.filledSize > 0) {
-      return retried;
+      return { ...retried, attemptsSubmitted };
     }
 
     await writeRunEvent({
@@ -2591,7 +2675,7 @@ async function retryLegWithinExecutionBufferWithAttempts(
     });
   }
 
-  return lastResult;
+  return lastResult ? { ...lastResult, attemptsSubmitted } : null;
 }
 
 async function repriceIntentWithinExecutionBuffer(
@@ -3493,6 +3577,25 @@ async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig
   for (const intent of settledCandidates) {
     const venueResolutions = await fetchVenueSettlementResolutions(intent);
     if (!venueResolutions) {
+      await writeRunEvent({
+        asset: intent.asset,
+        level: "warn",
+        eventType: "intent.settlement.waiting_venue_resolution",
+        message: `Intent ${intent.id} remains hedged while waiting for venue settlement outcomes`,
+        payload: {
+          intentId: intent.id,
+          slotKey: intent.slotKey,
+          slotEndTs: intent.slotEndTs,
+          ageAfterSlotEndMs: now - intent.slotEndTs,
+          legs: intent.legs.map((leg) => ({
+            venue: leg.venue,
+            marketRef: leg.marketRef,
+            outcome: leg.outcome,
+            filledSize: leg.filledSize,
+          })),
+        },
+        createdAt: now,
+      });
       continue;
     }
 
