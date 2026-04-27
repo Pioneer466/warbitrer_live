@@ -95,12 +95,6 @@ export function PortfolioClient() {
         </div>
       </section>
 
-      <StablePnlChangesPanel
-        changes={stablePnlChanges}
-        meta="5 derniers trades settled"
-        showAsset
-      />
-
       <section className="grid gap-4 xl:grid-cols-2">
         {assets.map((asset) => {
           const mode = !asset.config.enableTrading ? "off" : asset.config.shadowMode ? "shadow" : "live";
@@ -171,6 +165,12 @@ export function PortfolioClient() {
           );
         })}
       </section>
+
+      <StablePnlChangesPanel
+        changes={stablePnlChanges}
+        meta="5 derniers points stables"
+        showAsset
+      />
     </div>
   );
 }

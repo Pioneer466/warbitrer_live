@@ -160,6 +160,14 @@ export async function readLatestPnlSnapshot() {
   return postgres.getLatestPnlSnapshot(await db());
 }
 
+export async function writeStablePnlChange(
+  intent: OrderIntent,
+  changedAt: number,
+  stability: Record<string, unknown>,
+) {
+  return postgres.insertStablePnlChange(await db(), intent, changedAt, stability);
+}
+
 export async function readLiveRealizedPnlUsd() {
   return postgres.getLiveRealizedPnlUsd(await db());
 }

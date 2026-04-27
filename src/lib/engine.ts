@@ -43,6 +43,7 @@ import {
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
 import { autoConvertPolymarketIfConfigured, reconcilePolymarketProxyConversions } from "@/lib/recovery";
+import { isRiskActivePosition } from "@/lib/positions";
 import {
   applyVenueBalanceReservations,
   calculateVenueExposureUsd,
@@ -80,6 +81,7 @@ import {
   readVenueBalances,
   replaceVenuePositions,
   runDatabaseMaintenance,
+  writeStablePnlChange,
   writeCircuitBreaker,
   writeFill,
   writeOrderIntent,
@@ -117,6 +119,8 @@ const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
 const POLYMARKET_SLOT_EXIT_DUST_CONTRACTS = 0.5;
+const STABLE_PNL_BALANCE_TOLERANCE_USD = 0.01;
+const STABLE_PNL_SETTLED_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const RECONCILE_STEP_TIMEOUT_MS = 30_000;
 const KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD = 2;
@@ -444,6 +448,7 @@ export function createExecutionCoordinator(
       const assetPolyPositions = polyPositions.filter((position) => position.asset === asset);
       const assetKalshiPositions = kalshiPositions.filter((position) => position.asset === asset);
       const allPositions = [...assetPolyPositions, ...assetKalshiPositions];
+      const allVenuePositions = [...polyPositions, ...kalshiPositions];
 
       reconcileErrors.push(
         ...(await runReconcileStep("replace_positions", now, async () => {
@@ -515,7 +520,15 @@ export function createExecutionCoordinator(
       reconcileErrors.push(
         ...(await runReconcileStep("refresh_pnl", now, async () => {
           if (asset === "btc") {
-            await refreshPnl(now, [...polyPositions, ...kalshiPositions]);
+            await refreshPnl(now, allVenuePositions);
+          }
+        })),
+      );
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("record_stable_pnl_changes", now, async () => {
+          if (asset === "btc") {
+            await recordStablePnlChanges(now, await readVenueBalances(), allVenuePositions);
           }
         })),
       );
@@ -4493,6 +4506,128 @@ async function refreshPnl(now: number, positions: PositionSnapshot[]) {
       realizedPnlUsd,
       feesUsd,
     }),
+  );
+}
+
+async function recordStablePnlChanges(now: number, balances: VenueBalance[], positions: PositionSnapshot[]) {
+  const settledIntents = await readRecentSettledOrderIntents(200);
+  const candidates = settledIntents.filter((intent) => {
+    const settledAt = intent.resolvedAt ?? intent.updatedAt;
+    return (
+      !intent.shadow &&
+      intent.status === "settled" &&
+      intent.realizedPnlUsd !== null &&
+      now - settledAt <= STABLE_PNL_SETTLED_LOOKBACK_MS
+    );
+  });
+
+  for (const intent of candidates) {
+    const readiness = evaluateStablePnlChangeReadiness(intent, balances, positions);
+    if (!readiness.ready) {
+      continue;
+    }
+
+    const inserted = await writeStablePnlChange(intent, now, readiness.stability);
+    if (!inserted) {
+      continue;
+    }
+
+    await writeRunEvent({
+      asset: intent.asset,
+      level: "info",
+      eventType: "pnl.stable_change.recorded",
+      message: `Stable P&L change recorded for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        asset: intent.asset,
+        combination: intent.combination,
+        realizedPnlUsd: intent.realizedPnlUsd,
+        ...readiness.stability,
+      },
+      createdAt: now,
+    });
+  }
+}
+
+export function evaluateStablePnlChangeReadiness(
+  intent: OrderIntent,
+  balances: VenueBalance[],
+  positions: PositionSnapshot[],
+  toleranceUsd = STABLE_PNL_BALANCE_TOLERANCE_USD,
+) {
+  const polymarketBalance = balances.find((balance) => balance.venue === "polymarket") ?? null;
+  const kalshiBalance = balances.find((balance) => balance.venue === "kalshi") ?? null;
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket") ?? null;
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi") ?? null;
+  const polymarketBalanceStable = isVenueCashEqualToPortfolio(polymarketBalance, toleranceUsd);
+  const kalshiBalanceStable = isVenueCashEqualToPortfolio(kalshiBalance, toleranceUsd);
+  const polymarketActivePosition = polymarketLeg
+    ? hasRiskActivePositionForLeg(positions, polymarketLeg)
+    : false;
+  const kalshiActivePosition = kalshiLeg ? hasRiskActivePositionForLeg(positions, kalshiLeg) : false;
+  const kalshiWon =
+    kalshiLeg !== null &&
+    intent.kalshiResolution !== null &&
+    intent.kalshiResolution !== undefined &&
+    kalshiLeg.outcome === intent.kalshiResolution;
+
+  const checks = {
+    settled: intent.status === "settled" && intent.realizedPnlUsd !== null,
+    polymarketCashEqualsPortfolio: polymarketBalanceStable,
+    polymarketIntentPositionCleared: !polymarketActivePosition,
+    kalshiCashEqualsPortfolio: kalshiBalanceStable,
+    kalshiIntentPositionCleared: !kalshiActivePosition,
+  };
+  const ready = Object.values(checks).every(Boolean);
+
+  return {
+    ready,
+    stability: {
+      ...checks,
+      toleranceUsd,
+      polymarket: {
+        availableBalanceUsd: polymarketBalance?.availableBalanceUsd ?? null,
+        portfolioValueUsd: polymarketBalance?.portfolioValueUsd ?? null,
+        differenceUsd: polymarketBalance
+          ? round4(polymarketBalance.portfolioValueUsd - polymarketBalance.availableBalanceUsd)
+          : null,
+        activeIntentPosition: polymarketActivePosition,
+      },
+      kalshi: {
+        won: kalshiWon,
+        availableBalanceUsd: kalshiBalance?.availableBalanceUsd ?? null,
+        portfolioValueUsd: kalshiBalance?.portfolioValueUsd ?? null,
+        differenceUsd: kalshiBalance
+          ? round4(kalshiBalance.portfolioValueUsd - kalshiBalance.availableBalanceUsd)
+          : null,
+        activeIntentPosition: kalshiActivePosition,
+      },
+    },
+  };
+}
+
+function isVenueCashEqualToPortfolio(
+  balance: Pick<VenueBalance, "availableBalanceUsd" | "portfolioValueUsd" | "status"> | null,
+  toleranceUsd: number,
+) {
+  return (
+    balance !== null &&
+    balance.status === "ready" &&
+    Math.abs(balance.portfolioValueUsd - balance.availableBalanceUsd) <= toleranceUsd
+  );
+}
+
+function hasRiskActivePositionForLeg(
+  positions: PositionSnapshot[],
+  leg: Pick<OrderIntent["legs"][number], "venue" | "marketRef" | "outcome" | "tokenId">,
+) {
+  return positions.some(
+    (position) =>
+      isRiskActivePosition(position) &&
+      position.venue === leg.venue &&
+      position.marketRef === leg.marketRef &&
+      position.outcome === leg.outcome &&
+      (leg.tokenId === undefined || extractPositionTokenId(position) === leg.tokenId),
   );
 }
 

@@ -8,6 +8,7 @@ import {
   deriveSettledVenueResolutions,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
+  evaluateStablePnlChangeReadiness,
   hasKalshiHedgeRetryCapacity,
   isFeedHealthBreaker,
   isBreakerRelevantToSlot,
@@ -24,7 +25,7 @@ import {
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
-import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, RunEvent } from "@/lib/types";
+import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   const base: OrderIntent = {
@@ -127,6 +128,51 @@ function buildOrder(overrides: Partial<LiveOrder> = {}): LiveOrder {
     ...base,
     ...overrides,
     asset: overrides.asset ?? base.asset,
+  };
+}
+
+function buildVenueBalance(overrides: Partial<VenueBalance> = {}): VenueBalance {
+  const base: VenueBalance = {
+    venue: "polymarket",
+    capturedAt: 1,
+    status: "ready",
+    currency: "USDC",
+    availableBalanceUsd: 100,
+    totalBalanceUsd: 100,
+    portfolioValueUsd: 100,
+    allowanceUsd: 100,
+    notes: [],
+    raw: {},
+  };
+
+  return {
+    ...base,
+    ...overrides,
+  };
+}
+
+function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnapshot {
+  const base: PositionSnapshot = {
+    id: "position-1",
+    asset: "btc",
+    venue: "polymarket",
+    marketRef: "poly-market",
+    outcome: "DOWN",
+    size: 10,
+    averagePrice: 0.45,
+    currentPrice: 0.5,
+    currentValueUsd: 5,
+    realizedPnlUsd: 0,
+    unrealizedPnlUsd: 0.5,
+    redeemable: false,
+    mergeable: false,
+    updatedAt: 1,
+    raw: {},
+  };
+
+  return {
+    ...base,
+    ...overrides,
   };
 }
 
@@ -1043,5 +1089,93 @@ describe("polymarket slot-end exit dust", () => {
 
   it("still rejects material partial slot-end exits", () => {
     expect(isPolymarketSlotExitFillAcceptable({ filledSize: 3 }, 5.21)).toBe(false);
+  });
+});
+
+describe("stable pnl readiness", () => {
+  it("waits for settled venues and cash-equivalent balances before recording", () => {
+    const intent = buildIntent({
+      status: "settled",
+      realizedPnlUsd: 0.4,
+      roi: 0.087,
+      polyResolution: "UP",
+      kalshiResolution: "YES",
+    });
+    const balances = [
+      buildVenueBalance({
+        venue: "polymarket",
+        availableBalanceUsd: 100,
+        totalBalanceUsd: 100,
+        portfolioValueUsd: 100,
+      }),
+      buildVenueBalance({
+        venue: "kalshi",
+        currency: "USD",
+        allowanceUsd: null,
+        availableBalanceUsd: 50,
+        totalBalanceUsd: 50,
+        portfolioValueUsd: 50,
+      }),
+    ];
+
+    expect(evaluateStablePnlChangeReadiness(intent, balances, []).ready).toBe(true);
+  });
+
+  it("blocks while Polymarket portfolio value has not returned to available cash", () => {
+    const intent = buildIntent({
+      status: "settled",
+      realizedPnlUsd: 0.4,
+      polyResolution: "UP",
+      kalshiResolution: "YES",
+    });
+    const balances = [
+      buildVenueBalance({
+        venue: "polymarket",
+        availableBalanceUsd: 100,
+        totalBalanceUsd: 100.25,
+        portfolioValueUsd: 100.25,
+      }),
+      buildVenueBalance({
+        venue: "kalshi",
+        currency: "USD",
+        allowanceUsd: null,
+        availableBalanceUsd: 50,
+        totalBalanceUsd: 50,
+        portfolioValueUsd: 50,
+      }),
+    ];
+
+    expect(evaluateStablePnlChangeReadiness(intent, balances, []).ready).toBe(false);
+  });
+
+  it("blocks while the Kalshi market still has active exposure", () => {
+    const intent = buildIntent({
+      status: "settled",
+      realizedPnlUsd: 0.4,
+      polyResolution: "UP",
+      kalshiResolution: "YES",
+    });
+    const balances = [
+      buildVenueBalance({ venue: "polymarket" }),
+      buildVenueBalance({
+        venue: "kalshi",
+        currency: "USD",
+        allowanceUsd: null,
+        availableBalanceUsd: 50,
+        totalBalanceUsd: 50,
+        portfolioValueUsd: 50,
+      }),
+    ];
+
+    expect(
+      evaluateStablePnlChangeReadiness(intent, balances, [
+        buildPosition({
+          venue: "kalshi",
+          marketRef: "kalshi-market",
+          outcome: "YES",
+          currentValueUsd: 10,
+        }),
+      ]).ready,
+    ).toBe(false);
   });
 });

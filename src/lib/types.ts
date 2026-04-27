@@ -436,11 +436,17 @@ export type StablePnlChange = {
   combination: PairCombination;
   changedAt: number;
   realizedPnlUsd: number;
-  cumulativeRealizedPnlUsd: number;
-  peakRealizedPnlUsd: number;
+  equityUsd: number;
+  cashUsd: number;
+  positionsValueUsd: number;
+  strategyPnlUsd: number;
+  accountDeltaUsd: number;
+  baselineEquityUsd: number | null;
+  peakEquityUsd: number | null;
   drawdownUsd: number;
   roi: number | null;
   targetNotionalUsd: number;
+  stability: Record<string, unknown>;
 };
 
 export type BridgeTransfer = {

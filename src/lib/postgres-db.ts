@@ -239,6 +239,31 @@ async function bootstrapDatabase(pool: Pool) {
     );
     CREATE INDEX IF NOT EXISTS pnl_snapshots_captured_idx ON pnl_snapshots(captured_at DESC);
 
+    CREATE TABLE IF NOT EXISTS stable_pnl_changes (
+      intent_id TEXT PRIMARY KEY REFERENCES order_intents(id) ON DELETE CASCADE,
+      asset TEXT NOT NULL,
+      combination TEXT NOT NULL,
+      changed_at BIGINT NOT NULL,
+      settled_at BIGINT,
+      realized_pnl_usd DOUBLE PRECISION NOT NULL,
+      roi DOUBLE PRECISION,
+      target_notional_usd DOUBLE PRECISION NOT NULL,
+      equity_usd DOUBLE PRECISION NOT NULL,
+      cash_usd DOUBLE PRECISION NOT NULL,
+      positions_value_usd DOUBLE PRECISION NOT NULL,
+      strategy_pnl_usd DOUBLE PRECISION NOT NULL,
+      account_delta_usd DOUBLE PRECISION NOT NULL,
+      baseline_equity_usd DOUBLE PRECISION,
+      peak_equity_usd DOUBLE PRECISION,
+      drawdown_usd DOUBLE PRECISION NOT NULL,
+      venue_breakdown_json JSONB NOT NULL,
+      stability_json JSONB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS stable_pnl_changes_changed_idx
+      ON stable_pnl_changes(changed_at DESC);
+    CREATE INDEX IF NOT EXISTS stable_pnl_changes_asset_changed_idx
+      ON stable_pnl_changes(asset, changed_at DESC);
+
     CREATE TABLE IF NOT EXISTS bridge_transfers (
       id TEXT PRIMARY KEY,
       venue TEXT NOT NULL,
@@ -1378,6 +1403,78 @@ export async function getLatestPnlSnapshot(pool: Pool): Promise<PnlSnapshot | nu
   return result.rows[0] ? mapPnlSnapshotRow(result.rows[0]) : null;
 }
 
+export async function insertStablePnlChange(
+  pool: Pool,
+  intent: OrderIntent,
+  changedAt: number,
+  stability: Record<string, unknown>,
+) {
+  if (intent.realizedPnlUsd === null) {
+    return false;
+  }
+
+  const result = await pool.query(
+    `
+      WITH latest AS (
+        SELECT *
+        FROM pnl_snapshots
+        WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
+          AND equity_usd > 0
+        ORDER BY captured_at DESC, id DESC
+        LIMIT 1
+      ),
+      baseline AS (
+        SELECT equity_usd
+        FROM pnl_snapshots
+        WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
+          AND equity_usd > 0
+        ORDER BY captured_at ASC, id ASC
+        LIMIT 1
+      ),
+      peak AS (
+        SELECT MAX(equity_usd) AS equity_usd
+        FROM pnl_snapshots
+        WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
+          AND equity_usd > 0
+      )
+      INSERT INTO stable_pnl_changes (
+        intent_id, asset, combination, changed_at, settled_at, realized_pnl_usd, roi,
+        target_notional_usd, equity_usd, cash_usd, positions_value_usd, strategy_pnl_usd,
+        account_delta_usd, baseline_equity_usd, peak_equity_usd, drawdown_usd,
+        venue_breakdown_json, stability_json
+      )
+      SELECT
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, latest.equity_usd, latest.cash_usd, latest.positions_value_usd,
+        latest.realized_pnl_usd + latest.unrealized_pnl_usd,
+        latest.equity_usd - COALESCE(baseline.equity_usd, latest.equity_usd),
+        COALESCE(baseline.equity_usd, latest.equity_usd),
+        COALESCE(peak.equity_usd, latest.equity_usd),
+        latest.equity_usd - COALESCE(peak.equity_usd, latest.equity_usd),
+        latest.venue_breakdown_json,
+        $9::jsonb
+      FROM latest
+      CROSS JOIN baseline
+      CROSS JOIN peak
+      ON CONFLICT (intent_id) DO NOTHING
+      RETURNING intent_id
+    `,
+    [
+      intent.id,
+      intent.asset,
+      intent.combination,
+      changedAt,
+      intent.resolvedAt,
+      intent.realizedPnlUsd,
+      intent.roi,
+      intent.targetNotionalUsd,
+      JSON.stringify(stability),
+    ],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
 export async function listStablePnlChanges(
   pool: Pool,
   limit = 5,
@@ -1385,50 +1482,10 @@ export async function listStablePnlChanges(
 ): Promise<StablePnlChange[]> {
   const result = await pool.query(
     `
-      WITH settled_intents AS (
-        SELECT
-          id AS intent_id,
-          asset,
-          combination,
-          COALESCE(resolved_at, updated_at) AS changed_at,
-          realized_pnl_usd,
-          roi,
-          target_notional_usd
-        FROM order_intents
-        WHERE shadow = false
-          AND status = 'settled'
-          AND realized_pnl_usd IS NOT NULL
-          ${asset ? "AND asset = $2" : ""}
-      ),
-      running AS (
-        SELECT
-          *,
-          SUM(realized_pnl_usd) OVER (
-            ORDER BY changed_at ASC, intent_id ASC
-          ) AS cumulative_realized_pnl_usd
-        FROM settled_intents
-      ),
-      enriched AS (
-        SELECT
-          *,
-          MAX(cumulative_realized_pnl_usd) OVER (
-            ORDER BY changed_at ASC, intent_id ASC
-            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-          ) AS peak_realized_pnl_usd
-        FROM running
-      )
       SELECT
-        intent_id,
-        asset,
-        combination,
-        changed_at,
-        realized_pnl_usd,
-        cumulative_realized_pnl_usd,
-        peak_realized_pnl_usd,
-        cumulative_realized_pnl_usd - peak_realized_pnl_usd AS drawdown_usd,
-        roi,
-        target_notional_usd
-      FROM enriched
+        *
+      FROM stable_pnl_changes
+      ${asset ? "WHERE asset = $2" : ""}
       ORDER BY changed_at DESC, intent_id DESC
       LIMIT $1
     `,
@@ -2023,11 +2080,23 @@ function mapStablePnlChangeRow(row: any): StablePnlChange {
     combination: row.combination,
     changedAt: row.changed_at,
     realizedPnlUsd: Number(row.realized_pnl_usd),
-    cumulativeRealizedPnlUsd: Number(row.cumulative_realized_pnl_usd),
-    peakRealizedPnlUsd: Number(row.peak_realized_pnl_usd),
+    equityUsd: Number(row.equity_usd),
+    cashUsd: Number(row.cash_usd),
+    positionsValueUsd: Number(row.positions_value_usd),
+    strategyPnlUsd: Number(row.strategy_pnl_usd),
+    accountDeltaUsd: Number(row.account_delta_usd),
+    baselineEquityUsd:
+      row.baseline_equity_usd === null || row.baseline_equity_usd === undefined
+        ? null
+        : Number(row.baseline_equity_usd),
+    peakEquityUsd:
+      row.peak_equity_usd === null || row.peak_equity_usd === undefined
+        ? null
+        : Number(row.peak_equity_usd),
     drawdownUsd: Number(row.drawdown_usd),
     roi: row.roi === null || row.roi === undefined ? null : Number(row.roi),
     targetNotionalUsd: Number(row.target_notional_usd),
+    stability: row.stability_json ?? {},
   };
 }
 

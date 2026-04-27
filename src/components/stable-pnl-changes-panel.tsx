@@ -5,7 +5,7 @@ import type { StablePnlChange } from "@/lib/types";
 
 export function StablePnlChangesPanel({
   changes,
-  title = "Évolution P&L Stable",
+  title = "Évolution Drawdown Stable",
   meta,
   showAsset = false,
 }: {
@@ -24,26 +24,28 @@ export function StablePnlChangesPanel({
       <div className="mt-4 grid gap-3">
         {changes.length === 0 ? (
           <div className="rounded-[22px] border border-white/6 bg-white/[0.02] px-4 py-8 text-center text-sm text-mist/70">
-            Aucun trade settled.
+            Aucun point stable enregistré.
           </div>
         ) : (
           changes.map((change) => (
             <div key={change.intentId} className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <div className="text-white">
+                  <div className="text-[11px] uppercase tracking-[0.16em] text-mist/60">Drawdown Stable</div>
+                  <div className="mt-2 text-white">
                     {showAsset ? `${change.asset.toUpperCase()} · ` : ""}
                     {formatCombination(change.combination)}
                   </div>
                   <div className="mt-1 text-xs text-mist/60">{formatDateTime(change.changedAt)}</div>
                 </div>
-                <div className={`font-mono text-lg leading-none ${change.realizedPnlUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
-                  {formatCurrency(change.realizedPnlUsd)}
+                <div className={`font-mono text-[30px] leading-none ${change.drawdownUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
+                  {formatCurrency(change.drawdownUsd)}
                 </div>
               </div>
-              <div className="mt-3 grid gap-2 text-xs text-mist/70 sm:grid-cols-3">
-                <div>Cumul {formatCurrency(change.cumulativeRealizedPnlUsd)}</div>
-                <div>DD {formatCurrency(change.drawdownUsd)}</div>
+              <div className="mt-3 grid gap-2 text-xs text-mist/70 sm:grid-cols-4">
+                <div>Delta {formatCurrency(change.accountDeltaUsd)}</div>
+                <div>Equity {formatCurrency(change.equityUsd)}</div>
+                <div>Trade {formatCurrency(change.realizedPnlUsd)}</div>
                 <div>ROI {change.roi === null ? "--" : `${(change.roi * 100).toFixed(2)}%`}</div>
               </div>
             </div>
