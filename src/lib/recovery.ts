@@ -157,19 +157,26 @@ export async function reconcilePolymarketProxyConversions(now = Date.now()) {
       continue;
     }
 
-    if (relayerTransaction.state === "STATE_FAILED") {
-      await writePolymarketConversionTerminalEvent("failed", pending, relayerTransaction, now);
-      completed.push(pending.relayerTransactionId);
-      continue;
-    }
-
-    if (relayerTransaction.state === "STATE_MINED" || relayerTransaction.state === "STATE_CONFIRMED") {
-      await writePolymarketConversionTerminalEvent("confirmed", pending, relayerTransaction, now);
+    const terminalStatus = classifyPolymarketRelayerTerminalState(relayerTransaction.state);
+    if (terminalStatus) {
+      await writePolymarketConversionTerminalEvent(terminalStatus, pending, relayerTransaction, now);
       completed.push(pending.relayerTransactionId);
     }
   }
 
   return completed;
+}
+
+export function classifyPolymarketRelayerTerminalState(state: string): "confirmed" | "failed" | null {
+  if (state === "STATE_CONFIRMED") {
+    return "confirmed";
+  }
+
+  if (state === "STATE_FAILED" || state === "STATE_INVALID") {
+    return "failed";
+  }
+
+  return null;
 }
 
 export function buildRedeemTxData(conditionId: string) {

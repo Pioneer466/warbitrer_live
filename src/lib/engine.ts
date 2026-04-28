@@ -118,7 +118,6 @@ const RESOLUTION_GRACE_MS = 5_000;
 const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
-const POLYMARKET_SLOT_EXIT_DUST_CONTRACTS = 0.5;
 const STABLE_PNL_BALANCE_TOLERANCE_USD = 0.01;
 const STABLE_PNL_SETTLED_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const RECONCILE_STEP_TIMEOUT_MS = 30_000;
@@ -579,14 +578,8 @@ export function createExecutionCoordinator(
       );
 
       reconcileErrors.push(
-        ...(await runReconcileStep("reconcile_slot_end_polymarket_exits", now, async () => {
-          await reconcileSlotEndPolymarketExits(asset, settings, now);
-        })),
-      );
-
-      reconcileErrors.push(
         ...(await runReconcileStep("reconcile_settlements", now, async () => {
-          await reconcileSettlements(asset, settings, now);
+          await reconcileSettlements(asset, now);
         })),
       );
 
@@ -3347,6 +3340,23 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   await writeOrderIntent(currentIntent);
   await armHedgeFailureGuards(currentIntent, hedgeOrder, hedgeResult ?? null, now);
 
+  if (shouldDeferPolymarketUnwindToSettlement(currentIntent, now)) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.unwind.polymarket_deferred_to_settlement",
+      message: `Polymarket primary unwind deferred to settlement/redeem for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        primaryVenue: currentIntent.primaryVenue,
+        slotEndTs: currentIntent.slotEndTs,
+        ageAfterSlotEndMs: now - currentIntent.slotEndTs,
+      },
+      createdAt: now,
+    });
+    return currentIntent;
+  }
+
   const maxAttempts = Math.max(1, settings.hedgeRetryAttempts);
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
@@ -3787,7 +3797,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
   }
 }
 
-async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig, now: number) {
+async function reconcileSettlements(asset: MarketAsset, now: number) {
   const openIntents = await readOpenOrderIntents(asset);
   const settledCandidates = openIntents.filter(
     (intent) => intent.status === "hedged" && intent.slotEndTs + RESOLUTION_GRACE_MS <= now,
@@ -3818,18 +3828,13 @@ async function reconcileSettlements(asset: MarketAsset, settings: StrategyConfig
       continue;
     }
 
-    const exitAdjustedIntent = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now, venueResolutions.polyResolution);
-    if (exitAdjustedIntent.status !== "hedged") {
-      continue;
-    }
-
     const payoutUsd = calculateWinningPayout(
-      exitAdjustedIntent.legs,
+      intent.legs,
       venueResolutions.polyResolution,
       venueResolutions.kalshiResolution,
     );
     const settled = finalizeIntent({
-      intent: exitAdjustedIntent,
+      intent,
       polyResolution: venueResolutions.polyResolution,
       kalshiResolution: venueResolutions.kalshiResolution,
       payoutUsd,
@@ -4077,47 +4082,6 @@ export async function repairSettledIntentResolutions(options?: {
   };
 }
 
-async function reconcileSlotEndPolymarketExits(asset: MarketAsset, settings: StrategyConfig, now: number) {
-  const openIntents = await readOpenOrderIntents(asset);
-  const candidates = openIntents.filter(
-    (intent) =>
-      !intent.shadow &&
-      intent.slotEndTs + RESOLUTION_GRACE_MS <= now &&
-      (intent.status === "hedged" ||
-        ((intent.status === "primary_filled" || intent.status === "hedging") && intent.primaryVenue === "polymarket")),
-  );
-
-  for (const intent of candidates) {
-    const exited = await maybeExitPolymarketLegAtSlotEnd(intent, settings, now);
-    if (!hasRecordedPolymarketSlotExit(intent, exited)) {
-      continue;
-    }
-
-    if (intent.status === "hedged") {
-      await writeOrderIntent(exited);
-      continue;
-    }
-
-    const closed = finalizeUnwoundIntent({
-      intent: exited,
-      now,
-      failureReason: "Primary exited at slot end after hedge remained incomplete",
-    });
-    await writeOrderIntent(closed);
-    await writeRunEvent({
-      level: "warn",
-      eventType: "intent.unwound.slot_end_exit",
-      message: `Intent ${intent.id} closed via Polymarket slot-end exit after hedge remained incomplete`,
-      payload: {
-        intentId: intent.id,
-        slotKey: intent.slotKey,
-        primaryVenue: intent.primaryVenue,
-      },
-      createdAt: now,
-    });
-  }
-}
-
 async function clearRecoveredIntentFailureReasons(asset: MarketAsset, now: number) {
   const openIntents = await readOpenOrderIntents(asset);
   for (const intent of openIntents) {
@@ -4152,195 +4116,6 @@ async function backfillUnwoundIntentPnl(asset: MarketAsset, now: number) {
       }),
     );
   }
-}
-
-async function maybeExitPolymarketLegAtSlotEnd(
-  intent: OrderIntent,
-  settings: StrategyConfig,
-  now: number,
-  resolvedOutcome?: "UP" | "DOWN" | null,
-) {
-  if (intent.shadow) {
-    return intent;
-  }
-
-  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
-  if (
-    !polymarketLeg ||
-    polymarketLeg.filledSize <= 0 ||
-    polymarketLeg.payoutUsd !== null ||
-    now < intent.slotEndTs + RESOLUTION_GRACE_MS
-  ) {
-    return intent;
-  }
-
-  if (shouldKeepPolymarketLegForResolution(polymarketLeg, resolvedOutcome)) {
-    return intent;
-  }
-
-  const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
-  const { polymarket: polymarketState } = await marketDataSupervisor.readSlotState(slot, now);
-  const outcome =
-    polymarketLeg.outcome === "UP" ? polymarketState.quote.outcomes.up : polymarketState.quote.outcomes.down;
-  const sellPrice = outcome.sellPrice ?? outcome.bestBid;
-
-  if (sellPrice === null || sellPrice <= 0) {
-    return intent;
-  }
-
-  const permissivePrice = Math.max(0.001, sellPrice - settings.executionPriceBuffer);
-  const requestedSize = await resolvePrimaryExitSize(intent, polymarketLeg, now);
-  if (requestedSize <= 0) {
-    return intent;
-  }
-  const exitLeg = {
-    ...polymarketLeg,
-    side: "SELL" as const,
-    requestedPrice: permissivePrice,
-    requestedSize,
-    requestedNotionalUsd: requestedSize * permissivePrice,
-  };
-
-  let lastOrder: LiveOrder | null = null;
-  for (let attempt = 1; attempt <= settings.hedgeRetryAttempts; attempt += 1) {
-    if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
-      await sleep(settings.hedgeRetryDelayMs);
-    }
-
-    let order: LiveOrder;
-    try {
-      const request = buildVenueOrderRequest(exitLeg, settings.maxSlippageBps, "FOK", true);
-      const submission = await polymarketAdapter.placeOrder(request);
-      const result = await confirmImmediateOrderExecution(
-        "polymarket",
-        request,
-        submission,
-        settings.immediateOrderConfirmationTimeoutMs,
-      );
-      order = buildLiveOrderRecord(intent.asset, intent.id, exitLeg, request, result, Date.now());
-      lastOrder = order;
-      await writeVenueOrder(order);
-    } catch (error) {
-      if (isPolymarketOrderbookUnavailableError(error)) {
-        await writeRunEvent({
-          level: "warn",
-          eventType: "order.slot_exit.polymarket_orderbook_unavailable",
-          message: `Polymarket slot-end exit unavailable because the orderbook is gone for intent ${intent.id}`,
-          payload: {
-            intentId: intent.id,
-            error: toErrorMessage(error),
-          },
-          createdAt: now,
-        });
-        break;
-      }
-
-      await writeRunEvent({
-        level: "warn",
-        eventType: "order.slot_exit.polymarket_submit_failed",
-        message: `Polymarket slot-end exit ${attempt}/${settings.hedgeRetryAttempts} submission failed for intent ${intent.id}`,
-        payload: {
-          intentId: intent.id,
-          attempt,
-          attempts: settings.hedgeRetryAttempts,
-          error: toErrorMessage(error),
-        },
-        createdAt: now,
-      });
-      continue;
-    }
-
-    const remainingExitSize = derivePolymarketSlotExitRemainingSize(order.filledSize, exitLeg.requestedSize);
-    if (isPolymarketSlotExitFillAcceptable(order, exitLeg.requestedSize)) {
-      const averageExitPrice = order.averageFillPrice ?? permissivePrice;
-      const payoutUsd = round4(order.filledSize * averageExitPrice - (order.feeUsd ?? 0));
-      const updated = {
-        ...intent,
-        updatedAt: now,
-        failureReason: null,
-        legs: intent.legs.map((leg) =>
-          leg.id === polymarketLeg.id
-            ? {
-                ...leg,
-                status: "unwound",
-                payoutUsd,
-              }
-            : leg,
-        ) as OrderIntent["legs"],
-      };
-      await writeRunEvent({
-        level: "info",
-        eventType: "order.slot_exit.polymarket_filled",
-        message: `Polymarket slot-end exit filled for intent ${intent.id}`,
-        payload: {
-          intentId: intent.id,
-          orderId: order.venueOrderId,
-          requestedSize: exitLeg.requestedSize,
-          filledSize: order.filledSize,
-          remainingSize: remainingExitSize,
-          dustThresholdContracts: POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
-          averageExitPrice,
-          payoutUsd,
-        },
-        createdAt: now,
-      });
-      return updated;
-    }
-
-    await writeRunEvent({
-      level: "warn",
-      eventType: "order.slot_exit.polymarket_retry",
-      message: `Polymarket slot-end exit ${attempt}/${settings.hedgeRetryAttempts} did not fill for intent ${intent.id}`,
-      payload: {
-        intentId: intent.id,
-        attempt,
-        attempts: settings.hedgeRetryAttempts,
-        orderId: order.venueOrderId,
-        orderStatus: order.status,
-        requestedSize: exitLeg.requestedSize,
-        filledSize: order.filledSize,
-        remainingSize: derivePolymarketSlotExitRemainingSize(order.filledSize, exitLeg.requestedSize),
-      },
-      createdAt: now,
-    });
-  }
-
-  if (lastOrder?.filledSize && lastOrder.filledSize > ORDER_SIZE_TOLERANCE) {
-    const remainingSize = derivePolymarketSlotExitRemainingSize(lastOrder.filledSize, exitLeg.requestedSize);
-    const failed = markIntentStatus(
-      intent,
-      "failed",
-      now,
-      `Polymarket slot-end exit partially filled (${lastOrder.status}, filled ${lastOrder.filledSize.toFixed(2)}/${exitLeg.requestedSize.toFixed(2)}, remaining ${remainingSize.toFixed(2)}); manual intervention required`,
-    );
-    await writeOrderIntent(failed);
-    await writeManualInterventionRunEvent(failed, now, "polymarket_slot_end_exit_partial_fill", {
-      venue: "polymarket",
-      orderId: lastOrder.venueOrderId,
-      orderStatus: lastOrder.status,
-      requestedSize: exitLeg.requestedSize,
-      filledSize: lastOrder.filledSize,
-      remainingSize,
-      dustThresholdContracts: POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
-    });
-    await writeCircuitBreaker({
-      key: "global",
-      active: true,
-      reason: "hedge_failure",
-      triggeredAt: now,
-      payload: {
-        intentId: intent.id,
-        stage: "polymarket_slot_exit_partial_fill",
-        orderId: lastOrder.venueOrderId,
-        requestedSize: exitLeg.requestedSize,
-        filledSize: lastOrder.filledSize,
-        remainingSize,
-      },
-    });
-    return failed;
-  }
-
-  return intent;
 }
 
 async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
@@ -4651,19 +4426,6 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
 
     if (!hedgeOrder) {
       if (stale && (currentIntent.status === "primary_filled" || currentIntent.status === "hedging")) {
-        if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
-          const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
-          if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
-            currentIntent = finalizeUnwoundIntent({
-              intent: exited,
-              now,
-              failureReason: "Primary exited at slot end after hedge remained incomplete",
-            });
-            await writeOrderIntent(currentIntent);
-            continue;
-          }
-        }
-
         await writeRunEvent({
           level: "error",
           eventType: "intent.failed.hedge_missing",
@@ -4743,19 +4505,6 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
 
     if (stale && (isTerminalOrderStatus(hedgeOrder.status) || isAwaitingOrderConfirmation(hedgeOrder.status))) {
-      if (currentIntent.primaryVenue === "polymarket" && currentIntent.slotEndTs + RESOLUTION_GRACE_MS <= now) {
-        const exited = await maybeExitPolymarketLegAtSlotEnd(currentIntent, settings, now);
-        if (hasRecordedPolymarketSlotExit(currentIntent, exited)) {
-          currentIntent = finalizeUnwoundIntent({
-            intent: exited,
-            now,
-            failureReason: "Primary exited at slot end after hedge remained incomplete",
-          });
-          await writeOrderIntent(currentIntent);
-          continue;
-        }
-      }
-
       await attemptPrimaryUnwindAfterHedgeFailure(
         currentIntent,
         primaryLeg,
@@ -6094,10 +5843,11 @@ function isInFlightIntentStale(intent: OrderIntent, now: number) {
   return intent.slotEndTs + RESOLUTION_GRACE_MS <= now || now - intent.updatedAt >= IN_FLIGHT_INTENT_STALE_MS;
 }
 
-function hasRecordedPolymarketSlotExit(previous: OrderIntent, next: OrderIntent) {
-  const previousLeg = previous.legs.find((leg) => leg.venue === "polymarket");
-  const nextLeg = next.legs.find((leg) => leg.venue === "polymarket");
-  return previousLeg?.payoutUsd === null && nextLeg?.payoutUsd !== null;
+export function shouldDeferPolymarketUnwindToSettlement(
+  intent: Pick<OrderIntent, "primaryVenue" | "slotEndTs">,
+  now: number,
+) {
+  return intent.primaryVenue === "polymarket" && intent.slotEndTs + RESOLUTION_GRACE_MS <= now;
 }
 
 export function isLatePrimaryFillRescueEligible(intent: OrderIntent, recentOrders: LiveOrder[]) {
@@ -6137,22 +5887,6 @@ export function derivePrimaryExitSize(params: {
   }
 
   return floorToSixDecimals(Math.min(...candidates));
-}
-
-export function derivePolymarketSlotExitRemainingSize(filledSize: number, requestedSize: number) {
-  return roundToSixDecimals(Math.max(0, requestedSize - filledSize));
-}
-
-export function isPolymarketSlotExitFillAcceptable(
-  order: Pick<LiveOrder, "filledSize">,
-  requestedSize: number,
-  dustThresholdContracts = POLYMARKET_SLOT_EXIT_DUST_CONTRACTS,
-) {
-  if (order.filledSize <= ORDER_SIZE_TOLERANCE) {
-    return false;
-  }
-
-  return derivePolymarketSlotExitRemainingSize(order.filledSize, requestedSize) <= dustThresholdContracts + ORDER_SIZE_TOLERANCE;
 }
 
 export function deriveRemainingExposureSize(entryFilledSize: number, exitFilledSize: number) {

@@ -1,7 +1,12 @@
 import { constants as ethersConstants, utils } from "ethers";
 
 import { POLY_PUSD_ADDRESS } from "@/lib/constants";
-import { buildMergeTxData, buildRecoveryMarkets, buildRedeemTxData } from "@/lib/recovery";
+import {
+  buildMergeTxData,
+  buildRecoveryMarkets,
+  buildRedeemTxData,
+  classifyPolymarketRelayerTerminalState,
+} from "@/lib/recovery";
 import type { PositionSnapshot } from "@/lib/types";
 
 describe("recovery helpers", () => {
@@ -17,6 +22,15 @@ describe("recovery helpers", () => {
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
     expect(decoded.indexSets.map((value: any) => Number(value))).toEqual([1, 2]);
+  });
+
+  it("classifies Polymarket relayer terminal states according to the docs", () => {
+    expect(classifyPolymarketRelayerTerminalState("STATE_NEW")).toBeNull();
+    expect(classifyPolymarketRelayerTerminalState("STATE_EXECUTED")).toBeNull();
+    expect(classifyPolymarketRelayerTerminalState("STATE_MINED")).toBeNull();
+    expect(classifyPolymarketRelayerTerminalState("STATE_CONFIRMED")).toBe("confirmed");
+    expect(classifyPolymarketRelayerTerminalState("STATE_FAILED")).toBe("failed");
+    expect(classifyPolymarketRelayerTerminalState("STATE_INVALID")).toBe("failed");
   });
 
   it("encodes mergePositions with a 6-decimal collateral amount", () => {

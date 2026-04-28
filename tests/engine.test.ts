@@ -6,7 +6,6 @@ import {
   deriveKalshiPrimaryFallbackClipPlan,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
-  derivePolymarketSlotExitRemainingSize,
   deriveSettledVenueResolutions,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
@@ -15,7 +14,6 @@ import {
   isFeedHealthBreaker,
   isBreakerRelevantToSlot,
   isLatePrimaryFillRescueEligible,
-  isPolymarketSlotExitFillAcceptable,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
   resolvePrimaryRetryPlan,
@@ -25,6 +23,7 @@ import {
   shouldKeepSlotExecutionBreakerActive,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatPrimaryOrderAsFilled,
+  shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
@@ -1185,14 +1184,37 @@ describe("live remaining leg size", () => {
   });
 });
 
-describe("polymarket slot-end exit dust", () => {
-  it("accepts a near-complete exit instead of requiring manual intervention for dust", () => {
-    expect(derivePolymarketSlotExitRemainingSize(5, 5.21)).toBe(0.21);
-    expect(isPolymarketSlotExitFillAcceptable({ filledSize: 5 }, 5.21)).toBe(true);
-  });
+describe("polymarket post-slot unwind handling", () => {
+  it("defers Polymarket primary unwind to settlement/redeem after the resolution grace window", () => {
+    expect(
+      shouldDeferPolymarketUnwindToSettlement(
+        {
+          primaryVenue: "polymarket",
+          slotEndTs: 1_000,
+        },
+        6_000,
+      ),
+    ).toBe(true);
 
-  it("still rejects material partial slot-end exits", () => {
-    expect(isPolymarketSlotExitFillAcceptable({ filledSize: 3 }, 5.21)).toBe(false);
+    expect(
+      shouldDeferPolymarketUnwindToSettlement(
+        {
+          primaryVenue: "polymarket",
+          slotEndTs: 1_000,
+        },
+        5_999,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldDeferPolymarketUnwindToSettlement(
+        {
+          primaryVenue: "kalshi",
+          slotEndTs: 1_000,
+        },
+        6_000,
+      ),
+    ).toBe(false);
   });
 });
 
