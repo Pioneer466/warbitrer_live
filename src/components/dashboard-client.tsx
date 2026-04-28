@@ -352,6 +352,10 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
           </StatusBadge>
         </div>
         <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <CompactMetric label="Action" value={formatMismatchAction(opportunity)} />
+          <CompactMetric label="Paiements proxy" value={formatNullableNumber(opportunity.referencePayoutCount)} />
+          <CompactMetric label="Distance zone" value={formatBps(opportunity.deadZoneDistanceBps)} />
+          <CompactMetric label="Largeur zone" value={formatBps(opportunity.deadZoneWidthBps)} />
           <CompactMetric label="Désaccord" value={formatMismatchPct(opportunity.venueDisagreementPct)} />
           <CompactMetric label="Temps slot" value={formatSeconds(opportunity.secondsElapsedInSlot)} />
           <CompactMetric label="Move Chainlink" value={formatBps(opportunity.chainlinkMoveBps)} />
@@ -602,6 +606,16 @@ function getMismatchRiskTone(risk: LiveOpportunity["mismatchRisk"]) {
 
 function formatMismatchPct(value: number | null) {
   return value === null ? "--" : `${(value * 100).toFixed(1)}%`;
+}
+
+function formatMismatchAction(opportunity: LiveOpportunity) {
+  return opportunity.mismatchGuardAction === "reduce_size"
+    ? `x${opportunity.mismatchSizeMultiplier}`
+    : opportunity.mismatchGuardAction;
+}
+
+function formatNullableNumber(value: number | null) {
+  return value === null ? "--" : String(value);
 }
 
 function formatBps(value: number | null) {

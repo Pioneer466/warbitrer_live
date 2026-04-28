@@ -35,7 +35,7 @@ export function Shell({ activePath, children }: ShellProps) {
             </nav>
           </div>
           <div className="flex items-center gap-2">
-            <Badge tone="amber">BTC + ETH + SOL + XRP 15m</Badge>
+            <Badge tone="amber">{MARKET_ASSETS.map((asset) => asset.toUpperCase()).join(" + ")} 15m</Badge>
             <Badge tone="cyan">MULTI</Badge>
             <Badge tone="default">POSTGRES</Badge>
           </div>

@@ -1,4 +1,4 @@
-export type MarketAsset = "btc" | "eth" | "sol" | "xrp";
+export type MarketAsset = "btc" | "eth" | "sol" | "xrp" | "doge" | "bnb" | "hype";
 export type AssetScoped<T> = Record<MarketAsset, T>;
 export type Venue = "polymarket" | "kalshi";
 export type PairCombination = "POLY_UP_KALSHI_NO" | "POLY_DOWN_KALSHI_YES";
@@ -270,6 +270,11 @@ export type LiveOpportunity = {
   projectedNetReturn: number | null;
   reasons: string[];
   legs: [OpportunityLeg, OpportunityLeg];
+  mismatchGuardAction: "allow" | "reduce_size" | "block";
+  mismatchSizeMultiplier: number;
+  referencePayoutCount: number | null;
+  deadZoneDistanceBps: number | null;
+  deadZoneWidthBps: number | null;
   mismatchRisk: "low" | "medium" | "high" | null;
   venueDisagreementPct: number | null;
   secondsElapsedInSlot: number | null;

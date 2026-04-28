@@ -25,6 +25,9 @@ const ASSET_THEMES: Record<
   eth: ORANGE_ASSET_THEME,
   sol: ORANGE_ASSET_THEME,
   xrp: ORANGE_ASSET_THEME,
+  doge: ORANGE_ASSET_THEME,
+  bnb: ORANGE_ASSET_THEME,
+  hype: ORANGE_ASSET_THEME,
 };
 
 export function PortfolioClient() {

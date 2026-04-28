@@ -36,6 +36,11 @@ type SignalContext = {
 };
 
 type MismatchGuardMetrics = {
+  mismatchGuardAction: LiveOpportunity["mismatchGuardAction"];
+  mismatchSizeMultiplier: number;
+  referencePayoutCount: number | null;
+  deadZoneDistanceBps: number | null;
+  deadZoneWidthBps: number | null;
   mismatchRisk: LiveOpportunity["mismatchRisk"];
   venueDisagreementPct: number | null;
   secondsElapsedInSlot: number | null;
@@ -45,6 +50,25 @@ type MismatchGuardMetrics = {
   observedSlotOpenPriceUsd: number | null;
   kalshiTargetPriceUsd: number | null;
   mismatchGuardReason: string | null;
+};
+
+type MismatchGuardBaseMetrics = Omit<
+  MismatchGuardMetrics,
+  | "mismatchGuardAction"
+  | "mismatchSizeMultiplier"
+  | "referencePayoutCount"
+  | "deadZoneDistanceBps"
+  | "deadZoneWidthBps"
+  | "mismatchRisk"
+  | "mismatchGuardReason"
+> & {
+  activeMinMoveBps: number;
+  mismatchPhase: MismatchGuardPhase;
+  tooEarly: boolean;
+  disagreementHigh: boolean;
+  disagreementMedium: boolean;
+  missingReferenceSignal: boolean;
+  hasAnyMismatchSignal: boolean;
 };
 
 type MismatchGuardPhase = "standard" | "late";
@@ -75,7 +99,7 @@ export function buildSignals({
       : secondsRemaining != null
         ? Math.max(0, 900 - secondsRemaining)
         : null;
-  const mismatchGuard = computeMismatchGuard(polymarket, kalshi, settings, secondsElapsed);
+  const mismatchGuardBase = computeMismatchGuardBase(polymarket, kalshi, settings, secondsElapsed);
 
   return [
     buildSignal({
@@ -99,7 +123,7 @@ export function buildSignals({
       balances,
       lastEntryCosts,
       marketAlignmentReason,
-      mismatchGuard,
+      mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_UP_KALSHI_NO", settings),
     }),
     buildSignal({
       slotKey,
@@ -122,7 +146,7 @@ export function buildSignals({
       balances,
       lastEntryCosts,
       marketAlignmentReason,
-      mismatchGuard,
+      mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_DOWN_KALSHI_YES", settings),
     }),
   ];
 }
@@ -172,7 +196,7 @@ function buildSignal({
   marketAlignmentReason: string | null;
   mismatchGuard: MismatchGuardMetrics;
 }): LiveOpportunity {
-  const targetLegBudgetUsd = settings.maxPairNotionalUsd / 2;
+  const targetLegBudgetUsd = (settings.maxPairNotionalUsd / 2) * mismatchGuard.mismatchSizeMultiplier;
   const reasons: string[] = [];
 
   if (marketAlignmentReason) {
@@ -333,6 +357,11 @@ function buildSignal({
     projectedNetProfitUsd,
     projectedNetReturn,
     reasons,
+    mismatchGuardAction: mismatchGuard.mismatchGuardAction,
+    mismatchSizeMultiplier: mismatchGuard.mismatchSizeMultiplier,
+    referencePayoutCount: mismatchGuard.referencePayoutCount,
+    deadZoneDistanceBps: mismatchGuard.deadZoneDistanceBps,
+    deadZoneWidthBps: mismatchGuard.deadZoneWidthBps,
     mismatchRisk,
     venueDisagreementPct,
     secondsElapsedInSlot: mismatchGuard.secondsElapsedInSlot,
@@ -395,12 +424,12 @@ function outcomeMidPrice(outcome: OutcomeQuote): number | null {
   return null;
 }
 
-function computeMismatchGuard(
+function computeMismatchGuardBase(
   polymarket: PolymarketQuote,
   kalshi: KalshiQuote,
   settings: StrategyConfig,
   secondsElapsed: number | null,
-): MismatchGuardMetrics {
+): MismatchGuardBaseMetrics {
   const polyUpMid = outcomeMidPrice(polymarket.outcomes.up);
   const kalshiYesMid = outcomeMidPrice(kalshi.outcomes.yes);
   const venueDisagreementPct =
@@ -413,7 +442,6 @@ function computeMismatchGuard(
   const openDriftBps = computeMoveBps(kalshiTargetPriceUsd, observedSlotOpenPriceUsd);
 
   const {
-    mismatchGuardEnabled,
     mismatchGuardMinElapsedSeconds,
     mismatchGuardMinMoveBps,
     mismatchGuardPhase2StartSeconds,
@@ -428,9 +456,6 @@ function computeMismatchGuard(
     mismatchPhase === "late" ? mismatchGuardPhase2MinMoveBps : mismatchGuardMinMoveBps;
 
   const tooEarly = secondsElapsed !== null && secondsElapsed < mismatchGuardMinElapsedSeconds;
-  const moveTooSmall = chainlinkMoveBps !== null && chainlinkMoveBps < activeMinMoveBps;
-  const openDriftDominant =
-    openDriftBps !== null && chainlinkMoveBps !== null && chainlinkMoveBps <= openDriftBps;
   const disagreementHigh =
     venueDisagreementPct !== null && venueDisagreementPct > mismatchGuardMaxVenueDisagreementPct;
   const disagreementMedium =
@@ -440,47 +465,14 @@ function computeMismatchGuard(
     chainlinkLivePriceUsd === null ||
     observedSlotOpenPriceUsd === null ||
     kalshiTargetPriceUsd === null;
-
-  let mismatchRisk: LiveOpportunity["mismatchRisk"] = null;
-  if (missingReferenceSignal) {
-    mismatchRisk = "high";
-  } else if (
+  const hasAnyMismatchSignal =
     secondsElapsed !== null ||
     venueDisagreementPct !== null ||
     chainlinkMoveBps !== null ||
-    openDriftBps !== null
-  ) {
-    if (tooEarly || moveTooSmall || openDriftDominant || disagreementHigh) {
-      mismatchRisk = "high";
-    } else if (
-      disagreementMedium ||
-      (chainlinkMoveBps !== null && chainlinkMoveBps < activeMinMoveBps * 2) ||
-      (openDriftBps !== null && openDriftBps >= activeMinMoveBps * 0.5)
-    ) {
-      mismatchRisk = "medium";
-    } else {
-      mismatchRisk = "low";
-    }
-  }
-
-  let mismatchGuardReason: string | null = null;
-  if (mismatchGuardEnabled) {
-    if (missingReferenceSignal) {
-      mismatchGuardReason = "Garde discordance: données de référence indisponibles";
-    } else if (tooEarly && secondsElapsed !== null) {
-      mismatchGuardReason = `Garde discordance: créneau trop récent (${Math.round(secondsElapsed)}s < ${mismatchGuardMinElapsedSeconds}s)`;
-    } else if (moveTooSmall && chainlinkMoveBps !== null) {
-      const phaseLabel = mismatchPhase === "late" ? " en fenêtre tardive" : "";
-      mismatchGuardReason = `Garde discordance: mouvement Chainlink trop faible${phaseLabel} (${chainlinkMoveBps.toFixed(2)} bps < ${activeMinMoveBps.toFixed(2)} bps)`;
-    } else if (openDriftDominant && openDriftBps !== null && chainlinkMoveBps !== null) {
-      mismatchGuardReason = `Garde discordance: écart d'ouverture dominant (${openDriftBps.toFixed(2)} bps >= ${chainlinkMoveBps.toFixed(2)} bps)`;
-    } else if (disagreementHigh && venueDisagreementPct !== null) {
-      mismatchGuardReason = `Garde discordance: désaccord venues élevé (${(venueDisagreementPct * 100).toFixed(1)}% > ${(mismatchGuardMaxVenueDisagreementPct * 100).toFixed(1)}%)`;
-    }
-  }
+    openDriftBps !== null ||
+    missingReferenceSignal;
 
   return {
-    mismatchRisk,
     venueDisagreementPct,
     secondsElapsedInSlot: secondsElapsed !== null ? round4(secondsElapsed) : null,
     chainlinkMoveBps,
@@ -488,8 +480,204 @@ function computeMismatchGuard(
     chainlinkLivePriceUsd,
     observedSlotOpenPriceUsd,
     kalshiTargetPriceUsd,
+    activeMinMoveBps,
+    mismatchPhase,
+    tooEarly,
+    disagreementHigh,
+    disagreementMedium,
+    missingReferenceSignal,
+    hasAnyMismatchSignal,
+  };
+}
+
+function computeMismatchGuard(
+  base: MismatchGuardBaseMetrics,
+  combination: PairCombination,
+  settings: StrategyConfig,
+): MismatchGuardMetrics {
+  const deadZone = computeDeadZoneMetrics({
+    combination,
+    livePrice: base.chainlinkLivePriceUsd,
+    observedSlotOpenPrice: base.observedSlotOpenPriceUsd,
+    kalshiTargetPrice: base.kalshiTargetPriceUsd,
+  });
+  const { mismatchGuardEnabled, mismatchGuardMaxVenueDisagreementPct } = settings;
+
+  let action: LiveOpportunity["mismatchGuardAction"] = "allow";
+  let sizeMultiplier = 1;
+  let mismatchGuardReason: string | null = null;
+
+  if (base.missingReferenceSignal) {
+    action = "block";
+    mismatchGuardReason = "Garde discordance: données de référence indisponibles";
+  } else if (base.disagreementHigh && base.venueDisagreementPct !== null) {
+    action = "block";
+    mismatchGuardReason = `Garde discordance: désaccord venues élevé (${(base.venueDisagreementPct * 100).toFixed(1)}% > ${(mismatchGuardMaxVenueDisagreementPct * 100).toFixed(1)}%)`;
+  } else if (deadZone.insideDeadZone) {
+    action = "block";
+    mismatchGuardReason = `Garde discordance: zone morte ${formatCombinationForReason(combination)} (${deadZone.referencePayoutCount} paiements proxy)`;
+  } else {
+    const multiplierCap = computeMismatchSizeMultiplierCap(base, deadZone.deadZoneDistanceBps);
+    if (multiplierCap < 1) {
+      action = "reduce_size";
+      sizeMultiplier = multiplierCap;
+    }
+  }
+
+  if (!mismatchGuardEnabled) {
+    action = "allow";
+    sizeMultiplier = 1;
+    mismatchGuardReason = null;
+  }
+
+  const mismatchRisk: LiveOpportunity["mismatchRisk"] =
+    action === "block"
+      ? "high"
+      : action === "reduce_size"
+        ? "medium"
+        : base.hasAnyMismatchSignal
+          ? "low"
+          : null;
+
+  return {
+    mismatchGuardAction: action,
+    mismatchSizeMultiplier: sizeMultiplier,
+    referencePayoutCount: deadZone.referencePayoutCount,
+    deadZoneDistanceBps: deadZone.deadZoneDistanceBps,
+    deadZoneWidthBps: deadZone.deadZoneWidthBps,
+    mismatchRisk,
+    venueDisagreementPct: base.venueDisagreementPct,
+    secondsElapsedInSlot: base.secondsElapsedInSlot,
+    chainlinkMoveBps: base.chainlinkMoveBps,
+    openDriftBps: base.openDriftBps,
+    chainlinkLivePriceUsd: base.chainlinkLivePriceUsd,
+    observedSlotOpenPriceUsd: base.observedSlotOpenPriceUsd,
+    kalshiTargetPriceUsd: base.kalshiTargetPriceUsd,
     mismatchGuardReason,
   };
+}
+
+function computeMismatchSizeMultiplierCap(
+  base: MismatchGuardBaseMetrics,
+  deadZoneDistanceBps: number | null,
+) {
+  let multiplierCap = 1;
+
+  if (deadZoneDistanceBps !== null && base.activeMinMoveBps > 0) {
+    if (deadZoneDistanceBps <= base.activeMinMoveBps) {
+      multiplierCap = Math.min(multiplierCap, 0.25);
+    } else if (deadZoneDistanceBps <= base.activeMinMoveBps * 2) {
+      multiplierCap = Math.min(multiplierCap, 0.5);
+    }
+  }
+
+  if (base.tooEarly) {
+    multiplierCap = Math.min(multiplierCap, 0.25);
+  }
+
+  if (base.disagreementMedium) {
+    multiplierCap = Math.min(multiplierCap, 0.5);
+  }
+
+  return multiplierCap;
+}
+
+function computeDeadZoneMetrics({
+  combination,
+  livePrice,
+  observedSlotOpenPrice,
+  kalshiTargetPrice,
+}: {
+  combination: PairCombination;
+  livePrice: number | null;
+  observedSlotOpenPrice: number | null;
+  kalshiTargetPrice: number | null;
+}) {
+  if (livePrice === null || observedSlotOpenPrice === null || kalshiTargetPrice === null) {
+    return {
+      referencePayoutCount: null,
+      deadZoneDistanceBps: null,
+      deadZoneWidthBps: null,
+      insideDeadZone: false,
+    };
+  }
+
+  const referencePayoutCount = countReferencePayouts(
+    combination,
+    livePrice,
+    observedSlotOpenPrice,
+    kalshiTargetPrice,
+  );
+  const deadZoneBounds = getDeadZoneBounds(combination, observedSlotOpenPrice, kalshiTargetPrice);
+  if (!deadZoneBounds) {
+    return {
+      referencePayoutCount,
+      deadZoneDistanceBps: null,
+      deadZoneWidthBps: 0,
+      insideDeadZone: false,
+    };
+  }
+
+  const insideDeadZone =
+    combination === "POLY_UP_KALSHI_NO"
+      ? livePrice > deadZoneBounds.lower && livePrice <= deadZoneBounds.upper
+      : livePrice >= deadZoneBounds.lower && livePrice < deadZoneBounds.upper;
+  const deadZoneDistanceBps = insideDeadZone
+    ? 0
+    : livePrice < deadZoneBounds.lower
+      ? computeMoveBps(deadZoneBounds.lower, livePrice)
+      : computeMoveBps(deadZoneBounds.upper, livePrice);
+
+  return {
+    referencePayoutCount,
+    deadZoneDistanceBps,
+    deadZoneWidthBps: computeMoveBps(deadZoneBounds.lower, deadZoneBounds.upper),
+    insideDeadZone,
+  };
+}
+
+function countReferencePayouts(
+  combination: PairCombination,
+  livePrice: number,
+  observedSlotOpenPrice: number,
+  kalshiTargetPrice: number,
+) {
+  const polymarketWins =
+    combination === "POLY_UP_KALSHI_NO"
+      ? livePrice > observedSlotOpenPrice
+      : livePrice < observedSlotOpenPrice;
+  const kalshiWins =
+    combination === "POLY_UP_KALSHI_NO"
+      ? livePrice <= kalshiTargetPrice
+      : livePrice > kalshiTargetPrice;
+
+  return Number(polymarketWins) + Number(kalshiWins);
+}
+
+function getDeadZoneBounds(
+  combination: PairCombination,
+  observedSlotOpenPrice: number,
+  kalshiTargetPrice: number,
+) {
+  if (combination === "POLY_UP_KALSHI_NO" && kalshiTargetPrice < observedSlotOpenPrice) {
+    return {
+      lower: kalshiTargetPrice,
+      upper: observedSlotOpenPrice,
+    };
+  }
+
+  if (combination === "POLY_DOWN_KALSHI_YES" && observedSlotOpenPrice < kalshiTargetPrice) {
+    return {
+      lower: observedSlotOpenPrice,
+      upper: kalshiTargetPrice,
+    };
+  }
+
+  return null;
+}
+
+function formatCombinationForReason(combination: PairCombination) {
+  return combination === "POLY_UP_KALSHI_NO" ? "Poly Up + Kalshi No" : "Poly Down + Kalshi Yes";
 }
 
 function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuote) {

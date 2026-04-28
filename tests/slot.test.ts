@@ -19,20 +19,29 @@ describe("slot resolver", () => {
     expect(slot.asset).toBe("eth");
   });
 
-  it("builds SOL and XRP slots with namespaced keys and matching slugs", () => {
+  it("builds SOL, XRP, DOGE, BNB and HYPE slots with namespaced keys and matching slugs", () => {
     const now = new Date("2026-03-30T19:37:10.000Z");
     const solSlot = getCurrentSlot("sol", now);
     const xrpSlot = getCurrentSlot("xrp", now);
+    const dogeSlot = getCurrentSlot("doge", now);
+    const bnbSlot = getCurrentSlot("bnb", now);
+    const hypeSlot = getCurrentSlot("hype", now);
 
     expect(solSlot.key).toBe("sol:1774899000000");
     expect(solSlot.polymarketSlug).toBe("sol-updown-15m-1774899000");
     expect(xrpSlot.key).toBe("xrp:1774899000000");
     expect(xrpSlot.polymarketSlug).toBe("xrp-updown-15m-1774899000");
+    expect(dogeSlot.key).toBe("doge:1774899000000");
+    expect(dogeSlot.polymarketSlug).toBe("doge-updown-15m-1774899000");
+    expect(bnbSlot.key).toBe("bnb:1774899000000");
+    expect(bnbSlot.polymarketSlug).toBe("bnb-updown-15m-1774899000");
+    expect(hypeSlot.key).toBe("hype:1774899000000");
+    expect(hypeSlot.polymarketSlug).toBe("hype-updown-15m-1774899000");
   });
 
-  it("returns all four current slots in canonical asset order", () => {
+  it("returns all current slots in canonical asset order", () => {
     const slots = getCurrentSlots(new Date("2026-03-30T19:37:10.000Z"));
 
-    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp"]);
+    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
   });
 });

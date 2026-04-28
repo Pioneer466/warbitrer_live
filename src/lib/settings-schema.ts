@@ -139,6 +139,9 @@ export const settingsMapSchema = z.object({
   eth: settingsSchema,
   sol: settingsSchema,
   xrp: settingsSchema,
+  doge: settingsSchema,
+  bnb: settingsSchema,
+  hype: settingsSchema,
 });
 
 export type SettingsMapInput = z.infer<typeof settingsMapSchema>;
@@ -171,6 +174,18 @@ export function normalizeSettingsMap(
     xrp: {
       ...DEFAULT_STRATEGY_CONFIGS.xrp,
       ...(input?.xrp ?? {}),
+    },
+    doge: {
+      ...DEFAULT_STRATEGY_CONFIGS.doge,
+      ...(input?.doge ?? {}),
+    },
+    bnb: {
+      ...DEFAULT_STRATEGY_CONFIGS.bnb,
+      ...(input?.bnb ?? {}),
+    },
+    hype: {
+      ...DEFAULT_STRATEGY_CONFIGS.hype,
+      ...(input?.hype ?? {}),
     },
   });
 }

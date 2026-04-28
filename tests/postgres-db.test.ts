@@ -2,7 +2,7 @@ import { buildBootstrapStrategyConfigs } from "@/lib/postgres-db";
 import { normalizeSettings } from "@/lib/settings-schema";
 
 describe("postgres bootstrap strategy configs", () => {
-  it("clones ETH strategy parameters into SOL/XRP while forcing shadow mode", () => {
+  it("clones ETH strategy parameters into shadow assets while forcing shadow mode", () => {
     const legacy = normalizeSettings({
       enableTrading: false,
       shadowMode: true,
@@ -46,9 +46,18 @@ describe("postgres bootstrap strategy configs", () => {
     expect(configs.eth.maxPairNotionalUsd).toBe(275);
     expect(configs.sol.maxPairNotionalUsd).toBe(275);
     expect(configs.xrp.maxPairNotionalUsd).toBe(275);
+    expect(configs.doge.maxPairNotionalUsd).toBe(275);
+    expect(configs.bnb.maxPairNotionalUsd).toBe(275);
+    expect(configs.hype.maxPairNotionalUsd).toBe(275);
     expect(configs.sol.enableTrading).toBe(true);
     expect(configs.sol.shadowMode).toBe(true);
     expect(configs.xrp.enableTrading).toBe(true);
     expect(configs.xrp.shadowMode).toBe(true);
+    expect(configs.doge.enableTrading).toBe(true);
+    expect(configs.doge.shadowMode).toBe(true);
+    expect(configs.bnb.enableTrading).toBe(true);
+    expect(configs.bnb.shadowMode).toBe(true);
+    expect(configs.hype.enableTrading).toBe(true);
+    expect(configs.hype.shadowMode).toBe(true);
   });
 });

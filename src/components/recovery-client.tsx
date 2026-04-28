@@ -4,6 +4,7 @@ import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatPrice } from "@/lib/format";
+import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { RecoveryResponse } from "@/lib/types";
 
 export function RecoveryClient() {
@@ -29,7 +30,7 @@ export function RecoveryClient() {
 
   const recoveryData = recovery.data;
   const globalBreakerActive = recoveryData.globalKillSwitchActive;
-  const groupedMarkets = (["btc", "eth"] as const)
+  const groupedMarkets = MARKET_ASSETS
     .map((asset) => ({
       asset,
       markets: recoveryData.markets.filter((market) => market.asset === asset),

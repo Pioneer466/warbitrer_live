@@ -674,6 +674,21 @@ export function buildBootstrapStrategyConfigs(
       enableTrading: true,
       shadowMode: true,
     },
+    doge: {
+      ...ethStrategyPayload,
+      enableTrading: true,
+      shadowMode: true,
+    },
+    bnb: {
+      ...ethStrategyPayload,
+      enableTrading: true,
+      shadowMode: true,
+    },
+    hype: {
+      ...ethStrategyPayload,
+      enableTrading: true,
+      shadowMode: true,
+    },
   });
 }
 

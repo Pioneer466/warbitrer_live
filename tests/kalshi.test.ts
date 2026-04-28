@@ -303,6 +303,26 @@ describe("Kalshi quote derivation", () => {
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXXRP15M");
   });
 
+  it("queries DOGE, BNB and HYPE Kalshi series", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        markets: [],
+        cursor: null,
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await fetchKalshiMarkets("doge");
+    await fetchKalshiMarkets("bnb");
+    await fetchKalshiMarkets("hype");
+
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("series_ticker=KXDOGE15M");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("series_ticker=KXBNB15M");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("series_ticker=KXHYPE15M");
+  });
+
   it("accepts determined and settled Kalshi markets as resolved", async () => {
     const fetchMock = vi
       .fn()

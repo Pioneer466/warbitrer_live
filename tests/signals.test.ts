@@ -1,5 +1,12 @@
 import { buildSignals } from "@/lib/signals";
-import type { KalshiQuote, PolymarketQuote, StrategyConfig, VenueBalance, VenueFeedHealth } from "@/lib/types";
+import type {
+  KalshiQuote,
+  OutcomeQuote,
+  PolymarketQuote,
+  StrategyConfig,
+  VenueBalance,
+  VenueFeedHealth,
+} from "@/lib/types";
 
 const SLOT_KEY = "btc:1774899000000";
 
@@ -267,6 +274,92 @@ function buildV3Settings(overrides: Partial<StrategyConfig> = {}): StrategyConfi
     mismatchGuardPhase2StartSeconds: 480,
     mismatchGuardPhase2MinMoveBps: 10,
     ...overrides,
+  };
+}
+
+function withOutcomeQuote(outcome: OutcomeQuote, patch: Partial<OutcomeQuote>): OutcomeQuote {
+  const next = {
+    ...outcome,
+    ...patch,
+  };
+
+  return {
+    ...next,
+    execution: {
+      ...outcome.execution,
+      buyPrice: next.buyPrice,
+      sellPrice: next.sellPrice,
+      midPrice: next.midPrice,
+      bestBid: next.bestBid,
+      bestAsk: next.bestAsk,
+      depth: next.depth,
+      minOrderSize: next.minOrderSize,
+      feeRateBps: next.feeRateBps,
+    },
+    chart: {
+      ...outcome.chart,
+      price: next.buyPrice,
+    },
+  };
+}
+
+function tradablePolymarket(overrides: Partial<PolymarketQuote> = {}): PolymarketQuote {
+  const base = {
+    ...polymarket,
+    outcomes: {
+      up: withOutcomeQuote(polymarket.outcomes.up, {
+        buyPrice: 0.42,
+        sellPrice: 0.41,
+        midPrice: 0.415,
+        bestBid: 0.41,
+        bestAsk: 0.42,
+        depth: 300,
+      }),
+      down: withOutcomeQuote(polymarket.outcomes.down, {
+        buyPrice: 0.42,
+        sellPrice: 0.41,
+        midPrice: 0.415,
+        bestBid: 0.41,
+        bestAsk: 0.42,
+        depth: 300,
+      }),
+    },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    outcomes: overrides.outcomes ?? base.outcomes,
+  };
+}
+
+function tradableKalshi(overrides: Partial<KalshiQuote> = {}): KalshiQuote {
+  const base = {
+    ...kalshi,
+    outcomes: {
+      yes: withOutcomeQuote(kalshi.outcomes.yes, {
+        buyPrice: 0.35,
+        sellPrice: 0.34,
+        midPrice: 0.345,
+        bestBid: 0.34,
+        bestAsk: 0.35,
+        depth: 180,
+      }),
+      no: withOutcomeQuote(kalshi.outcomes.no, {
+        buyPrice: 0.35,
+        sellPrice: 0.34,
+        midPrice: 0.345,
+        bestBid: 0.34,
+        bestAsk: 0.35,
+        depth: 180,
+      }),
+    },
+  };
+
+  return {
+    ...base,
+    ...overrides,
+    outcomes: overrides.outcomes ?? base.outcomes,
   };
 }
 
@@ -678,131 +771,150 @@ describe("live signal engine", () => {
     expect(signal.reasons).toContain("Feed Polymarket stale");
   });
 
-  it("shares the same slot-level mismatch metrics across both opportunities", () => {
-    const [first, second] = buildSignals({
+  it("shares slot-level mismatch metrics while keeping combination-specific dead-zone metrics", () => {
+    const [upNo, downYes] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899120000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
+      polymarket: tradablePolymarket({
         chainlinkLivePriceUsd: 100120,
-      },
-      kalshi: {
-        ...kalshi,
+      }),
+      kalshi: tradableKalshi({
         targetPriceUsd: 100015,
-      },
+      }),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
-    expect(first.mismatchRisk).toBe("low");
-    expect(second.mismatchRisk).toBe("low");
-    expect(second.venueDisagreementPct).toBe(first.venueDisagreementPct);
-    expect(second.secondsElapsedInSlot).toBe(first.secondsElapsedInSlot);
-    expect(second.chainlinkMoveBps).toBe(first.chainlinkMoveBps);
-    expect(second.openDriftBps).toBe(first.openDriftBps);
-    expect(second.chainlinkLivePriceUsd).toBe(first.chainlinkLivePriceUsd);
-    expect(second.observedSlotOpenPriceUsd).toBe(first.observedSlotOpenPriceUsd);
-    expect(second.kalshiTargetPriceUsd).toBe(first.kalshiTargetPriceUsd);
+    expect(upNo.mismatchRisk).toBe("low");
+    expect(downYes.mismatchRisk).toBe("low");
+    expect(downYes.venueDisagreementPct).toBe(upNo.venueDisagreementPct);
+    expect(downYes.secondsElapsedInSlot).toBe(upNo.secondsElapsedInSlot);
+    expect(downYes.chainlinkMoveBps).toBe(upNo.chainlinkMoveBps);
+    expect(downYes.openDriftBps).toBe(upNo.openDriftBps);
+    expect(downYes.chainlinkLivePriceUsd).toBe(upNo.chainlinkLivePriceUsd);
+    expect(downYes.observedSlotOpenPriceUsd).toBe(upNo.observedSlotOpenPriceUsd);
+    expect(downYes.kalshiTargetPriceUsd).toBe(upNo.kalshiTargetPriceUsd);
+    expect(upNo.deadZoneDistanceBps).toBeNull();
+    expect(downYes.deadZoneDistanceBps).toBeGreaterThan(0);
   });
 
-  it("marks mismatch risk high when the slot is too recent", () => {
+  it("blocks only POLY_UP_KALSHI_NO inside the dead-zone when Kalshi target is below Poly open", () => {
+    const [upNo, downYes] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 99975,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 99950,
+      }),
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(upNo.combination).toBe("POLY_UP_KALSHI_NO");
+    expect(upNo.mismatchGuardAction).toBe("block");
+    expect(upNo.mismatchRisk).toBe("high");
+    expect(upNo.eligible).toBe(false);
+    expect(upNo.referencePayoutCount).toBe(0);
+    expect(upNo.deadZoneDistanceBps).toBe(0);
+    expect(upNo.deadZoneWidthBps).toBeCloseTo(5.0025, 4);
+    expect(upNo.reasons.join(" | ")).toContain("zone morte");
+
+    expect(downYes.combination).toBe("POLY_DOWN_KALSHI_YES");
+    expect(downYes.mismatchGuardAction).toBe("allow");
+    expect(downYes.mismatchRisk).toBe("low");
+    expect(downYes.eligible).toBe(true);
+    expect(downYes.referencePayoutCount).toBe(2);
+    expect(downYes.deadZoneDistanceBps).toBeNull();
+  });
+
+  it("blocks only POLY_DOWN_KALSHI_YES inside the dead-zone when Kalshi target is above Poly open", () => {
+    const [upNo, downYes] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 100025,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 100050,
+      }),
+      settings: buildV3Settings(),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(upNo.mismatchGuardAction).toBe("allow");
+    expect(upNo.mismatchRisk).toBe("low");
+    expect(upNo.eligible).toBe(true);
+    expect(upNo.referencePayoutCount).toBe(2);
+    expect(upNo.deadZoneDistanceBps).toBeNull();
+
+    expect(downYes.mismatchGuardAction).toBe("block");
+    expect(downYes.mismatchRisk).toBe("high");
+    expect(downYes.eligible).toBe(false);
+    expect(downYes.referencePayoutCount).toBe(0);
+    expect(downYes.deadZoneDistanceBps).toBe(0);
+    expect(downYes.deadZoneWidthBps).toBe(5);
+    expect(downYes.reasons.join(" | ")).toContain("zone morte");
+  });
+
+  it("keeps a too-recent slot eligible away from the dead-zone with size reduced to 25%", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899030000,
       slotStartTs: 1774899000000,
-      polymarket,
-      kalshi,
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 99900,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 99950,
+      }),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.reasons.join(" | ")).toContain("créneau trop récent");
+    expect(signal.mismatchGuardAction).toBe("reduce_size");
+    expect(signal.mismatchSizeMultiplier).toBe(0.25);
+    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.eligible).toBe(true);
+    expect(signal.reasons).toEqual([]);
+    expect(signal.legs[0].size).toBeLessThan(20);
+    expect(signal.legs[1].size).toBeLessThan(20);
   });
 
-  it("marks mismatch risk high when the Chainlink move is too small", () => {
-    const [signal] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899120000,
-      slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100040,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100010,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
+  it("reduces size by 50% on soft venue disagreement without blocking", () => {
+    const baseKalshi = tradableKalshi({
+      targetPriceUsd: 99950,
     });
-
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.chainlinkMoveBps).toBe(4);
-    expect(signal.reasons.join(" | ")).toContain("mouvement Chainlink trop faible");
-  });
-
-  it("marks mismatch risk high when open drift dominates the live move", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899120000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100110,
-      },
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 99800,
+        observedSlotOpenPriceUsd: 100000,
+      }),
       kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100120,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
-    });
-
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.chainlinkMoveBps).toBe(11);
-    expect(signal.openDriftBps).toBeCloseTo(11.9856, 4);
-    expect(signal.reasons.join(" | ")).toContain("écart d'ouverture dominant");
-  });
-
-  it("marks mismatch risk high when venue disagreement is too wide", () => {
-    const [signal] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899120000,
-      slotStartTs: 1774899000000,
-      polymarket,
-      kalshi: {
-        ...kalshi,
+        ...baseKalshi,
         outcomes: {
-          ...kalshi.outcomes,
-          yes: {
-            ...kalshi.outcomes.yes,
-            buyPrice: 0.24,
-            sellPrice: 0.23,
-            midPrice: 0.235,
-            bestBid: 0.23,
-            bestAsk: 0.24,
-            execution: {
-              ...kalshi.outcomes.yes.execution,
-              buyPrice: 0.24,
-              sellPrice: 0.23,
-              midPrice: 0.235,
-              bestBid: 0.23,
-              bestAsk: 0.24,
-            },
-            chart: {
-              ...kalshi.outcomes.yes.chart,
-              price: 0.24,
-            },
-          },
+          ...baseKalshi.outcomes,
+          yes: withOutcomeQuote(baseKalshi.outcomes.yes, {
+            buyPrice: 0.34,
+            sellPrice: 0.33,
+            midPrice: 0.335,
+            bestBid: 0.33,
+            bestAsk: 0.34,
+          }),
         },
       },
       settings: buildV3Settings(),
@@ -810,33 +922,44 @@ describe("live signal engine", () => {
       lastEntryCosts: {},
     });
 
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.venueDisagreementPct).toBe(0.18);
-    expect(signal.reasons.join(" | ")).toContain("désaccord venues élevé");
+    expect(signal.venueDisagreementPct).toBe(0.08);
+    expect(signal.mismatchGuardAction).toBe("reduce_size");
+    expect(signal.mismatchSizeMultiplier).toBe(0.5);
+    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.eligible).toBe(true);
+    expect(signal.reasons).toEqual([]);
   });
 
-  it("marks mismatch risk medium on borderline proxy conditions without blocking the entry", () => {
+  it("blocks when venue disagreement is above the hard cap", () => {
+    const baseKalshi = tradableKalshi();
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899120000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100065,
-      },
+      polymarket: tradablePolymarket(),
       kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100014,
+        ...baseKalshi,
+        outcomes: {
+          ...baseKalshi.outcomes,
+          yes: withOutcomeQuote(baseKalshi.outcomes.yes, {
+            buyPrice: 0.24,
+            sellPrice: 0.23,
+            midPrice: 0.235,
+            bestBid: 0.23,
+            bestAsk: 0.24,
+          }),
+        },
       },
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
-    expect(signal.mismatchRisk).toBe("medium");
-    expect(signal.eligible).toBe(true);
-    expect(signal.reasons).toEqual([]);
+    expect(signal.mismatchGuardAction).toBe("block");
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.venueDisagreementPct).toBe(0.18);
+    expect(signal.reasons.join(" | ")).toContain("désaccord venues élevé");
   });
 
   it("blocks when the Chainlink live reference is missing", () => {
@@ -844,19 +967,21 @@ describe("live signal engine", () => {
       slotKey: SLOT_KEY,
       now: 1774899120000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
+      polymarket: tradablePolymarket({
         chainlinkLivePriceUsd: null,
         chainlinkLivePriceCapturedAt: null,
-      },
-      kalshi,
+      }),
+      kalshi: tradableKalshi(),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
+    expect(signal.mismatchGuardAction).toBe("block");
     expect(signal.mismatchRisk).toBe("high");
     expect(signal.eligible).toBe(false);
+    expect(signal.referencePayoutCount).toBeNull();
+    expect(signal.deadZoneDistanceBps).toBeNull();
     expect(signal.chainlinkMoveBps).toBeNull();
     expect(signal.reasons.join(" | ")).toContain("données de référence indisponibles");
   });
@@ -866,17 +991,17 @@ describe("live signal engine", () => {
       slotKey: SLOT_KEY,
       now: 1774899120000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
+      polymarket: tradablePolymarket({
         observedSlotOpenPriceUsd: null,
         observedSlotOpenCapturedAt: null,
-      },
-      kalshi,
+      }),
+      kalshi: tradableKalshi(),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
+    expect(signal.mismatchGuardAction).toBe("block");
     expect(signal.mismatchRisk).toBe("high");
     expect(signal.eligible).toBe(false);
     expect(signal.chainlinkMoveBps).toBeNull();
@@ -884,121 +1009,107 @@ describe("live signal engine", () => {
     expect(signal.reasons.join(" | ")).toContain("données de référence indisponibles");
   });
 
-  it("blocks before 60s and switches into the standard guard window at 60s", () => {
-    const [tooEarly] = buildSignals({
+  it("reduces size near a dead-zone using the active standard and late thresholds", () => {
+    const [, midSlot] = buildSignals({
       slotKey: SLOT_KEY,
-      now: 1774899059000,
+      now: 1774899300000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100050,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 100125,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 100050,
+      }),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
-    const [standardWindow] = buildSignals({
+    const [, lateSlot] = buildSignals({
       slotKey: SLOT_KEY,
-      now: 1774899060000,
+      now: 1774899600000,
       slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100050,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 100125,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 100050,
+      }),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
     });
 
-    expect(tooEarly.mismatchRisk).toBe("high");
-    expect(tooEarly.eligible).toBe(false);
-    expect(tooEarly.reasons.join(" | ")).toContain("créneau trop récent");
-    expect(standardWindow.mismatchRisk).toBe("medium");
-    expect(standardWindow.eligible).toBe(true);
-    expect(standardWindow.reasons).toEqual([]);
+    expect(midSlot.combination).toBe("POLY_DOWN_KALSHI_YES");
+    expect(midSlot.deadZoneDistanceBps).toBeCloseTo(7.4963, 4);
+    expect(midSlot.mismatchGuardAction).toBe("reduce_size");
+    expect(midSlot.mismatchSizeMultiplier).toBe(0.5);
+    expect(midSlot.eligible).toBe(true);
+    expect(lateSlot.mismatchGuardAction).toBe("reduce_size");
+    expect(lateSlot.mismatchSizeMultiplier).toBe(0.25);
+    expect(lateSlot.eligible).toBe(true);
   });
 
-  it("keeps the standard threshold before phase 2 starts", () => {
+  it("lets reduced sizing trip venue minimum order checks when the trade becomes too small", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
-      now: 1774899479000,
+      now: 1774899030000,
       slotStartTs: 1774899000000,
       polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100070,
+        ...tradablePolymarket({
+          chainlinkLivePriceUsd: 99900,
+          observedSlotOpenPriceUsd: 100000,
+        }),
+        outcomes: {
+          ...tradablePolymarket().outcomes,
+          up: withOutcomeQuote(tradablePolymarket().outcomes.up, {
+            minOrderSize: 25,
+          }),
+        },
       },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
-      settings: buildV3Settings(),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 99950,
+      }),
+      settings: buildV3Settings({
+        maxPairNotionalUsd: 20,
+      }),
       balances,
       lastEntryCosts: {},
     });
 
-    expect(signal.secondsElapsedInSlot).toBe(479);
-    expect(signal.chainlinkMoveBps).toBe(7);
-    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.mismatchGuardAction).toBe("reduce_size");
+    expect(signal.mismatchSizeMultiplier).toBe(0.25);
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Taille minimum Polymarket non atteinte");
+  });
+
+  it("does not block or reduce when mismatch guard actions are disabled, while keeping metrics", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 99975,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: tradableKalshi({
+        targetPriceUsd: 99950,
+      }),
+      settings: buildV3Settings({
+        mismatchGuardEnabled: false,
+      }),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.referencePayoutCount).toBe(0);
+    expect(signal.deadZoneDistanceBps).toBe(0);
+    expect(signal.mismatchGuardAction).toBe("allow");
+    expect(signal.mismatchSizeMultiplier).toBe(1);
+    expect(signal.mismatchRisk).toBe("low");
     expect(signal.eligible).toBe(true);
-  });
-
-  it("switches to the stricter late threshold at 480s", () => {
-    const [signal] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899480000,
-      slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100070,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
-    });
-
-    expect(signal.secondsElapsedInSlot).toBe(480);
-    expect(signal.chainlinkMoveBps).toBe(7);
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.reasons.join(" | ")).toContain("fenêtre tardive");
-    expect(signal.reasons.join(" | ")).toContain("10.00 bps");
-  });
-
-  it("keeps the stricter late threshold active until the cutoff window", () => {
-    const [signal] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899719000,
-      slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100070,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
-    });
-
-    expect(signal.secondsElapsedInSlot).toBe(719);
-    expect(signal.mismatchRisk).toBe("high");
-    expect(signal.eligible).toBe(false);
-    expect(signal.reasons.join(" | ")).toContain("10.00 bps");
   });
 
   it("blocks at 720s because the entry cutoff window starts", () => {
@@ -1007,14 +1118,12 @@ describe("live signal engine", () => {
       now: 1774899720000,
       slotStartTs: 1774899000000,
       secondsRemaining: 180,
-      polymarket: {
-        ...polymarket,
+      polymarket: tradablePolymarket({
         chainlinkLivePriceUsd: 100250,
-      },
-      kalshi: {
-        ...kalshi,
+      }),
+      kalshi: tradableKalshi({
         targetPriceUsd: 100005,
-      },
+      }),
       settings: buildV3Settings(),
       balances,
       lastEntryCosts: {},
@@ -1024,49 +1133,5 @@ describe("live signal engine", () => {
     expect(signal.mismatchRisk).toBe("low");
     expect(signal.eligible).toBe(false);
     expect(signal.reasons).toContain("Entrée bloquée sur les 180 dernières secondes");
-  });
-
-  it("allows a 7 bps move mid-slot but blocks the same move in the late window", () => {
-    const [midSlot] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899300000,
-      slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100070,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
-    });
-
-    const [lateSlot] = buildSignals({
-      slotKey: SLOT_KEY,
-      now: 1774899600000,
-      slotStartTs: 1774899000000,
-      polymarket: {
-        ...polymarket,
-        chainlinkLivePriceUsd: 100070,
-      },
-      kalshi: {
-        ...kalshi,
-        targetPriceUsd: 100005,
-      },
-      settings: buildV3Settings(),
-      balances,
-      lastEntryCosts: {},
-    });
-
-    expect(midSlot.secondsElapsedInSlot).toBe(300);
-    expect(midSlot.mismatchRisk).toBe("medium");
-    expect(midSlot.eligible).toBe(true);
-    expect(lateSlot.secondsElapsedInSlot).toBe(600);
-    expect(lateSlot.mismatchRisk).toBe("high");
-    expect(lateSlot.eligible).toBe(false);
-    expect(lateSlot.reasons.join(" | ")).toContain("10.00 bps");
   });
 });

@@ -109,7 +109,7 @@ describe("settings schema", () => {
     ).toThrow(/Phase 2 mismatch guard must start before the entry cutoff window/);
   });
 
-  it("normalizes a four-asset settings map with SOL and XRP shadow defaults", () => {
+  it("normalizes a seven-asset settings map with shadow defaults", () => {
     const settingsMap = normalizeSettingsMap({
       eth: normalizeSettings({
         enableTrading: false,
@@ -122,5 +122,11 @@ describe("settings schema", () => {
     expect(settingsMap.sol.shadowMode).toBe(true);
     expect(settingsMap.xrp.enableTrading).toBe(true);
     expect(settingsMap.xrp.shadowMode).toBe(true);
+    expect(settingsMap.doge.enableTrading).toBe(true);
+    expect(settingsMap.doge.shadowMode).toBe(true);
+    expect(settingsMap.bnb.enableTrading).toBe(true);
+    expect(settingsMap.bnb.shadowMode).toBe(true);
+    expect(settingsMap.hype.enableTrading).toBe(true);
+    expect(settingsMap.hype.shadowMode).toBe(true);
   });
 });

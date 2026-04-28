@@ -2,7 +2,7 @@
   "name": "warbitrer-live-btc15m",
   "version": "0.1.0",
   "private": true,
-  "description": "Live BTC, ETH, SOL and XRP 15m arbitrage cockpit and worker for Kalshi and Polymarket",
+  "description": "Live multi-asset 15m arbitrage cockpit and worker for Kalshi and Polymarket",
   "engines": {
     "node": ">=22.0.0"
   },

@@ -103,4 +103,19 @@ export const DEFAULT_STRATEGY_CONFIGS: StrategyConfigMap = {
     enableTrading: true,
     shadowMode: true,
   },
+  doge: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: true,
+    shadowMode: true,
+  },
+  bnb: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: true,
+    shadowMode: true,
+  },
+  hype: {
+    ...DEFAULT_STRATEGY_CONFIG,
+    enableTrading: true,
+    shadowMode: true,
+  },
 };
