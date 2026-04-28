@@ -158,6 +158,7 @@ function buildTradeLiveMessage(event: RunEvent) {
   const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
   const targetNotionalUsd = typeof payload.targetNotionalUsd === "number" ? payload.targetNotionalUsd : null;
+  const entrySizingReason = typeof payload.entrySizingReason === "string" ? payload.entrySizingReason : null;
   const grossCost = typeof payload.grossCost === "number" ? payload.grossCost : null;
   const polymarketOutcome = typeof payload.polymarketOutcome === "string" ? payload.polymarketOutcome : null;
   const kalshiOutcome = typeof payload.kalshiOutcome === "string" ? payload.kalshiOutcome : null;
@@ -179,6 +180,7 @@ function buildTradeLiveMessage(event: RunEvent) {
     `Gross : ${grossCost !== null ? formatPrice(grossCost, 2) : "--"}`,
     "",
     "NOTIONNEL",
+    ...(entrySizingReason ? [`Raison : ${entrySizingReason}`] : []),
     `Poly : ${formatTelegramUsd(polymarketRequestedNotionalUsd)} - filled : ${formatPrice(polymarketFilledSize, 2)}`,
     `Kalshi : ${formatTelegramUsd(kalshiRequestedNotionalUsd)} - filled : ${formatPrice(kalshiFilledSize, 2)}`,
   ].join("\n");

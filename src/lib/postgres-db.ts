@@ -132,6 +132,7 @@ async function bootstrapDatabase(pool: Pool) {
       hedge_venue TEXT NOT NULL,
       gross_cost DOUBLE PRECISION NOT NULL,
       target_notional_usd DOUBLE PRECISION NOT NULL,
+      entry_sizing_reason TEXT,
       max_slippage_bps INTEGER NOT NULL,
       failure_reason TEXT,
       projected_net_profit_usd DOUBLE PRECISION,
@@ -485,6 +486,11 @@ async function bootstrapDatabase(pool: Pool) {
     await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
+  `);
+
+    await pool.query(`
+    ALTER TABLE order_intents
+    ADD COLUMN IF NOT EXISTS entry_sizing_reason TEXT
   `);
 
     await pool.query(`
@@ -970,20 +976,21 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
       INSERT INTO order_intents (
         id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
         resolved_at, primary_venue, hedge_venue, gross_cost, target_notional_usd, max_slippage_bps,
-        failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
+        entry_sizing_reason, failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
         kalshi_resolution, legs_json
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21,
-        $22, $23::jsonb
+        $17, $18, $19, $20, $21, $22,
+        $23, $24::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
         asset = EXCLUDED.asset,
         status = EXCLUDED.status,
         updated_at = EXCLUDED.updated_at,
         resolved_at = EXCLUDED.resolved_at,
+        entry_sizing_reason = EXCLUDED.entry_sizing_reason,
         failure_reason = EXCLUDED.failure_reason,
         projected_net_profit_usd = EXCLUDED.projected_net_profit_usd,
         realized_pnl_usd = EXCLUDED.realized_pnl_usd,
@@ -1009,6 +1016,7 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
       intent.grossCost,
       intent.targetNotionalUsd,
       intent.maxSlippageBps,
+      intent.entrySizingReason ?? null,
       intent.failureReason,
       intent.projectedNetProfitUsd,
       intent.realizedPnlUsd,
@@ -1995,6 +2003,7 @@ function mapOrderIntentRow(row: any): OrderIntent {
     hedgeVenue: row.hedge_venue,
     grossCost: row.gross_cost,
     targetNotionalUsd: row.target_notional_usd,
+    entrySizingReason: row.entry_sizing_reason ?? null,
     maxSlippageBps: row.max_slippage_bps,
     failureReason: row.failure_reason,
     projectedNetProfitUsd: row.projected_net_profit_usd,

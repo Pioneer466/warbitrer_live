@@ -152,6 +152,23 @@ export function deriveKalshiPrimaryFallbackClipPlan(requestedContracts: number) 
     .sort((left, right) => right - left);
 }
 
+function annotateThirdKalshiFallbackEntry(
+  intent: OrderIntent,
+  clipIndex: number,
+  clipPlan: number[],
+  failedClipCount: number,
+  requestedSize: number,
+): OrderIntent {
+  if (clipIndex < 2) {
+    return intent;
+  }
+
+  return {
+    ...intent,
+    entrySizingReason: `Notionnel réduit par fallback Kalshi: entrée au clip ${clipIndex + 1}/${clipPlan.length} après ${failedClipCount} échecs d'entrée; taille ${requestedSize.toFixed(2)}`,
+  };
+}
+
 function buildSlotBreakerKey(slotKey: string): CircuitBreaker["key"] {
   return `slot:${slotKey}` as CircuitBreaker["key"];
 }
@@ -762,6 +779,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     );
     currentIntent = multiClipResult.intent;
     if (multiClipResult.outcome === "hedged") {
+      await writeLiveTradeRunEvent(currentIntent, Date.now(), "hedged");
       return currentIntent;
     }
     if (multiClipResult.outcome === "filled") {
@@ -1267,6 +1285,13 @@ async function executeKalshiPrimaryMultiClip(
 
     if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
       currentIntent = accumulateIntentLegOrder(primaryExecutionIntent, primaryLeg.id, primaryOrder, "filled", clipAttemptNow);
+      currentIntent = annotateThirdKalshiFallbackEntry(
+        currentIntent,
+        clipIndex,
+        clipPlan,
+        failedClipSummaries.length,
+        primaryOrder.requestedSize,
+      );
       await writeOrderIntent(currentIntent);
       await writeRunEvent({
         level: primaryResult.status === "filled" ? "info" : "warn",
@@ -1284,6 +1309,7 @@ async function executeKalshiPrimaryMultiClip(
           orderId: primaryOrder.venueOrderId,
           clipFilledSize: primaryOrder.filledSize,
           totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+          entrySizingReason: currentIntent.entrySizingReason ?? null,
         },
         createdAt: clipAttemptNow,
       });
@@ -1348,6 +1374,13 @@ async function executeKalshiPrimaryMultiClip(
 
       if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
         currentIntent = accumulateIntentLegOrder(primaryExecutionIntent, primaryLeg.id, primaryOrder, "filled", Date.now());
+        currentIntent = annotateThirdKalshiFallbackEntry(
+          currentIntent,
+          clipIndex,
+          clipPlan,
+          failedClipSummaries.length,
+          primaryOrder.requestedSize,
+        );
         await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: primaryResult.status === "filled" ? "info" : "warn",
@@ -1365,6 +1398,7 @@ async function executeKalshiPrimaryMultiClip(
             orderId: primaryOrder.venueOrderId,
             clipFilledSize: primaryOrder.filledSize,
             totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
+            entrySizingReason: currentIntent.entrySizingReason ?? null,
             retried: true,
           },
           createdAt: Date.now(),
@@ -5504,7 +5538,17 @@ export function shouldTreatPrimaryExecutionAsFilled(
 async function writeLiveTradeRunEvent(
   intent: Pick<
     OrderIntent,
-    "id" | "asset" | "shadow" | "slotKey" | "combination" | "primaryVenue" | "hedgeVenue" | "grossCost" | "targetNotionalUsd" | "legs"
+    | "id"
+    | "asset"
+    | "shadow"
+    | "slotKey"
+    | "combination"
+    | "primaryVenue"
+    | "hedgeVenue"
+    | "grossCost"
+    | "targetNotionalUsd"
+    | "entrySizingReason"
+    | "legs"
   >,
   now: number,
   stage: "primary_filled" | "hedged" = "primary_filled",
@@ -5530,6 +5574,7 @@ async function writeLiveTradeRunEvent(
       hedgeVenue: intent.hedgeVenue,
       grossCost: intent.grossCost,
       targetNotionalUsd: intent.targetNotionalUsd,
+      entrySizingReason: intent.entrySizingReason ?? null,
       stage,
       primaryFilledSize: primaryLeg?.filledSize ?? null,
       primaryFilledPrice: primaryLeg?.filledPrice ?? null,

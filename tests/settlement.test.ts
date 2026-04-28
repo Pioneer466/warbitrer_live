@@ -80,10 +80,29 @@ describe("live intent settlement", () => {
 
     expect(intent.primaryVenue).toBe("kalshi");
     expect(intent.hedgeVenue).toBe("polymarket");
+    expect(intent.entrySizingReason).toBeNull();
     expect(intent.legs[0].requestedNotionalUsd + intent.legs[1].requestedNotionalUsd).toBeCloseTo(
       opportunity.legs[0].targetNotionalUsd + opportunity.legs[1].targetNotionalUsd,
       4,
     );
+  });
+
+  it("keeps the safeguard sizing reason when an opportunity is reduced", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity: {
+        ...opportunity,
+        mismatchGuardAction: "reduce_size",
+        mismatchSizeMultiplier: 0.5,
+        mismatchRisk: "medium",
+      },
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+
+    expect(intent.entrySizingReason).toBe("Notionnel réduit par safeguard mismatch (medium): taille x0.5");
   });
 
   it("does not trust a stale snapshot primary venue when rebuilding a live intent", () => {

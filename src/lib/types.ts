@@ -333,6 +333,7 @@ export type OrderIntent = {
   hedgeVenue: Venue;
   grossCost: number;
   targetNotionalUsd: number;
+  entrySizingReason?: string | null;
   maxSlippageBps: number;
   failureReason: string | null;
   projectedNetProfitUsd: number | null;

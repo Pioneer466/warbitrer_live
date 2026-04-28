@@ -48,6 +48,7 @@ export function createIntentFromOpportunity({
     hedgeVenue: hedgeLeg.venue,
     grossCost: opportunity.grossCost,
     targetNotionalUsd: primaryLeg.targetNotionalUsd + hedgeLeg.targetNotionalUsd,
+    entrySizingReason: deriveEntrySizingReason(opportunity),
     maxSlippageBps,
     failureReason: null,
     projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
@@ -60,6 +61,14 @@ export function createIntentFromOpportunity({
       buildIntentLeg(intentId, secondLeg.venue, secondLeg.outcome, secondLeg.marketRef, secondLeg.tokenId, secondLeg.price, secondLeg.size, secondLeg.targetNotionalUsd),
     ],
   };
+}
+
+function deriveEntrySizingReason(opportunity: LiveOpportunity) {
+  if (opportunity.mismatchGuardAction !== "reduce_size") {
+    return null;
+  }
+
+  return `Notionnel réduit par safeguard mismatch (${opportunity.mismatchRisk ?? "risk n/a"}): taille x${opportunity.mismatchSizeMultiplier}`;
 }
 
 function deriveExecutionPrimaryVenue(opportunity: Pick<LiveOpportunity, "legs" | "primaryVenue">): Venue | null {

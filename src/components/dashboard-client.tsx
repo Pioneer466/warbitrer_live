@@ -414,6 +414,11 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
           </div>
         ))}
       </div>
+      {intent.entrySizingReason ? (
+        <div className="mt-3 rounded-[18px] border border-amber/20 bg-amber/10 px-3 py-3 text-sm text-amber">
+          {intent.entrySizingReason}
+        </div>
+      ) : null}
       {intent.failureReason ? (
         <div className="mt-3 rounded-[18px] border border-rose/20 bg-rose/10 px-3 py-3 text-sm text-rose">
           {intent.failureReason}

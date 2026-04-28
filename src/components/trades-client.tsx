@@ -233,6 +233,7 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
           </div>
         ))}
       </div>
+      {intent.entrySizingReason ? <div className="mt-3 text-amber">{intent.entrySizingReason}</div> : null}
       {intent.failureReason ? <div className="mt-3 text-rose">{intent.failureReason}</div> : null}
     </div>
   );
