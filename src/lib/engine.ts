@@ -169,6 +169,51 @@ function annotateThirdKalshiFallbackEntry(
   };
 }
 
+export function deriveFastKalshiPrimaryClipIntent(
+  intent: OrderIntent,
+  primaryLegId: OrderIntent["legs"][number]["id"],
+  clipSize: number,
+  now: number,
+) {
+  const normalizedClipSize = normalizeVenueTargetSize("kalshi", clipSize, 1, 1);
+  if (normalizedClipSize <= 0) {
+    return null;
+  }
+
+  let foundPrimaryLeg = false;
+  const legs = intent.legs.map((leg) => {
+    if (leg.id !== primaryLegId) {
+      return leg;
+    }
+
+    foundPrimaryLeg = true;
+    if (leg.venue !== "kalshi" || leg.requestedPrice === null) {
+      return null;
+    }
+
+    const requestedSize = Math.min(leg.requestedSize, normalizedClipSize);
+    if (requestedSize <= 0) {
+      return null;
+    }
+
+    return {
+      ...leg,
+      requestedSize,
+      requestedNotionalUsd: round4(requestedSize * leg.requestedPrice),
+    };
+  });
+
+  if (!foundPrimaryLeg || legs.some((leg) => leg === null)) {
+    return null;
+  }
+
+  return {
+    ...intent,
+    updatedAt: now,
+    legs: legs as OrderIntent["legs"],
+  };
+}
+
 function buildSlotBreakerKey(slotKey: string): CircuitBreaker["key"] {
   return `slot:${slotKey}` as CircuitBreaker["key"];
 }
@@ -407,7 +452,13 @@ export function createExecutionCoordinator(
         const preparedIntent =
           settings.shadowMode
             ? { intent: baseIntent, reason: null }
-            : await prepareIntentForLiveExecution(baseIntent, slot, settings, now);
+            : await prepareIntentForLiveExecution(baseIntent, slot, settings, now, {
+                useFastKalshiPrimaryPreparation: shouldUseFastKalshiPrimaryPreparation(
+                  baseIntent,
+                  snapshot.capturedAt,
+                  now,
+                ),
+              });
         if (!preparedIntent.intent) {
           await writeRunEvent({
             level: "warn",
@@ -1066,6 +1117,7 @@ async function executeKalshiPrimaryMultiClip(
       requestedSize: requestedPrimarySize,
       clipPlan,
       clipCount: clipPlan.length,
+      priceMode: "fast_original_signal",
       estimatedRequestedSizeFeeUsd: estimatedRequestedSizeFee,
       estimatedFallbackFeeUsdByClip: estimatedFallbackFeeByClip,
     },
@@ -1084,7 +1136,8 @@ async function executeKalshiPrimaryMultiClip(
   for (let clipIndex = 0; clipIndex < clipPlan.length; clipIndex += 1) {
     const clipAttemptNow = Date.now();
     const clipSize = clipPlan[clipIndex];
-    const repricedIntent = await repriceIntentWithinExecutionBuffer(
+    const fastClipIntent = deriveFastKalshiPrimaryClipIntent(currentIntent, primaryLeg.id, clipSize, clipAttemptNow);
+    const repricedIntent = fastClipIntent ?? await repriceIntentWithinExecutionBuffer(
       currentIntent,
       slot,
       settings,
@@ -1350,7 +1403,7 @@ async function executeKalshiPrimaryMultiClip(
     }
 
     if (isTerminalOrderStatus(primaryResult.status)) {
-      const primaryRetryPlan = resolvePrimaryRetryPlan(currentIntent.primaryVenue, primaryResult, settings);
+      const primaryRetryPlan = resolveKalshiPrimaryMultiClipRetryPlan(currentIntent.primaryVenue, primaryResult);
       const retried = await retryLegWithinExecutionBufferWithAttempts(
         currentIntent,
         repricedPrimaryLeg,
@@ -3085,6 +3138,23 @@ export function resolvePrimaryRetryPlan(
     return {
       attempts: Math.max(1, settings.primaryRetryAttempts),
       retryDelayMs: settings.primaryRetryDelayMs,
+    };
+  }
+
+  return {
+    attempts: 1,
+    retryDelayMs: 0,
+  };
+}
+
+export function resolveKalshiPrimaryMultiClipRetryPlan(
+  primaryVenue: Venue,
+  result: Pick<Awaited<ReturnType<VenueAdapter["placeOrder"]>>, "raw">,
+) {
+  if (primaryVenue === "kalshi" && Boolean(result.raw?.softNoFill)) {
+    return {
+      attempts: 0,
+      retryDelayMs: 0,
     };
   }
 
@@ -5627,7 +5697,22 @@ function extractTerminalNoFillDetail(result: Awaited<ReturnType<VenueAdapter["pl
   return typeof result.raw?.error === "string" ? result.raw.error : null;
 }
 
-async function prepareIntentForLiveExecution(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
+async function prepareIntentForLiveExecution(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  options: {
+    useFastKalshiPrimaryPreparation?: boolean;
+  } = {},
+) {
+  if (options.useFastKalshiPrimaryPreparation) {
+    return {
+      intent,
+      reason: null,
+    };
+  }
+
   const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now);
   if (!repricedIntent) {
     return {
@@ -5647,6 +5732,14 @@ async function prepareIntentForLiveExecution(intent: OrderIntent, slot: MarketSl
     intent: repricedIntent,
     reason: null,
   };
+}
+
+export function shouldUseFastKalshiPrimaryPreparation(
+  intent: Pick<OrderIntent, "primaryVenue">,
+  snapshotCapturedAt: number | null | undefined,
+  now: number,
+) {
+  return intent.primaryVenue === "kalshi" && snapshotCapturedAt === now;
 }
 
 async function canSafelyLeadWithPolymarket(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {

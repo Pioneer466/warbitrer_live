@@ -2,6 +2,7 @@ import {
   buildVenueOrderRequest,
   countRecentKalshiSoftHedgeNoFillEvents,
   countRecentKalshiSoftPrimaryNoFillEvents,
+  deriveFastKalshiPrimaryClipIntent,
   deriveKalshiPrimaryFallbackClipPlan,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
@@ -18,11 +19,13 @@ import {
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
   resolvePrimaryRetryPlan,
+  resolveKalshiPrimaryMultiClipRetryPlan,
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
   shouldKeepSlotExecutionBreakerActive,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatPrimaryOrderAsFilled,
+  shouldUseFastKalshiPrimaryPreparation,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
@@ -561,10 +564,82 @@ describe("venue order request sizing", () => {
 });
 
 describe("Kalshi primary IOC handling", () => {
+  it("uses fast first-entry preparation only for fresh Kalshi-primary signals", () => {
+    expect(
+      shouldUseFastKalshiPrimaryPreparation(
+        {
+          primaryVenue: "kalshi",
+        },
+        1_000,
+        1_000,
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldUseFastKalshiPrimaryPreparation(
+        {
+          primaryVenue: "kalshi",
+        },
+        999,
+        1_000,
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldUseFastKalshiPrimaryPreparation(
+        {
+          primaryVenue: "polymarket",
+        },
+        1_000,
+        1_000,
+      ),
+    ).toBe(false);
+  });
+
   it("builds descending fallback clips around 20, 10, then 5 contracts", () => {
     expect(deriveKalshiPrimaryFallbackClipPlan(22)).toEqual([20, 10, 5]);
     expect(deriveKalshiPrimaryFallbackClipPlan(16)).toEqual([16, 10, 5]);
     expect(deriveKalshiPrimaryFallbackClipPlan(7)).toEqual([7, 5]);
+  });
+
+  it("caps a fast Kalshi primary clip without repricing the signal", () => {
+    const intent = buildIntent({
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      grossCost: 0.91,
+      legs: [
+        {
+          ...buildIntent().legs[0],
+          id: "leg-hedge",
+          venue: "polymarket",
+          requestedPrice: 0.46,
+          requestedSize: 22,
+          requestedNotionalUsd: 10.12,
+        },
+        {
+          ...buildIntent().legs[1],
+          id: "leg-primary",
+          venue: "kalshi",
+          requestedPrice: 0.45,
+          requestedSize: 22,
+          requestedNotionalUsd: 9.9,
+        },
+      ],
+    });
+
+    const clipped = deriveFastKalshiPrimaryClipIntent(intent, "leg-primary", 10, 123);
+
+    expect(clipped?.grossCost).toBe(0.91);
+    expect(clipped?.updatedAt).toBe(123);
+    expect(clipped?.legs.find((leg) => leg.id === "leg-primary")).toMatchObject({
+      requestedPrice: 0.45,
+      requestedSize: 10,
+      requestedNotionalUsd: 4.5,
+    });
+    expect(clipped?.legs.find((leg) => leg.id === "leg-hedge")).toMatchObject({
+      requestedPrice: 0.46,
+      requestedSize: 22,
+    });
   });
 
   it("treats a partial Kalshi primary order as hedgable when contracts actually filled", () => {
@@ -793,6 +868,28 @@ describe("primary retry plan", () => {
           primaryRetryDelayMs: 500,
         },
       ),
+    ).toEqual({
+      attempts: 1,
+      retryDelayMs: 0,
+    });
+  });
+
+  it("moves Kalshi multi-clip fallback directly to the next clip after a soft no-fill", () => {
+    expect(
+      resolveKalshiPrimaryMultiClipRetryPlan("kalshi", {
+        raw: {
+          softNoFill: true,
+        },
+      }),
+    ).toEqual({
+      attempts: 0,
+      retryDelayMs: 0,
+    });
+
+    expect(
+      resolveKalshiPrimaryMultiClipRetryPlan("kalshi", {
+        raw: {},
+      }),
     ).toEqual({
       attempts: 1,
       retryDelayMs: 0,
