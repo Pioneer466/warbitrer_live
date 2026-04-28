@@ -56,7 +56,7 @@ export async function fetchPolymarketDepositAddresses(): Promise<BridgeTransfer 
     quoteId: null,
     sourceChain: null,
     sourceAsset: null,
-    targetAsset: "USDC",
+    targetAsset: "pUSD",
     amountInUsd: null,
     amountOutUsd: null,
     txHash: null,
@@ -94,7 +94,7 @@ export async function createPolymarketBridgeQuote(input: {
     quoteId: response.quoteId ?? null,
     sourceChain: input.fromChain,
     sourceAsset: input.fromAsset,
-    targetAsset: "USDC",
+    targetAsset: "pUSD",
     amountInUsd: response.amountIn ? Number(response.amountIn) : Number(input.amount),
     amountOutUsd: response.estimatedAmountOut
       ? Number(response.estimatedAmountOut)

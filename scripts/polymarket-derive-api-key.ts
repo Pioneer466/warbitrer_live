@@ -1,7 +1,6 @@
 import fs from "node:fs";
 
-import { ClobClient } from "@polymarket/clob-client";
-import { SignatureType } from "@polymarket/clob-client";
+import { ClobClient, SignatureTypeV2 } from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
 
 const DEFAULT_ENV_PATH = process.env.WARBITRER_ENV_PATH || "/etc/warbitrer/warbitrer.env";
@@ -25,16 +24,14 @@ async function main() {
   }
 
   const signer = new Wallet(privateKey.trim());
-  const client = new ClobClient(
-    POLY_CLOB_BASE,
-    POLY_CHAIN_ID,
+  const client = new ClobClient({
+    host: POLY_CLOB_BASE,
+    chain: POLY_CHAIN_ID,
     signer,
-    undefined,
-    mapSignatureType(env.POLY_SIGNATURE_TYPE),
-    env.POLY_FUNDER_ADDRESS,
-    undefined,
-    true,
-  );
+    signatureType: mapSignatureType(env.POLY_SIGNATURE_TYPE),
+    funderAddress: env.POLY_FUNDER_ADDRESS,
+    useServerTime: true,
+  });
 
   const creds = await client.createOrDeriveApiKey();
 
@@ -86,11 +83,11 @@ function readSecret(options: { inline?: string; path?: string; label: string }) 
 function mapSignatureType(value: string) {
   switch (value) {
     case "EOA":
-      return SignatureType.EOA;
+      return SignatureTypeV2.EOA;
     case "POLY_PROXY":
-      return SignatureType.POLY_PROXY;
+      return SignatureTypeV2.POLY_PROXY;
     case "POLY_GNOSIS_SAFE":
-      return SignatureType.POLY_GNOSIS_SAFE;
+      return SignatureTypeV2.POLY_GNOSIS_SAFE;
     default:
       throw new Error(`Unsupported POLY_SIGNATURE_TYPE: ${value}`);
   }

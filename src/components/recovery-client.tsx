@@ -211,7 +211,7 @@ export function RecoveryClient() {
         <div className="border-b border-white/6 pb-4">
           <div className="text-sm text-white">Recup Polymarket</div>
           <div className="mt-1 text-xs text-mist/70">
-            Gains resolus a redeem en USDC.e, ou paires YES/NO a merge si presentes.
+            Gains resolus a redeem en pUSD, ou paires YES/NO a merge si presentes.
           </div>
         </div>
 

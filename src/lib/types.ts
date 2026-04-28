@@ -221,7 +221,7 @@ export type VenueBalance = {
   venue: Venue;
   capturedAt: number;
   status: ReadinessStatus;
-  currency: "USD" | "USDC";
+  currency: "USD" | "USDC" | "pUSD";
   availableBalanceUsd: number;
   totalBalanceUsd: number;
   portfolioValueUsd: number;

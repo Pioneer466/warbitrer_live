@@ -1,13 +1,13 @@
-import { ClobClient, OrderType, Side } from "@polymarket/clob-client";
+import { ClobClient, OrderType, Side } from "@polymarket/clob-client-v2";
 import {
   AssetType,
-  SignatureType,
+  SignatureTypeV2,
   type ApiKeyCreds,
   type BalanceAllowanceParams,
   type BalanceAllowanceResponse,
   type OpenOrder,
   type Trade,
-} from "@polymarket/clob-client";
+} from "@polymarket/clob-client-v2";
 import { Wallet } from "ethers";
 
 import { DEFAULT_POLY_CHAIN_ID, POLY_CLOB_BASE, POLY_DATA_BASE, POLY_GAMMA_BASE } from "@/lib/constants";
@@ -76,6 +76,16 @@ type PolymarketCollateralLike = {
   allowance?: string | number | null;
   allowances?: Record<string, string | number | null> | null;
 };
+export type PolymarketClobMarketInfo = {
+  c?: string;
+  mts?: number | string | null;
+  nr?: boolean | null;
+  fd?: {
+    r?: number | string | null;
+    e?: number | string | null;
+    to?: boolean | null;
+  } | null;
+};
 
 type DataPosition = {
   asset: string;
@@ -106,14 +116,18 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
 
   const outcomes = JSON.parse(market.outcomes) as Array<"Up" | "Down">;
   const tokenIds = JSON.parse(market.clobTokenIds) as [string, string];
+  const conditionId = market.conditionId ?? market.id;
 
   const upTokenId = tokenIds[outcomes.indexOf("Up")];
   const downTokenId = tokenIds[outcomes.indexOf("Down")];
 
-  const [upQuote, downQuote] = await Promise.all([
+  const [clobMarketInfo, upQuote, downQuote] = await Promise.all([
+    fetchPolymarketClobMarketInfo(conditionId).catch(() => null),
     fetchOutcomeQuote(upTokenId, "UP"),
     fetchOutcomeQuote(downTokenId, "DOWN"),
   ]);
+  const upQuoteWithFee = applyPolymarketFeeToOutcomeQuote(upQuote, clobMarketInfo);
+  const downQuoteWithFee = applyPolymarketFeeToOutcomeQuote(downQuote, clobMarketInfo);
 
   return {
     ref: {
@@ -122,13 +136,13 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
       id: market.id,
       slotKey: slot.key,
       slug: market.slug,
-      conditionId: market.conditionId ?? market.id,
+      conditionId,
       title: market.question,
       url: `https://polymarket.com/event/${market.slug}`,
       startTime: market.startDate,
       endTime: market.endDate,
     },
-    conditionId: market.conditionId ?? market.id,
+    conditionId,
     status: market.closed ? "closed" : "open",
     slotAligned: true,
     availabilityReason: null,
@@ -146,8 +160,8 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     stalenessMs: 0,
     source: "rest-bootstrap",
     outcomes: {
-      up: upQuote,
-      down: downQuote,
+      up: upQuoteWithFee,
+      down: downQuoteWithFee,
     },
     resolution: extractPolymarketResolution(market.outcomePrices),
     tokenIds: {
@@ -158,8 +172,8 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     chainlinkLivePriceCapturedAt: null,
     observedSlotOpenPriceUsd: null,
     observedSlotOpenCapturedAt: null,
-    feeRateBps: 0,
-    negRisk: false,
+    feeRateBps: Math.max(upQuoteWithFee.feeRateBps ?? 0, downQuoteWithFee.feeRateBps ?? 0),
+    negRisk: Boolean(clobMarketInfo?.nr ?? false),
   };
 }
 
@@ -259,7 +273,7 @@ export function createPolymarketAdapter(): VenueAdapter {
           venue: "polymarket",
           capturedAt: Date.now(),
           status: "blocked",
-          currency: "USDC",
+          currency: "pUSD",
           availableBalanceUsd: 0,
           totalBalanceUsd: 0,
           portfolioValueUsd: 0,
@@ -305,14 +319,14 @@ export function createPolymarketAdapter(): VenueAdapter {
         requiresAllowanceCheck && available > 0 && !allowanceInfo.unlimited && allowance === null
           ? (notes.push("Allowance CLOB introuvable pour ce wallet Polymarket."), "degraded")
           : requiresAllowanceCheck && !allowanceInfo.unlimited && allowance !== null && allowance + 1e-9 < available
-            ? (notes.push("Allowance CLOB insuffisante pour le solde USDC disponible."), "degraded")
+            ? (notes.push("Allowance CLOB insuffisante pour le solde pUSD disponible."), "degraded")
             : "ready";
 
       return {
         venue: "polymarket",
         capturedAt: Date.now(),
         status,
-        currency: "USDC",
+        currency: "pUSD",
         availableBalanceUsd: available,
         totalBalanceUsd: available + positionsValue,
         portfolioValueUsd: available + positionsValue,
@@ -373,6 +387,10 @@ export function createPolymarketAdapter(): VenueAdapter {
             order.orderType === "FAK" ? OrderType.FAK : OrderType.FOK,
           ),
         );
+        const noFillMessage = getPolymarketSoftNoFillMessage(response);
+        if (noFillMessage) {
+          return buildPolymarketSoftNoFillResult(order, noFillMessage);
+        }
 
         return {
           venue: "polymarket",
@@ -390,21 +408,7 @@ export function createPolymarketAdapter(): VenueAdapter {
       } catch (error) {
         const noFillMessage = getPolymarketSoftNoFillMessage(error);
         if (noFillMessage) {
-          return {
-            venue: "polymarket",
-            venueOrderId: `killed:${order.clientOrderId}`,
-            status: "canceled",
-            filledSize: 0,
-            averageFillPrice: null,
-            feeUsd: 0,
-            raw: {
-              softNoFill: true,
-              error: noFillMessage,
-              clientOrderId: order.clientOrderId,
-              marketRef: order.marketRef,
-              orderType: order.orderType,
-            },
-          };
+          return buildPolymarketSoftNoFillResult(order, noFillMessage);
         }
 
         throw error;
@@ -544,10 +548,11 @@ export async function confirmPolymarketOrderExecution(params: {
 }
 
 export function getPolymarketSoftNoFillMessage(error: unknown) {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = stringifyPolymarketErrorLike(error);
   const normalized = message.toLowerCase();
 
   if (
+    normalized.includes("fok_order_not_filled_error") ||
     normalized.includes("order couldn't be fully filled") ||
     normalized.includes("order could not be fully filled") ||
     normalized.includes("fok orders are fully filled or killed") ||
@@ -557,6 +562,45 @@ export function getPolymarketSoftNoFillMessage(error: unknown) {
   }
 
   return null;
+}
+
+function buildPolymarketSoftNoFillResult(order: VenueOrderRequest, noFillMessage: string): VenueOrderResult {
+  return {
+    venue: "polymarket",
+    venueOrderId: `killed:${order.clientOrderId}`,
+    status: "canceled",
+    filledSize: 0,
+    averageFillPrice: null,
+    feeUsd: 0,
+    raw: {
+      softNoFill: true,
+      error: noFillMessage,
+      clientOrderId: order.clientOrderId,
+      marketRef: order.marketRef,
+      orderType: order.orderType,
+    },
+  };
+}
+
+function stringifyPolymarketErrorLike(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    const candidates = [record.errorMsg, record.error, record.message]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0);
+    if (candidates.length > 0) {
+      return candidates.join(" ");
+    }
+  }
+
+  return String(error);
 }
 
 export function shouldTreatPolymarketTerminalOrderAsPending(pendingTradeCount: number, confirmedFilledSize: number) {
@@ -594,6 +638,10 @@ async function fetchOutcomeQuote(tokenId: string, outcome: "UP" | "DOWN"): Promi
 
 export async function fetchPolymarketBook(tokenId: string) {
   return fetchJson<CLOBBook>(`${POLY_CLOB_BASE}/book?token_id=${tokenId}`);
+}
+
+export async function fetchPolymarketClobMarketInfo(conditionId: string) {
+  return fetchJson<PolymarketClobMarketInfo>(`${POLY_CLOB_BASE}/clob-markets/${conditionId}`);
 }
 
 export async function fetchPolymarketMarket(slug: string, conditionId?: string) {
@@ -643,6 +691,7 @@ export function buildPolymarketOutcomeQuoteFromBook(
   source: OutcomeQuote["chart"]["source"],
   lastUpdatedAt: number | null,
   fallbackMidpoint?: number | null,
+  clobMarketInfo?: PolymarketClobMarketInfo | null,
 ): OutcomeQuote {
   const bestBid = getBestBookLevel(book.bids, "desc");
   const bestAsk = getBestBookLevel(book.asks, "asc");
@@ -663,10 +712,39 @@ export function buildPolymarketOutcomeQuoteFromBook(
     depth: bestAsk?.size ?? null,
     tickSize: book.tick_size ? Number(book.tick_size) : 0.001,
     minOrderSize: book.min_order_size ? Number(book.min_order_size) : 1,
-    feeRateBps: 0,
+    feeRateBps: derivePolymarketEffectiveFeeRateBps(clobMarketInfo, buyPrice),
     source,
     lastUpdatedAt,
   });
+}
+
+export function derivePolymarketEffectiveFeeRateBps(
+  clobMarketInfo: PolymarketClobMarketInfo | null | undefined,
+  price: number | null,
+) {
+  const feeRate = getNumericCandidate(clobMarketInfo?.fd?.r ?? null);
+  const feeExponent = getNumericCandidate(clobMarketInfo?.fd?.e ?? null) ?? 0;
+  if (feeRate === null || feeRate <= 0 || price === null || price <= 0 || price >= 1) {
+    return 0;
+  }
+
+  const feePerShare = feeRate * Math.pow(price * (1 - price), feeExponent);
+  return round4((feePerShare / price) * 10_000);
+}
+
+function applyPolymarketFeeToOutcomeQuote(
+  quote: OutcomeQuote,
+  clobMarketInfo: PolymarketClobMarketInfo | null,
+) {
+  const feeRateBps = derivePolymarketEffectiveFeeRateBps(clobMarketInfo, quote.buyPrice);
+  return {
+    ...quote,
+    feeRateBps,
+    execution: {
+      ...quote.execution,
+      feeRateBps,
+    },
+  };
 }
 
 export function createOutcomeQuote(input: {
@@ -798,31 +876,27 @@ function createClobClient() {
     passphrase: env.POLY_API_PASSPHRASE,
   };
 
-  return new ClobClient(
-    POLY_CLOB_BASE,
-    DEFAULT_POLY_CHAIN_ID,
+  return new ClobClient({
+    host: POLY_CLOB_BASE,
+    chain: DEFAULT_POLY_CHAIN_ID,
     signer,
     creds,
-    mapSignatureType(env.POLY_SIGNATURE_TYPE),
-    env.POLY_FUNDER_ADDRESS,
-    undefined,
-    true,
-    undefined,
-    undefined,
-    true,
-    undefined,
-    true,
-  );
+    signatureType: mapSignatureType(env.POLY_SIGNATURE_TYPE),
+    funderAddress: env.POLY_FUNDER_ADDRESS,
+    useServerTime: true,
+    retryOnError: true,
+    throwOnError: true,
+  });
 }
 
 function mapSignatureType(value: string) {
   switch (value) {
     case "EOA":
-      return SignatureType.EOA;
+      return SignatureTypeV2.EOA;
     case "POLY_PROXY":
-      return SignatureType.POLY_PROXY;
+      return SignatureTypeV2.POLY_PROXY;
     case "POLY_GNOSIS_SAFE":
-      return SignatureType.POLY_GNOSIS_SAFE;
+      return SignatureTypeV2.POLY_GNOSIS_SAFE;
     default:
       throw new Error(`Unsupported Polymarket signature type: ${value}`);
   }

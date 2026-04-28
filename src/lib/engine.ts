@@ -572,7 +572,7 @@ async function refreshBalances(polyBridgeLowWaterUsdc: number, now: number): Pro
     if (result.status === "fulfilled") {
       const balance = result.value;
       if (venue === "polymarket" && balance.availableBalanceUsd < polyBridgeLowWaterUsdc) {
-        balance.notes = [...balance.notes, "USDC disponible sous le seuil bridge configuré."];
+        balance.notes = [...balance.notes, "pUSD disponible sous le seuil bridge configuré."];
       }
       return balance;
     }
@@ -581,7 +581,7 @@ async function refreshBalances(polyBridgeLowWaterUsdc: number, now: number): Pro
       venue,
       capturedAt: now,
       status: "blocked",
-      currency: venue === "polymarket" ? "USDC" : "USD",
+      currency: venue === "polymarket" ? "pUSD" : "USD",
       availableBalanceUsd: 0,
       totalBalanceUsd: 0,
       portfolioValueUsd: 0,
@@ -1075,6 +1075,13 @@ async function executeKalshiPrimaryMultiClip(
     );
 
     if (!repricedIntent) {
+      const repriceDiagnostic = await diagnoseRepriceIntentFailure(
+        currentIntent,
+        slot,
+        settings,
+        Date.now(),
+        clipSize,
+      );
       if (currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0 > 0) {
         const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
         if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
@@ -1096,6 +1103,7 @@ async function executeKalshiPrimaryMultiClip(
             clipIndex: clipIndex + 1,
             clipCount: clipPlan.length,
             reason: "pair_outside_execution_window",
+            repriceDiagnostic,
             totalFilledSize: currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0,
           },
           createdAt: clipAttemptNow,
@@ -1119,6 +1127,7 @@ async function executeKalshiPrimaryMultiClip(
             clipSize,
             nextClipSize: clipPlan[clipIndex + 1],
             reason: "pair_outside_execution_window",
+            repriceDiagnostic,
           },
           createdAt: clipAttemptNow,
         });
@@ -1129,7 +1138,7 @@ async function executeKalshiPrimaryMultiClip(
         currentIntent,
         "failed",
         clipAttemptNow,
-        "Primary multi-clip moved outside the execution window before any fill",
+        `Primary fallback moved outside the execution window before any fill (${repriceDiagnostic.reason})`,
       );
       await writeOrderIntent(currentIntent);
       await writeRunEvent({
@@ -1142,6 +1151,7 @@ async function executeKalshiPrimaryMultiClip(
           clipIndex: clipIndex + 1,
           clipCount: clipPlan.length,
           reason: "pair_outside_execution_window",
+          repriceDiagnostic,
         },
         createdAt: clipAttemptNow,
       });
@@ -1474,7 +1484,7 @@ async function executeKalshiPrimaryMultiClip(
         "failed",
         Date.now(),
         `${describeTerminalNoFill(
-          `Primary clip ${clipIndex + 1}/${clipPlan.length}`,
+          `Primary fallback exhausted at clip ${clipIndex + 1}/${clipPlan.length}`,
           primaryResult,
         )}; attempted ${totalPrimaryOrderAttempts} order${totalPrimaryOrderAttempts === 1 ? "" : "s"} across fallback clips ${clipPlan.join(" -> ")}; last requested ${primaryOrder.requestedSize.toFixed(2)}`,
       );
@@ -2761,6 +2771,111 @@ async function repriceIntentWithinExecutionBuffer(
     grossCost: pair.grossCost,
     updatedAt: now,
     legs: updatedLegs as OrderIntent["legs"],
+  };
+}
+
+async function diagnoseRepriceIntentFailure(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  pairSizeCap?: number | null,
+) {
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const pair = getLivePairSnapshot(intent, polymarketState.quote, kalshiState.quote, settings);
+  const allowedGrossCost = settings.grossEntryThreshold + settings.executionPriceBuffer;
+  const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
+
+  if (!pair) {
+    return {
+      reason: "missing_live_pair",
+      slotKey: slot.key,
+      feedSources: {
+        polymarket: polymarketState.quote.source,
+        kalshi: kalshiState.quote.source,
+      },
+      feedStalenessMs: {
+        polymarket: polymarketState.quote.stalenessMs,
+        kalshi: kalshiState.quote.stalenessMs,
+      },
+    };
+  }
+
+  const priceReasons = [];
+  if (pair.poly.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
+    priceReasons.push("polymarket_leg_above_allowed_price");
+  }
+  if (pair.kalshi.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
+    priceReasons.push("kalshi_leg_above_allowed_price");
+  }
+  if (pair.grossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE) {
+    priceReasons.push("gross_above_allowed_cost");
+  }
+
+  if (priceReasons.length > 0) {
+    return {
+      reason: priceReasons.join("+"),
+      slotKey: slot.key,
+      grossCost: pair.grossCost,
+      allowedGrossCost,
+      polyPrice: pair.poly.price,
+      kalshiPrice: pair.kalshi.price,
+      allowedLegPrice,
+      pairSizeCap: pairSizeCap ?? null,
+    };
+  }
+
+  const polyLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  if (!polyLeg || !kalshiLeg) {
+    return {
+      reason: "missing_intent_leg",
+      slotKey: slot.key,
+      hasPolymarketLeg: Boolean(polyLeg),
+      hasKalshiLeg: Boolean(kalshiLeg),
+    };
+  }
+
+  const desiredPairSize = Math.min(
+    polyLeg.requestedSize,
+    kalshiLeg.requestedSize,
+    pairSizeCap ?? Number.POSITIVE_INFINITY,
+    getKalshiPrimaryMultiClipCapacity(
+      settings.kalshiPrimaryMaxClipContracts,
+      settings.kalshiPrimaryMaxClips,
+    ) ?? Number.POSITIVE_INFINITY,
+  );
+  const alignedSizing = deriveAlignedPairSize({
+    targetLegNotionalUsd: settings.maxPairNotionalUsd / 2,
+    pairSizeCap: desiredPairSize,
+    polymarket: {
+      price: pair.poly.price,
+      depth: pair.poly.depth,
+      minOrderSize: pair.poly.minOrderSize,
+      fallbackMinOrderSize: settings.minOrderSize,
+    },
+    kalshi: {
+      price: pair.kalshi.price,
+      depth: pair.kalshi.depth,
+      minOrderSize: pair.kalshi.minOrderSize,
+      fallbackMinOrderSize: 1,
+    },
+    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
+  });
+
+  return {
+    reason: alignedSizing.commonSize <= 0 ? "insufficient_executable_size" : "unknown_reprice_failure",
+    slotKey: slot.key,
+    desiredPairSize,
+    pairSizeCap: pairSizeCap ?? null,
+    alignedSizing,
+    polyPrice: pair.poly.price,
+    polyDepth: pair.poly.depth,
+    polyMinOrderSize: pair.poly.minOrderSize,
+    kalshiPrice: pair.kalshi.price,
+    kalshiSafetyAdjustedDepth: pair.kalshi.depth,
+    kalshiMinOrderSize: pair.kalshi.minOrderSize,
+    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   };
 }
 

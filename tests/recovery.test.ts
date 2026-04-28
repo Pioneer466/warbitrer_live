@@ -1,6 +1,6 @@
 import { constants as ethersConstants, utils } from "ethers";
 
-import { POLY_USDCE_ADDRESS } from "@/lib/constants";
+import { POLY_PUSD_ADDRESS } from "@/lib/constants";
 import { buildMergeTxData, buildRecoveryMarkets, buildRedeemTxData } from "@/lib/recovery";
 import type { PositionSnapshot } from "@/lib/types";
 
@@ -13,7 +13,7 @@ describe("recovery helpers", () => {
     const txData = buildRedeemTxData("0x" + "12".repeat(32));
     const decoded = iface.decodeFunctionData("redeemPositions", txData);
 
-    expect(decoded.collateralToken).toBe(POLY_USDCE_ADDRESS);
+    expect(decoded.collateralToken).toBe(POLY_PUSD_ADDRESS);
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
     expect(decoded.indexSets.map((value: any) => Number(value))).toEqual([1, 2]);
@@ -27,7 +27,7 @@ describe("recovery helpers", () => {
     const txData = buildMergeTxData("0x" + "34".repeat(32), "1234500");
     const decoded = iface.decodeFunctionData("mergePositions", txData);
 
-    expect(decoded.collateralToken).toBe(POLY_USDCE_ADDRESS);
+    expect(decoded.collateralToken).toBe(POLY_PUSD_ADDRESS);
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "34".repeat(32));
     expect(decoded.partition.map((value: any) => Number(value))).toEqual([1, 2]);

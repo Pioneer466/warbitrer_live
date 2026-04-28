@@ -1,6 +1,6 @@
 import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
-import { POLY_CTF_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
+import { POLY_CTF_ADDRESS, POLY_PUSD_ADDRESS } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
@@ -178,7 +178,7 @@ export function buildRedeemTxData(conditionId: string) {
   ]);
 
   return ctfInterface.encodeFunctionData("redeemPositions", [
-    POLY_USDCE_ADDRESS,
+    POLY_PUSD_ADDRESS,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
@@ -191,7 +191,7 @@ export function buildMergeTxData(conditionId: string, amount: string) {
   ]);
 
   return ctfInterface.encodeFunctionData("mergePositions", [
-    POLY_USDCE_ADDRESS,
+    POLY_PUSD_ADDRESS,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
@@ -250,13 +250,13 @@ export function buildRecoveryMarkets(
     market.conversionAction = deriveRecoveryAction(market);
 
     if (market.redeemable) {
-      market.notes.push("Gains Polymarket reclaimables vers USDC.e.");
+      market.notes.push("Gains Polymarket reclaimables vers pUSD.");
       if (market.redeemableSize !== null) {
         market.notes.push(`Taille redeemable: ${market.redeemableSize.toFixed(6)}`);
       }
     }
     if (market.mergeable) {
-      market.notes.push("Paire complete mergeable vers USDC.e.");
+      market.notes.push("Paire complete mergeable vers pUSD.");
       if (market.mergeableSize !== null) {
         market.notes.push(`Full sets mergeables: ${market.mergeableSize.toFixed(6)}`);
       }

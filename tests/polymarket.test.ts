@@ -1,7 +1,8 @@
-import { Side } from "@polymarket/clob-client";
+import { Side } from "@polymarket/clob-client-v2";
 
 import {
   derivePolymarketDepth,
+  derivePolymarketEffectiveFeeRateBps,
   extractPolymarketCollateralAllowanceInfo,
   extractPolymarketCollateralAllowanceUsd,
   extractPolymarketPositionValueUsd,
@@ -105,6 +106,12 @@ describe("Polymarket helpers", () => {
         new Error("order couldn't be fully filled. FOK orders are fully filled or killed."),
       ),
     ).toContain("FOK orders are fully filled or killed");
+    expect(
+      getPolymarketSoftNoFillMessage({
+        success: false,
+        errorMsg: "FOK_ORDER_NOT_FILLED_ERROR",
+      }),
+    ).toBe("FOK_ORDER_NOT_FILLED_ERROR");
 
     expect(getPolymarketSoftNoFillMessage(new Error("authentication error"))).toBeNull();
   });
@@ -130,6 +137,11 @@ describe("Polymarket helpers", () => {
   it("converts polymarket collateral balances from micro-USDC to USD", () => {
     expect(microUsdcToUsd("9993384")).toBe(9.993384);
     expect(microUsdcToUsd(1000000)).toBe(1);
+  });
+
+  it("maps CLOB V2 fee details to an effective notional bps estimate", () => {
+    expect(derivePolymarketEffectiveFeeRateBps({ fd: { r: 0.02, e: 1, to: true } }, 0.4)).toBe(120);
+    expect(derivePolymarketEffectiveFeeRateBps(null, 0.4)).toBe(0);
   });
 
   it("extracts a direct collateral allowance when the legacy field is present", () => {

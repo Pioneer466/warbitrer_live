@@ -30,7 +30,9 @@ import {
   derivePolymarketOutcomeTokens,
   extractPolymarketResolution,
   fetchPolymarketBook,
+  fetchPolymarketClobMarketInfo,
   fetchPolymarketMarket,
+  type PolymarketClobMarketInfo,
 } from "@/lib/polymarket";
 import type {
   FeedSource,
@@ -241,6 +243,7 @@ class PolymarketRealtimeFeed {
   private slotKey: string | null = null;
   private slotStartTs: number | null = null;
   private market: PolymarketMarketRecord | null = null;
+  private clobMarketInfo: PolymarketClobMarketInfo | null = null;
   private tokenIds: { up: string; down: string } | null = null;
   private books = new Map<string, PolymarketBookState>();
   private ws: WebSocket | null = null;
@@ -334,6 +337,7 @@ class PolymarketRealtimeFeed {
             feedHealth.source,
             upBook.lastUpdatedAt,
             upBook.lastTradePrice,
+            this.clobMarketInfo,
           )
         : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.up;
     const downOutcome =
@@ -344,6 +348,7 @@ class PolymarketRealtimeFeed {
             feedHealth.source,
             downBook.lastUpdatedAt,
             downBook.lastTradePrice,
+            this.clobMarketInfo,
           )
         : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.down;
 
@@ -378,8 +383,8 @@ class PolymarketRealtimeFeed {
       chainlinkLivePriceCapturedAt: this.chainlinkLivePriceCapturedAt,
       observedSlotOpenPriceUsd: this.observedSlotOpenPriceUsd,
       observedSlotOpenCapturedAt: this.observedSlotOpenCapturedAt,
-      feeRateBps: 0,
-      negRisk: false,
+      feeRateBps: Math.max(upOutcome.feeRateBps ?? 0, downOutcome.feeRateBps ?? 0),
+      negRisk: Boolean(this.clobMarketInfo?.nr ?? false),
     };
 
     return {
@@ -401,12 +406,15 @@ class PolymarketRealtimeFeed {
         }
 
         const tokenIds = derivePolymarketOutcomeTokens(market);
-        const [upBook, downBook] = await Promise.all([
+        const conditionId = market.conditionId ?? market.id;
+        const [clobMarketInfo, upBook, downBook] = await Promise.all([
+          fetchPolymarketClobMarketInfo(conditionId).catch(() => null),
           fetchPolymarketBook(tokenIds.up),
           fetchPolymarketBook(tokenIds.down),
         ]);
 
         this.market = market;
+        this.clobMarketInfo = clobMarketInfo;
         this.tokenIds = tokenIds;
         this.books.set(tokenIds.up, createPolymarketBookState(tokenIds.up, upBook, now));
         this.books.set(tokenIds.down, createPolymarketBookState(tokenIds.down, downBook, now));
@@ -429,15 +437,20 @@ class PolymarketRealtimeFeed {
     if (!this.market || !this.tokenIds || this.resyncPromise) {
       return this.resyncPromise;
     }
+    const market = this.market;
+    const tokenIds = this.tokenIds;
 
     this.resyncPromise = (async () => {
       try {
-        const [upBook, downBook] = await Promise.all([
-          fetchPolymarketBook(this.tokenIds!.up),
-          fetchPolymarketBook(this.tokenIds!.down),
+        const conditionId = market.conditionId ?? market.id;
+        const [clobMarketInfo, upBook, downBook] = await Promise.all([
+          fetchPolymarketClobMarketInfo(conditionId).catch(() => this.clobMarketInfo),
+          fetchPolymarketBook(tokenIds.up),
+          fetchPolymarketBook(tokenIds.down),
         ]);
-        this.books.set(this.tokenIds!.up, createPolymarketBookState(this.tokenIds!.up, upBook, now));
-        this.books.set(this.tokenIds!.down, createPolymarketBookState(this.tokenIds!.down, downBook, now));
+        this.clobMarketInfo = clobMarketInfo;
+        this.books.set(tokenIds.up, createPolymarketBookState(tokenIds.up, upBook, now));
+        this.books.set(tokenIds.down, createPolymarketBookState(tokenIds.down, downBook, now));
         const freshMarket = await fetchPolymarketMarket(slot.polymarketSlug).catch(() => null);
         if (freshMarket) {
           this.market = freshMarket;
@@ -976,6 +989,7 @@ class PolymarketRealtimeFeed {
     this.priceWs = null;
     this.slotStartTs = null;
     this.market = null;
+    this.clobMarketInfo = null;
     this.tokenIds = null;
     this.books.clear();
     this.lastRestSyncAt = null;
