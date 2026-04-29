@@ -10,9 +10,11 @@ import {
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   evaluateStablePnlChangeReadiness,
+  getOpportunitySnapshotAgeMs,
   hasKalshiHedgeRetryCapacity,
   isFeedHealthBreaker,
   isBreakerRelevantToSlot,
+  isOpportunitySnapshotFresh,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
@@ -202,6 +204,17 @@ describe("late primary fill rescue eligibility", () => {
         [buildOrder()],
       ),
     ).toBe(false);
+  });
+});
+
+describe("opportunity snapshot freshness", () => {
+  it("accepts snapshots inside maxSignalAgeMs and rejects stale ones", () => {
+    expect(isOpportunitySnapshotFresh({ capturedAt: 1_000 }, 1_999, 1_000)).toBe(true);
+    expect(isOpportunitySnapshotFresh({ capturedAt: 1_000 }, 2_001, 1_000)).toBe(false);
+  });
+
+  it("clamps negative ages when clocks are equalized by fresh process time", () => {
+    expect(getOpportunitySnapshotAgeMs({ capturedAt: 2_000 }, 1_900)).toBe(0);
   });
 });
 

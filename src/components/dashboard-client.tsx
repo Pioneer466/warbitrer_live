@@ -167,7 +167,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
       <section className="rounded-[28px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
         <SectionHeader
           title="Opportunités"
-          meta={`Snapshot ${formatSnapshotAge(snapshotAgeMs)} · entree si cout brut <= ${formatPrice(config.grossEntryThreshold, 3)} · budget pair ${formatCurrency(config.maxPairNotionalUsd)} · cap jambe ${(config.maxLegCapitalShare * 100).toFixed(0)}%`}
+          meta={`Snapshot ${formatSnapshotAge(snapshotAgeMs)} · signal max ${config.maxSignalAgeMs}ms · entree si cout brut <= ${formatPrice(config.grossEntryThreshold, 3)} · budget pair ${formatCurrency(config.maxPairNotionalUsd)} · cap jambe ${(config.maxLegCapitalShare * 100).toFixed(0)}%`}
         />
         <div className="mt-4 grid gap-4 xl:grid-cols-2">
           {opportunities.length === 0 ? (

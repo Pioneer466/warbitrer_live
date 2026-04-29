@@ -54,6 +54,8 @@ const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
 const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const POLYMARKET_RTDS_HEARTBEAT_MS = 5_000;
+const KALSHI_REST_BACKOFF_INITIAL_MS = 10_000;
+const KALSHI_REST_BACKOFF_MAX_MS = 60_000;
 // Capture the best slot-open proxy during the first 30s, then wait longer before entry
 // so the mismatch guard evaluates against a settled reference instead of the boundary tick.
 const SLOT_OPEN_CAPTURE_WINDOW_MS = 30_000;
@@ -1011,6 +1013,9 @@ class PolymarketRealtimeFeed {
 
 class KalshiRealtimeFeed {
   private slotKey: string | null = null;
+  private seriesCache: { series: Awaited<ReturnType<typeof fetchKalshiSeries>>["series"]; capturedAt: number } | null =
+    null;
+  private marketsCache: { markets: KalshiMarketSummary[]; capturedAt: number } | null = null;
   private series: Awaited<ReturnType<typeof fetchKalshiSeries>>["series"] | null = null;
   private market: KalshiMarketSummary | null = null;
   private orderbook: KalshiBookState | null = null;
@@ -1022,6 +1027,10 @@ class KalshiRealtimeFeed {
   private lastRestSyncAt: number | null = null;
   private lastWsMessageAt: number | null = null;
   private lastError: string | null = null;
+  private bootstrapBackoffUntil: number | null = null;
+  private bootstrapBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
+  private resyncBackoffUntil: number | null = null;
+  private resyncBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
   private reconnectAttempt = 0;
   private subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
   private nextSubscriptionId = 1;
@@ -1033,6 +1042,9 @@ class KalshiRealtimeFeed {
     }
 
     if (!this.market) {
+      if (this.isRestBackoffActive("bootstrap", now)) {
+        return;
+      }
       await this.bootstrap(slot, now);
     } else if (
       shouldRestResync(
@@ -1040,7 +1052,8 @@ class KalshiRealtimeFeed {
         this.lastWsMessageAt,
         now,
         KALSHI_REST_FALLBACK_RESYNC_MS,
-      )
+      ) &&
+      !this.isRestBackoffActive("resync", now)
     ) {
       void this.resync(now);
     }
@@ -1144,8 +1157,8 @@ class KalshiRealtimeFeed {
     if (!this.bootstrapPromise) {
       this.bootstrapPromise = (async () => {
         const [seriesResponse, marketsResponse] = await Promise.all([
-          fetchKalshiSeries(slot.asset),
-          fetchKalshiMarkets(slot.asset),
+          this.readSeriesForBootstrap(slot.asset, now),
+          this.readMarketsForBootstrap(slot, now),
         ]);
         const market = resolveKalshiMarketForSlot(marketsResponse.markets, slot);
         if (!market) {
@@ -1165,9 +1178,11 @@ class KalshiRealtimeFeed {
         this.trades = tradesResponse.trades ?? [];
         this.lastRestSyncAt = now;
         this.lastError = null;
+        this.resetRestBackoff("bootstrap");
+        this.resetRestBackoff("resync");
       })()
         .catch((error) => {
-          this.lastError = error instanceof Error ? error.message : "Bootstrap Kalshi impossible";
+          this.markRestFailure("bootstrap", error, now);
           throw error;
         })
         .finally(() => {
@@ -1179,7 +1194,7 @@ class KalshiRealtimeFeed {
   }
 
   private async resync(now: number) {
-    if (!this.market || this.resyncPromise) {
+    if (!this.market || this.resyncPromise || this.isRestBackoffActive("resync", now)) {
       return this.resyncPromise;
     }
 
@@ -1201,14 +1216,78 @@ class KalshiRealtimeFeed {
         this.trades = tradesResponse.trades ?? this.trades;
         this.lastRestSyncAt = now;
         this.lastError = null;
+        this.resetRestBackoff("resync");
       } catch (error) {
-        this.lastError = error instanceof Error ? error.message : "Resync Kalshi impossible";
+        this.markRestFailure("resync", error, now);
       }
     })().finally(() => {
       this.resyncPromise = null;
     });
 
     return this.resyncPromise;
+  }
+
+  private async readSeriesForBootstrap(asset: MarketAsset, now: number) {
+    if (this.seriesCache) {
+      return { series: this.seriesCache.series };
+    }
+
+    const response = await fetchKalshiSeries(asset);
+    this.seriesCache = {
+      series: response.series,
+      capturedAt: now,
+    };
+    return response;
+  }
+
+  private async readMarketsForBootstrap(slot: MarketSlot, now: number) {
+    if (this.marketsCache && resolveKalshiMarketForSlot(this.marketsCache.markets, slot)) {
+      return { markets: this.marketsCache.markets };
+    }
+
+    const response = await fetchKalshiMarkets(slot.asset);
+    this.marketsCache = {
+      markets: response.markets,
+      capturedAt: now,
+    };
+    return response;
+  }
+
+  private isRestBackoffActive(kind: "bootstrap" | "resync", now: number) {
+    const backoffUntil = kind === "bootstrap" ? this.bootstrapBackoffUntil : this.resyncBackoffUntil;
+    if (backoffUntil === null || now >= backoffUntil) {
+      return false;
+    }
+
+    const retryInMs = Math.max(0, backoffUntil - now);
+    this.lastError = `Kalshi REST ${kind} throttled after previous failure; retry in ${retryInMs}ms`;
+    return true;
+  }
+
+  private markRestFailure(kind: "bootstrap" | "resync", error: unknown, now: number) {
+    const message = error instanceof Error ? error.message : `${kind} Kalshi impossible`;
+    const backoffMs = kind === "bootstrap" ? this.bootstrapBackoffMs : this.resyncBackoffMs;
+    this.lastError = `${message}; retrying Kalshi REST ${kind} after ${backoffMs}ms`;
+
+    if (kind === "bootstrap") {
+      this.bootstrapBackoffUntil = now + backoffMs;
+      this.bootstrapBackoffMs = Math.min(KALSHI_REST_BACKOFF_MAX_MS, this.bootstrapBackoffMs * 2);
+      return;
+    }
+
+    this.resyncBackoffUntil = now + backoffMs;
+    this.resyncBackoffMs = Math.min(KALSHI_REST_BACKOFF_MAX_MS, this.resyncBackoffMs * 2);
+  }
+
+  private resetRestBackoff(kind: "bootstrap" | "resync") {
+    if (kind === "bootstrap") {
+      this.bootstrapBackoffUntil = null;
+      this.bootstrapBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
+      return;
+    }
+
+    this.resyncBackoffUntil = null;
+    this.resyncBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
   }
 
   private ensureWs() {

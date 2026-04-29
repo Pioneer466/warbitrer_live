@@ -13,6 +13,7 @@ import {
   DEFAULT_KALSHI_PRIMARY_PROBE_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIPS,
+  DEFAULT_MAX_SIGNAL_AGE_MS,
   DEFAULT_STRATEGY_CONFIG,
   DEFAULT_STRATEGY_CONFIGS,
 } from "@/lib/constants";
@@ -26,6 +27,7 @@ export const settingsSchema = z
     shadowMode: z.boolean(),
     maxPairNotionalUsd: z.number().positive().max(50_000),
     maxLegCapitalShare: z.number().min(0.5).max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare),
+    maxSignalAgeMs: z.number().int().min(250).max(5_000).default(DEFAULT_MAX_SIGNAL_AGE_MS),
     grossEntryThreshold: z.number().positive().max(1),
     maxLegPrice: z.number().positive().max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegPrice),
     reentryImprovement: z.number().nonnegative().max(0.25),

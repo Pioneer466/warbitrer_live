@@ -186,6 +186,7 @@ export type StrategyConfig = {
   shadowMode: boolean;
   maxPairNotionalUsd: number;
   maxLegCapitalShare: number;
+  maxSignalAgeMs: number;
   grossEntryThreshold: number;
   maxLegPrice: number;
   reentryImprovement: number;
@@ -717,6 +718,6 @@ export interface VenueAdapter {
 
 export interface ExecutionCoordinator {
   scan(slot: MarketSlot, now: number): Promise<OpportunitySnapshot>;
-  execute(slot: MarketSlot, now: number): Promise<OrderIntent[]>;
+  execute(slot: MarketSlot, now: number, snapshot?: OpportunitySnapshot | null): Promise<OrderIntent[]>;
   reconcile(slot: MarketSlot, now: number): Promise<void>;
 }

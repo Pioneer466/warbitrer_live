@@ -7,6 +7,7 @@ describe("postgres bootstrap strategy configs", () => {
       enableTrading: false,
       shadowMode: true,
       maxPairNotionalUsd: 50,
+      maxSignalAgeMs: 1000,
       grossEntryThreshold: 0.93,
       maxLegPrice: 0.49,
       reentryImprovement: 0.01,
@@ -27,6 +28,7 @@ describe("postgres bootstrap strategy configs", () => {
       enableTrading: false,
       shadowMode: false,
       maxPairNotionalUsd: 275,
+      maxSignalAgeMs: 750,
       grossEntryThreshold: 0.88,
       maxLegPrice: 0.44,
       reentryImprovement: 0.02,
@@ -49,6 +51,8 @@ describe("postgres bootstrap strategy configs", () => {
     expect(configs.doge.maxPairNotionalUsd).toBe(275);
     expect(configs.bnb.maxPairNotionalUsd).toBe(275);
     expect(configs.hype.maxPairNotionalUsd).toBe(275);
+    expect(configs.eth.maxSignalAgeMs).toBe(750);
+    expect(configs.sol.maxSignalAgeMs).toBe(750);
     expect(configs.sol.enableTrading).toBe(true);
     expect(configs.sol.shadowMode).toBe(true);
     expect(configs.xrp.enableTrading).toBe(true);

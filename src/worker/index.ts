@@ -1,33 +1,36 @@
-import { processTick } from "@/lib/engine";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { processExecutionTick, processReconcileTick, processScanTick } from "@/lib/engine";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { schedulePendingNotificationFlush } from "@/lib/notifications";
 import { readSettingsMap, storageMode } from "@/lib/storage";
 
-const WORKER_TICK_TIMEOUT_MS = 90_000;
+const SCAN_TICK_TIMEOUT_MS = 15_000;
+const EXECUTION_TICK_TIMEOUT_MS = 90_000;
+const RECONCILE_TICK_TIMEOUT_MS = 120_000;
+const NOTIFICATION_FLUSH_INTERVAL_MS = 1_000;
+const EXECUTION_INTERVAL_MS = 100;
+const RECONCILE_INTERVAL_MS = 3_000;
 const WORKER_FATAL_EXIT_DELAY_MS = 5_000;
+const MIN_LOOP_SLEEP_MS = 10;
+
+let shutdownRequested = false;
+let wakeExecutionLoop: (() => void) | null = null;
 
 async function run() {
   console.log(`[worker] storage=${storageMode()}`);
+  console.log(
+    `[worker] realtime loops enabled: scan pollingIntervalMs default=${DEFAULT_STRATEGY_CONFIG.pollingIntervalMs}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
+  );
 
-  while (true) {
-    const startedAt = Date.now();
-    try {
-      await processTickWithWatchdog();
-    } catch (error) {
-      console.error("[worker] tick error", error);
-      if (error instanceof WorkerTickTimeoutError) {
-        throw error;
-      }
-    }
+  process.once("SIGTERM", requestShutdown);
+  process.once("SIGINT", requestShutdown);
 
-    schedulePendingNotificationFlush();
-
-    const elapsed = Date.now() - startedAt;
-    const pollingIntervalMs = await readPollingIntervalMs();
-    const waitMs = Math.max(50, pollingIntervalMs - elapsed);
-    await sleep(waitMs);
-  }
+  await Promise.all([
+    runScanLoop(),
+    runExecutionLoop(),
+    runReconcileLoop(),
+    runNotificationFlushLoop(),
+  ]);
 }
 
 run().catch(async (error) => {
@@ -36,39 +39,158 @@ run().catch(async (error) => {
   process.exit(1);
 });
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function runScanLoop() {
+  await runLoop({
+    name: "scan",
+    timeoutMs: SCAN_TICK_TIMEOUT_MS,
+    resolveIntervalMs: readScanIntervalMs,
+    tick: async () => {
+      await processScanTick();
+      wakeExecutor();
+    },
+  });
 }
 
-async function readPollingIntervalMs() {
+async function runExecutionLoop() {
+  while (!shutdownRequested) {
+    const startedAt = Date.now();
+    try {
+      await runWithWatchdog("executor", EXECUTION_TICK_TIMEOUT_MS, () => processExecutionTick());
+    } catch (error) {
+      console.error("[worker] executor error", error);
+      if (error instanceof WorkerLoopTimeoutError) {
+        throw error;
+      }
+    }
+
+    if (shutdownRequested) {
+      break;
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const waitMs = Math.max(MIN_LOOP_SLEEP_MS, EXECUTION_INTERVAL_MS - elapsed);
+    await sleepUntilExecutionWake(waitMs);
+  }
+}
+
+async function runReconcileLoop() {
+  await runLoop({
+    name: "reconcile",
+    timeoutMs: RECONCILE_TICK_TIMEOUT_MS,
+    resolveIntervalMs: async () => RECONCILE_INTERVAL_MS,
+    tick: processReconcileTick,
+  });
+}
+
+async function runNotificationFlushLoop() {
+  await runLoop({
+    name: "notification_flush",
+    timeoutMs: 5_000,
+    resolveIntervalMs: async () => NOTIFICATION_FLUSH_INTERVAL_MS,
+    tick: async () => {
+      schedulePendingNotificationFlush();
+    },
+  });
+}
+
+async function runLoop({
+  name,
+  timeoutMs,
+  resolveIntervalMs,
+  tick,
+}: {
+  name: string;
+  timeoutMs: number;
+  resolveIntervalMs: () => Promise<number>;
+  tick: () => Promise<void> | void;
+}) {
+  while (!shutdownRequested) {
+    const startedAt = Date.now();
+    try {
+      await runWithWatchdog(name, timeoutMs, tick);
+    } catch (error) {
+      console.error(`[worker] ${name} error`, error);
+      if (error instanceof WorkerLoopTimeoutError) {
+        throw error;
+      }
+    }
+
+    if (shutdownRequested) {
+      break;
+    }
+
+    const elapsed = Date.now() - startedAt;
+    const intervalMs = await resolveIntervalMs();
+    const waitMs = Math.max(MIN_LOOP_SLEEP_MS, intervalMs - elapsed);
+    await sleep(waitMs);
+  }
+}
+
+async function readScanIntervalMs() {
   try {
     const settings = await readSettingsMap();
     return Math.min(...MARKET_ASSETS.map((asset) => settings[asset].pollingIntervalMs));
   } catch (error) {
-    console.error("[worker] settings read failed, using default live polling interval", error);
+    console.error("[worker] settings read failed, using default scan interval", error);
     return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;
   }
 }
 
-async function processTickWithWatchdog() {
+async function runWithWatchdog<T>(name: string, timeoutMs: number, task: () => Promise<T> | T) {
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutHandle = setTimeout(() => {
-      reject(new WorkerTickTimeoutError(`processTick timed out after ${WORKER_TICK_TIMEOUT_MS}ms`));
-    }, WORKER_TICK_TIMEOUT_MS);
+      reject(new WorkerLoopTimeoutError(`${name} loop timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
   });
 
-  return Promise.race([processTick(), timeoutPromise]).finally(() => {
+  return Promise.race([Promise.resolve().then(task), timeoutPromise]).finally(() => {
     if (timeoutHandle) {
       clearTimeout(timeoutHandle);
     }
   });
 }
 
-class WorkerTickTimeoutError extends Error {
+function requestShutdown(signal: NodeJS.Signals) {
+  if (shutdownRequested) {
+    return;
+  }
+
+  shutdownRequested = true;
+  wakeExecutor();
+  console.log(`[worker] shutdown requested by ${signal}`);
+}
+
+function wakeExecutor() {
+  const wake = wakeExecutionLoop;
+  wakeExecutionLoop = null;
+  wake?.();
+}
+
+function sleepUntilExecutionWake(ms: number) {
+  return new Promise<void>((resolve) => {
+    const timeoutHandle = setTimeout(done, ms);
+
+    wakeExecutionLoop = done;
+
+    function done() {
+      if (wakeExecutionLoop === done) {
+        wakeExecutionLoop = null;
+      }
+      clearTimeout(timeoutHandle);
+      resolve();
+    }
+  });
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+class WorkerLoopTimeoutError extends Error {
   constructor(message: string) {
     super(message);
-    this.name = "WorkerTickTimeoutError";
+    this.name = "WorkerLoopTimeoutError";
   }
 }

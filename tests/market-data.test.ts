@@ -27,6 +27,8 @@ function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   MARKET_CATALOG.btc.polymarketChainlinkSymbol = "btc/usd";
 });
 
@@ -122,6 +124,33 @@ describe("market data helpers", () => {
     expect(kalshiEnsureSlot).toHaveBeenCalledWith(slot, 1770000005000);
     expect(supervisor.feeds.btc.polymarket.buildState).toHaveBeenCalledWith(slot, 1770000005000);
     expect(supervisor.feeds.btc.kalshi.buildState).toHaveBeenCalledWith(slot, 1770000005000);
+  });
+
+  it("backs off Kalshi REST bootstrap retries after a rate limit", async () => {
+    const slot = buildSlot();
+    vi.stubEnv("DATABASE_URL", "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live");
+    vi.stubEnv("KALSHI_ENV", "prod");
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => '{"error":{"code":"too_many_requests","message":"too many requests"}}',
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    feed.ensureWs = vi.fn();
+
+    await expect(feed.ensureSlot(slot, 1_000)).rejects.toThrow(/HTTP 429/);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    await expect(feed.ensureSlot(slot, 1_250)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(feed.lastError).toContain("retry in 9750ms");
+
+    await expect(feed.ensureSlot(slot, 11_001)).rejects.toThrow(/HTTP 429/);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("keeps separate feed instances per asset across all markets", async () => {

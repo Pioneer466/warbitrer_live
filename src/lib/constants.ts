@@ -25,6 +25,7 @@ export const DEFAULT_ENTRY_CUTOFF_SECONDS = 180;
 export const DEFAULT_MAX_LEG_PRICE = 0.49;
 export const DEFAULT_MAX_PAIR_NOTIONAL_USD = 50;
 export const DEFAULT_MAX_LEG_CAPITAL_SHARE = 0.7;
+export const DEFAULT_MAX_SIGNAL_AGE_MS = 1_000;
 export const DEFAULT_MAX_SLIPPAGE_BPS = 30;
 export const DEFAULT_IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS = 8_000;
 export const DEFAULT_EXECUTION_PRICE_BUFFER = 0.01;
@@ -56,10 +57,11 @@ export const DEFAULT_STRATEGY_CONFIG = {
   shadowMode: true,
   maxPairNotionalUsd: DEFAULT_MAX_PAIR_NOTIONAL_USD,
   maxLegCapitalShare: DEFAULT_MAX_LEG_CAPITAL_SHARE,
+  maxSignalAgeMs: DEFAULT_MAX_SIGNAL_AGE_MS,
   grossEntryThreshold: DEFAULT_GROSS_ENTRY_THRESHOLD,
   maxLegPrice: DEFAULT_MAX_LEG_PRICE,
   reentryImprovement: 0.01,
-  pollingIntervalMs: 1_000,
+  pollingIntervalMs: 250,
   minOrderSize: DEFAULT_MIN_ORDER_SIZE,
   maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS,
   immediateOrderConfirmationTimeoutMs: DEFAULT_IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS,

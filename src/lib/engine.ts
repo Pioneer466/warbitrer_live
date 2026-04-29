@@ -127,12 +127,37 @@ const KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS = 30 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LIMIT = 500;
+const EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS = 5_000;
+const SCAN_SLOW_LOG_THRESHOLD_MS = 1_000;
+const EXECUTION_SLOW_LOG_THRESHOLD_MS = 2_000;
+const RECONCILE_SLOW_LOG_THRESHOLD_MS = 5_000;
+const SETTLEMENT_RECONCILE_INTERVAL_MS = 30_000;
+const PNL_RECONCILE_INTERVAL_MS = 15_000;
+const DATABASE_MAINTENANCE_RECONCILE_INTERVAL_MS = 60_000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
 const marketDataSupervisor = getMarketDataSupervisor();
 let lastDatabaseMaintenanceAttemptAt: number | null = null;
 const lastSettledResolutionRepairAtByAsset: Partial<Record<MarketAsset, number>> = {};
+let nextScanSequence = 1;
+let executionTickInFlight = false;
+const latestScanByAsset = new Map<MarketAsset, RealtimeScanState>();
+const lastExecutedScanSequenceByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
+
+type RealtimeScanState = {
+  sequence: number;
+  asset: MarketAsset;
+  slot: MarketSlot;
+  settings: StrategyConfig;
+  snapshot: OpportunitySnapshot;
+  capturedAt: number;
+  scanDurationMs: number;
+};
+
+type ReconcileCadenceKey = "settlements" | "pnl" | "database_maintenance";
 
 export function deriveKalshiPrimaryFallbackClipPlan(requestedContracts: number) {
   const normalizedRequestedContracts = normalizeVenueTargetSize("kalshi", requestedContracts, 1, 1);
@@ -231,98 +256,192 @@ type TickSharedContext = {
     polymarket: PositionSnapshot[];
     kalshi: PositionSnapshot[];
   } | null;
+  storedPositions?: PositionSnapshot[];
 };
 
 export async function processTick(now = new Date()) {
+  await processScanTick(now);
+  await processExecutionTick(now);
+  await processReconcileTick(now);
+}
+
+export async function processScanTick(now = new Date()) {
   const nowTs = now.getTime();
-  const tickStartedAt = Date.now();
+  const scanStartedAt = Date.now();
+  const errors: string[] = [];
+  const snapshots: OpportunitySnapshot[] = [];
+  const settingsMap = await readSettingsMap();
+  const sharedVenueBalances = await readVenueBalances();
+
+  await Promise.all(
+    MARKET_ASSETS.map(async (asset) => {
+      const settings = settingsMap[asset];
+      const slot = getCurrentSlot(asset, now);
+      const coordinator = createExecutionCoordinator(asset, settings, {
+        venueBalances: sharedVenueBalances,
+      });
+
+      try {
+        const assetScanStartedAt = Date.now();
+        const snapshot = await coordinator.scan(slot, nowTs);
+        snapshots.push(snapshot);
+        latestScanByAsset.set(asset, {
+          sequence: nextScanSequence++,
+          asset,
+          slot,
+          settings,
+          snapshot,
+          capturedAt: snapshot.capturedAt,
+          scanDurationMs: Date.now() - assetScanStartedAt,
+        });
+        await writeWorkerState(asset, {
+          phase: "scan",
+          currentSlotKey: slot.key,
+          lastScanAt: nowTs,
+          lastError: null,
+        });
+      } catch (error) {
+        const message = `[${asset}] ${toErrorMessage(error)}`;
+        errors.push(message);
+        await writeWorkerState(asset, {
+          phase: "scan",
+          currentSlotKey: slot.key,
+          lastError: message,
+        });
+      }
+    }),
+  );
+
+  const scanDurationMs = Date.now() - scanStartedAt;
+  if (scanDurationMs > SCAN_SLOW_LOG_THRESHOLD_MS) {
+    console.warn(`[worker] scan slow: total=${scanDurationMs}ms assets=${MARKET_ASSETS.length}`);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(errors.join(" | "));
+  }
+
+  return snapshots;
+}
+
+export async function processExecutionTick(now = new Date()) {
+  if (executionTickInFlight) {
+    return [];
+  }
+
+  executionTickInFlight = true;
+  try {
+    return await processExecutionTickUnlocked(now);
+  } finally {
+    executionTickInFlight = false;
+  }
+}
+
+async function processExecutionTickUnlocked(now = new Date()) {
+  const nowTs = now.getTime();
+  const executeStartedAt = Date.now();
+  const errors: string[] = [];
+  const created: OrderIntent[] = [];
+  const pendingScanStates: RealtimeScanState[] = [];
+
+  for (const asset of MARKET_ASSETS) {
+    const scanState = latestScanByAsset.get(asset);
+    if (!scanState || lastExecutedScanSequenceByAsset[asset] === scanState.sequence) {
+      continue;
+    }
+
+    const currentSlot = getCurrentSlot(asset, now);
+    if (scanState.slot.key !== currentSlot.key) {
+      lastExecutedScanSequenceByAsset[asset] = scanState.sequence;
+      continue;
+    }
+
+    pendingScanStates.push(scanState);
+  }
+
+  if (pendingScanStates.length === 0) {
+    return created;
+  }
+
+  const settingsMap = await readSettingsMap();
+
+  for (const scanState of pendingScanStates) {
+    const settings = settingsMap[scanState.asset];
+    const coordinator = createExecutionCoordinator(scanState.asset, settings);
+    try {
+      const assetCreated = await coordinator.execute(scanState.slot, nowTs, scanState.snapshot);
+      created.push(...assetCreated);
+      await writeWorkerState(scanState.asset, {
+        phase: "execute",
+        currentSlotKey: scanState.slot.key,
+        lastExecuteAt: nowTs,
+        lastError: null,
+      });
+    } catch (error) {
+      const message = `[${scanState.asset}] ${toErrorMessage(error)}`;
+      errors.push(message);
+      await writeWorkerState(scanState.asset, {
+        phase: "execute",
+        currentSlotKey: scanState.slot.key,
+        lastError: message,
+      });
+    } finally {
+      lastExecutedScanSequenceByAsset[scanState.asset] = scanState.sequence;
+    }
+  }
+
+  const executeDurationMs = Date.now() - executeStartedAt;
+  if (executeDurationMs > EXECUTION_SLOW_LOG_THRESHOLD_MS) {
+    console.warn(`[worker] executor slow: total=${executeDurationMs}ms created=${created.length}`);
+  }
+
+  if (errors.length > 0) {
+    throw new Error(errors.join(" | "));
+  }
+
+  return created;
+}
+
+export async function processReconcileTick(now = new Date()) {
+  const nowTs = now.getTime();
+  const reconcileStartedAt = Date.now();
   const errors: string[] = [];
   const settingsMap = await readSettingsMap();
   const sharedVenueBalances = await refreshBalances(getGlobalPolyBridgeLowWaterUsdc(settingsMap), nowTs);
   const sharedVenuePositions = await refreshVenuePositions();
+  const storedPositions = sharedVenuePositions === null ? await readPositions() : undefined;
 
-  const contexts = MARKET_ASSETS.map((asset) => {
+  for (const asset of MARKET_ASSETS) {
     const settings = settingsMap[asset];
     const slot = getCurrentSlot(asset, now);
     const coordinator = createExecutionCoordinator(asset, settings, {
       venueBalances: sharedVenueBalances,
       venuePositions: sharedVenuePositions,
+      storedPositions,
     });
 
-    return {
-      asset,
-      slot,
-      coordinator,
-      scanSucceeded: false,
-      executeSucceeded: false,
-      reconcileSucceeded: false,
-      assetErrors: [] as string[],
-    };
-  });
-
-  await Promise.all(
-    contexts.map(async (context) => {
-      await writeWorkerState(context.asset, {
-        phase: "scan",
-        currentSlotKey: context.slot.key,
+    try {
+      await coordinator.reconcile(slot, nowTs);
+      await writeWorkerState(asset, {
+        phase: "reconcile",
+        currentSlotKey: slot.key,
+        lastReconcileAt: nowTs,
         lastError: null,
       });
-
-      try {
-        await context.coordinator.scan(context.slot, nowTs);
-        context.scanSucceeded = true;
-      } catch (error) {
-        const message = `[${context.asset}] ${toErrorMessage(error)}`;
-        context.assetErrors.push(message);
-        errors.push(message);
-      }
-    }),
-  );
-
-  const scanFinishedAt = Date.now();
-
-  for (const context of contexts) {
-    try {
-      await writeWorkerState(context.asset, {
-        phase: "execute",
-        currentSlotKey: context.slot.key,
-      });
-      await context.coordinator.execute(context.slot, nowTs);
-      context.executeSucceeded = true;
     } catch (error) {
-      const message = `[${context.asset}] ${toErrorMessage(error)}`;
-      context.assetErrors.push(message);
+      const message = `[${asset}] ${toErrorMessage(error)}`;
       errors.push(message);
-    }
-
-    try {
-      await writeWorkerState(context.asset, {
+      await writeWorkerState(asset, {
         phase: "reconcile",
-        currentSlotKey: context.slot.key,
+        currentSlotKey: slot.key,
+        lastError: message,
       });
-      await context.coordinator.reconcile(context.slot, nowTs);
-      context.reconcileSucceeded = true;
-    } catch (error) {
-      const message = `[${context.asset}] ${toErrorMessage(error)}`;
-      context.assetErrors.push(message);
-      errors.push(message);
     }
-
-    await writeWorkerState(context.asset, {
-      phase: "idle",
-      currentSlotKey: context.slot.key,
-      lastScanAt: context.scanSucceeded ? nowTs : undefined,
-      lastExecuteAt: context.executeSucceeded ? nowTs : undefined,
-      lastReconcileAt: context.reconcileSucceeded ? nowTs : undefined,
-      lastError: context.assetErrors[0] ?? null,
-    });
   }
 
-  const tickDurationMs = Date.now() - tickStartedAt;
-  if (tickDurationMs > 5_000) {
-    console.warn(
-      `[worker] tick slow: total=${tickDurationMs}ms scan=${scanFinishedAt - tickStartedAt}ms post_scan=${Date.now() - scanFinishedAt}ms`,
-    );
+  const reconcileDurationMs = Date.now() - reconcileStartedAt;
+  if (reconcileDurationMs > RECONCILE_SLOW_LOG_THRESHOLD_MS) {
+    console.warn(`[worker] reconcile slow: total=${reconcileDurationMs}ms assets=${MARKET_ASSETS.length}`);
   }
 
   if (errors.length > 0) {
@@ -339,7 +458,7 @@ export function createExecutionCoordinator(
 
   return {
     async scan(slot, now) {
-      const balances = sharedContext.venueBalances ?? (await refreshBalances(settings.polyBridgeLowWaterUsdc, now));
+      const balances = sharedContext.venueBalances ?? (await readVenueBalances());
       const openIntents = await readOpenOrderIntents();
       const effectiveBalances = applyVenueBalanceReservations(balances, openIntents);
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
@@ -386,8 +505,8 @@ export function createExecutionCoordinator(
       return nextSnapshot;
     },
 
-    async execute(slot, now) {
-      const snapshot = latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
+    async execute(slot, now, providedSnapshot = null) {
+      const snapshot = providedSnapshot ?? latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
       const readiness = await computeReadiness(snapshot, slot.asset, now);
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
       const initialOpenIntents = await readOpenOrderIntents(slot.asset);
@@ -414,6 +533,11 @@ export function createExecutionCoordinator(
       }
 
       if (!snapshot) {
+        return resumed;
+      }
+
+      if (!isOpportunitySnapshotFresh(snapshot, now, settings.maxSignalAgeMs)) {
+        await maybeWriteStaleSignalRunEvent(slot.asset, snapshot, settings, now);
         return resumed;
       }
 
@@ -541,12 +665,16 @@ export function createExecutionCoordinator(
     async reconcile(slot, now) {
       const [polyPositions, kalshiPositions] = sharedContext.venuePositions
         ? [sharedContext.venuePositions.polymarket, sharedContext.venuePositions.kalshi]
-        : await Promise.all([polymarketAdapter.getPositions(now), kalshiAdapter.getPositions(now)]);
+        : sharedContext.venuePositions === null
+          ? [
+              (sharedContext.storedPositions ?? []).filter((position) => position.venue === "polymarket"),
+              (sharedContext.storedPositions ?? []).filter((position) => position.venue === "kalshi"),
+            ]
+          : await Promise.all([polymarketAdapter.getPositions(now), kalshiAdapter.getPositions(now)]);
 
       const reconcileErrors: string[] = [];
       const assetPolyPositions = polyPositions.filter((position) => position.asset === asset);
       const assetKalshiPositions = kalshiPositions.filter((position) => position.asset === asset);
-      const allPositions = [...assetPolyPositions, ...assetKalshiPositions];
       const allVenuePositions = [...polyPositions, ...kalshiPositions];
 
       reconcileErrors.push(
@@ -592,53 +720,123 @@ export function createExecutionCoordinator(
         })),
       );
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("reconcile_settlements", now, async () => {
-          await reconcileSettlements(asset, now);
-        })),
-      );
+      if (shouldRunReconcileCadence(asset, "settlements", now, SETTLEMENT_RECONCILE_INTERVAL_MS)) {
+        reconcileErrors.push(
+          ...(await runReconcileStep("reconcile_settlements", now, async () => {
+            await reconcileSettlements(asset, now);
+          })),
+        );
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("repair_recent_settled_resolutions", now, async () => {
-          await repairRecentSettledIntentResolutions(asset, now);
-        })),
-      );
+        reconcileErrors.push(
+          ...(await runReconcileStep("repair_recent_settled_resolutions", now, async () => {
+            await repairRecentSettledIntentResolutions(asset, now);
+          })),
+        );
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("backfill_unwound_pnl", now, async () => {
-          await backfillUnwoundIntentPnl(asset, now);
-        })),
-      );
+        reconcileErrors.push(
+          ...(await runReconcileStep("backfill_unwound_pnl", now, async () => {
+            await backfillUnwoundIntentPnl(asset, now);
+          })),
+        );
+      }
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("refresh_pnl", now, async () => {
-          if (asset === "btc") {
-            await refreshPnl(now, allVenuePositions);
-          }
-        })),
-      );
+      if (shouldRunReconcileCadence(asset, "pnl", now, PNL_RECONCILE_INTERVAL_MS)) {
+        reconcileErrors.push(
+          ...(await runReconcileStep("refresh_pnl", now, async () => {
+            if (asset === "btc") {
+              await refreshPnl(now, allVenuePositions);
+            }
+          })),
+        );
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("record_stable_pnl_changes", now, async () => {
-          if (asset === "btc") {
-            await recordStablePnlChanges(now, await readVenueBalances(), allVenuePositions);
-          }
-        })),
-      );
+        reconcileErrors.push(
+          ...(await runReconcileStep("record_stable_pnl_changes", now, async () => {
+            if (asset === "btc") {
+              await recordStablePnlChanges(now, await readVenueBalances(), allVenuePositions);
+            }
+          })),
+        );
+      }
 
-      reconcileErrors.push(
-        ...(await runReconcileStep("database_maintenance", now, async () => {
-          if (asset === "btc") {
-            await maybeRunDatabaseMaintenance(now);
-          }
-        })),
-      );
+      if (shouldRunReconcileCadence(asset, "database_maintenance", now, DATABASE_MAINTENANCE_RECONCILE_INTERVAL_MS)) {
+        reconcileErrors.push(
+          ...(await runReconcileStep("database_maintenance", now, async () => {
+            if (asset === "btc") {
+              await maybeRunDatabaseMaintenance(now);
+            }
+          })),
+        );
+      }
 
       if (reconcileErrors.length > 0) {
         throw new Error(reconcileErrors.join(" | "));
       }
     },
   };
+}
+
+export function isOpportunitySnapshotFresh(
+  snapshot: Pick<OpportunitySnapshot, "capturedAt">,
+  now: number,
+  maxSignalAgeMs: number,
+) {
+  return getOpportunitySnapshotAgeMs(snapshot, now) <= maxSignalAgeMs;
+}
+
+export function getOpportunitySnapshotAgeMs(snapshot: Pick<OpportunitySnapshot, "capturedAt">, now: number) {
+  return Math.max(0, now - snapshot.capturedAt);
+}
+
+async function maybeWriteStaleSignalRunEvent(
+  asset: MarketAsset,
+  snapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+  now: number,
+) {
+  if (!snapshot.opportunities.some((opportunity) => opportunity.eligible)) {
+    return;
+  }
+
+  const lastLogAt = lastStaleSignalLogAtByAsset[asset] ?? 0;
+  if (now - lastLogAt < EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS) {
+    return;
+  }
+
+  lastStaleSignalLogAtByAsset[asset] = now;
+  const signalAgeMs = getOpportunitySnapshotAgeMs(snapshot, now);
+  console.warn(
+    `[worker] executor skipped stale signal: asset=${asset} slot=${snapshot.slotKey} age=${signalAgeMs}ms max=${settings.maxSignalAgeMs}ms`,
+  );
+  await writeRunEvent({
+    level: "warn",
+    eventType: "executor.skipped.stale_signal",
+    message: `Executor skipped stale ${asset.toUpperCase()} signal before live order`,
+    payload: {
+      asset,
+      slotKey: snapshot.slotKey,
+      capturedAt: snapshot.capturedAt,
+      signalAgeMs,
+      maxSignalAgeMs: settings.maxSignalAgeMs,
+      eligibleOpportunities: snapshot.opportunities.filter((opportunity) => opportunity.eligible).length,
+    },
+    createdAt: now,
+  });
+}
+
+function shouldRunReconcileCadence(
+  asset: MarketAsset,
+  key: ReconcileCadenceKey,
+  now: number,
+  intervalMs: number,
+) {
+  const byAsset = (lastReconcileCadenceAtByAsset[asset] ??= {});
+  const lastRunAt = byAsset[key] ?? null;
+  if (lastRunAt !== null && now - lastRunAt < intervalMs) {
+    return false;
+  }
+
+  byAsset[key] = now;
+  return true;
 }
 
 async function refreshBalances(polyBridgeLowWaterUsdc: number, now: number): Promise<VenueBalance[]> {

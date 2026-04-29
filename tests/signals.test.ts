@@ -26,6 +26,7 @@ const settings: StrategyConfig = {
   shadowMode: true,
   maxPairNotionalUsd: 50,
   maxLegCapitalShare: 0.7,
+  maxSignalAgeMs: 1000,
   grossEntryThreshold: 0.93,
   maxLegPrice: 0.49,
   reentryImprovement: 0.01,

@@ -572,6 +572,29 @@ async function bootstrapDatabase(pool: Pool) {
       [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare)],
     );
 
+    await pool.query(
+      `
+      UPDATE strategy_configs
+      SET
+        payload = jsonb_set(payload, '{pollingIntervalMs}', $2::jsonb, true),
+        updated_at = $1
+      WHERE NOT (payload ? 'maxSignalAgeMs')
+        AND payload->>'pollingIntervalMs' = '1000'
+    `,
+      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.pollingIntervalMs)],
+    );
+
+    await pool.query(
+      `
+      UPDATE strategy_configs
+      SET
+        payload = jsonb_set(payload, '{maxSignalAgeMs}', $2::jsonb, true),
+        updated_at = $1
+      WHERE NOT (payload ? 'maxSignalAgeMs')
+    `,
+      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxSignalAgeMs)],
+    );
+
     const legacyWorkerState = await pool.query<{
       phase: WorkerState["phase"];
       current_slot_key: string | null;
