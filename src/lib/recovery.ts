@@ -1,6 +1,6 @@
 import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
-import { POLY_CTF_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
+import { POLY_CTF_ADDRESS, POLY_PUSD_ADDRESS } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
@@ -180,7 +180,7 @@ export function buildRedeemTxData(conditionId: string) {
   ]);
 
   return ctfInterface.encodeFunctionData("redeemPositions", [
-    POLY_USDCE_ADDRESS,
+    POLY_PUSD_ADDRESS,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
@@ -193,7 +193,7 @@ export function buildMergeTxData(conditionId: string, amount: string) {
   ]);
 
   return ctfInterface.encodeFunctionData("mergePositions", [
-    POLY_USDCE_ADDRESS,
+    POLY_PUSD_ADDRESS,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
