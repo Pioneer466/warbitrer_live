@@ -4574,7 +4574,8 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
 
     await writeVenueOrder(unwindResult);
 
-    if (unwindResult.status === "filled" && unwindResult.filledSize + ORDER_SIZE_TOLERANCE >= unwindResult.requestedSize) {
+    if (shouldTreatPrimaryUnwindOrderAsComplete(unwindResult)) {
+      await maybeWritePrimaryUnwindFilledSizeMismatchEvent(currentIntent, unwindResult, now);
       const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
       const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
       currentIntent = finalizeUnwoundIntent({
@@ -4698,6 +4699,39 @@ async function attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
 
   await recordExecutionLockBusy(intent.asset, intent.slotKey, now);
   return intent;
+}
+
+export function shouldTreatPrimaryUnwindOrderAsComplete(
+  order: Pick<LiveOrder, "status" | "filledSize" | "requestedSize">,
+) {
+  return order.status === "filled" && order.filledSize > 0;
+}
+
+async function maybeWritePrimaryUnwindFilledSizeMismatchEvent(
+  intent: OrderIntent,
+  order: Pick<LiveOrder, "venue" | "venueOrderId" | "filledSize" | "requestedSize" | "status">,
+  now: number,
+) {
+  if (order.filledSize + ORDER_SIZE_TOLERANCE >= order.requestedSize) {
+    return;
+  }
+
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "warn",
+    eventType: "order.unwind.filled_size_mismatch",
+    message: `Primary unwind order ${order.venueOrderId} reported filled below requested local size`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: order.venue,
+      orderId: order.venueOrderId,
+      orderStatus: order.status,
+      requestedSize: order.requestedSize,
+      filledSize: order.filledSize,
+    },
+    createdAt: now,
+  });
 }
 
 async function tripManualInterventionBreaker(
@@ -5421,7 +5455,8 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
         continue;
       }
 
-      if (unwindOrder.status === "filled" && unwindOrder.filledSize + ORDER_SIZE_TOLERANCE >= unwindOrder.requestedSize) {
+      if (shouldTreatPrimaryUnwindOrderAsComplete(unwindOrder)) {
+        await maybeWritePrimaryUnwindFilledSizeMismatchEvent(currentIntent, unwindOrder, now);
         const averageExitPrice = unwindOrder.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
         const payoutUsd = round4(unwindOrder.filledSize * averageExitPrice - (unwindOrder.feeUsd ?? 0));
         currentIntent = finalizeUnwoundIntent({

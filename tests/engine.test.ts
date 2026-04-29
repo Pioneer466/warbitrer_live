@@ -25,6 +25,7 @@ import {
   shouldKeepSlotExecutionBreakerActive,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatPrimaryOrderAsFilled,
+  shouldTreatPrimaryUnwindOrderAsComplete,
   shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
   selectWinningExecutionCandidate,
@@ -820,6 +821,28 @@ describe("forced unwind request pricing", () => {
     expect(request.price).toBe(0.47);
     expect(request.reduceOnly).toBe(true);
     expect(request.side).toBe("SELL");
+  });
+});
+
+describe("primary unwind completion", () => {
+  it("trusts a venue-filled unwind order even when the local requested size is higher", () => {
+    expect(
+      shouldTreatPrimaryUnwindOrderAsComplete({
+        status: "filled",
+        filledSize: 8.999,
+        requestedSize: 9,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not treat no-fill terminal unwind orders as complete", () => {
+    expect(
+      shouldTreatPrimaryUnwindOrderAsComplete({
+        status: "canceled",
+        filledSize: 0,
+        requestedSize: 9,
+      }),
+    ).toBe(false);
   });
 });
 
