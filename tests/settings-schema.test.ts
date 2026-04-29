@@ -6,6 +6,7 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
+    expect(settings.maxLegCapitalShare).toBe(0.7);
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.7);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(2);
@@ -28,6 +29,7 @@ describe("settings schema", () => {
       enableTrading: true,
       shadowMode: false,
       maxPairNotionalUsd: 50,
+      maxLegCapitalShare: 0.8,
       grossEntryThreshold: 0.93,
       maxLegPrice: 0.49,
       reentryImprovement: 0.01,
@@ -54,6 +56,7 @@ describe("settings schema", () => {
 
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(12000);
     expect(settings.executionPriceBuffer).toBe(0.02);
+    expect(settings.maxLegCapitalShare).toBe(0.8);
     expect(settings.kalshiDepthHeadroomContracts).toBe(3);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.6);
     expect(settings.kalshiPrimaryPriceTicksSlippage).toBe(3);

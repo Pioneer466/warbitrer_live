@@ -369,6 +369,38 @@ describe("hedge retry repricing", () => {
     ).toBeNull();
   });
 
+  it("allows a retry above the legacy leg-price cap when it stays inside the original price buffer", () => {
+    const hedgeLeg = {
+      ...buildIntent({
+        primaryVenue: "polymarket",
+        hedgeVenue: "kalshi",
+      }).legs[1],
+      requestedPrice: 0.58,
+      requestedNotionalUsd: 11.6,
+    };
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.585,
+          depth: 25,
+          minOrderSize: 1,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
+        },
+      ),
+    ).toMatchObject({
+      requestedPrice: 0.585,
+      requestedNotionalUsd: 5.85,
+    });
+  });
+
   it("refuses a Kalshi retry when displayed depth only matches the order size without headroom", () => {
     const hedgeLeg = {
       ...buildIntent({
@@ -411,7 +443,7 @@ describe("hedge retry repricing", () => {
       deriveBufferedRetryLeg(
         primaryLeg,
         {
-          price: 0.47,
+          price: 0.46,
           depth: 25,
           minOrderSize: 5,
         },
@@ -426,9 +458,9 @@ describe("hedge retry repricing", () => {
     ).toMatchObject({
       id: primaryLeg.id,
       venue: "polymarket",
-      requestedPrice: 0.47,
+      requestedPrice: 0.46,
       requestedSize: 22.22,
-      requestedNotionalUsd: 10.4434,
+      requestedNotionalUsd: 10.2212,
     });
   });
 
@@ -444,7 +476,7 @@ describe("hedge retry repricing", () => {
       deriveBufferedRetryLeg(
         primaryLeg,
         {
-          price: 0.47,
+          price: 0.458,
           depth: 25,
           minOrderSize: 5,
           tickSize: 0.001,
@@ -461,9 +493,9 @@ describe("hedge retry repricing", () => {
     ).toMatchObject({
       id: primaryLeg.id,
       venue: "polymarket",
-      requestedPrice: 0.472,
+      requestedPrice: 0.46,
       requestedSize: 22.22,
-      requestedNotionalUsd: 10.4878,
+      requestedNotionalUsd: 10.2212,
     });
   });
 });

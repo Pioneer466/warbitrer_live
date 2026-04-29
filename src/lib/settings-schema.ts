@@ -25,6 +25,7 @@ export const settingsSchema = z
     enableTrading: z.boolean(),
     shadowMode: z.boolean(),
     maxPairNotionalUsd: z.number().positive().max(50_000),
+    maxLegCapitalShare: z.number().min(0.5).max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare),
     grossEntryThreshold: z.number().positive().max(1),
     maxLegPrice: z.number().positive().max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegPrice),
     reentryImprovement: z.number().nonnegative().max(0.25),

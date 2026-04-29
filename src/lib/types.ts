@@ -185,6 +185,7 @@ export type StrategyConfig = {
   enableTrading: boolean;
   shadowMode: boolean;
   maxPairNotionalUsd: number;
+  maxLegCapitalShare: number;
   grossEntryThreshold: number;
   maxLegPrice: number;
   reentryImprovement: number;

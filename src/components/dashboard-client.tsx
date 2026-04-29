@@ -50,7 +50,6 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const historyFeedHealth = history.data?.feedHealth ?? feedHealth;
   const historyLabels = historyPoints.map((point) => formatClock(point.ts).slice(0, 5));
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
-  const perLegNotionalUsd = config.maxPairNotionalUsd / 2;
   const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
   const displayPositions = positions.filter(isDisplayablePosition);
@@ -167,7 +166,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
       <section className="rounded-[28px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
         <SectionHeader
           title="Opportunités"
-          meta={`Entree si cout total <= ${formatPrice(config.grossEntryThreshold, 3)} · prix max/jambe <= ${formatPrice(config.maxLegPrice, 2)} · ${formatCurrency(config.maxPairNotionalUsd)} total = ${formatCurrency(perLegNotionalUsd)} par jambe`}
+          meta={`Entree si cout brut <= ${formatPrice(config.grossEntryThreshold, 3)} · budget pair ${formatCurrency(config.maxPairNotionalUsd)} · cap jambe ${(config.maxLegCapitalShare * 100).toFixed(0)}%`}
         />
         <div className="mt-4 grid gap-4 xl:grid-cols-2">
           {opportunities.length === 0 ? (

@@ -5,6 +5,7 @@ import {
   calculateKalshiFee,
   calculatePolymarketFee,
   deriveAlignedPairSize,
+  deriveBalancedPayoutPairSize,
   deriveKalshiPrimaryClipPlan,
   derivePolymarketTargetShares,
   deriveTargetShares,
@@ -73,6 +74,80 @@ describe("live fee and sizing helpers", () => {
       polyMaxSize: 25,
       kalshiMaxSize: 18,
     });
+  });
+
+  it("sizes a balanced payout pair under a total budget with asymmetric leg capital", () => {
+    const sizing = deriveBalancedPayoutPairSize({
+      targetPairBudgetUsd: 20,
+      maxLegCapitalShare: 0.7,
+      polymarket: {
+        price: 0.35,
+        depth: 100,
+        minOrderSize: 0.01,
+        fallbackMinOrderSize: 5,
+        feeRateBps: 10,
+      },
+      kalshi: {
+        price: 0.58,
+        depth: 100,
+        minOrderSize: 1,
+        fallbackMinOrderSize: 1,
+        feeMultiplier: 1,
+      },
+    });
+
+    expect(sizing.commonSize).toBe(21);
+    expect(sizing.kalshiNotionalUsd).toBeGreaterThan(sizing.polyNotionalUsd);
+    expect(sizing.totalCostUsd).toBeLessThanOrEqual(20);
+    expect(sizing.polyCostUsd).toBeLessThanOrEqual(14);
+    expect(sizing.kalshiCostUsd).toBeLessThanOrEqual(14);
+    expect(sizing.projectedNetProfitUsd).toBeGreaterThan(0);
+  });
+
+  it("rejects balanced payout sizing when the minimum executable leg would exceed its capital share", () => {
+    const sizing = deriveBalancedPayoutPairSize({
+      targetPairBudgetUsd: 20,
+      maxLegCapitalShare: 0.7,
+      polymarket: {
+        price: 0.1,
+        depth: 100,
+        minOrderSize: 0.01,
+        fallbackMinOrderSize: 5,
+      },
+      kalshi: {
+        price: 0.8,
+        depth: 100,
+        minOrderSize: 20,
+        fallbackMinOrderSize: 1,
+        feeMultiplier: 1,
+      },
+    });
+
+    expect(sizing.commonSize).toBe(0);
+    expect(sizing.kalshiMaxSize).toBeGreaterThan(0);
+  });
+
+  it("reduces balanced payout sizing when fees would push the total cost over budget", () => {
+    const sizing = deriveBalancedPayoutPairSize({
+      targetPairBudgetUsd: 20,
+      maxLegCapitalShare: 1,
+      polymarket: {
+        price: 0.45,
+        depth: 100,
+        minOrderSize: 0.01,
+        fallbackMinOrderSize: 5,
+      },
+      kalshi: {
+        price: 0.45,
+        depth: 100,
+        minOrderSize: 1,
+        fallbackMinOrderSize: 1,
+        feeMultiplier: 1,
+      },
+    });
+
+    expect(sizing.commonSize).toBe(21);
+    expect(sizing.totalCostUsd).toBeLessThanOrEqual(20);
   });
 
   it("builds a fee-aware Kalshi clip plan with the fewest balanced clips under the size cap", () => {

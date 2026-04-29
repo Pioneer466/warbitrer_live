@@ -1,9 +1,6 @@
 import {
   applyKalshiPrimaryDepthSafetyFactor,
-  calculateKalshiFee,
-  calculatePolymarketFee,
-  deriveAlignedPairSize,
-  deriveVenueTargetSize,
+  deriveBalancedPayoutPairSize,
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
 } from "@/lib/fees";
@@ -196,7 +193,7 @@ function buildSignal({
   marketAlignmentReason: string | null;
   mismatchGuard: MismatchGuardMetrics;
 }): LiveOpportunity {
-  const targetLegBudgetUsd = (settings.maxPairNotionalUsd / 2) * mismatchGuard.mismatchSizeMultiplier;
+  const targetPairBudgetUsd = settings.maxPairNotionalUsd * mismatchGuard.mismatchSizeMultiplier;
   const reasons: string[] = [];
 
   if (marketAlignmentReason) {
@@ -211,8 +208,6 @@ function buildSignal({
     reasons.push("Profondeur indisponible");
   }
 
-  const safePolyPrice = polyPrice ?? 0;
-  const safeKalshiPrice = kalshiPrice ?? 0;
   const kalshiMaxBuyPrice =
     kalshiPrice === null
       ? null
@@ -235,8 +230,9 @@ function buildSignal({
     settings.kalshiDepthHeadroomContracts,
   );
   const grossCost = polyPrice !== null && kalshiPrice !== null ? round4(polyPrice + kalshiPrice) : null;
-  const alignedSizing = deriveAlignedPairSize({
-    targetLegNotionalUsd: targetLegBudgetUsd,
+  const balancedSizing = deriveBalancedPayoutPairSize({
+    targetPairBudgetUsd,
+    maxLegCapitalShare: settings.maxLegCapitalShare,
     pairSizeCap: getKalshiPrimaryMultiClipCapacity(
       settings.kalshiPrimaryMaxClipContracts,
       settings.kalshiPrimaryMaxClips,
@@ -246,61 +242,54 @@ function buildSignal({
       depth: polyDepth,
       minOrderSize: polyMinOrderSize,
       fallbackMinOrderSize: settings.minOrderSize,
+      feeRateBps: polyFeeRateBps,
     },
     kalshi: {
       price: kalshiPrice,
       depth: safetyAdjustedKalshiDepth,
       minOrderSize: kalshiMinOrderSize,
       fallbackMinOrderSize: 1,
+      feeMultiplier: kalshi.feeMultiplier,
     },
     kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   });
-  const polyBudgetUnits =
-    polyPrice === null
-      ? 0
-      : deriveVenueTargetSize("polymarket", targetLegBudgetUsd, polyPrice, polyMinOrderSize, settings.minOrderSize);
-  const polyUnits = alignedSizing.polySize;
-  const kalshiUnits = alignedSizing.kalshiSize;
-  const polyTargetNotionalUsd = polyPrice === null ? 0 : round4(polyUnits * polyPrice);
-  const kalshiTargetNotionalUsd = kalshiPrice === null ? 0 : round4(kalshiUnits * kalshiPrice);
-  const estimatedFees =
-    calculatePolymarketFee({
-      shares: polyUnits,
-      price: safePolyPrice,
-      feeRateBps: polyFeeRateBps,
-    }) +
-    calculateKalshiFee({
-      contracts: kalshiUnits,
-      price: safeKalshiPrice,
-      feeMultiplier: kalshi.feeMultiplier,
-    });
+  const polyUnits = balancedSizing.polySize;
+  const kalshiUnits = balancedSizing.kalshiSize;
+  const polyTargetNotionalUsd = balancedSizing.polyNotionalUsd;
+  const kalshiTargetNotionalUsd = balancedSizing.kalshiNotionalUsd;
+  const estimatedFees = balancedSizing.polyFeeUsd + balancedSizing.kalshiFeeUsd;
 
   if (grossCost !== null && grossCost > settings.grossEntryThreshold) {
     reasons.push("Seuil brut non atteint");
   }
-  if (safePolyPrice > settings.maxLegPrice || safeKalshiPrice > settings.maxLegPrice) {
-    reasons.push(`Une jambe dépasse ${settings.maxLegPrice.toFixed(2)}`);
-  }
-  if (polyBudgetUnits > 0 && alignedSizing.polyMaxSize <= 0) {
-    reasons.push("Taille minimum Polymarket non atteinte");
-  }
-  if (alignedSizing.polyMaxSize <= 0 && polyDepth !== null) {
+  if (balancedSizing.polyMaxSize <= 0 && polyDepth !== null) {
     reasons.push("Liquidité Polymarket insuffisante");
   }
-  if (alignedSizing.kalshiMaxSize <= 0 && (effectiveKalshiDepth !== null || cumulativeKalshiDepth !== null)) {
+  if (balancedSizing.kalshiMaxSize <= 0 && (effectiveKalshiDepth !== null || cumulativeKalshiDepth !== null)) {
     reasons.push(
       settings.kalshiDepthHeadroomContracts > 0
         ? `Liquidité Kalshi insuffisante après headroom (${settings.kalshiDepthHeadroomContracts} contrats)`
         : "Liquidité Kalshi insuffisante",
     );
   }
+  if (
+    polyPrice !== null &&
+    kalshiPrice !== null &&
+    polyDepth !== null &&
+    kalshiDepth !== null &&
+    balancedSizing.polyMaxSize > 0 &&
+    balancedSizing.kalshiMaxSize > 0 &&
+    balancedSizing.commonSize <= 0
+  ) {
+    reasons.push("Budget/profit insuffisant frais inclus");
+  }
 
   const polyBalance = balances.find((balance) => balance.venue === "polymarket");
   const kalshiBalance = balances.find((balance) => balance.venue === "kalshi");
-  if (!polyBalance || polyBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < polyTargetNotionalUsd) {
+  if (!polyBalance || polyBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < balancedSizing.polyCostUsd) {
     reasons.push("Solde Polymarket insuffisant");
   }
-  if (!kalshiBalance || kalshiBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < kalshiTargetNotionalUsd) {
+  if (!kalshiBalance || kalshiBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < balancedSizing.kalshiCostUsd) {
     reasons.push("Solde Kalshi insuffisant");
   }
   if (polyBalance?.status === "blocked" || kalshiBalance?.status === "blocked") {
@@ -329,14 +318,8 @@ function buildSignal({
     reasons.push(mismatchGuardReason);
   }
 
-  const minimumWinningPayout = Math.min(polyUnits, kalshiUnits);
-  const capitalDeployed = round4(polyTargetNotionalUsd + kalshiTargetNotionalUsd + estimatedFees);
-  const projectedNetProfitUsd =
-    grossCost === null ? null : round4(minimumWinningPayout - capitalDeployed);
-  const projectedNetReturn =
-    projectedNetProfitUsd === null || capitalDeployed <= 0
-      ? null
-      : round4(projectedNetProfitUsd / capitalDeployed);
+  const projectedNetProfitUsd = grossCost === null ? null : balancedSizing.projectedNetProfitUsd;
+  const projectedNetReturn = grossCost === null ? null : balancedSizing.projectedNetReturn;
 
   const primaryVenue = polyDepth === null || kalshiDepth === null ? null : choosePrimaryVenue();
 
@@ -382,13 +365,7 @@ function buildSignal({
         size: polyUnits,
         tickSize: polymarket.outcomes[polyOutcome === "UP" ? "up" : "down"].tickSize,
         minOrderSize: polyMinOrderSize,
-        feeEstimateUsd: round4(
-          calculatePolymarketFee({
-            shares: polyUnits,
-            price: safePolyPrice,
-            feeRateBps: polyFeeRateBps,
-          }),
-        ),
+        feeEstimateUsd: balancedSizing.polyFeeUsd,
       },
       {
         venue: "kalshi",
@@ -400,13 +377,7 @@ function buildSignal({
         size: kalshiUnits,
         tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,
         minOrderSize: kalshiMinOrderSize,
-        feeEstimateUsd: round4(
-          calculateKalshiFee({
-            contracts: kalshiUnits,
-            price: safeKalshiPrice,
-            feeMultiplier: kalshi.feeMultiplier,
-          }),
-        ),
+        feeEstimateUsd: balancedSizing.kalshiFeeUsd,
       },
     ],
   };
@@ -518,7 +489,10 @@ function computeMismatchGuard(
     mismatchGuardReason = `Garde discordance: zone morte ${formatCombinationForReason(combination)} (${deadZone.referencePayoutCount} paiements proxy)`;
   } else {
     const multiplierCap = computeMismatchSizeMultiplierCap(base, deadZone.deadZoneDistanceBps);
-    if (multiplierCap < 1) {
+    if (multiplierCap <= 0.25 + ORDER_SIZE_TOLERANCE) {
+      action = "block";
+      mismatchGuardReason = "Garde discordance: risque medium trop proche (taille x0.25 désactivée)";
+    } else if (multiplierCap < 1) {
       action = "reduce_size";
       sizeMultiplier = multiplierCap;
     }

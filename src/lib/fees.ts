@@ -14,6 +14,7 @@ type PolymarketFeeInput = {
 };
 
 export const POLYMARKET_SHARE_ESTIMATE_STEP = 0.01;
+const ORDER_SIZE_TOLERANCE = 1e-6;
 
 export function roundUpToCent(value: number) {
   return Math.ceil((value - Number.EPSILON) * 100) / 100;
@@ -325,6 +326,220 @@ export function deriveAlignedPairSize(input: {
   };
 }
 
+export type BalancedPayoutPairSize = {
+  commonSize: number;
+  polyMaxSize: number;
+  kalshiMaxSize: number;
+  polySize: number;
+  kalshiSize: number;
+  polyNotionalUsd: number;
+  kalshiNotionalUsd: number;
+  polyFeeUsd: number;
+  kalshiFeeUsd: number;
+  polyCostUsd: number;
+  kalshiCostUsd: number;
+  totalCostUsd: number;
+  projectedNetProfitUsd: number;
+  projectedNetReturn: number | null;
+  maxLegCostUsd: number;
+  kalshiExecutableDepth: number | null;
+};
+
+export function deriveBalancedPayoutPairSize(input: {
+  targetPairBudgetUsd: number;
+  maxLegCapitalShare: number;
+  pairSizeCap?: number | null;
+  polymarket: {
+    price: number | null;
+    depth: number | null;
+    minOrderSize: number | null;
+    fallbackMinOrderSize: number;
+    feeRateBps?: number;
+  };
+  kalshi: {
+    price: number | null;
+    depth: number | null;
+    minOrderSize: number | null;
+    fallbackMinOrderSize: number;
+    feeMultiplier?: number;
+  };
+  kalshiDepthHeadroomContracts?: number;
+}): BalancedPayoutPairSize {
+  const targetPairBudgetUsd = Number.isFinite(input.targetPairBudgetUsd)
+    ? Math.max(0, input.targetPairBudgetUsd)
+    : 0;
+  const normalizedMaxLegCapitalShare = Number.isFinite(input.maxLegCapitalShare)
+    ? Math.min(1, Math.max(0, input.maxLegCapitalShare))
+    : 1;
+  const maxLegCostUsd = targetPairBudgetUsd * normalizedMaxLegCapitalShare;
+  const empty = (overrides: Partial<BalancedPayoutPairSize> = {}): BalancedPayoutPairSize => ({
+    commonSize: 0,
+    polyMaxSize: 0,
+    kalshiMaxSize: 0,
+    polySize: 0,
+    kalshiSize: 0,
+    polyNotionalUsd: 0,
+    kalshiNotionalUsd: 0,
+    polyFeeUsd: 0,
+    kalshiFeeUsd: 0,
+    polyCostUsd: 0,
+    kalshiCostUsd: 0,
+    totalCostUsd: 0,
+    projectedNetProfitUsd: 0,
+    projectedNetReturn: null,
+    maxLegCostUsd: round4(maxLegCostUsd),
+    kalshiExecutableDepth: null,
+    ...overrides,
+  });
+
+  if (
+    targetPairBudgetUsd <= 0 ||
+    input.polymarket.price === null ||
+    input.kalshi.price === null ||
+    input.polymarket.price <= 0 ||
+    input.kalshi.price <= 0
+  ) {
+    return empty();
+  }
+
+  const pairSizeCap =
+    input.pairSizeCap === null || input.pairSizeCap === undefined
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, input.pairSizeCap);
+  const polyMaxSize = deriveVenueExecutableSize({
+    venue: "polymarket",
+    targetNotionalUsd: null,
+    sizeCap: pairSizeCap,
+    price: input.polymarket.price,
+    displayedDepth: input.polymarket.depth,
+    minOrderSize: input.polymarket.minOrderSize,
+    fallbackMinOrderSize: input.polymarket.fallbackMinOrderSize,
+  });
+  const kalshiMaxSize = deriveVenueExecutableSize({
+    venue: "kalshi",
+    targetNotionalUsd: null,
+    sizeCap: pairSizeCap,
+    price: input.kalshi.price,
+    displayedDepth: input.kalshi.depth,
+    minOrderSize: input.kalshi.minOrderSize,
+    fallbackMinOrderSize: input.kalshi.fallbackMinOrderSize,
+    kalshiDepthHeadroomContracts: input.kalshiDepthHeadroomContracts,
+  });
+  const kalshiExecutableDepth = getVenueExecutableDepth(
+    "kalshi",
+    input.kalshi.depth,
+    input.kalshiDepthHeadroomContracts ?? 0,
+  );
+  const commonMaxSize = Math.min(polyMaxSize, kalshiMaxSize);
+  if (commonMaxSize <= 0) {
+    return empty({
+      polyMaxSize,
+      kalshiMaxSize,
+      kalshiExecutableDepth,
+    });
+  }
+
+  const polyMinimumSize = getVenueMinimumOrderSize(
+    "polymarket",
+    input.polymarket.minOrderSize,
+    input.polymarket.fallbackMinOrderSize,
+  );
+  const kalshiMinimumSize = getVenueMinimumOrderSize(
+    "kalshi",
+    input.kalshi.minOrderSize,
+    input.kalshi.fallbackMinOrderSize,
+  );
+  const buildSizedResult = (size: number): BalancedPayoutPairSize => {
+    const polySize = normalizeVenueTargetSize(
+      "polymarket",
+      size,
+      input.polymarket.minOrderSize,
+      input.polymarket.fallbackMinOrderSize,
+    );
+    const kalshiSize = normalizeVenueTargetSize(
+      "kalshi",
+      size,
+      input.kalshi.minOrderSize,
+      input.kalshi.fallbackMinOrderSize,
+    );
+    const commonSize = Math.min(polySize, kalshiSize);
+    const polyNotionalUsd = commonSize * input.polymarket.price!;
+    const kalshiNotionalUsd = commonSize * input.kalshi.price!;
+    const polyFeeUsd = calculatePolymarketFee({
+      shares: commonSize,
+      price: input.polymarket.price!,
+      feeRateBps: input.polymarket.feeRateBps ?? 0,
+    });
+    const kalshiFeeUsd = calculateKalshiFee({
+      contracts: commonSize,
+      price: input.kalshi.price!,
+      feeMultiplier: input.kalshi.feeMultiplier ?? 1,
+    });
+    const polyCostUsd = polyNotionalUsd + polyFeeUsd;
+    const kalshiCostUsd = kalshiNotionalUsd + kalshiFeeUsd;
+    const totalCostUsd = polyCostUsd + kalshiCostUsd;
+    const projectedNetProfitUsd = commonSize - totalCostUsd;
+
+    return {
+      commonSize,
+      polyMaxSize,
+      kalshiMaxSize,
+      polySize: commonSize,
+      kalshiSize: commonSize,
+      polyNotionalUsd: round4(polyNotionalUsd),
+      kalshiNotionalUsd: round4(kalshiNotionalUsd),
+      polyFeeUsd: round4(polyFeeUsd),
+      kalshiFeeUsd: round4(kalshiFeeUsd),
+      polyCostUsd: round4(polyCostUsd),
+      kalshiCostUsd: round4(kalshiCostUsd),
+      totalCostUsd: round4(totalCostUsd),
+      projectedNetProfitUsd: round4(projectedNetProfitUsd),
+      projectedNetReturn: totalCostUsd > 0 ? round4(projectedNetProfitUsd / totalCostUsd) : null,
+      maxLegCostUsd: round4(maxLegCostUsd),
+      kalshiExecutableDepth,
+    };
+  };
+
+  for (let candidate = Math.floor(commonMaxSize + ORDER_SIZE_TOLERANCE); candidate > 0; candidate -= 1) {
+    const normalizedPolySize = normalizeVenueTargetSize(
+      "polymarket",
+      candidate,
+      input.polymarket.minOrderSize,
+      input.polymarket.fallbackMinOrderSize,
+    );
+    const normalizedKalshiSize = normalizeVenueTargetSize(
+      "kalshi",
+      candidate,
+      input.kalshi.minOrderSize,
+      input.kalshi.fallbackMinOrderSize,
+    );
+    const commonSize = Math.min(normalizedPolySize, normalizedKalshiSize);
+    if (
+      commonSize + ORDER_SIZE_TOLERANCE < polyMinimumSize ||
+      commonSize + ORDER_SIZE_TOLERANCE < kalshiMinimumSize
+    ) {
+      continue;
+    }
+
+    const sized = buildSizedResult(commonSize);
+    if (
+      sized.totalCostUsd <= targetPairBudgetUsd + ORDER_SIZE_TOLERANCE &&
+      sized.polyCostUsd <= maxLegCostUsd + ORDER_SIZE_TOLERANCE &&
+      sized.kalshiCostUsd <= maxLegCostUsd + ORDER_SIZE_TOLERANCE &&
+      sized.projectedNetProfitUsd > ORDER_SIZE_TOLERANCE
+    ) {
+      return sized;
+    }
+  }
+
+  return empty({
+    polyMaxSize,
+    kalshiMaxSize,
+    maxLegCostUsd: round4(maxLegCostUsd),
+    kalshiExecutableDepth,
+  });
+}
+
 export function getVenueMinimumOrderSize(
   venue: Venue,
   minOrderSize: number | null,
@@ -340,4 +555,8 @@ export function getVenueMinimumOrderSize(
 export function applySlippage(price: number, maxSlippageBps: number, side: OrderSide = "BUY") {
   const multiplier = 1 + maxSlippageBps / 10_000;
   return side === "SELL" ? price / multiplier : price * multiplier;
+}
+
+function round4(value: number) {
+  return Math.round(value * 10_000) / 10_000;
 }

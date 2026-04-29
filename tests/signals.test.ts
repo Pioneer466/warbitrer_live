@@ -25,6 +25,7 @@ const settings: StrategyConfig = {
   enableTrading: true,
   shadowMode: true,
   maxPairNotionalUsd: 50,
+  maxLegCapitalShare: 0.7,
   grossEntryThreshold: 0.93,
   maxLegPrice: 0.49,
   reentryImprovement: 0.01,
@@ -384,7 +385,98 @@ describe("live signal engine", () => {
     expect(signal.legs[1].size).toBeGreaterThan(0);
   });
 
-  it("keeps the polymarket leg at a 10 USD budget even when the venue minimum is 5 shares", () => {
+  it("sizes an asymmetric balanced payout pair under the total pair budget", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.35,
+            depth: 300,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.58,
+            depth: 300,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+        kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    const polyCost = signal.legs[0].targetNotionalUsd + signal.legs[0].feeEstimateUsd;
+    const kalshiCost = signal.legs[1].targetNotionalUsd + signal.legs[1].feeEstimateUsd;
+
+    expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
+    expect(signal.grossCost).toBe(0.93);
+    expect(signal.eligible).toBe(true);
+    expect(signal.legs[0].size).toBeGreaterThan(0);
+    expect(signal.legs[0].size).toBe(signal.legs[1].size);
+    expect(signal.legs[1].targetNotionalUsd).toBeGreaterThan(signal.legs[0].targetNotionalUsd);
+    expect(polyCost + kalshiCost).toBeLessThanOrEqual(20);
+    expect(polyCost).toBeLessThanOrEqual(14);
+    expect(kalshiCost).toBeLessThanOrEqual(14);
+    expect(signal.projectedNetProfitUsd).toBeGreaterThan(0);
+  });
+
+  it("blocks a pair above the gross entry threshold even when asymmetric sizing is possible", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.35,
+            depth: 300,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.59,
+            depth: 300,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+        kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.grossCost).toBe(0.94);
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Seuil brut non atteint");
+    expect(signal.legs[0].size).toBeGreaterThan(0);
+  });
+
+  it("keeps the pair inside the total fee-aware budget even when the venue minimum is 5 shares", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899060000,
@@ -409,9 +501,15 @@ describe("live signal engine", () => {
     });
 
     expect(signal.eligible).toBe(true);
-    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(8.4, 4);
-    expect(signal.legs[0].size).toBe(20);
-    expect(signal.legs[1].size).toBe(20);
+    expect(signal.legs[0].targetNotionalUsd).toBeCloseTo(8.82, 4);
+    expect(signal.legs[0].size).toBe(21);
+    expect(signal.legs[1].size).toBe(21);
+    expect(
+      signal.legs[0].targetNotionalUsd +
+        signal.legs[0].feeEstimateUsd +
+        signal.legs[1].targetNotionalUsd +
+        signal.legs[1].feeEstimateUsd,
+    ).toBeLessThanOrEqual(20);
   });
 
   it("still prefers Kalshi as the primary venue even when Polymarket looks shallower on displayed depth", () => {
@@ -591,6 +689,96 @@ describe("live signal engine", () => {
     expect(signal.eligible).toBe(true);
   });
 
+  it("uses the total pair budget beyond the old 20-contract leg-budget clip", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.4,
+            depth: 300,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.45,
+            depth: 300,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+        kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
+    expect(signal.legs[0].size).toBe(23);
+    expect(signal.legs[1].size).toBe(23);
+    expect(signal.legs[0].targetNotionalUsd).toBe(9.2);
+    expect(signal.legs[1].targetNotionalUsd).toBe(10.35);
+    expect(signal.eligible).toBe(true);
+  });
+
+  it("caps balanced payout sizing when fees would exceed the total pair budget", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.4,
+            depth: 300,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.49,
+            depth: 300,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+        kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
+    expect(signal.legs[0].size).toBe(22);
+    expect(signal.legs[1].size).toBe(22);
+    expect(
+      signal.legs[0].targetNotionalUsd +
+        signal.legs[0].feeEstimateUsd +
+        signal.legs[1].targetNotionalUsd +
+        signal.legs[1].feeEstimateUsd,
+    ).toBeLessThanOrEqual(20);
+    expect(signal.eligible).toBe(true);
+  });
+
   it("caps the displayed opportunity size to the configured Kalshi multi-clip capacity", () => {
     const [, signal] = buildSignals({
       slotKey: SLOT_KEY,
@@ -646,7 +834,7 @@ describe("live signal engine", () => {
     expect(signal.eligible).toBe(true);
   });
 
-  it("blocks entries when the polymarket budget cannot satisfy the venue minimum size", () => {
+  it("blocks entries when the balanced model cannot satisfy venue minimum size under budget", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899060000,
@@ -671,7 +859,48 @@ describe("live signal engine", () => {
     });
 
     expect(signal.eligible).toBe(false);
-    expect(signal.reasons).toContain("Taille minimum Polymarket non atteinte");
+    expect(signal.reasons).toContain("Budget/profit insuffisant frais inclus");
+  });
+
+  it("blocks entries when the 70% leg capital cap prevents the minimum Kalshi size", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.1,
+            depth: 300,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.8,
+            depth: 300,
+            minOrderSize: 20,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 20,
+        kalshiDepthHeadroomContracts: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.grossCost).toBe(0.9);
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Budget/profit insuffisant frais inclus");
   });
 
   it("blocks re-entry when the improvement is below the configured threshold", () => {
@@ -866,7 +1095,7 @@ describe("live signal engine", () => {
     expect(downYes.reasons.join(" | ")).toContain("zone morte");
   });
 
-  it("keeps a too-recent slot eligible away from the dead-zone with size reduced to 25%", () => {
+  it("blocks a too-recent slot instead of entering with the removed 25% safeguard size", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899030000,
@@ -883,13 +1112,11 @@ describe("live signal engine", () => {
       lastEntryCosts: {},
     });
 
-    expect(signal.mismatchGuardAction).toBe("reduce_size");
-    expect(signal.mismatchSizeMultiplier).toBe(0.25);
-    expect(signal.mismatchRisk).toBe("medium");
-    expect(signal.eligible).toBe(true);
-    expect(signal.reasons).toEqual([]);
-    expect(signal.legs[0].size).toBeLessThan(20);
-    expect(signal.legs[1].size).toBeLessThan(20);
+    expect(signal.mismatchGuardAction).toBe("block");
+    expect(signal.mismatchSizeMultiplier).toBe(1);
+    expect(signal.mismatchRisk).toBe("high");
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons.join(" | ")).toContain("taille x0.25 désactivée");
   });
 
   it("reduces size by 50% on soft venue disagreement without blocking", () => {
@@ -1047,12 +1274,13 @@ describe("live signal engine", () => {
     expect(midSlot.mismatchGuardAction).toBe("reduce_size");
     expect(midSlot.mismatchSizeMultiplier).toBe(0.5);
     expect(midSlot.eligible).toBe(true);
-    expect(lateSlot.mismatchGuardAction).toBe("reduce_size");
-    expect(lateSlot.mismatchSizeMultiplier).toBe(0.25);
-    expect(lateSlot.eligible).toBe(true);
+    expect(lateSlot.mismatchGuardAction).toBe("block");
+    expect(lateSlot.mismatchSizeMultiplier).toBe(1);
+    expect(lateSlot.eligible).toBe(false);
+    expect(lateSlot.reasons.join(" | ")).toContain("taille x0.25 désactivée");
   });
 
-  it("lets reduced sizing trip venue minimum order checks when the trade becomes too small", () => {
+  it("blocks removed 25% safeguard sizing before entering tiny trades", () => {
     const [signal] = buildSignals({
       slotKey: SLOT_KEY,
       now: 1774899030000,
@@ -1079,10 +1307,10 @@ describe("live signal engine", () => {
       lastEntryCosts: {},
     });
 
-    expect(signal.mismatchGuardAction).toBe("reduce_size");
-    expect(signal.mismatchSizeMultiplier).toBe(0.25);
+    expect(signal.mismatchGuardAction).toBe("block");
+    expect(signal.mismatchSizeMultiplier).toBe(1);
     expect(signal.eligible).toBe(false);
-    expect(signal.reasons).toContain("Taille minimum Polymarket non atteinte");
+    expect(signal.reasons.join(" | ")).toContain("taille x0.25 désactivée");
   });
 
   it("does not block or reduce when mismatch guard actions are disabled, while keeping metrics", () => {

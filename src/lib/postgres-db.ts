@@ -561,6 +561,17 @@ async function bootstrapDatabase(pool: Pool) {
       [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.kalshiPrimaryProbeClipContracts)],
     );
 
+    await pool.query(
+      `
+      UPDATE strategy_configs
+      SET
+        payload = jsonb_set(payload, '{maxLegCapitalShare}', $2::jsonb, true),
+        updated_at = $1
+      WHERE NOT (payload ? 'maxLegCapitalShare')
+    `,
+      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare)],
+    );
+
     const legacyWorkerState = await pool.query<{
       phase: WorkerState["phase"];
       current_slot_key: string | null;

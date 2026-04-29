@@ -3,7 +3,7 @@ import {
   applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateKalshiFee,
-  deriveAlignedPairSize,
+  deriveBalancedPayoutPairSize,
   deriveKalshiPrimaryClipPlan,
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
@@ -2782,12 +2782,7 @@ async function repriceIntentWithinExecutionBuffer(
   }
 
   const allowedGrossCost = settings.grossEntryThreshold + settings.executionPriceBuffer;
-  const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
-  if (
-    pair.poly.price > allowedLegPrice + ORDER_SIZE_TOLERANCE ||
-    pair.kalshi.price > allowedLegPrice + ORDER_SIZE_TOLERANCE ||
-    pair.grossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE
-  ) {
+  if (pair.grossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE) {
     return null;
   }
 
@@ -2806,30 +2801,33 @@ async function repriceIntentWithinExecutionBuffer(
       settings.kalshiPrimaryMaxClips,
     ) ?? Number.POSITIVE_INFINITY,
   );
-  const alignedSizing = deriveAlignedPairSize({
-    targetLegNotionalUsd: settings.maxPairNotionalUsd / 2,
+  const balancedSizing = deriveBalancedPayoutPairSize({
+    targetPairBudgetUsd: settings.maxPairNotionalUsd,
+    maxLegCapitalShare: settings.maxLegCapitalShare,
     pairSizeCap: desiredPairSize,
     polymarket: {
       price: pair.poly.price,
       depth: pair.poly.depth,
       minOrderSize: pair.poly.minOrderSize,
       fallbackMinOrderSize: settings.minOrderSize,
+      feeRateBps: pair.poly.feeRateBps,
     },
     kalshi: {
       price: pair.kalshi.price,
       depth: pair.kalshi.depth,
       minOrderSize: pair.kalshi.minOrderSize,
       fallbackMinOrderSize: 1,
+      feeMultiplier: pair.kalshi.feeMultiplier,
     },
     kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   });
-  if (alignedSizing.commonSize <= 0) {
+  if (balancedSizing.commonSize <= 0) {
     return null;
   }
 
   const updatedLegs = intent.legs.map((leg) => {
     const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
-    const size = leg.venue === "polymarket" ? alignedSizing.polySize : alignedSizing.kalshiSize;
+    const size = leg.venue === "polymarket" ? balancedSizing.polySize : balancedSizing.kalshiSize;
     if (size <= 0 || liveLeg.price === null) {
       return null;
     }
@@ -2849,6 +2847,7 @@ async function repriceIntentWithinExecutionBuffer(
   return {
     ...intent,
     grossCost: pair.grossCost,
+    projectedNetProfitUsd: balancedSizing.projectedNetProfitUsd,
     updatedAt: now,
     legs: updatedLegs as OrderIntent["legs"],
   };
@@ -2864,7 +2863,6 @@ async function diagnoseRepriceIntentFailure(
   const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
   const pair = getLivePairSnapshot(intent, polymarketState.quote, kalshiState.quote, settings);
   const allowedGrossCost = settings.grossEntryThreshold + settings.executionPriceBuffer;
-  const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
 
   if (!pair) {
     return {
@@ -2882,12 +2880,6 @@ async function diagnoseRepriceIntentFailure(
   }
 
   const priceReasons = [];
-  if (pair.poly.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
-    priceReasons.push("polymarket_leg_above_allowed_price");
-  }
-  if (pair.kalshi.price > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
-    priceReasons.push("kalshi_leg_above_allowed_price");
-  }
   if (pair.grossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE) {
     priceReasons.push("gross_above_allowed_cost");
   }
@@ -2900,7 +2892,6 @@ async function diagnoseRepriceIntentFailure(
       allowedGrossCost,
       polyPrice: pair.poly.price,
       kalshiPrice: pair.kalshi.price,
-      allowedLegPrice,
       pairSizeCap: pairSizeCap ?? null,
     };
   }
@@ -2925,30 +2916,33 @@ async function diagnoseRepriceIntentFailure(
       settings.kalshiPrimaryMaxClips,
     ) ?? Number.POSITIVE_INFINITY,
   );
-  const alignedSizing = deriveAlignedPairSize({
-    targetLegNotionalUsd: settings.maxPairNotionalUsd / 2,
+  const balancedSizing = deriveBalancedPayoutPairSize({
+    targetPairBudgetUsd: settings.maxPairNotionalUsd,
+    maxLegCapitalShare: settings.maxLegCapitalShare,
     pairSizeCap: desiredPairSize,
     polymarket: {
       price: pair.poly.price,
       depth: pair.poly.depth,
       minOrderSize: pair.poly.minOrderSize,
       fallbackMinOrderSize: settings.minOrderSize,
+      feeRateBps: pair.poly.feeRateBps,
     },
     kalshi: {
       price: pair.kalshi.price,
       depth: pair.kalshi.depth,
       minOrderSize: pair.kalshi.minOrderSize,
       fallbackMinOrderSize: 1,
+      feeMultiplier: pair.kalshi.feeMultiplier,
     },
     kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   });
 
   return {
-    reason: alignedSizing.commonSize <= 0 ? "insufficient_executable_size" : "unknown_reprice_failure",
+    reason: balancedSizing.commonSize <= 0 ? "insufficient_balanced_payout_size" : "unknown_reprice_failure",
     slotKey: slot.key,
     desiredPairSize,
     pairSizeCap: pairSizeCap ?? null,
-    alignedSizing,
+    balancedSizing,
     polyPrice: pair.poly.price,
     polyDepth: pair.poly.depth,
     polyMinOrderSize: pair.poly.minOrderSize,
@@ -3042,13 +3036,23 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
-  const allowedLegPrice = settings.maxLegPrice + settings.executionPriceBuffer;
   const boundedPrice =
     leg.venue === "kalshi"
       ? deriveEffectiveKalshiRetryOrderPrice(requestedPrice, leg.side, settings.maxSlippageBps) ?? requestedPrice
       : requestedPrice;
-  if (boundedPrice > allowedLegPrice + ORDER_SIZE_TOLERANCE) {
-    return null;
+  const referencePrice = leg.requestedPrice;
+  if (referencePrice !== null) {
+    if (leg.side === "SELL") {
+      const allowedWorstPrice = referencePrice - settings.executionPriceBuffer;
+      if (boundedPrice + ORDER_SIZE_TOLERANCE < allowedWorstPrice) {
+        return null;
+      }
+    } else {
+      const allowedWorstPrice = referencePrice + settings.executionPriceBuffer;
+      if (boundedPrice > allowedWorstPrice + ORDER_SIZE_TOLERANCE) {
+        return null;
+      }
+    }
   }
 
   const fallbackMinOrderSize = leg.venue === "polymarket" ? settings.minOrderSize : 1;
@@ -3229,11 +3233,13 @@ function getLivePairSnapshot(
       price: polyPrice,
       depth: polyOutcome.depth,
       minOrderSize: polyOutcome.minOrderSize,
+      feeRateBps: polyOutcome.feeRateBps ?? polymarket.feeRateBps,
     },
     kalshi: {
       price: kalshiPrice,
       depth: kalshiSizingDepth,
       minOrderSize: kalshiOutcome.minOrderSize,
+      feeMultiplier: kalshi.feeMultiplier,
     },
   };
 }

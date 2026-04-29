@@ -13,4 +13,4 @@ data/*.sqlite
 data/*.sqlite-*
 tsconfig.tsbuildinfo
 .DS_Store
-PLAN_IMPLEMENTATION.md
+PLAN.md
