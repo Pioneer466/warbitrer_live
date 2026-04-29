@@ -6,6 +6,7 @@ import {
   buildRecoveryMarkets,
   buildRedeemTxData,
   classifyPolymarketRelayerTerminalState,
+  resolvePolymarketConversionFinality,
 } from "@/lib/recovery";
 import type { PositionSnapshot } from "@/lib/types";
 
@@ -31,6 +32,35 @@ describe("recovery helpers", () => {
     expect(classifyPolymarketRelayerTerminalState("STATE_CONFIRMED")).toBe("confirmed");
     expect(classifyPolymarketRelayerTerminalState("STATE_FAILED")).toBe("failed");
     expect(classifyPolymarketRelayerTerminalState("STATE_INVALID")).toBe("failed");
+  });
+
+  it("does not finalize relayer confirmations until the Polymarket position changed", () => {
+    expect(
+      resolvePolymarketConversionFinality({
+        terminalStatus: "confirmed",
+        pendingCreatedAt: 1_000,
+        now: 2_000,
+        conversionStillActionable: true,
+      }),
+    ).toBeNull();
+
+    expect(
+      resolvePolymarketConversionFinality({
+        terminalStatus: "confirmed",
+        pendingCreatedAt: 1_000,
+        now: 1_000 + 10 * 60 * 1_000,
+        conversionStillActionable: true,
+      }),
+    ).toBe("failed");
+
+    expect(
+      resolvePolymarketConversionFinality({
+        terminalStatus: "confirmed",
+        pendingCreatedAt: 1_000,
+        now: 2_000,
+        conversionStillActionable: false,
+      }),
+    ).toBe("confirmed");
   });
 
   it("encodes mergePositions with a 6-decimal collateral amount", () => {

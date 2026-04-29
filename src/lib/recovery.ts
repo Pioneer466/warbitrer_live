@@ -154,7 +154,29 @@ export async function reconcilePolymarketProxyConversions(now = Date.now()) {
 
     const terminalStatus = classifyPolymarketRelayerTerminalState(relayerTransaction.state);
     if (terminalStatus) {
-      await writePolymarketConversionTerminalEvent(terminalStatus, pending, relayerTransaction, now);
+      const conversionStillActionable =
+        terminalStatus === "confirmed" ? await isPolymarketConversionStillActionable(pending.event, env) : false;
+      const finalStatus = resolvePolymarketConversionFinality({
+        terminalStatus,
+        pendingCreatedAt: pending.event.createdAt,
+        now,
+        conversionStillActionable,
+      });
+      if (!finalStatus) {
+        continue;
+      }
+
+      await writePolymarketConversionTerminalEvent(
+        finalStatus,
+        pending,
+        finalStatus === "failed" && terminalStatus === "confirmed" && conversionStillActionable
+          ? {
+              ...relayerTransaction,
+              state: "STATE_CONFIRMED_NO_POSITION_CHANGE",
+            }
+          : relayerTransaction,
+        now,
+      );
       completed.push(pending.relayerTransactionId);
     }
   }
@@ -172,6 +194,28 @@ export function classifyPolymarketRelayerTerminalState(state: string): "confirme
   }
 
   return null;
+}
+
+export function resolvePolymarketConversionFinality({
+  terminalStatus,
+  pendingCreatedAt,
+  now,
+  conversionStillActionable,
+}: {
+  terminalStatus: "confirmed" | "failed";
+  pendingCreatedAt: number;
+  now: number;
+  conversionStillActionable: boolean;
+}): "confirmed" | "failed" | null {
+  if (terminalStatus === "failed") {
+    return "failed";
+  }
+
+  if (!conversionStillActionable) {
+    return "confirmed";
+  }
+
+  return now - pendingCreatedAt >= AUTO_CONVERT_PENDING_TIMEOUT_MS ? "failed" : null;
 }
 
 export function buildRedeemTxData(conditionId: string) {
@@ -524,7 +568,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
     path: env.POLY_PRIVATE_KEY_PATH,
     label: "POLY_PRIVATE_KEY",
   });
-  const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-rpc.com");
+  const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-bor.publicnode.com");
   const signer = new Wallet(privateKey, provider);
 
   if (!env.POLY_FUNDER_ADDRESS || signer.address.toLowerCase() !== env.POLY_FUNDER_ADDRESS.toLowerCase()) {
@@ -665,7 +709,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
     path: env.POLY_PRIVATE_KEY_PATH,
     label: "POLY_PRIVATE_KEY",
   });
-  const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-rpc.com");
+  const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-bor.publicnode.com");
   const signer = new Wallet(privateKey, provider);
 
   if (!env.POLY_FUNDER_ADDRESS || signer.address.toLowerCase() !== env.POLY_FUNDER_ADDRESS.toLowerCase()) {
@@ -820,6 +864,20 @@ function shouldThrottlePolymarketConversionSubmission(
   }
 
   return latestSubmittedAt !== null && now - latestSubmittedAt < AUTO_CONVERT_COOLDOWN_MS;
+}
+
+async function isPolymarketConversionStillActionable(
+  event: Awaited<ReturnType<typeof readRunEvents>>[number],
+  env = readEnv(),
+) {
+  const marketRef = typeof event.payload?.marketRef === "string" ? event.payload.marketRef : null;
+  if (!marketRef) {
+    return false;
+  }
+
+  const positions = await readPositions();
+  const markets = buildRecoveryMarkets(positions, env, true);
+  return markets.some((market) => market.marketRef === marketRef && market.conversionAction !== null);
 }
 
 async function writePolymarketConversionTerminalEvent(
