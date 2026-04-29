@@ -235,73 +235,94 @@ type TickSharedContext = {
 
 export async function processTick(now = new Date()) {
   const nowTs = now.getTime();
+  const tickStartedAt = Date.now();
   const errors: string[] = [];
   const settingsMap = await readSettingsMap();
   const sharedVenueBalances = await refreshBalances(getGlobalPolyBridgeLowWaterUsdc(settingsMap), nowTs);
   const sharedVenuePositions = await refreshVenuePositions();
 
-  for (const asset of MARKET_ASSETS) {
+  const contexts = MARKET_ASSETS.map((asset) => {
     const settings = settingsMap[asset];
     const slot = getCurrentSlot(asset, now);
-    let scanSucceeded = false;
-    let executeSucceeded = false;
-    let reconcileSucceeded = false;
-    const assetErrors: string[] = [];
-
-    await writeWorkerState(asset, {
-      phase: "scan",
-      currentSlotKey: slot.key,
-      lastError: null,
-    });
-
     const coordinator = createExecutionCoordinator(asset, settings, {
       venueBalances: sharedVenueBalances,
       venuePositions: sharedVenuePositions,
     });
 
-    try {
-      await coordinator.scan(slot, nowTs);
-      scanSucceeded = true;
-    } catch (error) {
-      const message = `[${asset}] ${toErrorMessage(error)}`;
-      assetErrors.push(message);
-      errors.push(message);
-    }
+    return {
+      asset,
+      slot,
+      coordinator,
+      scanSucceeded: false,
+      executeSucceeded: false,
+      reconcileSucceeded: false,
+      assetErrors: [] as string[],
+    };
+  });
 
+  await Promise.all(
+    contexts.map(async (context) => {
+      await writeWorkerState(context.asset, {
+        phase: "scan",
+        currentSlotKey: context.slot.key,
+        lastError: null,
+      });
+
+      try {
+        await context.coordinator.scan(context.slot, nowTs);
+        context.scanSucceeded = true;
+      } catch (error) {
+        const message = `[${context.asset}] ${toErrorMessage(error)}`;
+        context.assetErrors.push(message);
+        errors.push(message);
+      }
+    }),
+  );
+
+  const scanFinishedAt = Date.now();
+
+  for (const context of contexts) {
     try {
-      await writeWorkerState(asset, {
+      await writeWorkerState(context.asset, {
         phase: "execute",
-        currentSlotKey: slot.key,
+        currentSlotKey: context.slot.key,
       });
-      await coordinator.execute(slot, nowTs);
-      executeSucceeded = true;
+      await context.coordinator.execute(context.slot, nowTs);
+      context.executeSucceeded = true;
     } catch (error) {
-      const message = `[${asset}] ${toErrorMessage(error)}`;
-      assetErrors.push(message);
+      const message = `[${context.asset}] ${toErrorMessage(error)}`;
+      context.assetErrors.push(message);
       errors.push(message);
     }
 
     try {
-      await writeWorkerState(asset, {
+      await writeWorkerState(context.asset, {
         phase: "reconcile",
-        currentSlotKey: slot.key,
+        currentSlotKey: context.slot.key,
       });
-      await coordinator.reconcile(slot, nowTs);
-      reconcileSucceeded = true;
+      await context.coordinator.reconcile(context.slot, nowTs);
+      context.reconcileSucceeded = true;
     } catch (error) {
-      const message = `[${asset}] ${toErrorMessage(error)}`;
-      assetErrors.push(message);
+      const message = `[${context.asset}] ${toErrorMessage(error)}`;
+      context.assetErrors.push(message);
       errors.push(message);
     }
 
-    await writeWorkerState(asset, {
+    await writeWorkerState(context.asset, {
       phase: "idle",
-      currentSlotKey: slot.key,
-      lastScanAt: scanSucceeded ? nowTs : undefined,
-      lastExecuteAt: executeSucceeded ? nowTs : undefined,
-      lastReconcileAt: reconcileSucceeded ? nowTs : undefined,
-      lastError: assetErrors[0] ?? null,
+      currentSlotKey: context.slot.key,
+      lastScanAt: context.scanSucceeded ? nowTs : undefined,
+      lastExecuteAt: context.executeSucceeded ? nowTs : undefined,
+      lastReconcileAt: context.reconcileSucceeded ? nowTs : undefined,
+      lastError: context.assetErrors[0] ?? null,
     });
+  }
+
+  const tickDurationMs = Date.now() - tickStartedAt;
+  if (tickDurationMs > 5_000) {
+    console.warn(
+      `[worker] tick slow: total=${tickDurationMs}ms scan=${scanFinishedAt - tickStartedAt}ms post_scan=${Date.now() - scanFinishedAt}ms`,
+    );
   }
 
   if (errors.length > 0) {
@@ -451,13 +472,7 @@ export function createExecutionCoordinator(
         const preparedIntent =
           settings.shadowMode
             ? { intent: baseIntent, reason: null }
-            : await prepareIntentForLiveExecution(baseIntent, slot, settings, now, {
-                useFastKalshiPrimaryPreparation: shouldUseFastKalshiPrimaryPreparation(
-                  baseIntent,
-                  snapshot.capturedAt,
-                  now,
-                ),
-              });
+            : await prepareIntentForLiveExecution(baseIntent, slot, settings, Date.now());
         if (!preparedIntent.intent) {
           await writeRunEvent({
             level: "warn",
@@ -835,6 +850,33 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   const primaryRequest = buildVenueOrderRequest(primaryLeg, settings.maxSlippageBps, "IOC", false, {
     kalshiPriceTicksSlippage: currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
   });
+  const primaryRestPreflight =
+    currentIntent.primaryVenue === "kalshi"
+      ? await preflightKalshiPrimaryRestLiquidity(primaryLeg, primaryRequest, settings)
+      : null;
+  if (primaryRestPreflight?.status === "insufficient") {
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "failed",
+      Date.now(),
+      `Primary order skipped before submission (Kalshi REST depth insufficient for ${primaryRequest.size.toFixed(2)} contracts)`,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.primary.no_fill",
+      message: `Intent ${currentIntent.id} closed before Kalshi primary submission after REST book preflight`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        venue: currentIntent.primaryVenue,
+        orderType: primaryRequest.orderType,
+        restPreflight: primaryRestPreflight,
+      },
+      createdAt: Date.now(),
+    });
+    return currentIntent;
+  }
   let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let primaryOrder: LiveOrder;
   try {
@@ -858,6 +900,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         requestedPrice: primaryLeg.requestedPrice,
         orderPrice: primaryRequest.price,
         requestedSize: primaryRequest.size,
+        restPreflight: primaryRestPreflight,
       },
       createdAt: now,
     });
@@ -1129,8 +1172,7 @@ async function executeKalshiPrimaryMultiClip(
   for (let clipIndex = 0; clipIndex < clipPlan.length; clipIndex += 1) {
     const clipAttemptNow = Date.now();
     const clipSize = clipPlan[clipIndex];
-    const fastClipIntent = deriveFastKalshiPrimaryClipIntent(currentIntent, primaryLeg.id, clipSize, clipAttemptNow);
-    const repricedIntent = fastClipIntent ?? await repriceIntentWithinExecutionBuffer(
+    const repricedIntent = await repriceIntentWithinExecutionBuffer(
       currentIntent,
       slot,
       settings,
@@ -1235,10 +1277,115 @@ async function executeKalshiPrimaryMultiClip(
       };
     }
 
-    let primaryExecutionIntent = repricedIntent;
-    const primaryRequest = buildVenueOrderRequest(repricedPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+    let primaryExecutionIntent: OrderIntent = repricedIntent;
+    let executionPrimaryLeg = repricedPrimaryLeg;
+    let primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
       kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     });
+    const restPreflight = await preflightKalshiPrimaryRestLiquidity(
+      executionPrimaryLeg,
+      primaryRequest,
+      settings,
+    );
+    if (restPreflight.status === "insufficient") {
+      const safeClipSize = normalizeVenueTargetSize(
+        "kalshi",
+        restPreflight.executableDepth ?? 0,
+        1,
+        1,
+      );
+      const minimumClipSize = Math.max(1, settings.minOrderSize);
+
+      if (safeClipSize + ORDER_SIZE_TOLERANCE >= minimumClipSize) {
+        const clippedIntent = deriveFastKalshiPrimaryClipIntent(
+          primaryExecutionIntent,
+          primaryLeg.id,
+          safeClipSize,
+          clipAttemptNow,
+        );
+        const clippedPrimaryLeg = clippedIntent?.legs.find((leg) => leg.id === primaryLeg.id) ?? null;
+
+        if (clippedIntent && clippedPrimaryLeg) {
+          primaryExecutionIntent = clippedIntent;
+          executionPrimaryLeg = clippedPrimaryLeg;
+          primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+            kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
+          });
+          await writeRunEvent({
+            level: "warn",
+            eventType: "order.primary.clip_rest_resized",
+            message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} reduced by REST book preflight`,
+            payload: {
+              intentId: currentIntent.id,
+              slotKey: currentIntent.slotKey,
+              clipIndex: clipIndex + 1,
+              clipCount: clipPlan.length,
+              originalClipSize: clipSize,
+              resizedClipSize: safeClipSize,
+              restPreflight,
+            },
+            createdAt: clipAttemptNow,
+          });
+        }
+      } else {
+        totalPrimaryOrderAttempts += 1;
+        failedClipSummaries.push({
+          clipIndex: clipIndex + 1,
+          requestedSize: executionPrimaryLeg.requestedSize,
+          attempts: 0,
+          status: "rejected",
+          detail: "kalshi_rest_preflight_insufficient_depth",
+        });
+
+        if (clipIndex < clipPlan.length - 1) {
+          await writeRunEvent({
+            level: "warn",
+            eventType: "order.primary.clip_fallback",
+            message: `Primary Kalshi fallback moved from clip ${clipIndex + 1}/${clipPlan.length} after REST book preflight`,
+            payload: {
+              intentId: currentIntent.id,
+              slotKey: currentIntent.slotKey,
+              clipIndex: clipIndex + 1,
+              clipCount: clipPlan.length,
+              clipSize,
+              nextClipSize: clipPlan[clipIndex + 1],
+              reason: "kalshi_rest_preflight_insufficient_depth",
+              restPreflight,
+            },
+            createdAt: clipAttemptNow,
+          });
+          continue;
+        }
+
+        currentIntent = markIntentStatus(
+          currentIntent,
+          "failed",
+          clipAttemptNow,
+          `Primary fallback exhausted at clip ${clipIndex + 1}/${clipPlan.length} before submission (Kalshi REST depth insufficient); attempted ${totalPrimaryOrderAttempts} preflight${totalPrimaryOrderAttempts === 1 ? "" : "s"} across fallback clips ${clipPlan.join(" -> ")}; last requested ${executionPrimaryLeg.requestedSize.toFixed(2)}`,
+        );
+        await writeOrderIntent(currentIntent);
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.primary.no_fill",
+          message: `Intent ${currentIntent.id} closed before Kalshi primary submission after REST book preflight`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            venue: currentIntent.primaryVenue,
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            clipPlan,
+            failedClipSummaries,
+            restPreflight,
+          },
+          createdAt: clipAttemptNow,
+        });
+        return {
+          intent: currentIntent,
+          outcome: "failed",
+        };
+      }
+    }
     let primaryOrderAttempts = 1;
     let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
     let primaryOrder: LiveOrder;
@@ -1254,7 +1401,7 @@ async function executeKalshiPrimaryMultiClip(
       primaryOrder = buildLiveOrderRecord(
         currentIntent.asset,
         currentIntent.id,
-        repricedPrimaryLeg,
+        executionPrimaryLeg,
         primaryRequest,
         primaryResult,
         clipAttemptNow,
@@ -1272,15 +1419,16 @@ async function executeKalshiPrimaryMultiClip(
           clipCount: clipPlan.length,
           clipSize,
           orderId: primaryOrder.venueOrderId,
-          requestedPrice: repricedPrimaryLeg.requestedPrice,
+          requestedPrice: executionPrimaryLeg.requestedPrice,
           orderPrice: primaryRequest.price,
+          restPreflight,
         },
         createdAt: clipAttemptNow,
       });
     } catch (error) {
       const recovered = await recoverKalshiOrderSubmissionForIntent(
         currentIntent,
-        repricedPrimaryLeg,
+        executionPrimaryLeg,
         primaryRequest,
         clipAttemptNow,
         "primary",
@@ -1399,7 +1547,7 @@ async function executeKalshiPrimaryMultiClip(
       const primaryRetryPlan = resolveKalshiPrimaryMultiClipRetryPlan(currentIntent.primaryVenue, primaryResult);
       const retried = await retryLegWithinExecutionBufferWithAttempts(
         currentIntent,
-        repricedPrimaryLeg,
+        executionPrimaryLeg,
         slot,
         settings,
         clipAttemptNow,
@@ -1407,7 +1555,7 @@ async function executeKalshiPrimaryMultiClip(
         primaryRetryPlan.attempts,
         primaryRetryPlan.retryDelayMs,
         {
-          pairSizeCap: clipSize,
+          pairSizeCap: executionPrimaryLeg.requestedSize,
           persistRepricedIntent: false,
         },
       );
@@ -1586,14 +1734,14 @@ async function executeKalshiPrimaryMultiClip(
       } else {
         const failureKalshiBookWs = await buildKalshiPrimaryBookTelemetry(
           slot,
-          repricedPrimaryLeg,
+          executionPrimaryLeg,
           settings,
           Date.now(),
           primaryOrder.requestedPrice,
           primaryOrder.requestedSize,
         );
         const failureKalshiBookRest = await buildKalshiPrimaryRestFailureBookTelemetry(
-          repricedPrimaryLeg,
+          executionPrimaryLeg,
           settings,
           primaryOrder.requestedPrice,
           primaryOrder.requestedSize,
@@ -3325,6 +3473,81 @@ async function buildKalshiPrimaryRestFailureBookTelemetry(
       limitPrice: orderPrice,
       requestedSize,
       error: toErrorMessage(error),
+    };
+  }
+}
+
+async function preflightKalshiPrimaryRestLiquidity(
+  leg: Pick<OrderIntent["legs"][number], "marketRef" | "outcome" | "side" | "venue">,
+  request: Pick<VenueOrderRequest, "price" | "size">,
+  settings: Pick<StrategyConfig, "kalshiPrimaryDepthSafetyFactor" | "kalshiDepthHeadroomContracts">,
+) {
+  if (leg.venue !== "kalshi" || leg.side !== "BUY") {
+    return {
+      status: "skipped" as const,
+      reason: "not_kalshi_buy",
+      requestedSize: request.size,
+      orderPrice: request.price,
+      cumulativeDepthWithinLimit: null,
+      executableDepth: null,
+      topLevels: [],
+    };
+  }
+
+  if (request.price === null) {
+    return {
+      status: "insufficient" as const,
+      reason: "missing_order_price",
+      requestedSize: request.size,
+      orderPrice: request.price,
+      cumulativeDepthWithinLimit: null,
+      executableDepth: 0,
+      topLevels: [],
+    };
+  }
+
+  try {
+    const orderbook = await fetchKalshiOrderbook(leg.marketRef);
+    const levels = normalizeKalshiNumericOrderbookLevels(orderbook);
+    const kalshiOutcome = leg.outcome === "YES" ? "YES" : "NO";
+    const cumulativeDepth = computeKalshiBuyDepthWithinPriceRange(levels, kalshiOutcome, request.price);
+    const safetyAdjustedDepth = applyKalshiPrimaryDepthSafetyFactor(
+      cumulativeDepth,
+      settings.kalshiPrimaryDepthSafetyFactor,
+    );
+    const executableDepth = getVenueExecutableDepth(
+      "kalshi",
+      safetyAdjustedDepth,
+      settings.kalshiDepthHeadroomContracts,
+    );
+    const topLevels = deriveKalshiBuyPriceLevels(levels, kalshiOutcome)
+      .slice(0, 3)
+      .map(([price, size]) => ({ price, size }));
+    const insufficient =
+      executableDepth !== null && executableDepth + ORDER_SIZE_TOLERANCE < request.size;
+
+    return {
+      status: insufficient ? "insufficient" as const : "ready" as const,
+      reason: insufficient ? "rest_depth_below_requested_size" : null,
+      requestedSize: request.size,
+      orderPrice: request.price,
+      cumulativeDepthWithinLimit: cumulativeDepth,
+      depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+      safetyAdjustedCumulativeDepthWithinLimit: safetyAdjustedDepth,
+      kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
+      executableDepth,
+      topLevels,
+      seq: orderbook.seq ?? null,
+    };
+  } catch (error) {
+    return {
+      status: "unavailable" as const,
+      reason: toErrorMessage(error),
+      requestedSize: request.size,
+      orderPrice: request.price,
+      cumulativeDepthWithinLimit: null,
+      executableDepth: null,
+      topLevels: [],
     };
   }
 }

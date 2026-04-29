@@ -14,7 +14,10 @@ ExecStart=/usr/bin/npm run start:worker
 Restart=always
 RestartSec=5
 TimeoutStartSec=60
-KillSignal=SIGINT
+TimeoutStopSec=15
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+KillMode=control-group
 SyslogIdentifier=warbitrer-worker
 
 [Install]
