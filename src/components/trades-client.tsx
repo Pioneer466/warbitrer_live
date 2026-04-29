@@ -18,7 +18,6 @@ const TRADE_FILTERS: Array<MarketAsset | "all"> = ["all", ...ACTIVE_MARKET_ASSET
 export function TradesClient() {
   const [assetFilter, setAssetFilter] = useState<MarketAsset | "all">("all");
   const { data, error, loading } = usePollingJson<TradesResponse>(`/api/trades?asset=${assetFilter}`, 4_000);
-  const [showAllIntents, setShowAllIntents] = useState(false);
   const [showAllExecutions, setShowAllExecutions] = useState(false);
 
   if (loading && !data) {
@@ -42,7 +41,9 @@ export function TradesClient() {
   const intentNotionalUsd = intents.reduce((sum, intent) => sum + intent.targetNotionalUsd, 0);
   const executedNotionalUsd = fills.reduce((sum, fill) => sum + fill.price * fill.size, 0);
   const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
-  const visibleIntents = showAllIntents ? intents : intents.slice(0, 3);
+  const successfulIntents = intents.filter(isSuccessfulIntent);
+  const errorIntents = intents.filter(isErrorIntent);
+  const otherIntentsCount = intents.length - successfulIntents.length - errorIntents.length;
   const visibleExecutions = showAllExecutions ? fills : fills.slice(0, 8);
   const orderGroups = groupOrdersByPair(orders, intentsById);
 
@@ -81,25 +82,28 @@ export function TradesClient() {
         </div>
       </section>
 
-      <Panel title="Intents" meta={`${intents.length} total · ${visibleIntents.length} affichés`}>
+      <Panel
+        title="Intents"
+        meta={`${successfulIntents.length} réussis · ${errorIntents.length} erreurs${otherIntentsCount > 0 ? ` · ${otherIntentsCount} en cours` : ""}`}
+      >
         {intents.length === 0 ? (
           <EmptyState message="Aucun intent enregistré." />
         ) : (
-          <>
-            <div className="grid gap-3">
-              {visibleIntents.map((intent) => (
-                <IntentRow key={intent.id} intent={intent} />
-              ))}
-            </div>
-            {intents.length > 3 ? (
-              <ExpandButton
-                expanded={showAllIntents}
-                collapsedLabel={`Voir les ${intents.length - 3} intents suivants`}
-                expandedLabel="Réduire la liste"
-                onClick={() => setShowAllIntents((value) => !value)}
-              />
-            ) : null}
-          </>
+          <div className="grid gap-4 xl:grid-cols-2">
+            <IntentListColumn
+              title="Trades Réussis"
+              meta="hedged / settled"
+              intents={successfulIntents}
+              emptyMessage="Aucun trade réussi dans cette vue."
+            />
+            <IntentListColumn
+              title="Erreurs"
+              meta="failed / recovery / failure reason"
+              intents={errorIntents}
+              emptyMessage="Aucun intent en erreur dans cette vue."
+              tone="rose"
+            />
+          </div>
         )}
       </Panel>
 
@@ -142,6 +146,70 @@ export function TradesClient() {
       </Panel>
 
       {error ? <PanelMessage title="Erreur" message={error} tone="rose" /> : null}
+    </div>
+  );
+}
+
+function isSuccessfulIntent(intent: OrderIntent) {
+  return intent.status === "hedged" || intent.status === "settled";
+}
+
+function isErrorIntent(intent: OrderIntent) {
+  return (
+    intent.failureReason !== null ||
+    intent.status === "failed" ||
+    intent.status === "canceled" ||
+    intent.status === "unwind_required" ||
+    intent.status === "unwound"
+  );
+}
+
+function IntentListColumn({
+  title,
+  meta,
+  intents,
+  emptyMessage,
+  tone = "default",
+}: {
+  title: string;
+  meta: string;
+  intents: OrderIntent[];
+  emptyMessage: string;
+  tone?: "default" | "rose";
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const visibleIntents = expanded ? intents : intents.slice(0, 4);
+
+  return (
+    <div
+      className={`rounded-[24px] border px-4 py-4 ${
+        tone === "rose" ? "border-rose/20 bg-rose/[0.04]" : "border-white/6 bg-white/[0.02]"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm text-white">{title}</div>
+          <div className="mt-1 text-xs text-mist/60">{meta}</div>
+        </div>
+        <div className={tone === "rose" ? "text-sm text-rose" : "text-sm text-mist"}>{intents.length}</div>
+      </div>
+
+      <div className="mt-4 grid gap-3">
+        {visibleIntents.length === 0 ? (
+          <EmptyState message={emptyMessage} />
+        ) : (
+          visibleIntents.map((intent) => <IntentRow key={intent.id} intent={intent} />)
+        )}
+      </div>
+
+      {intents.length > 4 ? (
+        <ExpandButton
+          expanded={expanded}
+          collapsedLabel={`Voir les ${intents.length - 4} suivants`}
+          expandedLabel="Réduire la liste"
+          onClick={() => setExpanded((value) => !value)}
+        />
+      ) : null}
     </div>
   );
 }

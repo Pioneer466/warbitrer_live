@@ -171,7 +171,7 @@ export function PortfolioClient() {
 
       <StablePnlChangesPanel
         changes={stablePnlChanges}
-        meta="5 derniers points stables"
+        meta="5 dernières fenêtres stables"
         showAsset
       />
     </div>

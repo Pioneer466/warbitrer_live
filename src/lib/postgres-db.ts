@@ -1956,7 +1956,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
     openPositionsCount: positions.filter(isRiskActivePosition).length,
     venueBalances,
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
-    stablePnlChanges: await listStablePnlChanges(pool, 5),
+    stablePnlChanges: await listStablePnlChanges(pool, 25),
     activeBreakers: breakers.filter((breaker) => breaker.active),
   };
 }
