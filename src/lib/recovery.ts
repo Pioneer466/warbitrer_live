@@ -94,16 +94,11 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
           return payloadMarketRef === market.marketRef;
         }),
     )
+    .filter((market) => !shouldThrottlePolymarketConversionSubmission(recentEvents, market.marketRef, now))
     .sort((left, right) => scoreRecoveryMarket(right) - scoreRecoveryMarket(left));
   const submitted: string[] = [];
 
   for (const market of markets.slice(0, availableSubmissionSlots)) {
-    const recentlySubmitted = shouldThrottlePolymarketConversionSubmission(recentEvents, market.marketRef, now);
-
-    if (recentlySubmitted) {
-      continue;
-    }
-
     try {
       const result = await executePolymarketConversion(market);
       if (result.mode === "direct") {
@@ -883,7 +878,7 @@ function deriveMergeableSize(market: RecoveryMarket) {
 
 function deriveRedeemableSize(market: RecoveryMarket) {
   const redeemableSize = market.outcomes.reduce((sum, outcome) => {
-    if (!outcome.redeemable || outcome.size <= 0) {
+    if (!outcome.redeemable || outcome.size <= 0 || outcome.currentValueUsd <= 0) {
       return sum;
     }
 
