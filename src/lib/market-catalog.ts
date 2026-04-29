@@ -93,6 +93,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
 };
 
 export const MARKET_ASSETS = Object.keys(MARKET_CATALOG) as MarketAsset[];
+export const ACTIVE_MARKET_ASSETS: MarketAsset[] = ["btc", "eth", "sol", "xrp", "doge"];
 
 export function getMarketCatalogEntry(asset: MarketAsset) {
   return MARKET_CATALOG[asset];

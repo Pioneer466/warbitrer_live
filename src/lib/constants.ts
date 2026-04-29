@@ -61,7 +61,7 @@ export const DEFAULT_STRATEGY_CONFIG = {
   grossEntryThreshold: DEFAULT_GROSS_ENTRY_THRESHOLD,
   maxLegPrice: DEFAULT_MAX_LEG_PRICE,
   reentryImprovement: 0.01,
-  pollingIntervalMs: 250,
+  pollingIntervalMs: 1_000,
   minOrderSize: DEFAULT_MIN_ORDER_SIZE,
   maxSlippageBps: DEFAULT_MAX_SLIPPAGE_BPS,
   immediateOrderConfirmationTimeoutMs: DEFAULT_IMMEDIATE_ORDER_CONFIRMATION_TIMEOUT_MS,

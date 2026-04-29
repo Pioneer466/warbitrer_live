@@ -26,7 +26,7 @@ import {
   normalizeKalshiNumericOrderbookLevels,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
-import { getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS, getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
 import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
@@ -128,6 +128,7 @@ const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LIMIT = 500;
 const EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS = 5_000;
+const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const SCAN_SLOW_LOG_THRESHOLD_MS = 1_000;
 const EXECUTION_SLOW_LOG_THRESHOLD_MS = 2_000;
 const RECONCILE_SLOW_LOG_THRESHOLD_MS = 5_000;
@@ -144,6 +145,7 @@ let nextScanSequence = 1;
 let executionTickInFlight = false;
 const latestScanByAsset = new Map<MarketAsset, RealtimeScanState>();
 const lastExecutedScanSequenceByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastPersistedScanSnapshotAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
 
@@ -274,7 +276,7 @@ export async function processScanTick(now = new Date()) {
   const sharedVenueBalances = await readVenueBalances();
 
   await Promise.all(
-    MARKET_ASSETS.map(async (asset) => {
+    ACTIVE_MARKET_ASSETS.map(async (asset) => {
       const settings = settingsMap[asset];
       const slot = getCurrentSlot(asset, now);
       const coordinator = createExecutionCoordinator(asset, settings, {
@@ -283,7 +285,11 @@ export async function processScanTick(now = new Date()) {
 
       try {
         const assetScanStartedAt = Date.now();
-        const snapshot = await coordinator.scan(slot, nowTs);
+        const persistSnapshot = shouldPersistScanSnapshot(asset, nowTs);
+        const snapshot = await coordinator.scan(slot, nowTs, { persistSnapshot });
+        if (persistSnapshot) {
+          lastPersistedScanSnapshotAtByAsset[asset] = nowTs;
+        }
         snapshots.push(snapshot);
         latestScanByAsset.set(asset, {
           sequence: nextScanSequence++,
@@ -314,7 +320,7 @@ export async function processScanTick(now = new Date()) {
 
   const scanDurationMs = Date.now() - scanStartedAt;
   if (scanDurationMs > SCAN_SLOW_LOG_THRESHOLD_MS) {
-    console.warn(`[worker] scan slow: total=${scanDurationMs}ms assets=${MARKET_ASSETS.length}`);
+    console.warn(`[worker] scan slow: total=${scanDurationMs}ms assets=${ACTIVE_MARKET_ASSETS.length}`);
   }
 
   if (errors.length > 0) {
@@ -322,6 +328,11 @@ export async function processScanTick(now = new Date()) {
   }
 
   return snapshots;
+}
+
+function shouldPersistScanSnapshot(asset: MarketAsset, now: number) {
+  const lastPersistedAt = lastPersistedScanSnapshotAtByAsset[asset] ?? null;
+  return lastPersistedAt === null || now - lastPersistedAt >= SNAPSHOT_PERSIST_INTERVAL_MS;
 }
 
 export async function processExecutionTick(now = new Date()) {
@@ -344,7 +355,7 @@ async function processExecutionTickUnlocked(now = new Date()) {
   const created: OrderIntent[] = [];
   const pendingScanStates: RealtimeScanState[] = [];
 
-  for (const asset of MARKET_ASSETS) {
+  for (const asset of ACTIVE_MARKET_ASSETS) {
     const scanState = latestScanByAsset.get(asset);
     if (!scanState || lastExecutedScanSequenceByAsset[asset] === scanState.sequence) {
       continue;
@@ -411,7 +422,7 @@ export async function processReconcileTick(now = new Date()) {
   const sharedVenuePositions = await refreshVenuePositions();
   const storedPositions = sharedVenuePositions === null ? await readPositions() : undefined;
 
-  for (const asset of MARKET_ASSETS) {
+  for (const asset of ACTIVE_MARKET_ASSETS) {
     const settings = settingsMap[asset];
     const slot = getCurrentSlot(asset, now);
     const coordinator = createExecutionCoordinator(asset, settings, {
@@ -441,7 +452,7 @@ export async function processReconcileTick(now = new Date()) {
 
   const reconcileDurationMs = Date.now() - reconcileStartedAt;
   if (reconcileDurationMs > RECONCILE_SLOW_LOG_THRESHOLD_MS) {
-    console.warn(`[worker] reconcile slow: total=${reconcileDurationMs}ms assets=${MARKET_ASSETS.length}`);
+    console.warn(`[worker] reconcile slow: total=${reconcileDurationMs}ms assets=${ACTIVE_MARKET_ASSETS.length}`);
   }
 
   if (errors.length > 0) {
@@ -457,7 +468,7 @@ export function createExecutionCoordinator(
   let latestScanSnapshot: OpportunitySnapshot | null = null;
 
   return {
-    async scan(slot, now) {
+    async scan(slot, now, options = {}) {
       const balances = sharedContext.venueBalances ?? (await readVenueBalances());
       const openIntents = await readOpenOrderIntents();
       const effectiveBalances = applyVenueBalanceReservations(balances, openIntents);
@@ -477,16 +488,18 @@ export function createExecutionCoordinator(
         secondsRemaining: slot.secondsRemaining,
       });
 
-      await writeSnapshot({
-        asset: slot.asset,
-        slotKey: slot.key,
-        slotStartTs: slot.startTs,
-        slotEndTs: slot.endTs,
-        capturedAt: now,
-        polymarket,
-        kalshi,
-        opportunities,
-      });
+      if (options.persistSnapshot !== false) {
+        await writeSnapshot({
+          asset: slot.asset,
+          slotKey: slot.key,
+          slotStartTs: slot.startTs,
+          slotEndTs: slot.endTs,
+          capturedAt: now,
+          polymarket,
+          kalshi,
+          opportunities,
+        });
+      }
 
       await syncFeedCircuitBreaker(slot, [polymarket.feedHealth, kalshi.feedHealth], now);
 
@@ -891,7 +904,7 @@ async function refreshVenuePositions(): Promise<
 }
 
 function getGlobalPolyBridgeLowWaterUsdc(settingsMap: Record<MarketAsset, StrategyConfig>) {
-  return Math.max(...MARKET_ASSETS.map((asset) => settingsMap[asset].polyBridgeLowWaterUsdc));
+  return Math.max(...ACTIVE_MARKET_ASSETS.map((asset) => settingsMap[asset].polyBridgeLowWaterUsdc));
 }
 
 async function computeReadiness(
@@ -4952,7 +4965,7 @@ async function syncActiveSlotExecutionBreakers(now: number) {
   const unresolvedSlots = new Set(
     openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
   );
-  const currentSlotKeys = new Set(MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
+  const currentSlotKeys = new Set(ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
 
   for (const breaker of breakers) {
     if (shouldKeepSlotExecutionBreakerActive(breaker, now, currentSlotKeys, unresolvedSlots)) {

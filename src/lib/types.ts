@@ -717,7 +717,7 @@ export interface VenueAdapter {
 }
 
 export interface ExecutionCoordinator {
-  scan(slot: MarketSlot, now: number): Promise<OpportunitySnapshot>;
+  scan(slot: MarketSlot, now: number, options?: { persistSnapshot?: boolean }): Promise<OpportunitySnapshot>;
   execute(slot: MarketSlot, now: number, snapshot?: OpportunitySnapshot | null): Promise<OrderIntent[]>;
   reconcile(slot: MarketSlot, now: number): Promise<void>;
 }

@@ -1,8 +1,9 @@
-import { inferKalshiAsset, inferPolymarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS, inferKalshiAsset, inferPolymarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
 
 describe("market catalog", () => {
   it("keeps assets in canonical order", () => {
     expect(MARKET_ASSETS).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
+    expect(ACTIVE_MARKET_ASSETS).toEqual(["btc", "eth", "sol", "xrp", "doge"]);
   });
 
   it("infers assets from Kalshi series tickers", () => {

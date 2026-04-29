@@ -39,9 +39,9 @@ describe("slot resolver", () => {
     expect(hypeSlot.polymarketSlug).toBe("hype-updown-15m-1774899000");
   });
 
-  it("returns all current slots in canonical asset order", () => {
+  it("returns active current slots in canonical asset order", () => {
     const slots = getCurrentSlots(new Date("2026-03-30T19:37:10.000Z"));
 
-    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
+    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp", "doge"]);
   });
 });

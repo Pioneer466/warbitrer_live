@@ -1,13 +1,14 @@
-import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { processExecutionTick, processReconcileTick, processScanTick } from "@/lib/engine";
-import { MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import { schedulePendingNotificationFlush } from "@/lib/notifications";
-import { readSettingsMap, storageMode } from "@/lib/storage";
+import { storageMode } from "@/lib/storage";
 
 const SCAN_TICK_TIMEOUT_MS = 15_000;
 const EXECUTION_TICK_TIMEOUT_MS = 90_000;
 const RECONCILE_TICK_TIMEOUT_MS = 120_000;
 const NOTIFICATION_FLUSH_INTERVAL_MS = 1_000;
+const SCAN_INTERVAL_MS = 250;
+const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const EXECUTION_INTERVAL_MS = 100;
 const RECONCILE_INTERVAL_MS = 3_000;
 const WORKER_FATAL_EXIT_DELAY_MS = 5_000;
@@ -19,7 +20,7 @@ let wakeExecutionLoop: (() => void) | null = null;
 async function run() {
   console.log(`[worker] storage=${storageMode()}`);
   console.log(
-    `[worker] realtime loops enabled: scan pollingIntervalMs default=${DEFAULT_STRATEGY_CONFIG.pollingIntervalMs}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
+    `[worker] realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
   );
 
   process.once("SIGTERM", requestShutdown);
@@ -43,7 +44,7 @@ async function runScanLoop() {
   await runLoop({
     name: "scan",
     timeoutMs: SCAN_TICK_TIMEOUT_MS,
-    resolveIntervalMs: readScanIntervalMs,
+    resolveIntervalMs: async () => SCAN_INTERVAL_MS,
     tick: async () => {
       await processScanTick();
       wakeExecutor();
@@ -123,16 +124,6 @@ async function runLoop({
     const intervalMs = await resolveIntervalMs();
     const waitMs = Math.max(MIN_LOOP_SLEEP_MS, intervalMs - elapsed);
     await sleep(waitMs);
-  }
-}
-
-async function readScanIntervalMs() {
-  try {
-    const settings = await readSettingsMap();
-    return Math.min(...MARKET_ASSETS.map((asset) => settings[asset].pollingIntervalMs));
-  } catch (error) {
-    console.error("[worker] settings read failed, using default scan interval", error);
-    return DEFAULT_STRATEGY_CONFIG.pollingIntervalMs;
   }
 }
 

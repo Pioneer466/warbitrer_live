@@ -1,6 +1,6 @@
 import Link from "next/link";
 
-import { MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import type { MarketAsset } from "@/lib/types";
 
 type ShellProps = {
@@ -21,7 +21,7 @@ export function Shell({ activePath, children }: ShellProps) {
               <Tab href="/" active={activePath === "/"}>
                 Portfolio
               </Tab>
-              {MARKET_ASSETS.map((asset) => (
+              {ACTIVE_MARKET_ASSETS.map((asset) => (
                 <Tab key={asset} href={`/${asset}`} active={activePath === `/${asset}`}>
                   {asset.toUpperCase()}
                 </Tab>
@@ -35,7 +35,7 @@ export function Shell({ activePath, children }: ShellProps) {
             </nav>
           </div>
           <div className="flex items-center gap-2">
-            <Badge tone="amber">{MARKET_ASSETS.map((asset) => asset.toUpperCase()).join(" + ")} 15m</Badge>
+            <Badge tone="amber">{ACTIVE_MARKET_ASSETS.map((asset) => asset.toUpperCase()).join(" + ")} 15m</Badge>
             <Badge tone="cyan">MULTI</Badge>
             <Badge tone="default">POSTGRES</Badge>
           </div>

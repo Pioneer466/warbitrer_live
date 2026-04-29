@@ -4,7 +4,7 @@ import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatDateTime, formatPrice } from "@/lib/format";
-import { MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import type { LiveFill, LiveOrder, MarketAsset, OrderIntent, TradesResponse } from "@/lib/types";
 
 type OrderGroup = {
@@ -13,7 +13,7 @@ type OrderGroup = {
   orders: LiveOrder[];
 };
 
-const TRADE_FILTERS: Array<MarketAsset | "all"> = ["all", ...MARKET_ASSETS];
+const TRADE_FILTERS: Array<MarketAsset | "all"> = ["all", ...ACTIVE_MARKET_ASSETS];
 
 export function TradesClient() {
   const [assetFilter, setAssetFilter] = useState<MarketAsset | "all">("all");

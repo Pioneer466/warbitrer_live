@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import { getCurrentSlot } from "@/lib/slot";
 import {
   readCircuitBreakers,
@@ -17,7 +17,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    const slots = MARKET_ASSETS.map((asset) => getCurrentSlot(asset));
+    const slots = ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset));
     const [workerStates, circuitBreakers, config, latestSnapshots, database] = await Promise.all([
       readWorkerStates(),
       readCircuitBreakers(),

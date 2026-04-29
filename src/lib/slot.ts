@@ -1,4 +1,4 @@
-import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
+import { ACTIVE_MARKET_ASSETS, getMarketCatalogEntry } from "@/lib/market-catalog";
 import { FIFTEEN_MINUTES_MS } from "@/lib/constants";
 import type { MarketAsset, MarketSlot } from "@/lib/types";
 
@@ -22,7 +22,7 @@ export function getCurrentSlot(asset: MarketAsset, now = new Date()): MarketSlot
 }
 
 export function getCurrentSlots(now = new Date()): MarketSlot[] {
-  return MARKET_ASSETS.map((asset) => getCurrentSlot(asset, now));
+  return ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset, now));
 }
 
 export function formatSlotLabel(startTs: number, endTs: number) {
