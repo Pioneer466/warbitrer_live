@@ -1,6 +1,11 @@
 import { Contract, constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
-import { POLY_CTF_ADDRESS, POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
+import {
+  POLY_COLLATERAL_ONRAMP_ADDRESS,
+  POLY_CTF_ADDRESS,
+  POLY_PUSD_ADDRESS,
+  POLY_USDCE_ADDRESS,
+} from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue, type LiveEnv } from "@/lib/env";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
@@ -255,6 +260,18 @@ export function buildMergeTxData(conditionId: string, amount: string, collateral
   ]);
 }
 
+export function buildCollateralWrapTxData(asset: string, to: string, amount: string) {
+  const onrampInterface = new utils.Interface(["function wrap(address _asset, address _to, uint256 _amount)"]);
+
+  return onrampInterface.encodeFunctionData("wrap", [asset, to, amount]);
+}
+
+function buildErc20ApproveTxData(spender: string, amount: string) {
+  const erc20Interface = new utils.Interface(["function approve(address spender, uint256 amount) returns (bool)"]);
+
+  return erc20Interface.encodeFunctionData("approve", [spender, amount]);
+}
+
 export function buildRecoveryMarkets(
   positions: PositionSnapshot[],
   env = readEnv(),
@@ -497,7 +514,8 @@ function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidat
 async function executePolymarketConversion(market: RecoveryMarket) {
   if (market.conversionAction === "redeem") {
     const collateralToken = await inferPolymarketCollateralToken(market);
-    return redeemPolymarketCondition(market.conditionId, market.marketRef, collateralToken);
+    const collateralWrapAmount = buildLegacyCollateralWrapAmount(collateralToken, market.redeemableSize);
+    return redeemPolymarketCondition(market.conditionId, market.marketRef, collateralToken, collateralWrapAmount);
   }
 
   if (market.conversionAction === "merge") {
@@ -511,6 +529,7 @@ async function redeemPolymarketCondition(
   conditionId: string,
   marketRef: string,
   collateralToken: string = POLY_PUSD_ADDRESS,
+  collateralWrapAmount: string | null = null,
 ) {
   const env = readEnv();
   const walletValidation = buildWalletValidation(env);
@@ -524,6 +543,7 @@ async function redeemPolymarketCondition(
           data: txData,
           value: "0",
         },
+        ...buildLegacyCollateralWrapTransactions(collateralToken, collateralWrapAmount, env.POLY_FUNDER_ADDRESS!),
       ],
       `redeem:${marketRef}`,
       env,
@@ -539,6 +559,7 @@ async function redeemPolymarketCondition(
         marketRef,
         conditionId,
         collateralToken,
+        collateralWrapAmount,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -554,6 +575,7 @@ async function redeemPolymarketCondition(
         marketRef,
         conditionId,
         collateralToken,
+        collateralWrapAmount,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -571,6 +593,7 @@ async function redeemPolymarketCondition(
       marketRef,
       conditionId,
       collateralToken,
+      collateralWrapAmount,
       action: "redeem" as const,
     };
   }
@@ -586,6 +609,7 @@ async function redeemPolymarketCondition(
         value: "0",
         conditionId,
         collateralToken,
+        collateralWrapAmount,
         indexSets: [1, 2],
         operation: "redeem" as const,
       },
@@ -620,6 +644,7 @@ async function redeemPolymarketCondition(
       marketRef,
       conditionId,
       collateralToken,
+      collateralWrapAmount,
       txHash: tx.hash,
     },
     createdAt: Date.now(),
@@ -633,6 +658,7 @@ async function redeemPolymarketCondition(
       marketRef,
       conditionId,
       collateralToken,
+      collateralWrapAmount,
       txHash: tx.hash,
       action: "redeem",
     },
@@ -646,6 +672,7 @@ async function redeemPolymarketCondition(
     marketRef,
     conditionId,
     collateralToken,
+    collateralWrapAmount,
     action: "redeem" as const,
   };
 }
@@ -659,6 +686,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
   const walletValidation = buildWalletValidation(env);
   const collateralToken = await inferPolymarketCollateralToken(market, env);
   const amount = toRawCollateralAmount(market.mergeableSize);
+  const collateralWrapAmount = buildLegacyCollateralWrapAmount(collateralToken, market.mergeableSize);
   const txData = buildMergeTxData(market.conditionId, amount, collateralToken);
 
   if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && walletValidation.canDirectConversion) {
@@ -669,6 +697,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
           data: txData,
           value: "0",
         },
+        ...buildLegacyCollateralWrapTransactions(collateralToken, collateralWrapAmount, env.POLY_FUNDER_ADDRESS!),
       ],
       `merge:${market.marketRef}`,
       env,
@@ -684,6 +713,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
         marketRef: market.marketRef,
         conditionId: market.conditionId,
         collateralToken,
+        collateralWrapAmount,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -700,6 +730,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
         marketRef: market.marketRef,
         conditionId: market.conditionId,
         collateralToken,
+        collateralWrapAmount,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -718,6 +749,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       marketRef: market.marketRef,
       conditionId: market.conditionId,
       collateralToken,
+      collateralWrapAmount,
       amount,
       action: "merge" as const,
     };
@@ -734,6 +766,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
         value: "0",
         conditionId: market.conditionId,
         collateralToken,
+        collateralWrapAmount,
         indexSets: [1, 2],
         amount,
         operation: "merge" as const,
@@ -769,6 +802,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       marketRef: market.marketRef,
       conditionId: market.conditionId,
       collateralToken,
+      collateralWrapAmount,
       txHash: tx.hash,
       amount,
     },
@@ -783,6 +817,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       marketRef: market.marketRef,
       conditionId: market.conditionId,
       collateralToken,
+      collateralWrapAmount,
       txHash: tx.hash,
       action: "merge",
       amount,
@@ -797,6 +832,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
     marketRef: market.marketRef,
     conditionId: market.conditionId,
     collateralToken,
+    collateralWrapAmount,
     amount,
     action: "merge" as const,
   };
@@ -853,6 +889,37 @@ async function readCollateralPositionIds(conditionId: string, env: LiveEnv) {
 
   collateralPositionIdCache.set(cacheKey, promise);
   return promise;
+}
+
+function buildLegacyCollateralWrapAmount(collateralToken: string, amount: number | null) {
+  if (!isLegacyUsdcCollateral(collateralToken) || amount === null || amount <= 0) {
+    return null;
+  }
+
+  return toRawCollateralAmount(amount);
+}
+
+function buildLegacyCollateralWrapTransactions(collateralToken: string, amount: string | null, to: string) {
+  if (!isLegacyUsdcCollateral(collateralToken) || !amount) {
+    return [];
+  }
+
+  return [
+    {
+      to: POLY_USDCE_ADDRESS,
+      data: buildErc20ApproveTxData(POLY_COLLATERAL_ONRAMP_ADDRESS, amount),
+      value: "0",
+    },
+    {
+      to: POLY_COLLATERAL_ONRAMP_ADDRESS,
+      data: buildCollateralWrapTxData(POLY_USDCE_ADDRESS, to, amount),
+      value: "0",
+    },
+  ];
+}
+
+function isLegacyUsdcCollateral(collateralToken: string) {
+  return collateralToken.toLowerCase() === POLY_USDCE_ADDRESS.toLowerCase();
 }
 
 function deriveRecoveryAction(market: RecoveryMarket): RecoveryMarket["conversionAction"] {

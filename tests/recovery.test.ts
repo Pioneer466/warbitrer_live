@@ -2,6 +2,7 @@ import { constants as ethersConstants, utils } from "ethers";
 
 import { POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
 import {
+  buildCollateralWrapTxData,
   buildMergeTxData,
   buildRecoveryMarkets,
   buildRedeemTxData,
@@ -35,6 +36,21 @@ describe("recovery helpers", () => {
 
     expect(decoded.collateralToken).toBe(POLY_USDCE_ADDRESS);
     expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
+  });
+
+  it("encodes the Polymarket collateral onramp wrap call", () => {
+    const iface = new utils.Interface(["function wrap(address _asset, address _to, uint256 _amount)"]);
+    const recipient = "0x8f74fdd17f086bacfba844b420b6e34cf99a38bd";
+    const txData = buildCollateralWrapTxData(
+      POLY_USDCE_ADDRESS,
+      recipient,
+      "7000000",
+    );
+    const decoded = iface.decodeFunctionData("wrap", txData);
+
+    expect(decoded._asset).toBe(POLY_USDCE_ADDRESS);
+    expect(decoded._to.toLowerCase()).toBe(recipient);
+    expect(decoded._amount.toString()).toBe("7000000");
   });
 
   it("classifies Polymarket relayer terminal states according to the docs", () => {
