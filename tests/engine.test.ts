@@ -27,6 +27,7 @@ import {
   shouldTreatPrimaryOrderAsFilled,
   shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
+  sumPolymarketAskDepthWithinLimit,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
@@ -809,6 +810,36 @@ describe("slot execution breakers", () => {
 
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-1"]), new Set())).toBe(true);
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-2"]), new Set())).toBe(false);
+  });
+
+  it("lets preflight skip slot breakers expire after their short cooldown", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "slot:eth:slot-1",
+      active: true,
+      reason: "primary_no_fill",
+      payload: {
+        stage: "preflight_skipped",
+        cooldownUntil: 200,
+      },
+    };
+
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 150, new Set(["eth:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 250, new Set(["eth:slot-1"]), new Set())).toBe(false);
+  });
+});
+
+describe("Polymarket hedge preflight helpers", () => {
+  it("sums only ask depth executable within the hedge limit price", () => {
+    expect(
+      sumPolymarketAskDepthWithinLimit(
+        [
+          { price: "0.12", size: "3" },
+          { price: "0.13", size: "4" },
+          { price: "0.14", size: "100" },
+        ],
+        0.13,
+      ),
+    ).toBe(7);
   });
 });
 

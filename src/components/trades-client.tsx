@@ -155,6 +155,10 @@ function isSuccessfulIntent(intent: OrderIntent) {
 }
 
 function isErrorIntent(intent: OrderIntent) {
+  if (intent.status === "skipped") {
+    return false;
+  }
+
   return (
     intent.failureReason !== null ||
     intent.status === "failed" ||

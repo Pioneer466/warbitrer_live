@@ -410,7 +410,7 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
             {intent.primaryVenue} {"->"} {intent.hedgeVenue} · {intent.slotKey} · {formatDateTime(intent.createdAt)}
           </div>
         </div>
-        <StatusBadge tone={intent.status === "hedged" ? "cyan" : intent.status === "failed" || intent.status === "unwound" ? "rose" : "amber"}>
+        <StatusBadge tone={intent.status === "hedged" ? "cyan" : intent.status === "failed" || intent.status === "unwound" ? "rose" : intent.status === "skipped" ? "indigo" : "amber"}>
           {intent.status}
         </StatusBadge>
       </div>

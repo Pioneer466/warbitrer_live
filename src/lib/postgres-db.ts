@@ -1055,7 +1055,7 @@ export async function listOpenOrderIntents(pool: Pool, asset?: MarketAsset): Pro
     `
       SELECT *
       FROM order_intents
-      WHERE status NOT IN ('settled', 'failed', 'canceled', 'unwound')
+      WHERE status NOT IN ('settled', 'failed', 'skipped', 'canceled', 'unwound')
         ${asset ? "AND asset = $1" : ""}
       ORDER BY updated_at DESC
     `,
@@ -1665,7 +1665,7 @@ export async function runDatabaseMaintenance(
 
   deleted.closedIntents = await deleteBefore(pool, config.retention.closedIntentsMs, now, `
     DELETE FROM order_intents
-    WHERE status IN ('settled', 'failed', 'canceled', 'unwound')
+    WHERE status IN ('settled', 'failed', 'skipped', 'canceled', 'unwound')
       AND COALESCE(resolved_at, updated_at, created_at) < $1
   `);
 

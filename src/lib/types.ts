@@ -18,6 +18,7 @@ export type OrderIntentStatus =
   | "unwound"
   | "settled"
   | "failed"
+  | "skipped"
   | "canceled";
 export type VenueOrderStatus =
   | "pending"

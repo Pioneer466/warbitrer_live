@@ -32,6 +32,7 @@ import {
   confirmPolymarketOrderExecution,
   createPolymarketAdapter,
   extractPolymarketTradesForOrder,
+  fetchPolymarketBook,
   fetchPolymarketOpenOrders,
   getPolymarketConditionalSellableBalance,
   fetchPolymarketResolution,
@@ -1059,7 +1060,8 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     return currentIntent;
   }
 
-  const primaryRequest = buildVenueOrderRequest(primaryLeg, settings.maxSlippageBps, "IOC", false, {
+  let executionPrimaryLeg = primaryLeg;
+  let primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
     kalshiPriceTicksSlippage: currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
   });
   const primaryRestPreflight =
@@ -1067,27 +1069,69 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       ? await preflightKalshiPrimaryRestLiquidity(primaryLeg, primaryRequest, settings)
       : null;
   if (primaryRestPreflight?.status === "insufficient") {
-    currentIntent = markIntentStatus(
+    const resizedIntent = await resizeKalshiPrimaryIntentFromRestPreflight(
       currentIntent,
-      "failed",
+      primaryLeg.id,
+      slot,
+      settings,
       Date.now(),
-      `Primary order skipped before submission (Kalshi REST depth insufficient for ${primaryRequest.size.toFixed(2)} contracts)`,
+      primaryRestPreflight,
     );
-    await writeOrderIntent(currentIntent);
+    if (!resizedIntent) {
+      return skipIntentBeforeSubmission(
+        currentIntent,
+        Date.now(),
+        `Primary order skipped before submission (Kalshi REST depth insufficient for ${primaryRequest.size.toFixed(2)} contracts)`,
+        "kalshi_rest_preflight_insufficient_depth",
+        {
+          venue: currentIntent.primaryVenue,
+          orderType: primaryRequest.orderType,
+          restPreflight: primaryRestPreflight,
+        },
+      );
+    }
+
+    currentIntent = resizedIntent;
+    const resizedPrimaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+    if (!resizedPrimaryLeg) {
+      return skipIntentBeforeSubmission(
+        currentIntent,
+        Date.now(),
+        "Primary order skipped before submission (primary leg missing after REST resize)",
+        "kalshi_rest_preflight_resize_missing_leg",
+        { restPreflight: primaryRestPreflight },
+      );
+    }
+    executionPrimaryLeg = resizedPrimaryLeg;
+    primaryRequest = buildVenueOrderRequest(resizedPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+      kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
+    });
     await writeRunEvent({
-      level: "warn",
-      eventType: "order.primary.no_fill",
-      message: `Intent ${currentIntent.id} closed before Kalshi primary submission after REST book preflight`,
+      level: "info",
+      eventType: "order.primary.preflight_resized",
+      message: `Primary Kalshi order resized by REST book preflight for intent ${currentIntent.id}`,
       payload: {
         intentId: currentIntent.id,
         slotKey: currentIntent.slotKey,
-        venue: currentIntent.primaryVenue,
-        orderType: primaryRequest.orderType,
+        originalRequestedSize: primaryRestPreflight.requestedSize,
+        resizedRequestedSize: primaryRequest.size,
         restPreflight: primaryRestPreflight,
       },
       createdAt: Date.now(),
     });
-    return currentIntent;
+  }
+  const hedgePreflight =
+    currentIntent.primaryVenue === "kalshi"
+      ? await preflightPolymarketHedgeLiquidity(currentIntent, settings)
+      : null;
+  if (hedgePreflight?.status === "insufficient" || hedgePreflight?.status === "unavailable") {
+    return skipIntentBeforeSubmission(
+      currentIntent,
+      Date.now(),
+      `Primary order skipped before submission (Polymarket hedge preflight ${hedgePreflight.status})`,
+      "polymarket_hedge_preflight_unavailable",
+      { hedgePreflight },
+    );
   }
   let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let primaryOrder: LiveOrder;
@@ -1099,7 +1143,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       primarySubmission,
       settings.immediateOrderConfirmationTimeoutMs,
     );
-    primaryOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, primaryLeg, primaryRequest, primaryResult, now);
+    primaryOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, executionPrimaryLeg, primaryRequest, primaryResult, now);
     await writeVenueOrder(primaryOrder);
     await writeRunEvent({
       level: "info",
@@ -1109,7 +1153,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         intentId: currentIntent.id,
         venue: currentIntent.primaryVenue,
         orderType: primaryRequest.orderType,
-        requestedPrice: primaryLeg.requestedPrice,
+        requestedPrice: executionPrimaryLeg.requestedPrice,
         orderPrice: primaryRequest.price,
         requestedSize: primaryRequest.size,
         restPreflight: primaryRestPreflight,
@@ -1119,7 +1163,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   } catch (error) {
     const recovered = await recoverKalshiOrderSubmissionForIntent(
       currentIntent,
-      primaryLeg,
+      executionPrimaryLeg,
       primaryRequest,
       now,
       "primary",
@@ -1163,7 +1207,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
-    currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
+    currentIntent = updateIntentLeg(currentIntent, executionPrimaryLeg.venue, primaryOrder, "filled", now);
     currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
     await writeOrderIntent(currentIntent);
     await writeLiveTradeRunEvent(currentIntent, now);
@@ -1500,45 +1544,37 @@ async function executeKalshiPrimaryMultiClip(
       settings,
     );
     if (restPreflight.status === "insufficient") {
-      const safeClipSize = normalizeVenueTargetSize(
-        "kalshi",
-        restPreflight.executableDepth ?? 0,
-        1,
-        1,
+      const clippedIntent = await resizeKalshiPrimaryIntentFromRestPreflight(
+        primaryExecutionIntent,
+        primaryLeg.id,
+        slot,
+        settings,
+        clipAttemptNow,
+        restPreflight,
       );
-      const minimumClipSize = Math.max(1, settings.minOrderSize);
+      const clippedPrimaryLeg = clippedIntent?.legs.find((leg) => leg.id === primaryLeg.id) ?? null;
 
-      if (safeClipSize + ORDER_SIZE_TOLERANCE >= minimumClipSize) {
-        const clippedIntent = deriveFastKalshiPrimaryClipIntent(
-          primaryExecutionIntent,
-          primaryLeg.id,
-          safeClipSize,
-          clipAttemptNow,
-        );
-        const clippedPrimaryLeg = clippedIntent?.legs.find((leg) => leg.id === primaryLeg.id) ?? null;
-
-        if (clippedIntent && clippedPrimaryLeg) {
-          primaryExecutionIntent = clippedIntent;
-          executionPrimaryLeg = clippedPrimaryLeg;
-          primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
-            kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
-          });
-          await writeRunEvent({
-            level: "warn",
-            eventType: "order.primary.clip_rest_resized",
-            message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} reduced by REST book preflight`,
-            payload: {
-              intentId: currentIntent.id,
-              slotKey: currentIntent.slotKey,
-              clipIndex: clipIndex + 1,
-              clipCount: clipPlan.length,
-              originalClipSize: clipSize,
-              resizedClipSize: safeClipSize,
-              restPreflight,
-            },
-            createdAt: clipAttemptNow,
-          });
-        }
+      if (clippedIntent && clippedPrimaryLeg) {
+        primaryExecutionIntent = clippedIntent;
+        executionPrimaryLeg = clippedPrimaryLeg;
+        primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+          kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
+        });
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.primary.clip_rest_resized",
+          message: `Primary Kalshi clip ${clipIndex + 1}/${clipPlan.length} reduced by REST book preflight`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            clipIndex: clipIndex + 1,
+            clipCount: clipPlan.length,
+            originalClipSize: clipSize,
+            resizedClipSize: primaryRequest.size,
+            restPreflight,
+          },
+          createdAt: clipAttemptNow,
+        });
       } else {
         totalPrimaryOrderAttempts += 1;
         failedClipSummaries.push({
@@ -1569,18 +1605,12 @@ async function executeKalshiPrimaryMultiClip(
           continue;
         }
 
-        currentIntent = markIntentStatus(
+        currentIntent = await skipIntentBeforeSubmission(
           currentIntent,
-          "failed",
           clipAttemptNow,
           `Primary fallback exhausted at clip ${clipIndex + 1}/${clipPlan.length} before submission (Kalshi REST depth insufficient); attempted ${totalPrimaryOrderAttempts} preflight${totalPrimaryOrderAttempts === 1 ? "" : "s"} across fallback clips ${clipPlan.join(" -> ")}; last requested ${executionPrimaryLeg.requestedSize.toFixed(2)}`,
-        );
-        await writeOrderIntent(currentIntent);
-        await writeRunEvent({
-          level: "warn",
-          eventType: "order.primary.no_fill",
-          message: `Intent ${currentIntent.id} closed before Kalshi primary submission after REST book preflight`,
-          payload: {
+          "kalshi_rest_preflight_insufficient_depth",
+          {
             intentId: currentIntent.id,
             slotKey: currentIntent.slotKey,
             venue: currentIntent.primaryVenue,
@@ -1590,13 +1620,30 @@ async function executeKalshiPrimaryMultiClip(
             failedClipSummaries,
             restPreflight,
           },
-          createdAt: clipAttemptNow,
-        });
+        );
         return {
           intent: currentIntent,
           outcome: "failed",
         };
       }
+    }
+    const hedgePreflight = await preflightPolymarketHedgeLiquidity(primaryExecutionIntent, settings);
+    if (hedgePreflight.status === "insufficient" || hedgePreflight.status === "unavailable") {
+      currentIntent = await skipIntentBeforeSubmission(
+        primaryExecutionIntent,
+        clipAttemptNow,
+        `Primary Kalshi clip skipped before submission (Polymarket hedge preflight ${hedgePreflight.status})`,
+        "polymarket_hedge_preflight_unavailable",
+        {
+          clipIndex: clipIndex + 1,
+          clipCount: clipPlan.length,
+          hedgePreflight,
+        },
+      );
+      return {
+        intent: currentIntent,
+        outcome: "failed",
+      };
     }
     let primaryOrderAttempts = 1;
     let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
@@ -2043,6 +2090,43 @@ async function executeKalshiPrimaryMultiClip(
     intent: currentIntent,
     outcome: unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "filled",
   };
+}
+
+async function skipIntentBeforeSubmission(
+  intent: OrderIntent,
+  now: number,
+  failureReason: string,
+  reason: string,
+  payload: Record<string, unknown>,
+) {
+  const currentIntent = markIntentStatus(intent, "skipped", now, failureReason);
+  await writeOrderIntent(currentIntent);
+  await writeRunEvent({
+    level: "info",
+    eventType: "order.primary.preflight_skipped",
+    message: `Intent ${currentIntent.id} skipped before submission (${reason})`,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      reason,
+      ...payload,
+    },
+    createdAt: now,
+  });
+  await writeCircuitBreaker({
+    key: buildSlotBreakerKey(currentIntent.slotKey),
+    active: true,
+    reason: "primary_no_fill",
+    triggeredAt: now,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      stage: "preflight_skipped",
+      reason,
+      cooldownUntil: now + 5_000,
+    },
+  });
+  return currentIntent;
 }
 
 async function executeIncrementalHedgeLeg(
@@ -2842,6 +2926,13 @@ async function resolvePrimaryExitSize(
 }
 
 async function resolvePrimaryExitPrice(intent: OrderIntent, primaryLeg: OrderIntent["legs"][number], now: number) {
+  if (primaryLeg.venue === "kalshi") {
+    const restSellPrice = await resolveKalshiPrimaryRestSellPrice(primaryLeg).catch(() => null);
+    if (restSellPrice !== null) {
+      return restSellPrice;
+    }
+  }
+
   const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
   const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
 
@@ -2852,6 +2943,21 @@ async function resolvePrimaryExitPrice(intent: OrderIntent, primaryLeg: OrderInt
 
   const outcome = primaryLeg.outcome === "YES" ? kalshiState.quote.outcomes.yes : kalshiState.quote.outcomes.no;
   return outcome.sellPrice ?? outcome.bestBid ?? null;
+}
+
+async function resolveKalshiPrimaryRestSellPrice(primaryLeg: OrderIntent["legs"][number]) {
+  if (primaryLeg.venue !== "kalshi" || primaryLeg.side !== "BUY") {
+    return null;
+  }
+
+  const orderbook = await fetchKalshiOrderbook(primaryLeg.marketRef);
+  const levels = normalizeKalshiNumericOrderbookLevels(orderbook);
+  const bids = primaryLeg.outcome === "YES" ? levels.yesBids : levels.noBids;
+  const bestBid = [...bids]
+    .filter(([price, size]) => Number.isFinite(price) && Number.isFinite(size) && size > 0)
+    .sort((left, right) => right[0] - left[0])[0]?.[0];
+
+  return bestBid ?? null;
 }
 
 async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, now: number) {
@@ -3762,6 +3868,108 @@ async function preflightKalshiPrimaryRestLiquidity(
       topLevels: [],
     };
   }
+}
+
+async function resizeKalshiPrimaryIntentFromRestPreflight(
+  intent: OrderIntent,
+  primaryLegId: OrderIntent["legs"][number]["id"],
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  restPreflight: Awaited<ReturnType<typeof preflightKalshiPrimaryRestLiquidity>>,
+) {
+  if (restPreflight.status !== "insufficient" || restPreflight.executableDepth === null) {
+    return null;
+  }
+
+  const safePairSize = normalizeVenueTargetSize("kalshi", restPreflight.executableDepth, 1, 1);
+  if (safePairSize <= 0) {
+    return null;
+  }
+
+  const resizedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now, safePairSize);
+  if (!resizedIntent || resizedIntent.projectedNetProfitUsd === null || resizedIntent.projectedNetProfitUsd <= 0) {
+    return null;
+  }
+
+  const primaryLeg = resizedIntent.legs.find((leg) => leg.id === primaryLegId);
+  if (!primaryLeg || primaryLeg.requestedSize <= 0 || primaryLeg.requestedSize > safePairSize + ORDER_SIZE_TOLERANCE) {
+    return null;
+  }
+
+  return {
+    ...resizedIntent,
+    entrySizingReason:
+      resizedIntent.entrySizingReason ??
+      `Notionnel réduit par profondeur REST Kalshi: taille ${primaryLeg.requestedSize.toFixed(2)}`,
+  };
+}
+
+async function preflightPolymarketHedgeLiquidity(
+  intent: OrderIntent,
+  settings: Pick<StrategyConfig, "maxSlippageBps">,
+) {
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!hedgeLeg || hedgeLeg.venue !== "polymarket" || hedgeLeg.side !== "BUY") {
+    return {
+      status: "skipped" as const,
+      reason: "not_polymarket_buy_hedge",
+    };
+  }
+
+  const request = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  if (!hedgeLeg.tokenId || request.price === null) {
+    return {
+      status: "unavailable" as const,
+      reason: "missing_token_or_price",
+      requestedSize: request.size,
+      orderPrice: request.price,
+      executableDepth: null,
+    };
+  }
+
+  try {
+    const book = await fetchPolymarketBook(hedgeLeg.tokenId);
+    const executableDepth = sumPolymarketAskDepthWithinLimit(book.asks, request.price);
+    const insufficient = executableDepth + ORDER_SIZE_TOLERANCE < request.size;
+    return {
+      status: insufficient ? "insufficient" as const : "ready" as const,
+      reason: insufficient ? "polymarket_depth_below_requested_size" : null,
+      requestedSize: request.size,
+      orderPrice: request.price,
+      executableDepth,
+      topLevels: book.asks
+        .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+        .filter((level) => Number.isFinite(level.price) && Number.isFinite(level.size))
+        .sort((left, right) => left.price - right.price)
+        .slice(0, 3),
+    };
+  } catch (error) {
+    return {
+      status: "unavailable" as const,
+      reason: toErrorMessage(error),
+      requestedSize: request.size,
+      orderPrice: request.price,
+      executableDepth: null,
+    };
+  }
+}
+
+export function sumPolymarketAskDepthWithinLimit(
+  asks: Array<{ price: string; size: string }>,
+  limitPrice: number,
+) {
+  return round4(
+    asks.reduce((sum, level) => {
+      const price = Number(level.price);
+      const size = Number(level.size);
+      if (!Number.isFinite(price) || !Number.isFinite(size) || price > limitPrice + ORDER_SIZE_TOLERANCE) {
+        return sum;
+      }
+
+      return sum + size;
+    }, 0),
+  );
 }
 
 async function attemptPrimaryUnwindAfterHedgeFailure(
@@ -5998,11 +6206,11 @@ async function armPrimarySoftNoFillGuard(
 async function armHedgeFailureGuards(
   intent: OrderIntent,
   hedgeOrder: LiveOrder | null,
-  hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null,
+  _hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null,
   now: number,
 ) {
   await writeCircuitBreaker({
-      key: buildSlotBreakerKey(intent.slotKey),
+    key: buildSlotBreakerKey(intent.slotKey),
     active: true,
     reason: "hedge_failure",
     triggeredAt: now,
@@ -6014,66 +6222,6 @@ async function armHedgeFailureGuards(
       hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
       lockSlot: true,
     },
-  });
-
-  if (!Boolean(hedgeResult?.raw?.softNoFill)) {
-    return;
-  }
-
-  const breakers = await readCircuitBreakers();
-  if (breakers.some((breaker) => breaker.key === "global" && breaker.active)) {
-    return;
-  }
-
-  const recentEvents = await readRunEvents(100, intent.asset);
-  const recentSoftNoFills = recentEvents.filter((event) =>
-    isRecentSoftHedgeNoFillEvent(event, now, KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS, intent.hedgeVenue),
-  );
-  if (recentSoftNoFills.length < KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD) {
-    return;
-  }
-
-  const cooldownUntil = now + KALSHI_SOFT_HEDGE_FAILURE_GLOBAL_COOLDOWN_MS;
-  const slotKeys = Array.from(
-    new Set(
-      recentSoftNoFills
-        .map((event) => getPayloadString(event.payload, "slotKey"))
-        .filter((slotKey): slotKey is string => Boolean(slotKey)),
-    ),
-  );
-
-  await writeCircuitBreaker({
-    key: "global",
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: intent.id,
-      slotKey: intent.slotKey,
-      venue: intent.hedgeVenue,
-      stage: `repeated_${intent.hedgeVenue}_soft_no_fill`,
-      failureCount: recentSoftNoFills.length,
-      threshold: KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD,
-      windowMs: KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
-      cooldownUntil,
-      slotKeys,
-    },
-  });
-  await writeRunEvent({
-    level: "error",
-    eventType: "breaker.global.hedge_failure",
-    message: `Global hedge failure breaker armed after ${recentSoftNoFills.length} recent ${intent.hedgeVenue} soft no-fills`,
-    payload: {
-      intentId: intent.id,
-      slotKey: intent.slotKey,
-      venue: intent.hedgeVenue,
-      failureCount: recentSoftNoFills.length,
-      threshold: KALSHI_SOFT_HEDGE_FAILURE_THRESHOLD,
-      windowMs: KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS,
-      cooldownUntil,
-      slotKeys,
-    },
-    createdAt: now,
   });
 }
 
