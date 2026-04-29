@@ -23,10 +23,13 @@ describe("telegram notification mapping", () => {
         primaryFilledPrice: 0.44,
         polymarketOutcome: "DOWN",
         polymarketRequestedNotionalUsd: 8.8,
+        polymarketInvestedUsd: 8.4,
         polymarketFilledSize: 20,
         kalshiOutcome: "YES",
         kalshiRequestedNotionalUsd: 11.2,
+        kalshiInvestedUsd: 9.1,
         kalshiFilledSize: 20,
+        investedNotionalUsd: 17.5,
       },
       createdAt: 1_777_000_000_000,
     };
@@ -42,13 +45,13 @@ describe("telegram notification mapping", () => {
       [
         "TRADE",
         "ETH - Poly DOWN Kalshi YES",
-        "Traded : 20.00$",
+        "Traded : 17.50$",
         "Gross : 0.93",
         "",
         "NOTIONNEL",
         "Raison : Notionnel réduit par safeguard mismatch (medium): taille x0.5",
-        "Poly : 8.80$ - filled : 20.00",
-        "Kalshi : 11.20$ - filled : 20.00",
+        "Poly : 8.40$ - filled : 20.00",
+        "Kalshi : 9.10$ - filled : 20.00",
       ].join("\n"),
     );
   });

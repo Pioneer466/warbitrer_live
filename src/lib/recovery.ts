@@ -1,7 +1,7 @@
-import { constants as ethersConstants, providers, utils, Wallet } from "ethers";
+import { Contract, constants as ethersConstants, providers, utils, Wallet } from "ethers";
 
-import { POLY_CTF_ADDRESS, POLY_PUSD_ADDRESS } from "@/lib/constants";
-import { isTruthyEnv, readEnv, readSecretValue } from "@/lib/env";
+import { POLY_CTF_ADDRESS, POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
+import { isTruthyEnv, readEnv, readSecretValue, type LiveEnv } from "@/lib/env";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
   getPolymarketRelayerTransaction,
@@ -16,6 +16,16 @@ const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
 const AUTO_CONVERT_RETRY_AFTER_FAILURE_MS = 15 * 60 * 1000;
 const AUTO_CONVERT_MAX_PENDING_RELAYER_TX = 1;
 const AUTO_CONVERT_PENDING_TIMEOUT_MS = 10 * 60 * 1000;
+const POLY_COLLATERAL_TOKENS = [POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS] as const;
+type PolymarketCollateralToken = (typeof POLY_COLLATERAL_TOKENS)[number];
+const CTF_POSITION_ID_ABI = [
+  "function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) view returns (bytes32)",
+  "function getPositionId(address collateralToken, bytes32 collectionId) view returns (uint256)",
+];
+const collateralPositionIdCache = new Map<
+  string,
+  Promise<Array<{ collateralToken: PolymarketCollateralToken; tokenIds: Set<string> }>>
+>();
 const POLYMARKET_CONVERT_SUBMITTED_EVENTS = new Set([
   "polymarket.convert.submitted",
   "polymarket.redeem.submitted",
@@ -218,26 +228,26 @@ export function resolvePolymarketConversionFinality({
   return now - pendingCreatedAt >= AUTO_CONVERT_PENDING_TIMEOUT_MS ? "failed" : null;
 }
 
-export function buildRedeemTxData(conditionId: string) {
+export function buildRedeemTxData(conditionId: string, collateralToken: string = POLY_PUSD_ADDRESS) {
   const ctfInterface = new utils.Interface([
     "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
   ]);
 
   return ctfInterface.encodeFunctionData("redeemPositions", [
-    POLY_PUSD_ADDRESS,
+    collateralToken,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
   ]);
 }
 
-export function buildMergeTxData(conditionId: string, amount: string) {
+export function buildMergeTxData(conditionId: string, amount: string, collateralToken: string = POLY_PUSD_ADDRESS) {
   const ctfInterface = new utils.Interface([
     "function mergePositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] partition, uint256 amount)",
   ]);
 
   return ctfInterface.encodeFunctionData("mergePositions", [
-    POLY_PUSD_ADDRESS,
+    collateralToken,
     ethersConstants.HashZero,
     conditionId,
     [1, 2],
@@ -281,6 +291,7 @@ export function buildRecoveryMarkets(
     const market = marketsByRef.get(position.marketRef)!;
     market.outcomes.push({
       outcome: position.outcome,
+      tokenId: getPolymarketPositionTokenId(position),
       size: position.size,
       currentValueUsd: position.currentValueUsd,
       redeemable: position.redeemable,
@@ -327,6 +338,15 @@ export function buildRecoveryMarkets(
       const rightRank = Number(right.redeemable) * 2 + Number(right.mergeable);
       return rightRank - leftRank || left.title.localeCompare(right.title);
     });
+}
+
+function getPolymarketPositionTokenId(position: PositionSnapshot) {
+  const rawAsset = (position.raw as Record<string, unknown> | null)?.asset;
+  if (typeof rawAsset === "string" && rawAsset) {
+    return rawAsset;
+  }
+
+  return position.id.startsWith("polymarket:") ? position.id.slice("polymarket:".length) : undefined;
 }
 
 function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidation"] {
@@ -476,7 +496,8 @@ function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidat
 
 async function executePolymarketConversion(market: RecoveryMarket) {
   if (market.conversionAction === "redeem") {
-    return redeemPolymarketCondition(market.conditionId, market.marketRef);
+    const collateralToken = await inferPolymarketCollateralToken(market);
+    return redeemPolymarketCondition(market.conditionId, market.marketRef, collateralToken);
   }
 
   if (market.conversionAction === "merge") {
@@ -486,10 +507,14 @@ async function executePolymarketConversion(market: RecoveryMarket) {
   throw new Error("No convertible action available for this market");
 }
 
-async function redeemPolymarketCondition(conditionId: string, marketRef: string) {
+async function redeemPolymarketCondition(
+  conditionId: string,
+  marketRef: string,
+  collateralToken: string = POLY_PUSD_ADDRESS,
+) {
   const env = readEnv();
   const walletValidation = buildWalletValidation(env);
-  const txData = buildRedeemTxData(conditionId);
+  const txData = buildRedeemTxData(conditionId, collateralToken);
 
   if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && walletValidation.canDirectConversion) {
     const submitted = await submitPolymarketProxyTransactions(
@@ -513,6 +538,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
       payload: {
         marketRef,
         conditionId,
+        collateralToken,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -527,6 +553,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
       payload: {
         marketRef,
         conditionId,
+        collateralToken,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -543,6 +570,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
       relayerState,
       marketRef,
       conditionId,
+      collateralToken,
       action: "redeem" as const,
     };
   }
@@ -557,6 +585,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
         data: txData,
         value: "0",
         conditionId,
+        collateralToken,
         indexSets: [1, 2],
         operation: "redeem" as const,
       },
@@ -590,6 +619,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
     payload: {
       marketRef,
       conditionId,
+      collateralToken,
       txHash: tx.hash,
     },
     createdAt: Date.now(),
@@ -602,6 +632,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
     payload: {
       marketRef,
       conditionId,
+      collateralToken,
       txHash: tx.hash,
       action: "redeem",
     },
@@ -614,6 +645,7 @@ async function redeemPolymarketCondition(conditionId: string, marketRef: string)
     txHash: tx.hash,
     marketRef,
     conditionId,
+    collateralToken,
     action: "redeem" as const,
   };
 }
@@ -625,8 +657,9 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
 
   const env = readEnv();
   const walletValidation = buildWalletValidation(env);
+  const collateralToken = await inferPolymarketCollateralToken(market, env);
   const amount = toRawCollateralAmount(market.mergeableSize);
-  const txData = buildMergeTxData(market.conditionId, amount);
+  const txData = buildMergeTxData(market.conditionId, amount, collateralToken);
 
   if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && walletValidation.canDirectConversion) {
     const submitted = await submitPolymarketProxyTransactions(
@@ -650,6 +683,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       payload: {
         marketRef: market.marketRef,
         conditionId: market.conditionId,
+        collateralToken,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -665,6 +699,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       payload: {
         marketRef: market.marketRef,
         conditionId: market.conditionId,
+        collateralToken,
         txHash,
         relayerTransactionId: submitted.transactionId,
         relayerState,
@@ -682,6 +717,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
       relayerState,
       marketRef: market.marketRef,
       conditionId: market.conditionId,
+      collateralToken,
       amount,
       action: "merge" as const,
     };
@@ -697,6 +733,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
         data: txData,
         value: "0",
         conditionId: market.conditionId,
+        collateralToken,
         indexSets: [1, 2],
         amount,
         operation: "merge" as const,
@@ -731,6 +768,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
     payload: {
       marketRef: market.marketRef,
       conditionId: market.conditionId,
+      collateralToken,
       txHash: tx.hash,
       amount,
     },
@@ -744,6 +782,7 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
     payload: {
       marketRef: market.marketRef,
       conditionId: market.conditionId,
+      collateralToken,
       txHash: tx.hash,
       action: "merge",
       amount,
@@ -757,9 +796,63 @@ async function mergePolymarketCondition(market: RecoveryMarket) {
     txHash: tx.hash,
     marketRef: market.marketRef,
     conditionId: market.conditionId,
+    collateralToken,
     amount,
     action: "merge" as const,
   };
+}
+
+async function inferPolymarketCollateralToken(
+  market: Pick<RecoveryMarket, "conditionId" | "outcomes">,
+  env: LiveEnv = readEnv(),
+): Promise<PolymarketCollateralToken> {
+  const heldTokenIds = new Set(
+    market.outcomes
+      .map((outcome) => outcome.tokenId)
+      .filter((tokenId): tokenId is string => typeof tokenId === "string" && tokenId.length > 0),
+  );
+
+  if (heldTokenIds.size === 0 || !utils.isHexString(market.conditionId, 32)) {
+    return POLY_PUSD_ADDRESS;
+  }
+
+  const candidates = await readCollateralPositionIds(market.conditionId, env).catch(() => []);
+  const matched = candidates.find((candidate) => [...heldTokenIds].some((tokenId) => candidate.tokenIds.has(tokenId)));
+  return matched?.collateralToken ?? POLY_PUSD_ADDRESS;
+}
+
+async function readCollateralPositionIds(conditionId: string, env: LiveEnv) {
+  const cacheKey = `${conditionId}:${env.POLYGON_RPC_URL ?? "default"}`;
+  const cached = collateralPositionIdCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = (async () => {
+    const provider = new providers.JsonRpcProvider(env.POLYGON_RPC_URL ?? "https://polygon-bor.publicnode.com");
+    const ctf = new Contract(POLY_CTF_ADDRESS, CTF_POSITION_ID_ABI, provider);
+    const [yesCollectionId, noCollectionId] = await Promise.all([
+      ctf.getCollectionId(ethersConstants.HashZero, conditionId, 1),
+      ctf.getCollectionId(ethersConstants.HashZero, conditionId, 2),
+    ]);
+
+    return Promise.all(
+      POLY_COLLATERAL_TOKENS.map(async (collateralToken) => {
+        const [yesTokenId, noTokenId] = await Promise.all([
+          ctf.getPositionId(collateralToken, yesCollectionId),
+          ctf.getPositionId(collateralToken, noCollectionId),
+        ]);
+
+        return {
+          collateralToken,
+          tokenIds: new Set([yesTokenId.toString(), noTokenId.toString()]),
+        };
+      }),
+    );
+  })();
+
+  collateralPositionIdCache.set(cacheKey, promise);
+  return promise;
 }
 
 function deriveRecoveryAction(market: RecoveryMarket): RecoveryMarket["conversionAction"] {

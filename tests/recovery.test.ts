@@ -1,6 +1,6 @@
 import { constants as ethersConstants, utils } from "ethers";
 
-import { POLY_PUSD_ADDRESS } from "@/lib/constants";
+import { POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS } from "@/lib/constants";
 import {
   buildMergeTxData,
   buildRecoveryMarkets,
@@ -23,6 +23,18 @@ describe("recovery helpers", () => {
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
     expect(decoded.indexSets.map((value: any) => Number(value))).toEqual([1, 2]);
+  });
+
+  it("can encode redeemPositions with legacy USDC.e collateral", () => {
+    const iface = new utils.Interface([
+      "function redeemPositions(address collateralToken, bytes32 parentCollectionId, bytes32 conditionId, uint256[] indexSets)",
+    ]);
+
+    const txData = buildRedeemTxData("0x" + "12".repeat(32), POLY_USDCE_ADDRESS);
+    const decoded = iface.decodeFunctionData("redeemPositions", txData);
+
+    expect(decoded.collateralToken).toBe(POLY_USDCE_ADDRESS);
+    expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
   });
 
   it("classifies Polymarket relayer terminal states according to the docs", () => {

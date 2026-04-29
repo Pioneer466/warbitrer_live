@@ -38,7 +38,7 @@ export function TradesClient() {
   const orders = [...data.orders].sort((left, right) => right.createdAt - left.createdAt);
   const fills = [...data.fills].sort((left, right) => right.filledAt - left.filledAt);
   const intentsById = new Map(intents.map((intent) => [intent.id, intent]));
-  const intentNotionalUsd = intents.reduce((sum, intent) => sum + intent.targetNotionalUsd, 0);
+  const intentNotionalUsd = intents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
   const executedNotionalUsd = fills.reduce((sum, fill) => sum + fill.price * fill.size, 0);
   const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
   const successfulIntents = intents.filter(isSuccessfulIntent);
@@ -249,7 +249,7 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
         <div>{formatDateTime(intent.createdAt)}</div>
       </div>
       <div className="mt-2">
-        {intent.primaryVenue} {"->"} {intent.hedgeVenue} · notionnel {formatCurrency(intent.targetNotionalUsd)}
+        {intent.primaryVenue} {"->"} {intent.hedgeVenue} · notionnel {formatCurrency(deriveIntentCapitalUsd(intent))}
       </div>
       {shouldShowResolutionSummary ? (
         <div className={`mt-3 rounded-[18px] border px-3 py-3 ${
@@ -296,7 +296,9 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
               {leg.venue} · {leg.outcome}
             </div>
             <div className="mt-2">
-              notionnel {formatCurrency(leg.requestedNotionalUsd)} · req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
+              {leg.filledSize > 0 && leg.filledPrice !== null
+                ? `investi ${formatCurrency(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatCurrency(leg.feeUsd)}`
+                : `notionnel ${formatCurrency(leg.requestedNotionalUsd)} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatCurrency(leg.feeUsd)}`}
             </div>
           </div>
         ))}
@@ -305,6 +307,22 @@ function IntentRow({ intent }: { intent: OrderIntent }) {
       {intent.failureReason ? <div className="mt-3 text-rose">{intent.failureReason}</div> : null}
     </div>
   );
+}
+
+function deriveIntentCapitalUsd(intent: OrderIntent) {
+  return roundCurrency(
+    intent.legs.reduce((sum, leg) => sum + deriveLegCapitalUsd(leg), 0),
+  );
+}
+
+function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
+  const tradedNotional =
+    leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
+  return roundCurrency(tradedNotional + leg.feeUsd);
+}
+
+function roundCurrency(value: number) {
+  return Math.round(value * 10_000) / 10_000;
 }
 
 function getResolutionAlignment(intent: Pick<OrderIntent, "polyResolution" | "kalshiResolution">) {

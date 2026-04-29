@@ -618,6 +618,7 @@ export type HistoryResponse = {
 
 export type RecoveryOutcome = {
   outcome: Resolution;
+  tokenId?: string;
   size: number;
   currentValueUsd: number;
   redeemable: boolean;

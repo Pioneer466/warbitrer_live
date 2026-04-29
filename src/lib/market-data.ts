@@ -1405,18 +1405,34 @@ class KalshiRealtimeFeed {
 
     if (type === "ticker") {
       if (this.market) {
-        const yesBid = String(message.yes_bid_dollars ?? message.yes_bid ?? this.market.yes_bid_dollars);
-        const yesAsk = String(message.yes_ask_dollars ?? message.yes_ask ?? this.market.yes_ask_dollars);
+        const yesBidMessage = message.yes_bid_dollars ?? message.yes_bid;
+        const yesAskMessage = message.yes_ask_dollars ?? message.yes_ask;
+        const noBidMessage = message.no_bid_dollars ?? message.no_bid;
+        const noAskMessage = message.no_ask_dollars ?? message.no_ask;
+        const hasFreshYesSide = yesBidMessage !== undefined || yesAskMessage !== undefined;
+        const hasFreshNoSide = noBidMessage !== undefined || noAskMessage !== undefined;
+        const yesBid = String(
+          hasFreshNoSide && !hasFreshYesSide
+            ? deriveComplementPrice(noAskMessage ?? this.market.no_ask_dollars) ?? this.market.yes_bid_dollars
+            : yesBidMessage ?? this.market.yes_bid_dollars,
+        );
+        const yesAsk = String(
+          hasFreshNoSide && !hasFreshYesSide
+            ? deriveComplementPrice(noBidMessage ?? this.market.no_bid_dollars) ?? this.market.yes_ask_dollars
+            : yesAskMessage ?? this.market.yes_ask_dollars,
+        );
         const derivedNoBid = deriveComplementPrice(yesAsk);
         const derivedNoAsk = deriveComplementPrice(yesBid);
+        const noBid = String(hasFreshYesSide ? derivedNoBid ?? this.market.no_bid_dollars : noBidMessage ?? this.market.no_bid_dollars);
+        const noAsk = String(hasFreshYesSide ? derivedNoAsk ?? this.market.no_ask_dollars : noAskMessage ?? this.market.no_ask_dollars);
         const updatedTime =
           parseTimestamp(message.updated_time ?? message.created_time ?? message.ts ?? message.timestamp) ?? now;
         this.market = {
           ...this.market,
           yes_bid_dollars: yesBid,
           yes_ask_dollars: yesAsk,
-          no_bid_dollars: String(message.no_bid_dollars ?? message.no_bid ?? derivedNoBid ?? this.market.no_bid_dollars),
-          no_ask_dollars: String(message.no_ask_dollars ?? message.no_ask ?? derivedNoAsk ?? this.market.no_ask_dollars),
+          no_bid_dollars: noBid,
+          no_ask_dollars: noAsk,
           last_price_dollars: String(message.last_price_dollars ?? message.last_price ?? message.price_dollars ?? this.market.last_price_dollars ?? ""),
           yes_bid_size_fp: String(message.yes_bid_size_fp ?? this.market.yes_bid_size_fp),
           yes_ask_size_fp: String(message.yes_ask_size_fp ?? this.market.yes_ask_size_fp),

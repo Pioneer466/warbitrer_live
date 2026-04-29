@@ -53,6 +53,7 @@ import {
 import { buildSignals } from "@/lib/signals";
 import {
   calculateWinningPayout,
+  calculateLegSpentUsd,
   createIntentFromOpportunity,
   finalizeIntent,
   finalizeUnwoundIntent,
@@ -5819,6 +5820,9 @@ async function writeLiveTradeRunEvent(
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue) ?? null;
   const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket") ?? null;
   const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi") ?? null;
+  const polymarketInvestedUsd = polymarketLeg ? calculateLegSpentUsd(polymarketLeg) : null;
+  const kalshiInvestedUsd = kalshiLeg ? calculateLegSpentUsd(kalshiLeg) : null;
+  const investedNotionalUsd = (polymarketInvestedUsd ?? 0) + (kalshiInvestedUsd ?? 0);
   await writeRunEvent({
     asset: intent.asset,
     level: "info",
@@ -5833,6 +5837,7 @@ async function writeLiveTradeRunEvent(
       hedgeVenue: intent.hedgeVenue,
       grossCost: intent.grossCost,
       targetNotionalUsd: intent.targetNotionalUsd,
+      investedNotionalUsd,
       entrySizingReason: intent.entrySizingReason ?? null,
       stage,
       primaryFilledSize: primaryLeg?.filledSize ?? null,
@@ -5840,9 +5845,11 @@ async function writeLiveTradeRunEvent(
       primaryRequestedSize: primaryLeg?.requestedSize ?? null,
       polymarketOutcome: polymarketLeg?.outcome ?? null,
       polymarketRequestedNotionalUsd: polymarketLeg?.requestedNotionalUsd ?? null,
+      polymarketInvestedUsd,
       polymarketFilledSize: polymarketLeg?.filledSize ?? null,
       kalshiOutcome: kalshiLeg?.outcome ?? null,
       kalshiRequestedNotionalUsd: kalshiLeg?.requestedNotionalUsd ?? null,
+      kalshiInvestedUsd,
       kalshiFilledSize: kalshiLeg?.filledSize ?? null,
     },
     createdAt: now,

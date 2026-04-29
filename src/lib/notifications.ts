@@ -158,15 +158,21 @@ function buildTradeLiveMessage(event: RunEvent) {
   const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
   const targetNotionalUsd = typeof payload.targetNotionalUsd === "number" ? payload.targetNotionalUsd : null;
+  const investedNotionalUsd =
+    typeof payload.investedNotionalUsd === "number" ? payload.investedNotionalUsd : targetNotionalUsd;
   const entrySizingReason = typeof payload.entrySizingReason === "string" ? payload.entrySizingReason : null;
   const grossCost = typeof payload.grossCost === "number" ? payload.grossCost : null;
   const polymarketOutcome = typeof payload.polymarketOutcome === "string" ? payload.polymarketOutcome : null;
   const kalshiOutcome = typeof payload.kalshiOutcome === "string" ? payload.kalshiOutcome : null;
   const polymarketRequestedNotionalUsd =
     typeof payload.polymarketRequestedNotionalUsd === "number" ? payload.polymarketRequestedNotionalUsd : null;
+  const polymarketInvestedUsd =
+    typeof payload.polymarketInvestedUsd === "number" ? payload.polymarketInvestedUsd : polymarketRequestedNotionalUsd;
   const polymarketFilledSize = typeof payload.polymarketFilledSize === "number" ? payload.polymarketFilledSize : null;
   const kalshiRequestedNotionalUsd =
     typeof payload.kalshiRequestedNotionalUsd === "number" ? payload.kalshiRequestedNotionalUsd : null;
+  const kalshiInvestedUsd =
+    typeof payload.kalshiInvestedUsd === "number" ? payload.kalshiInvestedUsd : kalshiRequestedNotionalUsd;
   const kalshiFilledSize = typeof payload.kalshiFilledSize === "number" ? payload.kalshiFilledSize : null;
   const pairLabel =
     polymarketOutcome && kalshiOutcome
@@ -176,13 +182,13 @@ function buildTradeLiveMessage(event: RunEvent) {
   return [
     "TRADE",
     `${asset} - ${pairLabel}`,
-    `Traded : ${formatTelegramUsd(targetNotionalUsd)}`,
+    `Traded : ${formatTelegramUsd(investedNotionalUsd)}`,
     `Gross : ${grossCost !== null ? formatPrice(grossCost, 2) : "--"}`,
     "",
     "NOTIONNEL",
     ...(entrySizingReason ? [`Raison : ${entrySizingReason}`] : []),
-    `Poly : ${formatTelegramUsd(polymarketRequestedNotionalUsd)} - filled : ${formatPrice(polymarketFilledSize, 2)}`,
-    `Kalshi : ${formatTelegramUsd(kalshiRequestedNotionalUsd)} - filled : ${formatPrice(kalshiFilledSize, 2)}`,
+    `Poly : ${formatTelegramUsd(polymarketInvestedUsd)} - filled : ${formatPrice(polymarketFilledSize, 2)}`,
+    `Kalshi : ${formatTelegramUsd(kalshiInvestedUsd)} - filled : ${formatPrice(kalshiFilledSize, 2)}`,
   ].join("\n");
 }
 

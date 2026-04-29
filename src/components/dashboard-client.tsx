@@ -421,7 +421,9 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
               {leg.venue} · {leg.outcome}
             </div>
             <div className="mt-2">
-              notionnel {formatCurrency(leg.requestedNotionalUsd)} · req {formatPrice(leg.requestedSize, 2)} · filled {formatPrice(leg.filledSize, 2)} · fee {formatCurrency(leg.feeUsd)}
+              {leg.filledSize > 0 && leg.filledPrice !== null
+                ? `investi ${formatCurrency(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatCurrency(leg.feeUsd)}`
+                : `notionnel ${formatCurrency(leg.requestedNotionalUsd)} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatCurrency(leg.feeUsd)}`}
             </div>
           </div>
         ))}
@@ -438,6 +440,12 @@ function IntentCard({ intent }: { intent: OrderIntent }) {
       ) : null}
     </div>
   );
+}
+
+function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
+  const tradedNotional =
+    leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
+  return Math.round((tradedNotional + leg.feeUsd) * 10_000) / 10_000;
 }
 
 function PositionRow({ position }: { position: PositionSnapshot }) {

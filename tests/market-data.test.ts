@@ -703,4 +703,56 @@ describe("market data helpers", () => {
     expect(state.quote.feedHealth.feedStatus).toBe("blocked");
     expect(state.quote.feedHealth.details[0]).toContain("Gap sequence Kalshi");
   });
+
+  it("keeps Kalshi ticker YES and NO prices coherent when the websocket payload mixes stale fields", () => {
+    const slot = buildSlot();
+
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+
+    feed.slotKey = slot.key;
+    feed.series = {
+      ticker: "KXBTC15M",
+      fee_multiplier: 1,
+      fee_type: "quadratic",
+      title: "BTC 15m",
+    };
+    feed.market = {
+      ticker: "KXBTC15M-CURRENT",
+      event_ticker: "KXBTC15M-CURRENT",
+      title: "Current slot",
+      floor_strike: "101234.56",
+      open_time: slot.startIso,
+      close_time: slot.endIso,
+      status: "active",
+      yes_bid_dollars: "0.50",
+      yes_ask_dollars: "0.51",
+      no_bid_dollars: "0.48",
+      no_ask_dollars: "0.49",
+      yes_bid_size_fp: "10",
+      yes_ask_size_fp: "10",
+      no_bid_size_fp: "10",
+      no_ask_size_fp: "10",
+    };
+    feed.orderbook = null;
+    feed.lastRestSyncAt = slot.startTs + 5_000;
+
+    feed.applyWsPayload(
+      {
+        type: "ticker",
+        msg: {
+          yes_bid_dollars: "0.52",
+          yes_ask_dollars: "0.53",
+          no_ask_dollars: "0.15",
+        },
+      },
+      slot.startTs + 6_000,
+    );
+
+    const state = feed.buildState(slot, slot.startTs + 6_000);
+
+    expect(state.quote.outcomes.yes.buyPrice).toBe(0.53);
+    expect(state.quote.outcomes.no.buyPrice).toBe(0.48);
+    expect(state.quote.outcomes.no.sellPrice).toBe(0.47);
+  });
 });
