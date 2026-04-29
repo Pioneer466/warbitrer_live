@@ -2960,7 +2960,15 @@ async function resolveKalshiPrimaryRestSellPrice(primaryLeg: OrderIntent["legs"]
   return bestBid ?? null;
 }
 
-async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, now: number) {
+async function unwindPrimaryLeg(
+  intent: OrderIntent,
+  settings: StrategyConfig,
+  now: number,
+  force?: {
+    attempt: number;
+    ticks: number;
+  },
+) {
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   if (!primaryLeg || primaryLeg.filledSize <= 0) {
     throw new Error(`Unable to unwind intent ${intent.id}: no primary fill`);
@@ -2990,6 +2998,18 @@ async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, n
   const fallbackExitPrice =
     primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99;
   const requestedPrice = liveExitPrice ?? fallbackExitPrice;
+  const forcedPrice = force
+    ? deriveForcedUnwindOrderPrice(primaryLeg, requestedPrice, settings.maxSlippageBps, force.ticks)
+    : null;
+  const expectedExitPrice = forcedPrice ?? applySlippage(requestedPrice ?? 0, settings.maxSlippageBps, "SELL");
+  if (
+    force &&
+    shouldBlockForcedUnwindLoss(primaryLeg, requestedSize, expectedExitPrice, settings.forcedUnwindMaxLossUsd)
+  ) {
+    throw new Error(
+      `Forced unwind blocked by max loss: expected exit ${expectedExitPrice.toFixed(4)} exceeds configured loss cap`,
+    );
+  }
 
   const request = buildVenueOrderRequest(
     {
@@ -3002,7 +3022,26 @@ async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, n
     settings.maxSlippageBps,
     primaryLeg.venue === "polymarket" ? "FAK" : "IOC",
     true,
+    forcedPrice !== null ? { overridePrice: forcedPrice } : undefined,
   );
+  if (force) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.unwind.forced_attempt",
+      message: `Forced primary unwind attempt ${force.attempt} for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        venue: primaryLeg.venue,
+        attempt: force.attempt,
+        ticks: force.ticks,
+        requestedSize,
+        referencePrice: requestedPrice,
+        orderPrice: request.price,
+        maxLossUsd: settings.forcedUnwindMaxLossUsd,
+      },
+      createdAt: now,
+    });
+  }
   const submission = await adapterFor(primaryLeg.venue).placeOrder(request);
   const result = await confirmImmediateOrderExecution(
     primaryLeg.venue,
@@ -3011,6 +3050,45 @@ async function unwindPrimaryLeg(intent: OrderIntent, settings: StrategyConfig, n
     settings.immediateOrderConfirmationTimeoutMs,
   );
   return buildLiveOrderRecord(intent.asset, intent.id, { ...primaryLeg, side: "SELL" }, request, result, now);
+}
+
+function deriveForcedUnwindOrderPrice(
+  primaryLeg: OrderIntent["legs"][number],
+  referencePrice: number | null,
+  maxSlippageBps: number,
+  ticks: number,
+) {
+  if (referencePrice === null || !Number.isFinite(referencePrice) || referencePrice <= 0) {
+    return null;
+  }
+
+  if (primaryLeg.venue === "kalshi") {
+    return normalizeKalshiOrderPrice(
+      Math.max(KALSHI_ORDER_PRICE_STEP_USD, referencePrice - ticks * KALSHI_ORDER_PRICE_STEP_USD),
+      "SELL",
+    );
+  }
+
+  return round4(Math.max(0.001, applySlippage(referencePrice, maxSlippageBps + ticks * 100, "SELL")));
+}
+
+function shouldBlockForcedUnwindLoss(
+  primaryLeg: OrderIntent["legs"][number],
+  requestedSize: number,
+  expectedExitPrice: number | null,
+  maxLossUsd: number,
+) {
+  if (
+    maxLossUsd <= 0 ||
+    expectedExitPrice === null ||
+    primaryLeg.filledPrice === null ||
+    requestedSize <= 0
+  ) {
+    return false;
+  }
+
+  const expectedLossUsd = requestedSize * Math.max(0, primaryLeg.filledPrice - expectedExitPrice);
+  return expectedLossUsd > maxLossUsd + ORDER_SIZE_TOLERANCE;
 }
 
 async function retryLegWithinExecutionBuffer(
@@ -4006,15 +4084,49 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
     return currentIntent;
   }
 
-  const maxAttempts = Math.max(1, settings.hedgeRetryAttempts);
+  const secondsToSettlement = Math.ceil((currentIntent.slotEndTs - now) / 1_000);
+  const shouldHoldToSettlement =
+    settings.forcedUnwindEnabled &&
+    secondsToSettlement >= 0 &&
+    secondsToSettlement <= settings.forcedUnwindHoldSecondsToSettlement;
+  if (shouldHoldToSettlement) {
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.unwind.forced_hold_to_settlement",
+      message: `Primary unwind held to settlement for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        primaryVenue: currentIntent.primaryVenue,
+        secondsToSettlement,
+        thresholdSeconds: settings.forcedUnwindHoldSecondsToSettlement,
+      },
+      createdAt: now,
+    });
+    return currentIntent;
+  }
+
+  const normalAttempts = Math.max(1, settings.hedgeRetryAttempts);
+  const forcedAttempts = settings.forcedUnwindEnabled ? Math.max(0, settings.forcedUnwindMaxAttempts) : 0;
+  const maxAttempts = normalAttempts + forcedAttempts;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (attempt > 1 && settings.hedgeRetryDelayMs > 0) {
       await sleep(settings.hedgeRetryDelayMs);
     }
+    const forcedAttempt = attempt > normalAttempts ? attempt - normalAttempts : 0;
+    const force =
+      forcedAttempt > 0
+        ? {
+            attempt: forcedAttempt,
+            ticks: settings.forcedUnwindTickLadder[
+              Math.min(forcedAttempt - 1, settings.forcedUnwindTickLadder.length - 1)
+            ] ?? 0,
+          }
+        : undefined;
 
     let unwindResult: LiveOrder;
     try {
-      unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now());
+      unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now(), force);
     } catch (error) {
       const errorMessage = toErrorMessage(error);
       if (
@@ -4048,6 +4160,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
             venue: currentIntent.primaryVenue,
             attempt,
             attempts: maxAttempts,
+            forcedAttempt,
             error: errorMessage,
           },
           createdAt: now,
@@ -4142,7 +4255,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
     if (attempt < maxAttempts) {
       await writeRunEvent({
         level: "warn",
-        eventType: "order.unwind.retry_terminal",
+        eventType: force ? "order.unwind.forced_retry_terminal" : "order.unwind.retry_terminal",
         message: `Primary unwind ${attempt}/${maxAttempts} ended without fill for intent ${currentIntent.id}`,
         payload: {
           intentId: currentIntent.id,
@@ -4151,6 +4264,8 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
           orderStatus: unwindResult.status,
           attempt,
           attempts: maxAttempts,
+          forcedAttempt,
+          forcedTicks: force?.ticks ?? null,
         },
         createdAt: now,
       });
@@ -5358,10 +5473,13 @@ export function buildVenueOrderRequest(
   reduceOnly: boolean,
   options?: {
     kalshiPriceTicksSlippage?: number;
+    overridePrice?: number | null;
   },
 ): VenueOrderRequest {
   const slippageAdjustedPrice =
-    leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side);
+    options?.overridePrice !== undefined
+      ? options.overridePrice
+      : leg.requestedPrice === null ? null : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side);
   const kalshiTickAdjustedPrice =
     leg.venue === "kalshi" && leg.side === "BUY" && options?.kalshiPriceTicksSlippage
       ? normalizeKalshiOrderPrice(

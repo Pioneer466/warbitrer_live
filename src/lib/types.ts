@@ -206,6 +206,11 @@ export type StrategyConfig = {
   primaryRetryDelayMs: number;
   hedgeRetryAttempts: number;
   hedgeRetryDelayMs: number;
+  forcedUnwindEnabled: boolean;
+  forcedUnwindMaxAttempts: number;
+  forcedUnwindTickLadder: readonly number[];
+  forcedUnwindMaxLossUsd: number;
+  forcedUnwindHoldSecondsToSettlement: number;
   entryCutoffSeconds: number;
   maxOpenIntentsPerSlot: number;
   maxVenueExposureUsd: number;

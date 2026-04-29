@@ -19,6 +19,11 @@ describe("settings schema", () => {
     expect(settings.primaryRetryDelayMs).toBe(200);
     expect(settings.hedgeRetryAttempts).toBe(3);
     expect(settings.hedgeRetryDelayMs).toBe(350);
+    expect(settings.forcedUnwindEnabled).toBe(true);
+    expect(settings.forcedUnwindMaxAttempts).toBe(3);
+    expect(settings.forcedUnwindTickLadder).toEqual([1, 3, 6]);
+    expect(settings.forcedUnwindMaxLossUsd).toBe(2);
+    expect(settings.forcedUnwindHoldSecondsToSettlement).toBe(45);
     expect(settings.entryCutoffSeconds).toBe(180);
     expect(settings.mismatchGuardEnabled).toBe(true);
     expect(settings.mismatchGuardMinMoveBps).toBe(5);
@@ -51,6 +56,11 @@ describe("settings schema", () => {
       primaryRetryDelayMs: 250,
       hedgeRetryAttempts: 5,
       hedgeRetryDelayMs: 500,
+      forcedUnwindEnabled: true,
+      forcedUnwindMaxAttempts: 4,
+      forcedUnwindTickLadder: [1, 2, 4, 8],
+      forcedUnwindMaxLossUsd: 3,
+      forcedUnwindHoldSecondsToSettlement: 30,
       entryCutoffSeconds: 20,
       maxOpenIntentsPerSlot: 1,
       maxVenueExposureUsd: 1000,
@@ -71,6 +81,10 @@ describe("settings schema", () => {
     expect(settings.primaryRetryDelayMs).toBe(250);
     expect(settings.hedgeRetryAttempts).toBe(5);
     expect(settings.hedgeRetryDelayMs).toBe(500);
+    expect(settings.forcedUnwindMaxAttempts).toBe(4);
+    expect(settings.forcedUnwindTickLadder).toEqual([1, 2, 4, 8]);
+    expect(settings.forcedUnwindMaxLossUsd).toBe(3);
+    expect(settings.forcedUnwindHoldSecondsToSettlement).toBe(30);
   });
 
   it("accepts a 3 minute entry cutoff", () => {

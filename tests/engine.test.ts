@@ -731,6 +731,33 @@ describe("Kalshi primary IOC handling", () => {
   });
 });
 
+describe("forced unwind request pricing", () => {
+  it("can override the request price when building a reduce-only Kalshi sell", () => {
+    const intent = buildIntent({
+      primaryVenue: "kalshi",
+      legs: [
+        {
+          ...buildIntent().legs[1],
+          venue: "kalshi",
+          side: "SELL",
+          requestedPrice: 0.52,
+          requestedSize: 7,
+          requestedNotionalUsd: 3.64,
+        },
+        buildIntent().legs[0],
+      ],
+    });
+
+    const request = buildVenueOrderRequest(intent.legs[0], 30, "IOC", true, {
+      overridePrice: 0.47,
+    });
+
+    expect(request.price).toBe(0.47);
+    expect(request.reduceOnly).toBe(true);
+    expect(request.side).toBe("SELL");
+  });
+});
+
 describe("retryable polymarket unwind errors", () => {
   it("treats inventory sync errors as retryable", () => {
     expect(

@@ -14,6 +14,11 @@ import {
   DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIPS,
   DEFAULT_MAX_SIGNAL_AGE_MS,
+  DEFAULT_FORCED_UNWIND_ENABLED,
+  DEFAULT_FORCED_UNWIND_HOLD_SECONDS_TO_SETTLEMENT,
+  DEFAULT_FORCED_UNWIND_MAX_ATTEMPTS,
+  DEFAULT_FORCED_UNWIND_MAX_LOSS_USD,
+  DEFAULT_FORCED_UNWIND_TICK_LADDER,
   DEFAULT_STRATEGY_CONFIG,
   DEFAULT_STRATEGY_CONFIGS,
 } from "@/lib/constants";
@@ -75,6 +80,20 @@ export const settingsSchema = z
     primaryRetryDelayMs: z.number().int().min(0).max(5_000),
     hedgeRetryAttempts: z.number().int().min(0).max(10),
     hedgeRetryDelayMs: z.number().int().min(0).max(5_000),
+    forcedUnwindEnabled: z.boolean().default(DEFAULT_FORCED_UNWIND_ENABLED),
+    forcedUnwindMaxAttempts: z.number().int().min(1).max(10).default(DEFAULT_FORCED_UNWIND_MAX_ATTEMPTS),
+    forcedUnwindTickLadder: z
+      .array(z.number().int().min(0).max(50))
+      .min(1)
+      .max(10)
+      .default([...DEFAULT_FORCED_UNWIND_TICK_LADDER]),
+    forcedUnwindMaxLossUsd: z.number().nonnegative().max(10_000).default(DEFAULT_FORCED_UNWIND_MAX_LOSS_USD),
+    forcedUnwindHoldSecondsToSettlement: z
+      .number()
+      .int()
+      .min(0)
+      .max(SLOT_DURATION_SECONDS)
+      .default(DEFAULT_FORCED_UNWIND_HOLD_SECONDS_TO_SETTLEMENT),
     entryCutoffSeconds: z.number().int().min(1).max(300),
     maxOpenIntentsPerSlot: z.number().int().min(1).max(10),
     maxVenueExposureUsd: z.number().positive().max(1_000_000),

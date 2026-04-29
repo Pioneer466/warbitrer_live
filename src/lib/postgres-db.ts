@@ -583,6 +583,25 @@ async function bootstrapDatabase(pool: Pool) {
       [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxSignalAgeMs)],
     );
 
+    for (const key of [
+      "forcedUnwindEnabled",
+      "forcedUnwindMaxAttempts",
+      "forcedUnwindTickLadder",
+      "forcedUnwindMaxLossUsd",
+      "forcedUnwindHoldSecondsToSettlement",
+    ] as const) {
+      await pool.query(
+        `
+        UPDATE strategy_configs
+        SET
+          payload = jsonb_set(payload, $2::text[], $3::jsonb, true),
+          updated_at = $1
+        WHERE NOT (payload ? $4)
+      `,
+        [now, [key], JSON.stringify(DEFAULT_STRATEGY_CONFIG[key]), key],
+      );
+    }
+
     const legacyWorkerState = await pool.query<{
       phase: WorkerState["phase"];
       current_slot_key: string | null;
