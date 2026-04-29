@@ -7,6 +7,7 @@ import type {
   CircuitBreaker,
   DatabaseMaintenanceSummary,
   DatabaseMetrics,
+  ExecutionCandidate,
   DashboardResponse,
   HistoryPoint,
   LiveFill,
@@ -241,6 +242,18 @@ export async function writeCircuitBreaker(breaker: CircuitBreaker) {
 
 export async function readCircuitBreakers() {
   return postgres.listCircuitBreakers(await db());
+}
+
+export async function writeExecutionCandidate(candidate: ExecutionCandidate) {
+  return postgres.upsertExecutionCandidate(await db(), candidate);
+}
+
+export async function readExecutionCandidates(now?: number) {
+  return postgres.listExecutionCandidates(await db(), now);
+}
+
+export async function tryWithGlobalLiveExecutionLock<T>(owner: string, fn: () => Promise<T>) {
+  return postgres.tryWithGlobalLiveExecutionLock(await db(), owner, fn);
 }
 
 export async function readDashboard(slot: MarketSlot): Promise<DashboardResponse> {

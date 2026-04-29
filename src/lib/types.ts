@@ -5,6 +5,7 @@ export type PairCombination = "POLY_UP_KALSHI_NO" | "POLY_DOWN_KALSHI_YES";
 export type Resolution = "UP" | "DOWN" | "YES" | "NO";
 export type OrderSide = "BUY" | "SELL";
 export type WorkerPhase = "idle" | "scan" | "execute" | "reconcile";
+export type WorkerRole = "asset-live" | "reconciler" | "notifier" | "legacy";
 export type ReadinessStatus = "ready" | "degraded" | "blocked";
 export type FeedSource = "ws" | "rest-bootstrap" | "rest-fallback" | "unavailable";
 export type SubscriptionStatus = "idle" | "connecting" | "subscribed" | "error" | "closed";
@@ -554,6 +555,31 @@ export type WorkerState = {
   lastError: string | null;
   readinessStatus: ReadinessStatus;
   readiness: ReadinessCheck[];
+  loopHealth: WorkerLoopHealth;
+};
+
+export type WorkerLoopHealth = {
+  lastScanDurationMs: number | null;
+  lastExecutionDurationMs: number | null;
+  lastReconcileDurationMs: number | null;
+  lastScanAgeMs: number | null;
+  lastCandidateScore: number | null;
+  lockBusyCount: number;
+  staleSignalCount: number;
+  updatedAt: number | null;
+};
+
+export type ExecutionCandidate = {
+  asset: MarketAsset;
+  slotKey: string;
+  scanSequence: number;
+  capturedAt: number;
+  expiresAt: number;
+  combination: PairCombination;
+  projectedNetProfitUsd: number;
+  grossCost: number;
+  signalAgeMs: number;
+  updatedAt: number;
 };
 
 export type DashboardResponse = {

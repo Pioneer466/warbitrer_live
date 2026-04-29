@@ -13,6 +13,7 @@ import type {
   BridgeTransfer,
   CircuitBreaker,
   DashboardResponse,
+  ExecutionCandidate,
   PortfolioDashboardResponse,
   HistoryPoint,
   LiveFill,
@@ -31,6 +32,7 @@ import type {
   TradesResponse,
   Venue,
   VenueBalance,
+  WorkerLoopHealth,
   WorkerState,
 } from "@/lib/types";
 
@@ -40,6 +42,8 @@ let poolSingleton: Pool | null = null;
 let bootstrapPromise: Promise<void> | null = null;
 const BOOTSTRAP_LOCK_NAMESPACE = 4_298;
 const BOOTSTRAP_LOCK_KEY = 1;
+const LIVE_EXECUTION_LOCK_NAMESPACE = 4_298;
+const LIVE_EXECUTION_LOCK_KEY = 2;
 
 export async function getPgDb() {
   if (!process.env.DATABASE_URL) {
@@ -334,8 +338,29 @@ async function bootstrapDatabase(pool: Pool) {
       last_reconcile_at BIGINT,
       last_error TEXT,
       readiness_status TEXT NOT NULL,
-      readiness_json JSONB NOT NULL
+      readiness_json JSONB NOT NULL,
+      loop_health_json JSONB NOT NULL DEFAULT '{}'::jsonb
     );
+
+    CREATE TABLE IF NOT EXISTS execution_candidates (
+      asset TEXT PRIMARY KEY,
+      slot_key TEXT NOT NULL,
+      scan_sequence BIGINT NOT NULL,
+      captured_at BIGINT NOT NULL,
+      expires_at BIGINT NOT NULL,
+      combination TEXT NOT NULL,
+      projected_net_profit_usd DOUBLE PRECISION NOT NULL,
+      gross_cost DOUBLE PRECISION NOT NULL,
+      signal_age_ms BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS execution_candidates_expires_idx
+      ON execution_candidates(expires_at DESC, projected_net_profit_usd DESC);
+  `);
+
+    await pool.query(`
+    ALTER TABLE worker_states
+    ADD COLUMN IF NOT EXISTS loop_health_json JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
 
     await pool.query(
@@ -775,7 +800,7 @@ export async function getWorkerState(pool: Pool, asset: MarketAsset): Promise<Wo
   const result = await pool.query(
     `
       SELECT phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
-        last_error, readiness_status, readiness_json
+        last_error, readiness_status, readiness_json, loop_health_json
       FROM worker_states
       WHERE asset = $1
     `,
@@ -792,6 +817,7 @@ export async function getWorkerState(pool: Pool, asset: MarketAsset): Promise<Wo
     lastError: row.last_error,
     readinessStatus: row.readiness_status,
     readiness: (row.readiness_json ?? []) as WorkerState["readiness"],
+    loopHealth: normalizeWorkerLoopHealth(row.loop_health_json),
   };
 }
 
@@ -806,10 +832,11 @@ export async function listWorkerStates(pool: Pool): Promise<Record<MarketAsset, 
     last_error: string | null;
     readiness_status: WorkerState["readinessStatus"];
     readiness_json: WorkerState["readiness"];
+    loop_health_json: WorkerState["loopHealth"];
   }>(
     `
       SELECT asset, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
-        last_error, readiness_status, readiness_json
+        last_error, readiness_status, readiness_json, loop_health_json
       FROM worker_states
       ORDER BY asset ASC
     `,
@@ -826,6 +853,7 @@ export async function listWorkerStates(pool: Pool): Promise<Record<MarketAsset, 
       lastError: row.last_error,
       readinessStatus: row.readiness_status,
       readiness: row.readiness_json ?? [],
+      loopHealth: normalizeWorkerLoopHealth(row.loop_health_json),
     };
     return accumulator;
   }, {});
@@ -843,6 +871,7 @@ export async function listWorkerStates(pool: Pool): Promise<Record<MarketAsset, 
         lastError: null,
         readinessStatus: "blocked",
         readiness: [],
+        loopHealth: normalizeWorkerLoopHealth(null),
       },
     ]),
   ) as Record<MarketAsset, WorkerState>;
@@ -860,8 +889,9 @@ export async function updateWorkerState(pool: Pool, asset: MarketAsset, state: P
         last_reconcile_at = COALESCE($5, last_reconcile_at),
         last_error = $6,
         readiness_status = COALESCE($7, readiness_status),
-        readiness_json = COALESCE($8::jsonb, readiness_json)
-      WHERE asset = $9
+        readiness_json = COALESCE($8::jsonb, readiness_json),
+        loop_health_json = COALESCE($9::jsonb, loop_health_json)
+      WHERE asset = $10
     `,
     [
       state.phase ?? null,
@@ -872,9 +902,32 @@ export async function updateWorkerState(pool: Pool, asset: MarketAsset, state: P
       state.lastError ?? null,
       state.readinessStatus ?? null,
       state.readiness ? JSON.stringify(state.readiness) : null,
+      state.loopHealth ? JSON.stringify(state.loopHealth) : null,
       asset,
     ],
   );
+}
+
+function normalizeWorkerLoopHealth(value: unknown): WorkerLoopHealth {
+  const input = value && typeof value === "object" ? value as Partial<WorkerLoopHealth> : {};
+  return {
+    lastScanDurationMs: normalizeNullableNumber(input.lastScanDurationMs),
+    lastExecutionDurationMs: normalizeNullableNumber(input.lastExecutionDurationMs),
+    lastReconcileDurationMs: normalizeNullableNumber(input.lastReconcileDurationMs),
+    lastScanAgeMs: normalizeNullableNumber(input.lastScanAgeMs),
+    lastCandidateScore: normalizeNullableNumber(input.lastCandidateScore),
+    lockBusyCount: normalizeCounter(input.lockBusyCount),
+    staleSignalCount: normalizeCounter(input.staleSignalCount),
+    updatedAt: normalizeNullableNumber(input.updatedAt),
+  };
+}
+
+function normalizeNullableNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function normalizeCounter(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
 }
 
 export async function insertOpportunitySnapshot(
@@ -1893,6 +1946,107 @@ export async function listCircuitBreakers(pool: Pool): Promise<CircuitBreaker[]>
     triggeredAt: row.triggered_at,
     payload: row.payload_json,
   }));
+}
+
+export async function upsertExecutionCandidate(pool: Pool, candidate: ExecutionCandidate) {
+  await pool.query(
+    `
+      INSERT INTO execution_candidates (
+        asset, slot_key, scan_sequence, captured_at, expires_at, combination,
+        projected_net_profit_usd, gross_cost, signal_age_ms, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      ON CONFLICT (asset) DO UPDATE SET
+        slot_key = EXCLUDED.slot_key,
+        scan_sequence = EXCLUDED.scan_sequence,
+        captured_at = EXCLUDED.captured_at,
+        expires_at = EXCLUDED.expires_at,
+        combination = EXCLUDED.combination,
+        projected_net_profit_usd = EXCLUDED.projected_net_profit_usd,
+        gross_cost = EXCLUDED.gross_cost,
+        signal_age_ms = EXCLUDED.signal_age_ms,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [
+      candidate.asset,
+      candidate.slotKey,
+      candidate.scanSequence,
+      candidate.capturedAt,
+      candidate.expiresAt,
+      candidate.combination,
+      candidate.projectedNetProfitUsd,
+      candidate.grossCost,
+      candidate.signalAgeMs,
+      candidate.updatedAt,
+    ],
+  );
+}
+
+export async function listExecutionCandidates(pool: Pool, now = Date.now()): Promise<ExecutionCandidate[]> {
+  const result = await pool.query<{
+    asset: MarketAsset;
+    slot_key: string;
+    scan_sequence: number;
+    captured_at: number;
+    expires_at: number;
+    combination: ExecutionCandidate["combination"];
+    projected_net_profit_usd: number;
+    gross_cost: number;
+    signal_age_ms: number;
+    updated_at: number;
+  }>(
+    `
+      SELECT asset, slot_key, scan_sequence, captured_at, expires_at, combination,
+        projected_net_profit_usd, gross_cost, signal_age_ms, updated_at
+      FROM execution_candidates
+      WHERE expires_at >= $1
+      ORDER BY projected_net_profit_usd DESC, captured_at DESC
+    `,
+    [now],
+  );
+
+  return result.rows.map((row) => ({
+    asset: row.asset,
+    slotKey: row.slot_key,
+    scanSequence: row.scan_sequence,
+    capturedAt: row.captured_at,
+    expiresAt: row.expires_at,
+    combination: row.combination,
+    projectedNetProfitUsd: Number(row.projected_net_profit_usd),
+    grossCost: Number(row.gross_cost),
+    signalAgeMs: row.signal_age_ms,
+    updatedAt: row.updated_at,
+  }));
+}
+
+export async function tryWithGlobalLiveExecutionLock<T>(
+  pool: Pool,
+  owner: string,
+  fn: () => Promise<T>,
+): Promise<{ acquired: true; value: T } | { acquired: false; value: null }> {
+  const client = await pool.connect();
+  let acquired = false;
+  try {
+    const result = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock($1, $2) AS locked",
+      [LIVE_EXECUTION_LOCK_NAMESPACE, LIVE_EXECUTION_LOCK_KEY],
+    );
+    acquired = Boolean(result.rows[0]?.locked);
+    if (!acquired) {
+      return { acquired: false, value: null };
+    }
+
+    void owner;
+    return { acquired: true, value: await fn() };
+  } finally {
+    if (acquired) {
+      await client.query("SELECT pg_advisory_unlock($1, $2)", [
+        LIVE_EXECUTION_LOCK_NAMESPACE,
+        LIVE_EXECUTION_LOCK_KEY,
+      ]);
+    }
+    client.release();
+  }
 }
 
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {

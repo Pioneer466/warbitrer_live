@@ -66,6 +66,7 @@ import {
   findOrderIntent,
   findVenueOrder,
   readCircuitBreakers,
+  readExecutionCandidates,
   readFillsForIntentVenue,
   readLastEntryCosts,
   readLatestSnapshot,
@@ -83,8 +84,10 @@ import {
   readVenueBalances,
   replaceVenuePositions,
   runDatabaseMaintenance,
+  tryWithGlobalLiveExecutionLock,
   writeStablePnlChange,
   writeCircuitBreaker,
+  writeExecutionCandidate,
   writeFill,
   writeOrderIntent,
   writePnlSnapshot,
@@ -98,6 +101,7 @@ import {
 import type {
   ExecutionCoordinator,
   CircuitBreaker,
+  ExecutionCandidate,
   LiveFill,
   LiveOpportunity,
   LiveOrder,
@@ -131,6 +135,12 @@ const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LIMIT = 500;
 const EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS = 5_000;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
+const SETTINGS_CACHE_TTL_MS = 1_000;
+const VENUE_BALANCES_CACHE_TTL_MS = 750;
+const OPEN_INTENTS_CACHE_TTL_MS = 750;
+const LAST_ENTRY_COSTS_CACHE_TTL_MS = 750;
+const EXECUTION_ARBITER_WINDOW_MS = resolveExecutionArbiterWindowMs();
+const EXECUTION_LOCK_BUSY_LOG_INTERVAL_MS = 2_000;
 const SCAN_SLOW_LOG_THRESHOLD_MS = 1_000;
 const EXECUTION_SLOW_LOG_THRESHOLD_MS = 2_000;
 const RECONCILE_SLOW_LOG_THRESHOLD_MS = 5_000;
@@ -146,10 +156,18 @@ const lastSettledResolutionRepairAtByAsset: Partial<Record<MarketAsset, number>>
 let nextScanSequence = 1;
 let executionTickInFlight = false;
 const latestScanByAsset = new Map<MarketAsset, RealtimeScanState>();
+const executionTickInFlightByAsset: Partial<Record<MarketAsset, boolean>> = {};
 const lastExecutedScanSequenceByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastPersistedScanSnapshotAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastPersistedWorkerStateAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastExecutionLockBusyLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
+const loopHealthByAsset: Partial<Record<MarketAsset, WorkerState["loopHealth"]>> = {};
+const settingsCacheByAsset: Partial<Record<MarketAsset, { value: StrategyConfig; capturedAt: number }>> = {};
+let venueBalancesCache: { value: VenueBalance[]; capturedAt: number } | null = null;
+let openIntentsCache: { value: OrderIntent[]; capturedAt: number } | null = null;
+const lastEntryCostsCache = new Map<string, { value: Awaited<ReturnType<typeof readLastEntryCosts>>; capturedAt: number }>();
 
 type RealtimeScanState = {
   sequence: number;
@@ -256,6 +274,8 @@ function buildPolymarketSlotSlug(asset: MarketAsset, slotStartTs: number) {
 
 type TickSharedContext = {
   venueBalances?: VenueBalance[];
+  openIntents?: OrderIntent[];
+  lastEntryCosts?: Awaited<ReturnType<typeof readLastEntryCosts>>;
   venuePositions?: {
     polymarket: PositionSnapshot[];
     kalshi: PositionSnapshot[];
@@ -274,48 +294,30 @@ export async function processScanTick(now = new Date()) {
   const scanStartedAt = Date.now();
   const errors: string[] = [];
   const snapshots: OpportunitySnapshot[] = [];
-  const settingsMap = await readSettingsMap();
-  const sharedVenueBalances = await readVenueBalances();
+  const settingsMap = await readCachedSettingsMap(nowTs);
+  const sharedVenueBalances = await readCachedVenueBalances(nowTs);
+  const sharedOpenIntents = await readCachedOpenIntents(nowTs);
 
   await Promise.all(
     ACTIVE_MARKET_ASSETS.map(async (asset) => {
       const settings = settingsMap[asset];
       const slot = getCurrentSlot(asset, now);
-      const coordinator = createExecutionCoordinator(asset, settings, {
-        venueBalances: sharedVenueBalances,
-      });
 
       try {
-        const assetScanStartedAt = Date.now();
-        const persistSnapshot = shouldPersistScanSnapshot(asset, nowTs);
-        const snapshot = await coordinator.scan(slot, nowTs, { persistSnapshot });
-        if (persistSnapshot) {
-          lastPersistedScanSnapshotAtByAsset[asset] = nowTs;
-        }
+        const snapshot = await scanAsset(asset, slot, settings, nowTs, {
+          venueBalances: sharedVenueBalances,
+          openIntents: sharedOpenIntents,
+          lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
+        });
         snapshots.push(snapshot);
-        latestScanByAsset.set(asset, {
-          sequence: nextScanSequence++,
-          asset,
-          slot,
-          settings,
-          snapshot,
-          capturedAt: snapshot.capturedAt,
-          scanDurationMs: Date.now() - assetScanStartedAt,
-        });
-        await writeWorkerState(asset, {
-          phase: "scan",
-          currentSlotKey: slot.key,
-          lastScanAt: nowTs,
-          lastError: null,
-        });
       } catch (error) {
         const message = `[${asset}] ${toErrorMessage(error)}`;
         errors.push(message);
-        await writeWorkerState(asset, {
+        await writeAssetWorkerState(asset, {
           phase: "scan",
           currentSlotKey: slot.key,
           lastError: message,
-        });
+        }, nowTs, true);
       }
     }),
   );
@@ -330,6 +332,77 @@ export async function processScanTick(now = new Date()) {
   }
 
   return snapshots;
+}
+
+export async function processAssetScanTick(asset: MarketAsset, now = new Date()) {
+  const nowTs = now.getTime();
+  const slot = getCurrentSlot(asset, now);
+  const settings = await readCachedSettings(asset, nowTs);
+  try {
+    return await scanAsset(asset, slot, settings, nowTs, {
+      venueBalances: await readCachedVenueBalances(nowTs),
+      openIntents: await readCachedOpenIntents(nowTs),
+      lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
+    });
+  } catch (error) {
+    const message = `[${asset}] ${toErrorMessage(error)}`;
+    await writeAssetWorkerState(asset, {
+      phase: "scan",
+      currentSlotKey: slot.key,
+      lastError: message,
+    }, nowTs, true);
+    throw error;
+  }
+}
+
+async function scanAsset(
+  asset: MarketAsset,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  nowTs: number,
+  sharedContext: TickSharedContext,
+) {
+  const coordinator = createExecutionCoordinator(asset, settings, sharedContext);
+  const assetScanStartedAt = Date.now();
+  const persistSnapshot = shouldPersistScanSnapshot(asset, nowTs);
+  const snapshot = await coordinator.scan(slot, nowTs, { persistSnapshot });
+  if (persistSnapshot) {
+    lastPersistedScanSnapshotAtByAsset[asset] = nowTs;
+  }
+
+  const scanState: RealtimeScanState = {
+    sequence: nextScanSequence++,
+    asset,
+    slot,
+    settings,
+    snapshot,
+    capturedAt: snapshot.capturedAt,
+    scanDurationMs: Date.now() - assetScanStartedAt,
+  };
+  latestScanByAsset.set(asset, scanState);
+
+  const candidate = buildExecutionCandidate(scanState, nowTs);
+  if (candidate) {
+    await writeExecutionCandidate(candidate);
+    console.log(
+      `[worker] candidate published: asset=${asset} slot=${candidate.slotKey} profit=${candidate.projectedNetProfitUsd.toFixed(4)} age=${candidate.signalAgeMs}ms`,
+    );
+  }
+
+  const loopHealth = updateLoopHealth(asset, {
+    lastScanDurationMs: scanState.scanDurationMs,
+    lastScanAgeMs: Math.max(0, Date.now() - scanState.capturedAt),
+    lastCandidateScore: candidate?.projectedNetProfitUsd ?? null,
+  }, nowTs);
+  await writeAssetWorkerState(asset, {
+    phase: "scan",
+    currentSlotKey: slot.key,
+    lastScanAt: nowTs,
+    lastError: null,
+    loopHealth,
+  }, nowTs, persistSnapshot);
+
+  return snapshot;
 }
 
 function shouldPersistScanSnapshot(asset: MarketAsset, now: number) {
@@ -376,28 +449,18 @@ async function processExecutionTickUnlocked(now = new Date()) {
     return created;
   }
 
-  const settingsMap = await readSettingsMap();
-
   for (const scanState of pendingScanStates) {
-    const settings = settingsMap[scanState.asset];
-    const coordinator = createExecutionCoordinator(scanState.asset, settings);
     try {
-      const assetCreated = await coordinator.execute(scanState.slot, nowTs, scanState.snapshot);
+      const assetCreated = await executeScanState(scanState, nowTs);
       created.push(...assetCreated);
-      await writeWorkerState(scanState.asset, {
-        phase: "execute",
-        currentSlotKey: scanState.slot.key,
-        lastExecuteAt: nowTs,
-        lastError: null,
-      });
     } catch (error) {
       const message = `[${scanState.asset}] ${toErrorMessage(error)}`;
       errors.push(message);
-      await writeWorkerState(scanState.asset, {
+      await writeAssetWorkerState(scanState.asset, {
         phase: "execute",
         currentSlotKey: scanState.slot.key,
         lastError: message,
-      });
+      }, nowTs, true);
     } finally {
       lastExecutedScanSequenceByAsset[scanState.asset] = scanState.sequence;
     }
@@ -412,6 +475,81 @@ async function processExecutionTickUnlocked(now = new Date()) {
     throw new Error(errors.join(" | "));
   }
 
+  return created;
+}
+
+export async function processAssetExecutionTick(asset: MarketAsset, now = new Date()) {
+  if (executionTickInFlightByAsset[asset]) {
+    return [];
+  }
+
+  executionTickInFlightByAsset[asset] = true;
+  try {
+    const scanState = latestScanByAsset.get(asset);
+    if (!scanState || lastExecutedScanSequenceByAsset[asset] === scanState.sequence) {
+      return [];
+    }
+
+    const currentSlot = getCurrentSlot(asset, now);
+    if (scanState.slot.key !== currentSlot.key) {
+      lastExecutedScanSequenceByAsset[asset] = scanState.sequence;
+      return [];
+    }
+
+    const remainingArbiterWindowMs = Math.max(0, EXECUTION_ARBITER_WINDOW_MS - (Date.now() - scanState.capturedAt));
+    if (remainingArbiterWindowMs > 0) {
+      await sleep(remainingArbiterWindowMs);
+    }
+
+    try {
+      const created = await executeScanState(scanState, Date.now());
+      lastExecutedScanSequenceByAsset[asset] = scanState.sequence;
+      return created;
+    } catch (error) {
+      const message = `[${asset}] ${toErrorMessage(error)}`;
+      await writeAssetWorkerState(asset, {
+        phase: "execute",
+        currentSlotKey: scanState.slot.key,
+        lastError: message,
+      }, Date.now(), true);
+      lastExecutedScanSequenceByAsset[asset] = scanState.sequence;
+      throw error;
+    }
+  } finally {
+    executionTickInFlightByAsset[asset] = false;
+  }
+}
+
+async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
+  const executeStartedAt = Date.now();
+  const created: OrderIntent[] = [];
+  const settings = await readCachedSettings(scanState.asset, nowTs);
+  const candidate = buildExecutionCandidate({ ...scanState, settings }, nowTs);
+  if (candidate) {
+    const candidates = await readExecutionCandidates(nowTs);
+    const winner = selectWinningExecutionCandidate(candidates, nowTs);
+    if (!winner || winner.asset !== scanState.asset || winner.scanSequence !== scanState.sequence) {
+      return created;
+    }
+    console.log(
+      `[worker] candidate won: asset=${winner.asset} slot=${winner.slotKey} profit=${winner.projectedNetProfitUsd.toFixed(4)} age=${Math.max(0, nowTs - winner.capturedAt)}ms`,
+    );
+  }
+
+  const coordinator = createExecutionCoordinator(scanState.asset, settings);
+  const assetCreated = await coordinator.execute(scanState.slot, nowTs, scanState.snapshot);
+  created.push(...assetCreated);
+  const loopHealth = updateLoopHealth(scanState.asset, {
+    lastExecutionDurationMs: Date.now() - executeStartedAt,
+    lastScanAgeMs: Math.max(0, Date.now() - scanState.capturedAt),
+  }, nowTs);
+  await writeAssetWorkerState(scanState.asset, {
+    phase: "execute",
+    currentSlotKey: scanState.slot.key,
+    lastExecuteAt: nowTs,
+    lastError: null,
+    loopHealth,
+  }, nowTs, true);
   return created;
 }
 
@@ -434,21 +572,26 @@ export async function processReconcileTick(now = new Date()) {
     });
 
     try {
+      const assetReconcileStartedAt = Date.now();
       await coordinator.reconcile(slot, nowTs);
-      await writeWorkerState(asset, {
+      const loopHealth = updateLoopHealth(asset, {
+        lastReconcileDurationMs: Date.now() - assetReconcileStartedAt,
+      }, nowTs);
+      await writeAssetWorkerState(asset, {
         phase: "reconcile",
         currentSlotKey: slot.key,
         lastReconcileAt: nowTs,
         lastError: null,
-      });
+        loopHealth,
+      }, nowTs, true);
     } catch (error) {
       const message = `[${asset}] ${toErrorMessage(error)}`;
       errors.push(message);
-      await writeWorkerState(asset, {
+      await writeAssetWorkerState(asset, {
         phase: "reconcile",
         currentSlotKey: slot.key,
         lastError: message,
-      });
+      }, nowTs, true);
     }
   }
 
@@ -472,7 +615,7 @@ export function createExecutionCoordinator(
   return {
     async scan(slot, now, options = {}) {
       const balances = sharedContext.venueBalances ?? (await readVenueBalances());
-      const openIntents = await readOpenOrderIntents();
+      const openIntents = sharedContext.openIntents ?? (await readOpenOrderIntents());
       const effectiveBalances = applyVenueBalanceReservations(balances, openIntents);
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
       const polymarket = polymarketState.quote;
@@ -486,7 +629,7 @@ export function createExecutionCoordinator(
         kalshi,
         settings,
         balances: effectiveBalances,
-        lastEntryCosts: await readLastEntryCosts(slot.asset, slot.key),
+        lastEntryCosts: sharedContext.lastEntryCosts ?? (await readLastEntryCosts(slot.asset, slot.key)),
         secondsRemaining: slot.secondsRemaining,
       });
 
@@ -524,157 +667,179 @@ export function createExecutionCoordinator(
       const snapshot = providedSnapshot ?? latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
       const readiness = await computeReadiness(snapshot, slot.asset, now);
       const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
-      const initialOpenIntents = await readOpenOrderIntents(slot.asset);
-      const resumed = await resumeInFlightIntents(
-        initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
-        slot,
-        settings,
-        now,
-      );
-      const openIntents = await readOpenOrderIntents();
-      const assetOpenIntents = openIntents.filter((intent) => intent.asset === slot.asset);
 
-      await writeWorkerState(slot.asset, {
+      await writeAssetWorkerState(slot.asset, {
         readinessStatus: readiness.state.readinessStatus,
         readiness: readiness.state.readiness,
-      });
+      }, now, false);
 
       if (!settings.enableTrading || activeBreakers.length > 0) {
-        return resumed;
+        return [];
       }
 
       if (!settings.shadowMode && readiness.state.readinessStatus !== "ready") {
-        return resumed;
+        return [];
       }
 
       if (!snapshot) {
-        return resumed;
+        return [];
       }
 
       if (!isOpportunitySnapshotFresh(snapshot, now, settings.maxSignalAgeMs)) {
         await maybeWriteStaleSignalRunEvent(slot.asset, snapshot, settings, now);
-        return resumed;
-      }
-
-      if (hasUnresolvedExposureBlocker(openIntents)) {
-        return resumed;
-      }
-
-      const blockingOpenForSlot = countSlotExecutionBlockers(assetOpenIntents, slot.key);
-      if (blockingOpenForSlot >= settings.maxOpenIntentsPerSlot) {
-        return resumed;
+        return [];
       }
 
       const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
-      const created: OrderIntent[] = [...resumed];
-      const positions =
-        sharedContext.venuePositions === null
-          ? await readPositions()
-          : sharedContext.venuePositions
-            ? [...sharedContext.venuePositions.polymarket, ...sharedContext.venuePositions.kalshi]
-            : await readPositions();
-      const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
-      const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
-      let createdCount = 0;
-
-      for (const opportunity of eligible) {
-        if (createdCount >= creationBudget) {
-          break;
-        }
-
-        const currentBreakers = (await readCircuitBreakers()).filter(
-          (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.asset, slot.key),
-        );
-        if (currentBreakers.length > 0) {
-          break;
-        }
-
-        const currentOpenIntents = await readOpenOrderIntents();
-        const currentAssetOpenIntents = currentOpenIntents.filter((intent) => intent.asset === slot.asset);
-        if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
-          break;
-        }
-
-        if (countSlotExecutionBlockers(currentAssetOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
-          break;
-        }
-
-        const baseIntent = createIntentFromOpportunity({
-          opportunity,
-          slotStartTs: slot.startTs,
-          slotEndTs: slot.endTs,
-          now,
-          maxSlippageBps: settings.maxSlippageBps,
-          shadow: settings.shadowMode,
-        });
-
-        const preparedIntent =
-          settings.shadowMode
-            ? { intent: baseIntent, reason: null }
-            : await prepareIntentForLiveExecution(baseIntent, slot, settings, Date.now());
-        if (!preparedIntent.intent) {
-          await writeRunEvent({
-            level: "warn",
-            eventType:
-              preparedIntent.reason === "unsafe_polymarket_primary"
-                ? "intent.skipped.unsafe_primary_sequence"
-                : "intent.skipped.execution_window",
-            message:
-              preparedIntent.reason === "unsafe_polymarket_primary"
-                ? `Intent ${baseIntent.id} skipped because Kalshi hedge capacity is not robust enough to lead with Polymarket`
-                : `Intent ${baseIntent.id} skipped because the live pair no longer fits the execution window`,
-            payload: {
-              intentId: baseIntent.id,
-              slotKey: baseIntent.slotKey,
-              combination: baseIntent.combination,
-              primaryVenue: baseIntent.primaryVenue,
-              reason: preparedIntent.reason,
-            },
-            createdAt: now,
-          });
-          continue;
-        }
-        const intent = preparedIntent.intent;
-
-        if (wouldExceedVenueExposure(intent, exposureUsd, settings.maxVenueExposureUsd)) {
-          await writeRunEvent({
-            level: "warn",
-            eventType: "intent.skipped.exposure_limit",
-            message: `Intent ${intent.id} exceeds venue exposure limit`,
-            payload: {
-              slotKey: intent.slotKey,
-              limitUsd: settings.maxVenueExposureUsd,
-              exposureUsd,
-            },
-            createdAt: now,
-          });
-          continue;
-        }
-
-        for (const leg of intent.legs) {
-          exposureUsd[leg.venue] += leg.requestedNotionalUsd;
-        }
-
-        await writeOrderIntent(intent);
-        await writeRunEvent({
-          level: "info",
-          eventType: "intent.created",
-          message: `Intent ${intent.id} created for ${intent.combination}`,
-          payload: {
-            slotKey: intent.slotKey,
-            primaryVenue: intent.primaryVenue,
-          },
-          createdAt: now,
-        });
-
-        const executed = settings.shadowMode
-          ? await executeShadowIntent(intent, now)
-          : await executeIntent(intent, slot, settings, now);
-        created.push(executed);
-        createdCount += 1;
+      if (!settings.shadowMode && eligible.length === 0) {
+        return [];
       }
 
-      return created;
+      const executeWithinLock = async () => {
+        const initialOpenIntents = await readOpenOrderIntents(slot.asset);
+        const resumed = await resumeInFlightIntents(
+          initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
+          slot,
+          settings,
+          now,
+        );
+        const openIntents = await readOpenOrderIntents();
+        const assetOpenIntents = openIntents.filter((intent) => intent.asset === slot.asset);
+
+        if (hasUnresolvedExposureBlocker(openIntents)) {
+          return resumed;
+        }
+
+        const blockingOpenForSlot = countSlotExecutionBlockers(assetOpenIntents, slot.key);
+        if (blockingOpenForSlot >= settings.maxOpenIntentsPerSlot) {
+          return resumed;
+        }
+
+        const created: OrderIntent[] = [...resumed];
+        const positions =
+          sharedContext.venuePositions === null
+            ? await readPositions()
+            : sharedContext.venuePositions
+              ? [...sharedContext.venuePositions.polymarket, ...sharedContext.venuePositions.kalshi]
+              : await readPositions();
+        const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
+        const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
+        let createdCount = 0;
+
+        for (const opportunity of eligible) {
+          if (createdCount >= creationBudget) {
+            break;
+          }
+
+          const currentBreakers = (await readCircuitBreakers()).filter(
+            (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.asset, slot.key),
+          );
+          if (currentBreakers.length > 0) {
+            break;
+          }
+
+          const currentOpenIntents = await readOpenOrderIntents();
+          const currentAssetOpenIntents = currentOpenIntents.filter((intent) => intent.asset === slot.asset);
+          if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
+            break;
+          }
+
+          if (countSlotExecutionBlockers(currentAssetOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
+            break;
+          }
+
+          const baseIntent = createIntentFromOpportunity({
+            opportunity,
+            slotStartTs: slot.startTs,
+            slotEndTs: slot.endTs,
+            now,
+            maxSlippageBps: settings.maxSlippageBps,
+            shadow: settings.shadowMode,
+          });
+
+          const preparedIntent =
+            settings.shadowMode
+              ? { intent: baseIntent, reason: null }
+              : await prepareIntentForLiveExecution(baseIntent, slot, settings, Date.now());
+          if (!preparedIntent.intent) {
+            await writeRunEvent({
+              level: "warn",
+              eventType:
+                preparedIntent.reason === "unsafe_polymarket_primary"
+                  ? "intent.skipped.unsafe_primary_sequence"
+                  : "intent.skipped.execution_window",
+              message:
+                preparedIntent.reason === "unsafe_polymarket_primary"
+                  ? `Intent ${baseIntent.id} skipped because Kalshi hedge capacity is not robust enough to lead with Polymarket`
+                  : `Intent ${baseIntent.id} skipped because the live pair no longer fits the execution window`,
+              payload: {
+                intentId: baseIntent.id,
+                slotKey: baseIntent.slotKey,
+                combination: baseIntent.combination,
+                primaryVenue: baseIntent.primaryVenue,
+                reason: preparedIntent.reason,
+              },
+              createdAt: now,
+            });
+            continue;
+          }
+          const intent = preparedIntent.intent;
+
+          if (wouldExceedVenueExposure(intent, exposureUsd, settings.maxVenueExposureUsd)) {
+            await writeRunEvent({
+              level: "warn",
+              eventType: "intent.skipped.exposure_limit",
+              message: `Intent ${intent.id} exceeds venue exposure limit`,
+              payload: {
+                slotKey: intent.slotKey,
+                limitUsd: settings.maxVenueExposureUsd,
+                exposureUsd,
+              },
+              createdAt: now,
+            });
+            continue;
+          }
+
+          for (const leg of intent.legs) {
+            exposureUsd[leg.venue] += leg.requestedNotionalUsd;
+          }
+
+          await writeOrderIntent(intent);
+          await writeRunEvent({
+            level: "info",
+            eventType: "intent.created",
+            message: `Intent ${intent.id} created for ${intent.combination}`,
+            payload: {
+              slotKey: intent.slotKey,
+              primaryVenue: intent.primaryVenue,
+            },
+            createdAt: now,
+          });
+
+          const executed = settings.shadowMode
+            ? await executeShadowIntent(intent, now)
+            : await executeIntent(intent, slot, settings, now);
+          created.push(executed);
+          createdCount += 1;
+        }
+
+        return created;
+      };
+
+      if (settings.shadowMode) {
+        return executeWithinLock();
+      }
+
+      const lockResult = await tryWithGlobalLiveExecutionLock(
+        `execute:${slot.asset}:${slot.key}`,
+        executeWithinLock,
+      );
+      if (!lockResult.acquired) {
+        await recordExecutionLockBusy(slot.asset, slot.key, now);
+        return [];
+      }
+
+      return lockResult.value;
     },
 
     async reconcile(slot, now) {
@@ -802,6 +967,214 @@ export function getOpportunitySnapshotAgeMs(snapshot: Pick<OpportunitySnapshot, 
   return Math.max(0, now - snapshot.capturedAt);
 }
 
+export function selectWinningExecutionCandidate(
+  candidates: ExecutionCandidate[],
+  now: number,
+) {
+  const activeCandidates = candidates.filter(
+    (candidate) =>
+      candidate.expiresAt >= now &&
+      candidate.projectedNetProfitUsd > 0 &&
+      Number.isFinite(candidate.projectedNetProfitUsd) &&
+      Number.isFinite(candidate.grossCost),
+  );
+  if (activeCandidates.length === 0) {
+    return null;
+  }
+
+  return [...activeCandidates].sort((left, right) => {
+    const profitDelta = right.projectedNetProfitUsd - left.projectedNetProfitUsd;
+    if (Math.abs(profitDelta) > ORDER_SIZE_TOLERANCE) {
+      return profitDelta;
+    }
+
+    const leftAge = Math.max(0, now - left.capturedAt);
+    const rightAge = Math.max(0, now - right.capturedAt);
+    if (leftAge !== rightAge) {
+      return leftAge - rightAge;
+    }
+
+    return ACTIVE_MARKET_ASSETS.indexOf(left.asset) - ACTIVE_MARKET_ASSETS.indexOf(right.asset);
+  })[0];
+}
+
+function buildExecutionCandidate(scanState: RealtimeScanState, now: number): ExecutionCandidate | null {
+  const bestOpportunity = scanState.snapshot.opportunities
+    .filter(
+      (opportunity) =>
+        opportunity.eligible &&
+        opportunity.projectedNetProfitUsd !== null &&
+        opportunity.projectedNetProfitUsd > 0 &&
+        opportunity.grossCost !== null,
+    )
+    .sort((left, right) => {
+      const profitDelta = (right.projectedNetProfitUsd ?? 0) - (left.projectedNetProfitUsd ?? 0);
+      if (Math.abs(profitDelta) > ORDER_SIZE_TOLERANCE) {
+        return profitDelta;
+      }
+      return (left.grossCost ?? Number.POSITIVE_INFINITY) - (right.grossCost ?? Number.POSITIVE_INFINITY);
+    })[0];
+
+  if (!bestOpportunity || bestOpportunity.projectedNetProfitUsd === null || bestOpportunity.grossCost === null) {
+    return null;
+  }
+
+  return {
+    asset: scanState.asset,
+    slotKey: scanState.slot.key,
+    scanSequence: scanState.sequence,
+    capturedAt: scanState.capturedAt,
+    expiresAt: scanState.capturedAt + scanState.settings.maxSignalAgeMs,
+    combination: bestOpportunity.combination,
+    projectedNetProfitUsd: bestOpportunity.projectedNetProfitUsd,
+    grossCost: bestOpportunity.grossCost,
+    signalAgeMs: Math.max(0, now - scanState.capturedAt),
+    updatedAt: now,
+  };
+}
+
+function resolveExecutionArbiterWindowMs() {
+  const raw = process.env.WARBITRER_EXECUTION_ARBITER_WINDOW_MS;
+  if (!raw) {
+    return 25;
+  }
+
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(250, Math.floor(parsed))) : 25;
+}
+
+async function readCachedSettings(asset: MarketAsset, now: number) {
+  const cached = settingsCacheByAsset[asset];
+  if (cached && now - cached.capturedAt <= SETTINGS_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const value = await readSettings(asset);
+  settingsCacheByAsset[asset] = { value, capturedAt: now };
+  return value;
+}
+
+async function readCachedSettingsMap(now: number) {
+  const entries = await Promise.all(
+    ACTIVE_MARKET_ASSETS.map(async (asset) => [asset, await readCachedSettings(asset, now)] as const),
+  );
+  return Object.fromEntries(entries) as Record<MarketAsset, StrategyConfig>;
+}
+
+async function readCachedVenueBalances(now: number) {
+  if (venueBalancesCache && now - venueBalancesCache.capturedAt <= VENUE_BALANCES_CACHE_TTL_MS) {
+    return venueBalancesCache.value;
+  }
+
+  const value = await readVenueBalances();
+  venueBalancesCache = { value, capturedAt: now };
+  return value;
+}
+
+async function readCachedOpenIntents(now: number) {
+  if (openIntentsCache && now - openIntentsCache.capturedAt <= OPEN_INTENTS_CACHE_TTL_MS) {
+    return openIntentsCache.value;
+  }
+
+  const value = await readOpenOrderIntents();
+  openIntentsCache = { value, capturedAt: now };
+  return value;
+}
+
+async function readCachedLastEntryCosts(asset: MarketAsset, slotKey: string, now: number) {
+  const key = `${asset}:${slotKey}`;
+  const cached = lastEntryCostsCache.get(key);
+  if (cached && now - cached.capturedAt <= LAST_ENTRY_COSTS_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const value = await readLastEntryCosts(asset, slotKey);
+  lastEntryCostsCache.set(key, { value, capturedAt: now });
+  return value;
+}
+
+function getLoopHealth(asset: MarketAsset): WorkerState["loopHealth"] {
+  return loopHealthByAsset[asset] ?? {
+    lastScanDurationMs: null,
+    lastExecutionDurationMs: null,
+    lastReconcileDurationMs: null,
+    lastScanAgeMs: null,
+    lastCandidateScore: null,
+    lockBusyCount: 0,
+    staleSignalCount: 0,
+    updatedAt: null,
+  };
+}
+
+function updateLoopHealth(
+  asset: MarketAsset,
+  patch: Partial<WorkerState["loopHealth"]>,
+  now: number,
+) {
+  const next = {
+    ...getLoopHealth(asset),
+    ...patch,
+    updatedAt: now,
+  };
+  loopHealthByAsset[asset] = next;
+  return next;
+}
+
+async function writeAssetWorkerState(
+  asset: MarketAsset,
+  state: Partial<WorkerState>,
+  now: number,
+  force: boolean,
+) {
+  const shouldWrite = force || shouldPersistWorkerState(asset, now);
+  if (!shouldWrite) {
+    return;
+  }
+
+  lastPersistedWorkerStateAtByAsset[asset] = now;
+  await writeWorkerState(asset, {
+    ...state,
+    loopHealth: state.loopHealth ?? getLoopHealth(asset),
+  });
+}
+
+function shouldPersistWorkerState(asset: MarketAsset, now: number) {
+  const lastPersistedAt = lastPersistedWorkerStateAtByAsset[asset] ?? null;
+  return lastPersistedAt === null || now - lastPersistedAt >= SNAPSHOT_PERSIST_INTERVAL_MS;
+}
+
+async function recordExecutionLockBusy(asset: MarketAsset, slotKey: string, now: number) {
+  const previousHealth = getLoopHealth(asset);
+  const loopHealth = updateLoopHealth(asset, {
+    lockBusyCount: previousHealth.lockBusyCount + 1,
+  }, now);
+  await writeAssetWorkerState(asset, {
+    phase: "execute",
+    currentSlotKey: slotKey,
+    lastExecuteAt: now,
+    loopHealth,
+  }, now, true);
+
+  const lastLogAt = lastExecutionLockBusyLogAtByAsset[asset] ?? 0;
+  if (now - lastLogAt < EXECUTION_LOCK_BUSY_LOG_INTERVAL_MS) {
+    return;
+  }
+
+  lastExecutionLockBusyLogAtByAsset[asset] = now;
+  console.warn(`[worker] execution lock busy: asset=${asset} slot=${slotKey}`);
+  await writeRunEvent({
+    asset,
+    level: "warn",
+    eventType: "execution.lock_busy",
+    message: `Execution lock busy for ${asset.toUpperCase()} ${slotKey}`,
+    payload: {
+      asset,
+      slotKey,
+    },
+    createdAt: now,
+  });
+}
+
 async function maybeWriteStaleSignalRunEvent(
   asset: MarketAsset,
   snapshot: OpportunitySnapshot,
@@ -818,6 +1191,11 @@ async function maybeWriteStaleSignalRunEvent(
   }
 
   lastStaleSignalLogAtByAsset[asset] = now;
+  const previousHealth = getLoopHealth(asset);
+  updateLoopHealth(asset, {
+    staleSignalCount: previousHealth.staleSignalCount + 1,
+    lastScanAgeMs: getOpportunitySnapshotAgeMs(snapshot, now),
+  }, now);
   const signalAgeMs = getOpportunitySnapshotAgeMs(snapshot, now);
   console.warn(
     `[worker] executor skipped stale signal: asset=${asset} slot=${snapshot.slotKey} age=${signalAgeMs}ms max=${settings.maxSignalAgeMs}ms`,
@@ -4290,6 +4668,38 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   return currentIntent;
 }
 
+async function attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
+  intent: OrderIntent,
+  primaryLeg: OrderIntent["legs"][number],
+  hedgeLeg: OrderIntent["legs"][number],
+  hedgeOrder: LiveOrder | null,
+  settings: StrategyConfig,
+  now: number,
+  failureReason: string,
+  hedgeResult?: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
+) {
+  const lockResult = await tryWithGlobalLiveExecutionLock(
+    `reconcile-unwind:${intent.asset}:${intent.id}`,
+    () => attemptPrimaryUnwindAfterHedgeFailure(
+      intent,
+      primaryLeg,
+      hedgeLeg,
+      hedgeOrder,
+      settings,
+      now,
+      failureReason,
+      hedgeResult,
+    ),
+  );
+
+  if (lockResult.acquired) {
+    return lockResult.value;
+  }
+
+  await recordExecutionLockBusy(intent.asset, intent.slotKey, now);
+  return intent;
+}
+
 async function tripManualInterventionBreaker(
   intent: OrderIntent,
   now: number,
@@ -4998,7 +5408,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
 
       if (!unwindOrder) {
         if (stale) {
-          currentIntent = await attemptPrimaryUnwindAfterHedgeFailure(
+          currentIntent = await attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
             currentIntent,
             primaryLeg,
             hedgeLeg,
@@ -5201,7 +5611,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           },
           createdAt: now,
         });
-        await attemptPrimaryUnwindAfterHedgeFailure(
+        await attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
           currentIntent,
           primaryLeg,
           hedgeLeg,
@@ -5269,7 +5679,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
 
     if (stale && (isTerminalOrderStatus(hedgeOrder.status) || isAwaitingOrderConfirmation(hedgeOrder.status))) {
-      await attemptPrimaryUnwindAfterHedgeFailure(
+      await attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
         currentIntent,
         primaryLeg,
         hedgeLeg,

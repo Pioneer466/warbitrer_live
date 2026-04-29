@@ -27,11 +27,12 @@ import {
   shouldTreatPrimaryOrderAsFilled,
   shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
+  selectWinningExecutionCandidate,
   sumPolymarketAskDepthWithinLimit,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
-import type { CircuitBreaker, LiveFill, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
+import type { CircuitBreaker, ExecutionCandidate, LiveFill, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   const base: OrderIntent = {
@@ -182,6 +183,22 @@ function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnaps
   };
 }
 
+function buildExecutionCandidate(overrides: Partial<ExecutionCandidate> = {}): ExecutionCandidate {
+  return {
+    asset: "btc",
+    slotKey: "btc:slot-1",
+    scanSequence: 1,
+    capturedAt: 1_000,
+    expiresAt: 2_000,
+    combination: "POLY_DOWN_KALSHI_YES",
+    projectedNetProfitUsd: 0.2,
+    grossCost: 0.91,
+    signalAgeMs: 0,
+    updatedAt: 1_000,
+    ...overrides,
+  };
+}
+
 describe("late primary fill rescue eligibility", () => {
   it("allows rescue for primary-timeout failures without unwind activity", () => {
     expect(isLatePrimaryFillRescueEligible(buildIntent(), [])).toBe(true);
@@ -216,6 +233,54 @@ describe("opportunity snapshot freshness", () => {
 
   it("clamps negative ages when clocks are equalized by fresh process time", () => {
     expect(getOpportunitySnapshotAgeMs({ capturedAt: 2_000 }, 1_900)).toBe(0);
+  });
+});
+
+describe("execution candidate arbitration", () => {
+  it("selects the highest projected net profit among fresh candidates", () => {
+    const winner = selectWinningExecutionCandidate(
+      [
+        buildExecutionCandidate({ asset: "btc", projectedNetProfitUsd: 0.18, capturedAt: 1_000 }),
+        buildExecutionCandidate({ asset: "eth", projectedNetProfitUsd: 0.32, capturedAt: 950 }),
+      ],
+      1_010,
+    );
+
+    expect(winner?.asset).toBe("eth");
+  });
+
+  it("uses freshness and asset order as deterministic tie breakers", () => {
+    expect(
+      selectWinningExecutionCandidate(
+        [
+          buildExecutionCandidate({ asset: "eth", projectedNetProfitUsd: 0.2, capturedAt: 900 }),
+          buildExecutionCandidate({ asset: "btc", projectedNetProfitUsd: 0.2, capturedAt: 950 }),
+        ],
+        1_000,
+      )?.asset,
+    ).toBe("btc");
+
+    expect(
+      selectWinningExecutionCandidate(
+        [
+          buildExecutionCandidate({ asset: "eth", projectedNetProfitUsd: 0.2, capturedAt: 950 }),
+          buildExecutionCandidate({ asset: "btc", projectedNetProfitUsd: 0.2, capturedAt: 950 }),
+        ],
+        1_000,
+      )?.asset,
+    ).toBe("btc");
+  });
+
+  it("ignores expired candidates before any order path can run", () => {
+    const winner = selectWinningExecutionCandidate(
+      [
+        buildExecutionCandidate({ asset: "btc", projectedNetProfitUsd: 1, expiresAt: 999 }),
+        buildExecutionCandidate({ asset: "eth", projectedNetProfitUsd: 0.1, expiresAt: 1_500 }),
+      ],
+      1_000,
+    );
+
+    expect(winner?.asset).toBe("eth");
   });
 });
 
