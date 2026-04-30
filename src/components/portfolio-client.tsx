@@ -36,7 +36,8 @@ export function PortfolioClient() {
   const breakerCount = activeBreakers.length || assets.reduce((sum, asset) => sum + asset.activeBreakers.length, 0);
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd ?? null;
-  const netTone: V2Tone = accountDeltaUsd === null ? "mist" : accountDeltaUsd >= 0 ? "emerald" : "rose";
+  const drawdownUsd = pnl?.drawdownUsd ?? null;
+  const drawdownTone: V2Tone = drawdownUsd === null ? "mist" : drawdownUsd >= 0 ? "emerald" : "rose";
 
   return (
     <div className="flex flex-col gap-8">
@@ -59,10 +60,10 @@ export function PortfolioClient() {
             <BigMetric label="Cash disponible" value={formatV2Usd(pnl?.cashUsd, true)} tone="gold" />
             <BigMetric label="Positions" value={String(openPositionsCount)} sub={pnl ? `${formatV2Usd(pnl.positionsValueUsd)} exposés` : "positions live"} />
             <BigMetric
-              label={accountDeltaUsd !== null && accountDeltaUsd < 0 ? "Drawdown" : "Delta Compte"}
-              value={formatSignedUsd(accountDeltaUsd)}
-              tone={netTone}
-              sub={pnl ? `Strat ${formatSignedUsd(strategyPnlUsd)} · Frais ${formatV2Usd(pnl.feesUsd)}` : undefined}
+              label="Delta Compte"
+              value={formatSignedUsd(drawdownUsd)}
+              tone={drawdownTone}
+              sub={pnl ? `Drawdown global · Delta ${formatSignedUsd(accountDeltaUsd)}` : undefined}
             />
           </div>
           <div className="flex flex-wrap items-center gap-5 px-5 py-4 sm:px-6">
@@ -96,7 +97,7 @@ export function PortfolioClient() {
       </section>
 
       <section>
-        <SectionLabel right="5 dernières fenêtres stables">Évolution P&amp;L / Drawdown</SectionLabel>
+        <SectionLabel right="10 dernières fenêtres stables">Évolution Drawdown global</SectionLabel>
         <Surface>
           {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
         </Surface>
@@ -184,7 +185,7 @@ function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
   const pad = { top: 28, bottom: 28, left: 52, right: 16 };
   const innerWidth = width - pad.left - pad.right;
   const innerHeight = height - pad.top - pad.bottom;
-  const values = changes.map((change) => change.accountDeltaUsd);
+  const values = changes.map((change) => change.drawdownUsd);
   const min = Math.min(0, ...values);
   const max = Math.max(0, ...values);
   const range = max - min || 1;

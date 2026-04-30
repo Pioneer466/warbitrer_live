@@ -26,13 +26,13 @@ type ShellProps = {
 export function V2Shell({ activePath, children }: ShellProps) {
   return (
     <div className="min-h-screen bg-[var(--wa-bg0)]">
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[72px] flex-col items-center border-r border-[var(--wa-gold-border)] bg-[var(--wa-bg1)] px-2 py-4 md:flex">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[88px] flex-col items-center border-r border-[var(--wa-gold-border)] bg-[var(--wa-bg1)] px-3 py-4 md:flex">
         <Link
           href="/"
           aria-label="Portfolio"
-          className="mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--wa-gold-border-strong)] bg-[var(--wa-bg0)] shadow-[0_0_22px_rgba(201,168,100,0.18)]"
+          className="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[var(--wa-gold-border-strong)] bg-[var(--wa-bg0)] shadow-[0_0_22px_rgba(201,168,100,0.18)]"
         >
-          <Image src="/logo.png" alt="Wolff Arbitrer" width={42} height={42} className="h-[42px] w-[42px] rounded-full object-cover" priority />
+          <Image src="/logo.png" alt="Wolff Arbitrer" width={50} height={50} className="h-[50px] w-[50px] rounded-full object-cover" priority />
         </Link>
         <div className="mb-3 h-px w-8 bg-[var(--wa-gold-border)]" />
         <SideTab href="/" label="PORT" active={activePath === "/"} icon="◈" />
@@ -44,10 +44,10 @@ export function V2Shell({ activePath, children }: ShellProps) {
         <SideTab href="/recovery" label="REC" active={activePath === "/recovery"} icon="⟳" />
       </aside>
 
-      <div className="min-w-0 md:pl-[72px]">
+      <div className="min-w-0 md:pl-[88px]">
         <TickerBar />
         <MobileNav activePath={activePath} />
-        <main className="mx-auto w-full max-w-[1320px] px-4 py-5 sm:px-6 lg:px-8 lg:py-7">{children}</main>
+        <main className="wa-readable w-full px-4 py-5 sm:px-6 lg:px-7 lg:py-7">{children}</main>
       </div>
     </div>
   );
@@ -68,15 +68,15 @@ function SideTab({
     <Link
       href={href}
       title={label}
-      className={`relative mb-1 flex h-[52px] w-14 flex-col items-center justify-center gap-0.5 rounded-lg border text-center transition ${
+      className={`relative mb-1.5 flex h-[58px] w-16 flex-col items-center justify-center gap-1 rounded-lg border text-center transition ${
         active
           ? "border-[var(--wa-gold-border-strong)] bg-[rgba(201,168,100,0.10)] text-[var(--wa-gold)]"
           : "border-transparent text-[var(--wa-mist)] hover:border-[var(--wa-gold-border)] hover:bg-[rgba(201,168,100,0.05)] hover:text-[var(--wa-ivory)]"
       }`}
     >
       {active ? <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-[var(--wa-gold)]" /> : null}
-      <span className="text-sm leading-none">{icon}</span>
-      <span className="font-mono text-[8px] uppercase tracking-[0.14em]">{label}</span>
+      <span className="text-base leading-none">{icon}</span>
+      <span className="font-mono text-[9px] uppercase tracking-[0.14em]">{label}</span>
     </Link>
   );
 }
@@ -383,4 +383,3 @@ export function formatV2Countdown(seconds: number | null | undefined) {
   const safe = Math.max(0, Math.floor(seconds));
   return `${String(Math.floor(safe / 60)).padStart(2, "0")}:${String(safe % 60).padStart(2, "0")}`;
 }
-

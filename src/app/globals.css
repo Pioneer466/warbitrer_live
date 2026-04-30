@@ -84,3 +84,52 @@ input {
   background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
   background-size: 200px 200px;
 }
+
+.wa-readable {
+  font-size: 16px;
+}
+
+.wa-readable .text-\[8px\] {
+  font-size: 10px;
+}
+
+.wa-readable .text-\[9px\] {
+  font-size: 11px;
+}
+
+.wa-readable .text-\[10px\] {
+  font-size: 12px;
+}
+
+.wa-readable .text-\[11px\] {
+  font-size: 13px;
+}
+
+.wa-readable .text-\[12px\],
+.wa-readable .text-xs {
+  font-size: 14px;
+  line-height: 1.35rem;
+}
+
+.wa-readable .text-sm {
+  font-size: 15px;
+  line-height: 1.45rem;
+}
+
+.wa-readable .text-xl {
+  font-size: 1.35rem;
+  line-height: 1.8rem;
+}
+
+.wa-readable .text-3xl {
+  font-size: 2rem;
+  line-height: 2.25rem;
+}
+
+.wa-readable .text-\[22px\] {
+  font-size: 26px;
+}
+
+.wa-readable .text-\[42px\] {
+  font-size: 48px;
+}

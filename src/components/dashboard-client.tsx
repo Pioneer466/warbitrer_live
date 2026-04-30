@@ -96,7 +96,14 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
         <SectionLabel right={`poly ${formatFeedMeta(polyFeed)} · kalshi ${formatFeedMeta(kalshiFeed)}`}>Flux de Prix</SectionLabel>
         <div className="grid gap-3 xl:grid-cols-2">
           <Surface>
-            <ChartHeader title="Polymarket — UP / DOWN" feed={polyFeed} />
+            <ChartHeader
+              title="Polymarket — UP / DOWN"
+              feed={polyFeed}
+              legend={[
+                { label: "UP", color: "#2563eb" },
+                { label: "DOWN", color: "#93c5fd" },
+              ]}
+            />
             <MiniLineChart
               height={100}
               series={[
@@ -106,7 +113,14 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
             />
           </Surface>
           <Surface>
-            <ChartHeader title="Kalshi — YES / NO" feed={kalshiFeed} />
+            <ChartHeader
+              title="Kalshi — UP / DOWN"
+              feed={kalshiFeed}
+              legend={[
+                { label: "UP = NO", color: "var(--wa-rose)" },
+                { label: "DOWN = YES", color: "var(--wa-gold)" },
+              ]}
+            />
             <MiniLineChart
               height={100}
               series={[
@@ -304,11 +318,33 @@ function VenueBalanceRow({ balance }: { balance: VenueBalance }) {
   );
 }
 
-function ChartHeader({ title, feed }: { title: string; feed: VenueFeedHealth | null }) {
+function ChartHeader({
+  title,
+  feed,
+  legend = [],
+}: {
+  title: string;
+  feed: VenueFeedHealth | null;
+  legend?: Array<{ label: string; color: string }>;
+}) {
   return (
-    <div className="flex items-center justify-between gap-3 px-5 pb-1 pt-4">
-      <span className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.45)]">{title}</span>
-      <Chip tone={feed?.feedStatus === "ready" ? "emerald" : "rose"}>{feed?.source ?? "--"}</Chip>
+    <div className="flex flex-col gap-3 px-5 pb-2 pt-4 sm:flex-row sm:items-center sm:justify-between">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <span className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.45)]">{title}</span>
+        {legend.length > 0 ? (
+          <div className="flex flex-wrap items-center gap-3">
+            {legend.map((item) => (
+              <span key={item.label} className="inline-flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.08em] text-[var(--wa-mist)]">
+                <span className="h-2 w-5 rounded-full" style={{ backgroundColor: item.color }} />
+                {item.label}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="shrink-0">
+        <Chip tone={feed?.feedStatus === "ready" ? "emerald" : "rose"}>{feed?.source ?? "--"}</Chip>
+      </div>
     </div>
   );
 }
