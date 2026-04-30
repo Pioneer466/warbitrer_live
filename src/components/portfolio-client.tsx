@@ -2,33 +2,21 @@
 
 import Link from "next/link";
 
-import { StablePnlChangesPanel } from "@/components/stable-pnl-changes-panel";
 import { usePollingJson } from "@/components/use-polling-json";
-import { formatCountdown, formatCurrency, formatPrice } from "@/lib/format";
-import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus } from "@/lib/types";
-
-type Tone = "default" | "cyan" | "amber" | "rose" | "emerald" | "indigo";
-
-const ORANGE_ASSET_THEME = {
-  badge: "border-amber/[0.30] bg-amber/[0.12] text-amber shadow-[0_0_24px_rgba(255,184,79,0.18)]",
-  text: "text-amber",
-} as const;
-
-const ASSET_THEMES: Record<
-  MarketAsset,
-  {
-    badge: string;
-    text: string;
-  }
-> = {
-  btc: ORANGE_ASSET_THEME,
-  eth: ORANGE_ASSET_THEME,
-  sol: ORANGE_ASSET_THEME,
-  xrp: ORANGE_ASSET_THEME,
-  doge: ORANGE_ASSET_THEME,
-  bnb: ORANGE_ASSET_THEME,
-  hype: ORANGE_ASSET_THEME,
-};
+import {
+  BigMetric,
+  Chip,
+  formatV2Countdown,
+  formatV2Usd,
+  MetricCell,
+  PageSection,
+  SectionLabel,
+  Surface,
+  V2EmptyState,
+  V2_TONE_TEXT,
+  type V2Tone,
+} from "@/components/v2-ui";
+import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 1_000);
@@ -41,245 +29,236 @@ export function PortfolioClient() {
     return <PanelMessage title="Erreur" message={portfolio.error ?? "Aucune donnée portefeuille."} tone="rose" />;
   }
 
-  const { assets, pnl, stablePnlChanges, openPositionsCount, activeBreakers } = portfolio.data;
-  const readyAssets = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
-  const blockedAssets = assets.filter((asset) => asset.workerState.readinessStatus === "blocked").length;
-  const liveAssets = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
-  const shadowAssets = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
+  const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers } = portfolio.data;
+  const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
+  const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
+  const shadowCount = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
+  const breakerCount = activeBreakers.length || assets.reduce((sum, asset) => sum + asset.activeBreakers.length, 0);
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
-  const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd;
-  const drawdownUsd = pnl?.drawdownUsd ?? 0;
-  const showDrawdownHeadline = pnl ? drawdownUsd <= -5 : false;
-  const portfolioHeadlineLabel = showDrawdownHeadline ? "Drawdown" : "Delta Compte";
-  const portfolioHeadlineValue = showDrawdownHeadline ? drawdownUsd : (accountDeltaUsd ?? 0);
-  const portfolioHeadlineMeta = pnl
-    ? showDrawdownHeadline
-      ? `Depuis pic ${formatCurrency(pnl.peakEquityUsd ?? pnl.equityUsd)} · Delta total ${formatCurrency(accountDeltaUsd ?? 0)} · Stratégie ${formatCurrency(strategyPnlUsd ?? 0)}`
-      : `DD ${formatCurrency(drawdownUsd)} · Stratégie ${formatCurrency(strategyPnlUsd ?? 0)} · Frais ${formatCurrency(pnl.feesUsd)}`
-    : "delta compte";
+  const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd ?? null;
+  const netTone: V2Tone = accountDeltaUsd === null ? "mist" : accountDeltaUsd >= 0 ? "emerald" : "rose";
 
   return (
-    <div className="space-y-5">
-      <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
-        <div className="flex flex-col gap-3 border-b border-white/6 pb-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <div className="text-[11px] uppercase tracking-[0.24em] text-mist/70">Vue Multi-Actifs</div>
-            <div className="mt-2 text-sm text-mist/75">
-              Lecture rapide du moteur global, des modes de trading et des meilleures opportunités par actif.
-            </div>
+    <div className="flex flex-col gap-8">
+      <PageSection watermark="PORT">
+        <div className="mb-4">
+          <div className="mb-2 text-[9px] uppercase tracking-[0.30em] text-[rgba(201,168,100,0.45)]">
+            Vue Multi-Actifs · {new Date(portfolio.data.fetchedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
           </div>
           <div className="flex flex-wrap gap-2">
-            <StatusPill tone={blockedAssets > 0 ? "rose" : "emerald"}>{readyAssets}/{assets.length} ready</StatusPill>
-            <StatusPill tone={liveAssets > 0 ? "cyan" : "default"}>{liveAssets} live</StatusPill>
-            <StatusPill tone={shadowAssets > 0 ? "indigo" : "default"}>{shadowAssets} shadow</StatusPill>
-            <StatusPill tone={activeBreakers.length > 0 ? "rose" : "emerald"}>{activeBreakers.length} breakers</StatusPill>
+            <Chip tone={breakerCount > 0 ? "rose" : "emerald"}>{readyCount}/{assets.length} ready</Chip>
+            <Chip tone={liveCount > 0 ? "gold" : "mist"}>{liveCount} live</Chip>
+            <Chip tone={shadowCount > 0 ? "indigo" : "mist"}>{shadowCount} shadow</Chip>
+            {breakerCount > 0 ? <Chip tone="rose">{breakerCount} breakers</Chip> : null}
           </div>
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <SummaryCell
-            label="Equity"
-            value={pnl ? formatCurrency(pnl.equityUsd) : "--"}
-            tone={pnl && pnl.equityUsd >= (pnl.cashUsd ?? 0) ? "cyan" : "default"}
-          />
-          <SummaryCell label="Cash" value={pnl ? formatCurrency(pnl.cashUsd) : "--"} tone="amber" />
-          <SummaryCell
-            label="Positions ouvertes"
-            value={String(openPositionsCount)}
-            meta={pnl ? `${formatCurrency(pnl.positionsValueUsd)} exposés` : `${readyAssets} actifs prêts`}
-            tone="indigo"
-          />
-          <SummaryCell
-            label={portfolioHeadlineLabel}
-            value={pnl ? formatCurrency(portfolioHeadlineValue) : "--"}
-            meta={portfolioHeadlineMeta}
-            tone={pnl && portfolioHeadlineValue >= 0 ? "emerald" : "rose"}
-          />
+        <Surface glow>
+          <div className="grid border-b border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-4">
+            <BigMetric label="Equity totale" value={formatV2Usd(pnl?.equityUsd, true)} tone="gold" huge />
+            <BigMetric label="Cash disponible" value={formatV2Usd(pnl?.cashUsd, true)} tone="gold" />
+            <BigMetric label="Positions" value={String(openPositionsCount)} sub={pnl ? `${formatV2Usd(pnl.positionsValueUsd)} exposés` : "positions live"} />
+            <BigMetric
+              label={accountDeltaUsd !== null && accountDeltaUsd < 0 ? "Drawdown" : "Delta Compte"}
+              value={formatSignedUsd(accountDeltaUsd)}
+              tone={netTone}
+              sub={pnl ? `Strat ${formatSignedUsd(strategyPnlUsd)} · Frais ${formatV2Usd(pnl.feesUsd)}` : undefined}
+            />
+          </div>
+          <div className="flex flex-wrap items-center gap-5 px-5 py-4 sm:px-6">
+            <DailyPnl label="Réalisé" value={pnl?.realizedPnlUsd ?? null} />
+            <Divider />
+            <DailyPnl label="Non réalisé" value={pnl?.unrealizedPnlUsd ?? null} />
+            <Divider />
+            <DailyPnl label="Drawdown" value={pnl?.drawdownUsd ?? null} />
+            <Divider />
+            <DailyPnl label="Net compte" value={accountDeltaUsd} />
+          </div>
+        </Surface>
+      </PageSection>
+
+      <section>
+        <SectionLabel right="liquidités venues">Polymarket &amp; Kalshi</SectionLabel>
+        <div className="overflow-hidden rounded-lg border border-[var(--wa-gold-border)]">
+          {venueBalances.map((balance, index) => (
+            <PortfolioVenueRow key={balance.venue} balance={balance} last={index === venueBalances.length - 1} />
+          ))}
         </div>
       </section>
 
-      <section className="grid gap-4 xl:grid-cols-2">
-        {assets.map((asset) => {
-          const mode = !asset.config.enableTrading ? "off" : asset.config.shadowMode ? "shadow" : "live";
-          const best = asset.bestOpportunity;
-          const theme = ASSET_THEMES[asset.asset];
-          const feedReadyCount = asset.feedHealth.filter((feed) => feed.feedStatus === "ready").length;
-          return (
-            <Link
-              key={asset.asset}
-              href={`/${asset.asset}`}
-              className="rounded-[28px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 transition hover:border-white/20 hover:bg-[#10141d]"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="space-y-3">
-                  <div className="flex flex-wrap gap-2">
-                    <span className={`rounded-full border px-3 py-1.5 text-[11px] uppercase tracking-[0.18em] ${theme.badge}`}>
-                      {asset.asset.toUpperCase()}
-                    </span>
-                    <StatusPill tone={getModeTone(mode)}>{mode}</StatusPill>
-                    <StatusPill tone={getReadinessTone(asset.workerState.readinessStatus)}>
-                      {asset.workerState.readinessStatus}
-                    </StatusPill>
-                  </div>
-                  <div className="mt-2 text-lg text-white">{asset.slot.label}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2 text-sm text-mist/70">
-                    slot `{asset.slot.key}` · feeds {feedReadyCount}/{asset.feedHealth.length} ready
-                    <span className="text-[10px] uppercase tracking-[0.18em] text-mist/45">{asset.workerState.phase}</span>
-                  </div>
-                </div>
-                <div className="rounded-[22px] border border-white/6 bg-white/[0.02] px-4 py-3 text-right">
-                  <div className="font-mono text-[34px] leading-none text-white">
-                    {formatCountdown(asset.slot.secondsRemaining)}
-                  </div>
-                  <div className="mt-1 text-[11px] uppercase tracking-[0.18em] text-mist/60">
-                    fin du créneau
-                  </div>
-                </div>
-              </div>
-
-              <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-2 xl:grid-cols-4">
-                <MiniStat label="Mode" value={mode} tone={getModeTone(mode)} />
-                <MiniStat label="Readiness" value={asset.workerState.readinessStatus} tone={getReadinessTone(asset.workerState.readinessStatus)} />
-                <MiniStat
-                  label="Breakers"
-                  value={String(asset.activeBreakers.length)}
-                  tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"}
-                />
-              </div>
-
-              <div className="mt-4 rounded-[20px] border border-white/6 bg-white/[0.02] px-4 py-4 text-sm text-mist">
-                {best ? (
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="text-white">{best.label}</div>
-                      <StatusPill tone={best.eligible ? "emerald" : "amber"}>
-                        {best.eligible ? "eligible" : "watch"}
-                      </StatusPill>
-                    </div>
-                    <div className="text-sm text-white/80">
-                      brut live {formatPrice(best.grossCost, 3)} · seuil {formatPrice(asset.config.grossEntryThreshold, 3)}
-                    </div>
-                  </div>
-                ) : (
-                  "Aucune opportunité calculée pour ce créneau."
-                )}
-              </div>
-            </Link>
-          );
-        })}
+      <section>
+        <SectionLabel right={`${assets.length} actifs`}>Actifs</SectionLabel>
+        <div className="grid overflow-hidden rounded-lg border border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-3">
+          {assets.map((asset) => (
+            <AssetCard key={asset.asset} asset={asset} />
+          ))}
+        </div>
       </section>
 
-      <StablePnlChangesPanel
-        changes={stablePnlChanges}
-        meta="5 dernières fenêtres stables"
-        showAsset
-      />
+      <section>
+        <SectionLabel right="5 dernières fenêtres stables">Évolution P&amp;L / Drawdown</SectionLabel>
+        <Surface>
+          {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
+        </Surface>
+      </section>
     </div>
   );
 }
 
-function SummaryCell({
-  label,
-  value,
-  meta,
-  tone = "default",
-}: {
-  label: string;
-  value: string;
-  meta?: string;
-  tone?: Tone;
-}) {
+function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][number] }) {
+  const mode = !asset.config.enableTrading ? "off" : asset.config.shadowMode ? "shadow" : "live";
+  const modeTone: V2Tone = mode === "live" ? "gold" : mode === "shadow" ? "indigo" : "amber";
+  const readinessTone = getReadinessTone(asset.workerState.readinessStatus);
+  const best = asset.bestOpportunity;
+  const feedReadyCount = asset.feedHealth.filter((feed) => feed.feedStatus === "ready").length;
+
   return (
-    <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
-      <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{label}</div>
-      <div className={`mt-3 font-mono text-[34px] leading-none ${getSummaryValueToneClass(tone)}`}>{value}</div>
-      {meta ? <div className="mt-2 text-xs text-mist/60">{meta}</div> : null}
-    </div>
+    <Link
+      href={`/${asset.asset}`}
+      className="border-b border-r border-[var(--wa-gold-border)] bg-[var(--wa-bg1)] p-5 transition hover:bg-[rgba(201,168,100,0.035)]"
+    >
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <div className="mb-2 flex flex-wrap gap-2">
+            <Chip tone="gold">{asset.asset.toUpperCase()}</Chip>
+            <Chip tone={modeTone}>{mode}</Chip>
+            <Chip tone={readinessTone}>{asset.workerState.readinessStatus}</Chip>
+          </div>
+          <div className="text-sm text-[var(--wa-ivory)]">{asset.slot.label}</div>
+          <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-[var(--wa-dim)]">
+            {asset.workerState.phase} · feeds {feedReadyCount}/{asset.feedHealth.length}
+          </div>
+        </div>
+        <div className="font-mono text-3xl leading-none text-[var(--wa-ivory)]">{formatV2Countdown(asset.slot.secondsRemaining)}</div>
+      </div>
+      <div className="grid grid-cols-3 gap-px overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)]">
+        <MiniStat label="Budget" value={formatV2Usd(asset.config.maxPairNotionalUsd)} />
+        <MiniStat label="Seuil" value={asset.config.grossEntryThreshold.toFixed(3)} />
+        <MiniStat label="Breakers" value={String(asset.activeBreakers.length)} tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"} />
+      </div>
+      <div className="mt-4 border-t border-[var(--wa-gold-border)] pt-4 text-sm text-[var(--wa-mist)]">
+        {best ? (
+          <>
+            <div className="mb-2 flex flex-wrap items-center gap-2">
+              <span className="text-[var(--wa-ivory)]">{best.label}</span>
+              <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
+            </div>
+            <span>brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire {best.primaryVenue ?? "--"}</span>
+          </>
+        ) : (
+          "Aucune opportunité calculée pour ce créneau."
+        )}
+      </div>
+    </Link>
   );
 }
 
-function getSummaryValueToneClass(tone: Tone) {
-  switch (tone) {
-    case "cyan":
-      return "text-cyan";
-    case "amber":
-      return "text-amber";
-    case "rose":
-      return "text-rose";
-    case "emerald":
-      return "text-emerald-300";
-    case "indigo":
-      return "text-indigo-200";
-    default:
-      return "text-white";
-  }
-}
+function PortfolioVenueRow({ balance, last }: { balance: VenueBalance; last: boolean }) {
+  const allowance = balance.raw["allowanceUnlimited"] === true
+    ? "Illimitée"
+    : balance.allowanceUsd === null
+      ? "--"
+      : formatV2Usd(balance.allowanceUsd);
 
-function MiniStat({
-  label,
-  value,
-  tone = "default",
-}: {
-  label: string;
-  value: string;
-  tone?: Tone;
-}) {
   return (
-    <div className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3">
-      <div className="text-[11px] uppercase tracking-[0.16em] text-mist/60">{label}</div>
-      <div className="mt-2 text-sm text-white">{value}</div>
+    <div className={`grid gap-4 bg-[var(--wa-bg1)] px-5 py-4 lg:grid-cols-[120px_1fr_82px] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
+      <div>
+        <div className="mb-1 text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.50)]">{balance.venue}</div>
+        <div className="text-sm text-[var(--wa-ivory)]">{balance.currency}</div>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-3">
+        <VenueMetric label="Disponible" value={formatV2Usd(balance.availableBalanceUsd)} tone="gold" />
+        <VenueMetric label="Portfolio" value={formatV2Usd(balance.portfolioValueUsd)} />
+        <VenueMetric label="Allowance" value={allowance} />
+      </div>
+      <div className="flex items-start justify-start lg:justify-end">
+        <Chip tone={balance.status === "ready" ? "emerald" : balance.status === "degraded" ? "amber" : "rose"}>{balance.status}</Chip>
+      </div>
     </div>
   );
 }
 
-function StatusPill({ tone, children }: { tone: Tone; children: React.ReactNode }) {
-  return <span className={`rounded-full border px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] ${getPillToneClass(tone)}`}>{children}</span>;
+function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
+  const width = 800;
+  const height = 150;
+  const pad = { top: 28, bottom: 28, left: 52, right: 16 };
+  const innerWidth = width - pad.left - pad.right;
+  const innerHeight = height - pad.top - pad.bottom;
+  const values = changes.map((change) => change.accountDeltaUsd);
+  const min = Math.min(0, ...values);
+  const max = Math.max(0, ...values);
+  const range = max - min || 1;
+  const x = (index: number) => pad.left + (index + 0.5) / changes.length * innerWidth;
+  const y = (value: number) => pad.top + (1 - (value - min) / range) * innerHeight;
+  const line = values.map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
+
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-[150px] w-full" preserveAspectRatio="none">
+      <line x1={pad.left} y1={y(0)} x2={width - pad.right} y2={y(0)} stroke="rgba(201,168,100,0.16)" strokeDasharray="4,4" />
+      <path d={line} fill="none" stroke="var(--wa-gold)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      {values.map((value, index) => (
+        <g key={`${changes[index]!.intentId}-${changes[index]!.changedAt}`}>
+          <circle cx={x(index)} cy={y(value)} r="2.8" fill="var(--wa-gold)" />
+          <text x={x(index)} y={y(value) - 7} textAnchor="middle" fontSize="8" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
+            {value >= 0 ? "+" : ""}{value.toFixed(0)}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
 }
 
-function getModeTone(mode: "off" | "shadow" | "live"): Tone {
-  return mode === "off" ? "amber" : mode === "shadow" ? "indigo" : "cyan";
+function MiniStat({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {
+  return (
+    <div className="bg-[var(--wa-bg0)] px-3 py-3">
+      <div className="mb-1 text-[8px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">{label}</div>
+      <div className={`font-mono text-sm ${V2_TONE_TEXT[tone]}`}>{value}</div>
+    </div>
+  );
 }
 
-function getReadinessTone(status: ReadinessStatus): Tone {
+function VenueMetric({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {
+  return (
+    <div>
+      <div className="mb-1 text-[8px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">{label}</div>
+      <div className={`font-mono text-sm ${V2_TONE_TEXT[tone]}`}>{value}</div>
+    </div>
+  );
+}
+
+function DailyPnl({ label, value }: { label: string; value: number | null }) {
+  const tone: V2Tone = value === null ? "mist" : value >= 0 ? "emerald" : "rose";
+  return (
+    <div className="flex items-baseline gap-2">
+      <span className="text-[9px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">{label}</span>
+      <span className={`font-mono text-sm ${V2_TONE_TEXT[tone]}`}>{formatSignedUsd(value)}</span>
+    </div>
+  );
+}
+
+function Divider() {
+  return <div className="hidden h-5 w-px bg-[var(--wa-gold-border)] sm:block" />;
+}
+
+function PanelMessage({ title, message, tone = "default" }: { title: string; message: string; tone?: "default" | "rose" }) {
+  return (
+    <Surface className={tone === "rose" ? "border-[rgba(232,80,106,0.28)]" : ""}>
+      <div className={tone === "rose" ? "px-5 py-6 text-sm text-[var(--wa-rose)]" : "px-5 py-6 text-sm text-[var(--wa-mist)]"}>
+        <div className="text-[var(--wa-ivory)]">{title}</div>
+        <div className="mt-2">{message}</div>
+      </div>
+    </Surface>
+  );
+}
+
+function getReadinessTone(status: ReadinessStatus): V2Tone {
   return status === "ready" ? "emerald" : status === "blocked" ? "rose" : "amber";
 }
 
-function getPillToneClass(tone: Tone) {
-  switch (tone) {
-    case "cyan":
-      return "border-cyan/20 bg-cyan/10 text-cyan";
-    case "amber":
-      return "border-amber/20 bg-amber/10 text-amber";
-    case "rose":
-      return "border-rose/20 bg-rose/10 text-rose";
-    case "emerald":
-      return "border-emerald-400/20 bg-emerald-400/10 text-emerald-300";
-    case "indigo":
-      return "border-indigo-400/20 bg-indigo-400/10 text-indigo-200";
-    default:
-      return "border-white/8 bg-white/[0.03] text-mist";
+function formatSignedUsd(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
   }
-}
-
-function PanelMessage({
-  title,
-  message,
-  tone = "default",
-}: {
-  title: string;
-  message: string;
-  tone?: "default" | "rose";
-}) {
-  return (
-    <div
-      className={`rounded-[28px] border px-5 py-6 text-sm ${
-        tone === "rose"
-          ? "border-rose/20 bg-rose/10 text-rose"
-          : "border-white/8 bg-[#0d1017]/92 text-mist"
-      }`}
-    >
-      <div className="text-white">{title}</div>
-      <div className="mt-2">{message}</div>
-    </div>
-  );
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}${formatV2Usd(Math.abs(value))}`;
 }

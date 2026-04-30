@@ -4,10 +4,24 @@
 
 :root {
   color-scheme: dark;
-  --bg-0: #080a0f;
-  --bg-1: #0d1119;
-  --text-0: #f4f6ff;
-  --text-1: #a3acc5;
+  --wa-bg0: #04060c;
+  --wa-bg1: #080b14;
+  --wa-bg2: #0c1020;
+  --wa-gold: #c9a864;
+  --wa-gold-bright: #ddb96a;
+  --wa-gold-border: rgba(201, 168, 100, 0.13);
+  --wa-gold-border-strong: rgba(201, 168, 100, 0.3);
+  --wa-ivory: #ede8dc;
+  --wa-mist: #7a8299;
+  --wa-dim: #3a4260;
+  --wa-rose: #e8506a;
+  --wa-emerald: #1ed87e;
+  --wa-amber: #f5b84a;
+  --wa-indigo: #8a9fff;
+  --bg-0: var(--wa-bg0);
+  --bg-1: var(--wa-bg1);
+  --text-0: var(--wa-ivory);
+  --text-1: var(--wa-mist);
 }
 
 * {
@@ -17,17 +31,18 @@
 html {
   min-height: 100%;
   background:
-    radial-gradient(circle at top, rgba(78, 95, 171, 0.18), transparent 34%),
-    linear-gradient(180deg, var(--bg-0) 0%, var(--bg-1) 100%);
+    radial-gradient(circle at top left, rgba(201, 168, 100, 0.08), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(138, 159, 255, 0.05), transparent 30%),
+    linear-gradient(180deg, var(--wa-bg0) 0%, var(--wa-bg1) 100%);
 }
 
 body {
   margin: 0;
   min-height: 100vh;
   color: var(--text-0);
-  font-family: "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
+  font-family: "Space Grotesk", "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
   background:
-    radial-gradient(rgba(255, 255, 255, 0.045) 0.7px, transparent 0.7px),
+    radial-gradient(rgba(201, 168, 100, 0.045) 0.7px, transparent 0.7px),
     transparent;
   background-size: 18px 18px;
 }
@@ -43,5 +58,29 @@ input {
 }
 
 ::selection {
-  background: rgba(28, 231, 207, 0.24);
+  background: rgba(201, 168, 100, 0.24);
+}
+
+@keyframes waTickerScroll {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-33.333%);
+  }
+}
+
+.wa-ticker {
+  animation: waTickerScroll 40s linear infinite;
+}
+
+.wa-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+  background-size: 200px 200px;
 }
