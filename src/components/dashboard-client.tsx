@@ -1,7 +1,5 @@
 "use client";
 
-import { useState } from "react";
-
 import { TradingToggle } from "@/components/trading-toggle";
 import { usePollingJson } from "@/components/use-polling-json";
 import {
@@ -14,19 +12,17 @@ import {
   SectionLabel,
   Surface,
   V2EmptyState,
-  V2Expand,
   V2_TONE_TEXT,
   type V2Tone,
 } from "@/components/v2-ui";
 import { formatDateTime, formatPrice } from "@/lib/format";
-import { isRiskActivePosition } from "@/lib/positions";
 import type {
   DashboardResponse,
   HistoryResponse,
   LiveOpportunity,
   MarketAsset,
+  MarketSlot,
   OrderIntent,
-  PositionSnapshot,
   VenueBalance,
   VenueFeedHealth,
 } from "@/lib/types";
@@ -34,7 +30,6 @@ import type {
 export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 1_000);
   const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 1_000);
-  const [showAllPositions, setShowAllPositions] = useState(false);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -44,17 +39,15 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
     return <PanelMessage title="Erreur" message={dashboard.error ?? "Aucune donnée live disponible."} tone="rose" />;
   }
 
-  const { config, workerState, latestSnapshot, feedHealth, slot, venueBalances, opportunities, openIntents, positions, pnl, circuitBreakers, runEvents } = dashboard.data;
+  const { config, workerState, latestSnapshot, feedHealth, slot, venueBalances, opportunities, openIntents, pnl, circuitBreakers, runEvents } = dashboard.data;
   const historyPoints = history.data?.points ?? [];
   const historyFeedHealth = history.data?.feedHealth ?? feedHealth;
   const polyFeed = historyFeedHealth.find((item) => item.venue === "polymarket") ?? latestSnapshot?.polymarket.feedHealth ?? null;
   const kalshiFeed = historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
-  const displayPositions = positions.filter(isDisplayablePosition);
-  const visiblePositions = showAllPositions ? displayPositions : displayPositions.slice(0, 3);
-  const mode = !config.enableTrading ? "off" : config.shadowMode ? "shadow" : "live";
-  const modeTone: V2Tone = mode === "live" ? "gold" : mode === "shadow" ? "indigo" : "amber";
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
+  const drawdownUsd = pnl?.drawdownUsd ?? null;
+  const openIntentNotionalUsd = openIntents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
 
   return (
     <div className="flex flex-col gap-7">
@@ -68,21 +61,17 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
                 phase {workerState.phase} · readiness {workerState.readinessStatus}
               </div>
             </div>
-            <div className="flex flex-wrap items-center gap-3">
-              <TradingToggle asset={slot.asset} />
-              <div className="font-mono text-[42px] leading-none text-[var(--wa-ivory)]">{formatV2Countdown(slot.secondsRemaining)}</div>
-              <Chip tone={modeTone}>{mode}</Chip>
-            </div>
+            <SlotModeBar slot={slot} />
           </div>
           <div className="grid md:grid-cols-2 xl:grid-cols-4">
             <MetricCell label="Equity" value={formatV2Usd(pnl?.equityUsd, true)} tone="gold" />
             <MetricCell label="Cash" value={formatV2Usd(pnl?.cashUsd, true)} tone="gold" />
-            <MetricCell label="Positions" value={String(displayPositions.length)} meta={`${openIntents.length} intents`} />
+            <MetricCell label="Intents" value={openIntents.length > 0 ? "ouverts" : "aucun"} tone={openIntents.length > 0 ? "amber" : "mist"} meta={`Notionnel ${formatV2Usd(openIntentNotionalUsd)}`} />
             <MetricCell
-              label={accountDeltaUsd !== null && accountDeltaUsd < 0 ? "Drawdown" : "Delta Compte"}
-              value={formatSignedUsd(accountDeltaUsd)}
-              tone={accountDeltaUsd !== null && accountDeltaUsd >= 0 ? "emerald" : "rose"}
-              meta={pnl ? `Strat ${formatSignedUsd(pnl.strategyPnlUsd)} · Frais ${formatV2Usd(pnl.feesUsd)}` : undefined}
+              label="Delta Compte"
+              value={formatSignedUsd(drawdownUsd)}
+              tone={drawdownUsd !== null && drawdownUsd >= 0 ? "emerald" : "rose"}
+              meta={pnl ? `Drawdown · Delta ${formatSignedUsd(accountDeltaUsd)}` : undefined}
             />
           </div>
           <div className="flex flex-wrap gap-2 border-t border-[var(--wa-gold-border)] px-5 py-3 sm:px-6">
@@ -94,7 +83,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
 
       <section>
         <SectionLabel right={`poly ${formatFeedMeta(polyFeed)} · kalshi ${formatFeedMeta(kalshiFeed)}`}>Flux de Prix</SectionLabel>
-        <div className="grid gap-3 xl:grid-cols-2">
+        <div className="grid gap-3">
           <Surface>
             <ChartHeader
               title="Polymarket — UP / DOWN"
@@ -105,7 +94,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
               ]}
             />
             <MiniLineChart
-              height={100}
+              height={132}
               series={[
                 { key: "poly-up", color: "#2563eb", values: historyPoints.map((point) => point.polyUpBuy) },
                 { key: "poly-down", color: "#93c5fd", values: historyPoints.map((point) => point.polyDownBuy) },
@@ -117,15 +106,15 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
               title="Kalshi — UP / DOWN"
               feed={kalshiFeed}
               legend={[
-                { label: "UP = NO", color: "var(--wa-rose)" },
-                { label: "DOWN = YES", color: "var(--wa-gold)" },
+                { label: "UP", color: "var(--wa-rose)" },
+                { label: "DOWN", color: "var(--wa-amber)" },
               ]}
             />
             <MiniLineChart
-              height={100}
+              height={132}
               series={[
-                { key: "kalshi-yes", color: "var(--wa-gold)", values: historyPoints.map((point) => point.kalshiYesLast) },
-                { key: "kalshi-no", color: "var(--wa-rose)", values: historyPoints.map((point) => point.kalshiNoLast) },
+                { key: "kalshi-up", color: "var(--wa-rose)", values: historyPoints.map((point) => point.kalshiYesLast) },
+                { key: "kalshi-down", color: "var(--wa-amber)", values: historyPoints.map((point) => point.kalshiNoLast) },
               ]}
             />
           </Surface>
@@ -150,26 +139,6 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
             <V2EmptyState message="Aucun intent live ouvert" />
           ) : (
             openIntents.map((intent, index) => <IntentRow key={intent.id} intent={intent} last={index === openIntents.length - 1} />)
-          )}
-        </Surface>
-      </section>
-
-      <section>
-        <SectionLabel right={`${displayPositions.length} lignes`}>Positions Ouvertes</SectionLabel>
-        <Surface>
-          {displayPositions.length === 0 ? (
-            <V2EmptyState message="Aucune position" />
-          ) : (
-            <>
-              {visiblePositions.map((position, index) => (
-                <PositionRow key={position.id} position={position} last={index === visiblePositions.length - 1 && displayPositions.length <= 3} />
-              ))}
-              {displayPositions.length > 3 ? (
-                <div className="border-t border-[var(--wa-gold-border)] px-5 py-3">
-                  <V2Expand expanded={showAllPositions} n={displayPositions.length - 3} onClick={() => setShowAllPositions((value) => !value)} />
-                </div>
-              ) : null}
-            </>
           )}
         </Surface>
       </section>
@@ -258,6 +227,34 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
   );
 }
 
+function SlotModeBar({ slot }: { slot: MarketSlot }) {
+  const totalSeconds = Math.max(1, Math.floor((slot.endTs - slot.startTs) / 1000));
+  const remainingRatio = Math.max(0, Math.min(1, slot.secondsRemaining / totalSeconds));
+  const elapsedRatio = 1 - remainingRatio;
+
+  return (
+    <div className="flex flex-col gap-3 lg:items-end">
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-3">
+          <div className="font-mono text-[42px] leading-none text-[var(--wa-ivory)]">{formatV2Countdown(slot.secondsRemaining)}</div>
+          <div className="hidden min-w-[132px] sm:block">
+            <div className="mb-1 h-0.5 overflow-hidden rounded-full bg-[rgba(201,168,100,0.16)]">
+              <div
+                className="h-full rounded-full bg-[linear-gradient(90deg,var(--wa-gold),var(--wa-amber),var(--wa-rose))] transition-all"
+                style={{
+                  width: `${Math.max(4, elapsedRatio * 100)}%`,
+                }}
+              />
+            </div>
+            <div className="text-[9px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">fin du créneau</div>
+          </div>
+        </div>
+        <TradingToggle asset={slot.asset} />
+      </div>
+    </div>
+  );
+}
+
 function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
   return (
     <div className={`px-5 py-4 text-sm ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
@@ -282,18 +279,6 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       </div>
       {intent.entrySizingReason ? <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">{intent.entrySizingReason}</div> : null}
       {intent.failureReason ? <div className="mt-2 rounded border border-[rgba(232,80,106,0.18)] bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">{intent.failureReason}</div> : null}
-    </div>
-  );
-}
-
-function PositionRow({ position, last }: { position: PositionSnapshot; last: boolean }) {
-  return (
-    <div className={`grid gap-3 px-5 py-3 text-sm md:grid-cols-[1fr_auto] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
-      <div>
-        <div className="mb-1 text-[var(--wa-ivory)]">{position.venue} · {position.outcome}</div>
-        <div className="text-[11px] text-[var(--wa-mist)]">size {formatPrice(position.size, 2)} · avg {formatPrice(position.averagePrice, 4)} · unrealized {formatV2Usd(position.unrealizedPnlUsd)}</div>
-      </div>
-      <div className="font-mono text-[var(--wa-gold)]">{formatV2Usd(position.currentValueUsd)}</div>
     </div>
   );
 }
@@ -378,10 +363,6 @@ function PanelMessage({ title, message, tone = "default" }: { title: string; mes
   );
 }
 
-function isDisplayablePosition(position: PositionSnapshot) {
-  return isRiskActivePosition(position) || position.redeemable || position.mergeable || Math.abs(position.currentValueUsd) > 0.01;
-}
-
 function formatFeedMeta(feed: VenueFeedHealth | null) {
   if (!feed) {
     return "--";
@@ -419,6 +400,10 @@ function getIntentTone(intent: OrderIntent): V2Tone {
     return "indigo";
   }
   return "amber";
+}
+
+function deriveIntentCapitalUsd(intent: OrderIntent) {
+  return Math.round(intent.legs.reduce((sum, leg) => sum + deriveLegCapitalUsd(leg), 0) * 10_000) / 10_000;
 }
 
 function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {

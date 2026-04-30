@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 
+import { Chip, PageSection, SectionLabel, Surface, V2EmptyState } from "@/components/v2-ui";
 import { usePollingJson } from "@/components/use-polling-json";
 import { formatCurrency, formatPrice } from "@/lib/format";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
@@ -131,169 +132,163 @@ export function RecoveryClient() {
   }
 
   return (
-    <div className="space-y-5">
-      <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 shadow-[0_20px_60px_rgba(0,0,0,0.22)] sm:px-6">
-        <div className="grid gap-4 xl:grid-cols-2">
-          <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">Kill Switch</div>
-                <div className="mt-3 text-sm text-white">
-                  {globalBreakerActive ? "Global active: aucun nouvel ordre live." : "Global inactif."}
-                </div>
+    <div className="flex flex-col gap-7">
+      <PageSection watermark="REC">
+        <Surface glow>
+          <div className="grid gap-px bg-[var(--wa-gold-border)] xl:grid-cols-2">
+            <div className="bg-[var(--wa-bg1)] px-5 py-5 sm:px-6">
+              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">Kill Switch</div>
+              <div className="text-sm text-[var(--wa-ivory)]">
+                {globalBreakerActive ? "Global actif: aucun nouvel ordre live." : "Global inactif."}
               </div>
               <button
                 type="button"
                 onClick={toggleKillSwitch}
                 disabled={busy === "kill-switch"}
-                className={`rounded-full border px-4 py-2 text-xs uppercase tracking-[0.16em] transition ${
+                className={`mt-4 rounded border px-4 py-2 text-xs uppercase tracking-[0.16em] transition disabled:opacity-50 ${
                   globalBreakerActive
-                    ? "border-rose/20 bg-rose/10 text-rose"
-                    : "border-cyan/20 bg-cyan/10 text-cyan"
-                } disabled:opacity-50`}
+                    ? "border-[rgba(232,80,106,0.28)] bg-[rgba(232,80,106,0.09)] text-[var(--wa-rose)]"
+                    : "border-[rgba(30,216,126,0.28)] bg-[rgba(30,216,126,0.09)] text-[var(--wa-emerald)]"
+                }`}
               >
                 {globalBreakerActive ? "release" : "engage"}
               </button>
             </div>
-          </div>
 
-          <div className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4 text-sm text-mist">
-            <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">Settlement</div>
-            <div className="mt-3 text-white">Polymarket: redeem ou merge manuel/direct selon le wallet.</div>
-            <div className="mt-2">Signature type: {recoveryData.signatureType}</div>
-            <div className="mt-1">Kalshi: settlement automatique, aucun claim manuel requis.</div>
-          </div>
-        </div>
-
-        {actionMessage ? <div className="mt-4 rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">{actionMessage}</div> : null}
-        {manualTx ? (
-          <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-            <div className="text-white">Transaction manuelle preparee</div>
-            <div className="mt-2">operation: {manualTx.operation ?? "redeem"}</div>
-            {manualTx.amount ? <div className="mt-1">amount: {manualTx.amount}</div> : null}
-            <div className="mt-2">to: {manualTx.to}</div>
-            <div className="mt-1">conditionId: {manualTx.conditionId}</div>
-            <div className="mt-1">indexSets: {manualTx.indexSets.join(", ")}</div>
-            <div className="mt-2 break-all font-mono text-xs text-mist/80">{manualTx.data}</div>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
-        <div className="border-b border-white/6 pb-4">
-          <div className="text-sm text-white">Validation Wallet</div>
-          <div className="mt-1 text-xs text-mist/70">
-            Verification du wallet Polymarket pour la conversion directe, en EOA on-chain ou en proxy via relayer gasless.
-          </div>
-        </div>
-
-        <div className="mt-4 rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
-          {recoveryData.walletValidation.canDirectConversion
-            ? "Configuration wallet complete pour une conversion directe."
-            : "Configuration wallet incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
-        </div>
-
-        <div className="mt-4 grid gap-3">
-          {recoveryData.walletValidation.checks.map((check) => (
-            <div key={check.key} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
-              <div className="flex items-center justify-between gap-3">
-                <div className="text-white">{check.label}</div>
-                <Badge tone={check.status === "ready" ? "cyan" : check.status === "blocked" ? "default" : "amber"}>
-                  {check.status}
-                </Badge>
-              </div>
-              <div className="mt-2">{check.details}</div>
+            <div className="bg-[var(--wa-bg1)] px-5 py-5 text-sm text-[var(--wa-mist)] sm:px-6">
+              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">Settlement</div>
+              <div className="text-[var(--wa-ivory)]">Polymarket: redeem ou merge manuel/direct selon le wallet.</div>
+              <div className="mt-2">Signature type: {recoveryData.signatureType}</div>
+              <div className="mt-1">Kalshi: settlement automatique, aucun claim manuel requis.</div>
             </div>
-          ))}
-        </div>
+          </div>
+
+          {actionMessage ? <div className="border-t border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">{actionMessage}</div> : null}
+          {manualTx ? (
+            <div className="border-t border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
+              <div className="text-[var(--wa-ivory)]">Transaction manuelle preparee</div>
+              <div className="mt-2">operation: {manualTx.operation ?? "redeem"}</div>
+              {manualTx.amount ? <div className="mt-1">amount: {manualTx.amount}</div> : null}
+              <div className="mt-2">to: {manualTx.to}</div>
+              <div className="mt-1">conditionId: {manualTx.conditionId}</div>
+              <div className="mt-1">indexSets: {manualTx.indexSets.join(", ")}</div>
+              <div className="mt-2 break-all font-mono text-xs text-[var(--wa-dim)]">{manualTx.data}</div>
+            </div>
+          ) : null}
+        </Surface>
+      </PageSection>
+
+      <section>
+        <SectionLabel>Validation Wallet</SectionLabel>
+        <Surface>
+          <div className="border-b border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
+            <div className="text-[var(--wa-ivory)]">
+              {recoveryData.walletValidation.canDirectConversion
+                ? "Configuration wallet complete pour une conversion directe."
+                : "Configuration wallet incomplete. Le mode manuel reste disponible tant que les pre-requis ne sont pas tous valides."}
+            </div>
+            <div className="mt-1 text-[11px] text-[var(--wa-dim)]">
+              Verification du wallet Polymarket pour conversion directe, EOA on-chain ou proxy via relayer gasless.
+            </div>
+          </div>
+          <div className="grid gap-px bg-[var(--wa-gold-border)]">
+            {recoveryData.walletValidation.checks.map((check) => (
+              <div key={check.key} className="bg-[var(--wa-bg1)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-[var(--wa-ivory)]">{check.label}</div>
+                  <Chip tone={check.status === "ready" ? "emerald" : check.status === "blocked" ? "rose" : "amber"}>{check.status}</Chip>
+                </div>
+                <div className="mt-2">{check.details}</div>
+              </div>
+            ))}
+          </div>
+        </Surface>
       </section>
 
-      <section className="rounded-[32px] border border-white/8 bg-[#0d1017]/92 px-5 py-5 sm:px-6">
-        <div className="border-b border-white/6 pb-4">
-          <div className="text-sm text-white">Recup Polymarket</div>
-          <div className="mt-1 text-xs text-mist/70">
-            Gains resolus a redeem en pUSD, ou paires YES/NO a merge si presentes.
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-4">
+      <section>
+        <SectionLabel right={`${recoveryData.markets.length} marchés`}>Recup Polymarket</SectionLabel>
+        <Surface>
           {recoveryData.markets.length === 0 ? (
-            <EmptyState message="Aucune position Polymarket reclaimable ou mergeable pour l’instant." />
+            <V2EmptyState message="Aucune position Polymarket reclaimable ou mergeable pour l’instant" />
           ) : (
-            groupedMarkets.map((group) => (
-              <div key={group.asset} className="space-y-4">
-                <div className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3">
-                  <div className="text-[11px] uppercase tracking-[0.18em] text-mist/65">{group.asset.toUpperCase()}</div>
-                  <div className="mt-2 text-sm text-white">{group.markets.length} marché(s) récupérable(s)</div>
-                </div>
-
-                {group.markets.map((market) => (
-                  <div key={market.marketRef} className="rounded-[24px] border border-white/6 bg-white/[0.02] px-4 py-4">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div>
-                        <div className="text-white">{market.title}</div>
-                        <div className="mt-1 text-sm text-mist">
-                          {market.conditionId} {market.url ? "· lien marche disponible" : ""}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        {market.redeemable ? <Badge tone="cyan">redeemable</Badge> : null}
-                        {market.mergeable ? <Badge tone="amber">mergeable</Badge> : null}
-                        <Badge tone={market.directConversionSupported ? "cyan" : "default"}>
-                          {market.directConversionSupported ? "direct" : "manual"}
-                        </Badge>
-                      </div>
-                    </div>
-
-                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                      {market.outcomes.map((outcome) => (
-                        <div key={outcome.outcome} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
-                          <div className="text-white">{outcome.outcome}</div>
-                          <div className="mt-2">
-                            size {formatPrice(outcome.size, 2)} · valeur {formatCurrency(outcome.currentValueUsd)}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {market.notes.length > 0 ? (
-                      <div className="mt-3 flex flex-wrap gap-2 text-sm text-mist">
-                        {market.notes.map((note) => (
-                          <span key={note} className="rounded-full border border-white/6 bg-white/[0.03] px-3 py-1">
-                            {note}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    <div className="mt-4 flex flex-wrap gap-3">
-                      {market.conversionAction ? (
-                        <button
-                          type="button"
-                          onClick={() => convert(market.marketRef)}
-                          disabled={busy === market.marketRef}
-                          className="rounded-full border border-cyan/20 bg-cyan/10 px-4 py-2 text-xs uppercase tracking-[0.16em] text-cyan transition disabled:opacity-50"
-                        >
-                          {formatConversionLabel(market)}
-                        </button>
-                      ) : null}
-                      {market.url ? (
-                        <a
-                          href={market.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="rounded-full border border-white/8 bg-white/[0.03] px-4 py-2 text-xs uppercase tracking-[0.16em] text-mist transition hover:text-white"
-                        >
-                          open market
-                        </a>
-                      ) : null}
+            <div className="grid gap-px bg-[var(--wa-gold-border)]">
+              {groupedMarkets.map((group) => (
+                <div key={group.asset} className="bg-[var(--wa-bg1)]">
+                  <div className="flex items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4 sm:px-6">
+                    <div>
+                      <div className="font-mono text-xl text-[var(--wa-gold)]">{group.asset.toUpperCase()}</div>
+                      <div className="mt-1 text-sm text-[var(--wa-mist)]">{group.markets.length} marché(s) récupérable(s)</div>
                     </div>
                   </div>
-                ))}
-              </div>
-            ))
+
+                  {group.markets.map((market) => (
+                    <div key={market.marketRef} className="border-b border-[var(--wa-gold-border)] px-5 py-4 last:border-b-0 sm:px-6">
+                      <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                        <div>
+                          <div className="text-sm text-[var(--wa-ivory)]">{market.title}</div>
+                          <div className="mt-1 font-mono text-[10px] text-[var(--wa-dim)]">
+                            {market.conditionId} {market.url ? "· lien marche disponible" : ""}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          {market.redeemable ? <Chip tone="emerald">redeemable</Chip> : null}
+                          {market.mergeable ? <Chip tone="amber">mergeable</Chip> : null}
+                          <Chip tone={market.directConversionSupported ? "emerald" : "mist"}>
+                            {market.directConversionSupported ? "direct" : "manual"}
+                          </Chip>
+                        </div>
+                      </div>
+
+                      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                        {market.outcomes.map((outcome) => (
+                          <div key={outcome.outcome} className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-3 text-sm text-[var(--wa-mist)]">
+                            <div className="font-mono text-[var(--wa-ivory)]">{outcome.outcome}</div>
+                            <div className="mt-2">
+                              size {formatPrice(outcome.size, 2)} · valeur {formatCurrency(outcome.currentValueUsd)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {market.notes.length > 0 ? (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {market.notes.map((note) => (
+                            <span key={note} className="rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.06)] px-3 py-1 text-xs text-[var(--wa-mist)]">
+                              {note}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+
+                      <div className="mt-4 flex flex-wrap gap-3">
+                        {market.conversionAction ? (
+                          <button
+                            type="button"
+                            onClick={() => convert(market.marketRef)}
+                            disabled={busy === market.marketRef}
+                            className="rounded border border-[rgba(30,216,126,0.28)] bg-[rgba(30,216,126,0.09)] px-4 py-2 text-xs uppercase tracking-[0.16em] text-[var(--wa-emerald)] transition disabled:opacity-50"
+                          >
+                            {formatConversionLabel(market)}
+                          </button>
+                        ) : null}
+                        {market.url ? (
+                          <a
+                            href={market.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.06)] px-4 py-2 text-xs uppercase tracking-[0.16em] text-[var(--wa-mist)] transition hover:text-[var(--wa-ivory)]"
+                          >
+                            open market
+                          </a>
+                        ) : null}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
           )}
-        </div>
+        </Surface>
       </section>
     </div>
   );
@@ -317,40 +312,11 @@ function PanelMessage({
   tone?: "default" | "rose";
 }) {
   return (
-    <div
-      className={`rounded-[28px] border px-5 py-6 text-sm ${
-        tone === "rose"
-          ? "border-rose/20 bg-rose/10 text-rose"
-          : "border-white/8 bg-[#0d1017]/92 text-mist"
-      }`}
-    >
-      <div className="text-white">{title}</div>
+    <Surface className={tone === "rose" ? "border-[rgba(232,80,106,0.28)]" : ""}>
+      <div className={`px-5 py-6 text-sm ${tone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
+      <div className="text-[var(--wa-ivory)]">{title}</div>
       <div className="mt-2">{message}</div>
-    </div>
+      </div>
+    </Surface>
   );
-}
-
-function EmptyState({ message }: { message: string }) {
-  return (
-    <div className="rounded-[22px] border border-white/6 bg-white/[0.02] px-4 py-8 text-center text-sm text-mist/70">
-      {message}
-    </div>
-  );
-}
-
-function Badge({
-  children,
-  tone,
-}: {
-  children: React.ReactNode;
-  tone: "cyan" | "amber" | "default";
-}) {
-  const toneClass =
-    tone === "cyan"
-      ? "border-cyan/20 bg-cyan/10 text-cyan"
-      : tone === "amber"
-        ? "border-amber/20 bg-amber/10 text-amber"
-        : "border-white/8 bg-white/[0.03] text-mist";
-
-  return <span className={`rounded-full border px-3 py-1 text-[11px] uppercase tracking-[0.16em] ${toneClass}`}>{children}</span>;
 }

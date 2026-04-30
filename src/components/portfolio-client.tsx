@@ -97,7 +97,7 @@ export function PortfolioClient() {
       </section>
 
       <section>
-        <SectionLabel right="10 dernières fenêtres stables">Évolution Drawdown global</SectionLabel>
+        <SectionLabel right="10 dernières fenêtres stables · drawdown">P&amp;L Global</SectionLabel>
         <Surface>
           {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
         </Surface>
@@ -120,8 +120,8 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
     >
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
-          <div className="mb-2 flex flex-wrap gap-2">
-            <Chip tone="gold">{asset.asset.toUpperCase()}</Chip>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xl font-semibold text-[var(--wa-gold)]">{asset.asset.toUpperCase()}</span>
             <Chip tone={modeTone}>{mode}</Chip>
             <Chip tone={readinessTone}>{asset.workerState.readinessStatus}</Chip>
           </div>
@@ -139,13 +139,10 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
       </div>
       <div className="mt-4 border-t border-[var(--wa-gold-border)] pt-4 text-sm text-[var(--wa-mist)]">
         {best ? (
-          <>
-            <div className="mb-2 flex flex-wrap items-center gap-2">
-              <span className="text-[var(--wa-ivory)]">{best.label}</span>
-              <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
-            </div>
+          <div className="flex items-center justify-between gap-3">
             <span>brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire {best.primaryVenue ?? "--"}</span>
-          </>
+            <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
+          </div>
         ) : (
           "Aucune opportunité calculée pour ce créneau."
         )}
@@ -180,9 +177,9 @@ function PortfolioVenueRow({ balance, last }: { balance: VenueBalance; last: boo
 }
 
 function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
-  const width = 800;
-  const height = 150;
-  const pad = { top: 28, bottom: 28, left: 52, right: 16 };
+  const width = 1200;
+  const height = 220;
+  const pad = { top: 42, bottom: 42, left: 72, right: 28 };
   const innerWidth = width - pad.left - pad.right;
   const innerHeight = height - pad.top - pad.bottom;
   const values = changes.map((change) => change.drawdownUsd);
@@ -194,15 +191,33 @@ function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
   const line = values.map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-[150px] w-full" preserveAspectRatio="none">
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-[220px] w-full" preserveAspectRatio="none">
       <line x1={pad.left} y1={y(0)} x2={width - pad.right} y2={y(0)} stroke="rgba(201,168,100,0.16)" strokeDasharray="4,4" />
-      <path d={line} fill="none" stroke="var(--wa-gold)" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+      <path d={line} fill="none" stroke="var(--wa-gold)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
       {values.map((value, index) => (
         <g key={`${changes[index]!.intentId}-${changes[index]!.changedAt}`}>
-          <circle cx={x(index)} cy={y(value)} r="2.8" fill="var(--wa-gold)" />
-          <text x={x(index)} y={y(value) - 7} textAnchor="middle" fontSize="8" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
-            {value >= 0 ? "+" : ""}{value.toFixed(0)}
-          </text>
+          {(() => {
+            const label = formatChartUsd(value);
+            const labelWidth = label.length * 8 + 12;
+            const labelY = Math.max(18, Math.min(height - 16, y(value) + (index % 2 === 0 ? -16 : 22)));
+            return (
+              <>
+                <circle cx={x(index)} cy={y(value)} r="4" fill="var(--wa-gold)" />
+                <rect
+                  x={x(index) - labelWidth / 2}
+                  y={labelY - 13}
+                  width={labelWidth}
+                  height="19"
+                  rx="4"
+                  fill="rgba(4,6,12,0.82)"
+                  stroke="rgba(201,168,100,0.18)"
+                />
+                <text x={x(index)} y={labelY} textAnchor="middle" fontSize="11" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
+                  {label}
+                </text>
+              </>
+            );
+          })()}
         </g>
       ))}
     </svg>
@@ -262,4 +277,9 @@ function formatSignedUsd(value: number | null | undefined) {
   }
   const sign = value >= 0 ? "+" : "-";
   return `${sign}${formatV2Usd(Math.abs(value))}`;
+}
+
+function formatChartUsd(value: number) {
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}$${Math.abs(value).toFixed(2)}`;
 }

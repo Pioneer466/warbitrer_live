@@ -156,6 +156,8 @@ function IntentColumn({ title, subtitle, intents, emptyMessage, tone }: { title:
 }
 
 function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
+  const settlement = deriveSettlementSummary(intent);
+
   return (
     <div className={`px-5 py-4 text-sm ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
       <div className="mb-1 flex items-start justify-between gap-3">
@@ -165,6 +167,20 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       <div className="mb-3 text-[11px] text-[var(--wa-mist)]">
         {formatDateTime(intent.createdAt)} · {intent.primaryVenue} → {intent.hedgeVenue} · notionnel {formatV2Usd(deriveIntentCapitalUsd(intent))}
       </div>
+      {settlement ? (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <Chip tone={settlement.aligned === null ? "mist" : settlement.aligned ? "emerald" : "rose"}>
+            {settlement.aligned === null ? "alignement --" : settlement.aligned ? "aligné" : "non aligné"}
+          </Chip>
+          <span className={`font-mono text-[11px] ${settlement.pnlTone === "emerald" ? "text-[var(--wa-emerald)]" : settlement.pnlTone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
+            P&amp;L {formatSignedUsd(intent.realizedPnlUsd)}
+            {intent.roi !== null ? ` · ROI ${(intent.roi * 100).toFixed(2)}%` : ""}
+          </span>
+          <span className="font-mono text-[10px] text-[var(--wa-dim)]">
+            poly {intent.polyResolution ?? "--"} · kalshi {intent.kalshiResolution ?? "--"}
+          </span>
+        </div>
+      ) : null}
       <div className="grid gap-2 md:grid-cols-2">
         {intent.legs.map((leg) => (
           <div key={leg.id} className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2">
@@ -275,6 +291,18 @@ function getOrderTone(order: LiveOrder): V2Tone {
   return order.status === "partially_filled" ? "amber" : "mist";
 }
 
+function deriveSettlementSummary(intent: OrderIntent) {
+  if (intent.status !== "settled") {
+    return null;
+  }
+
+  const kalshiDirection = intent.kalshiResolution === "YES" ? "UP" : intent.kalshiResolution === "NO" ? "DOWN" : null;
+  const aligned = intent.polyResolution !== null && kalshiDirection !== null ? intent.polyResolution === kalshiDirection : null;
+  const pnlTone: V2Tone = intent.realizedPnlUsd === null ? "mist" : intent.realizedPnlUsd >= 0 ? "emerald" : "rose";
+
+  return { aligned, pnlTone };
+}
+
 function deriveIntentCapitalUsd(intent: OrderIntent) {
   return Math.round(intent.legs.reduce((sum, leg) => sum + deriveLegCapitalUsd(leg), 0) * 10_000) / 10_000;
 }
@@ -282,6 +310,14 @@ function deriveIntentCapitalUsd(intent: OrderIntent) {
 function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
   const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
   return Math.round((tradedNotional + leg.feeUsd) * 10_000) / 10_000;
+}
+
+function formatSignedUsd(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "--";
+  }
+  const sign = value >= 0 ? "+" : "-";
+  return `${sign}${formatV2Usd(Math.abs(value))}`;
 }
 
 function groupOrdersByPair(orders: LiveOrder[], intentsById: Map<string, OrderIntent>) {

@@ -116,27 +116,27 @@ function TickerBar() {
     return () => window.clearInterval(id);
   }, []);
 
-  const items = [
-    ["POLY", "LIVE"],
-    ["KALSHI", "LIVE"],
-    ["ENGINE", "MULTI-ASSET"],
-    ["BTC", "15M"],
-    ["ETH", "15M"],
-    ["DOGE", "15M"],
-    ["SOL", "15M"],
-    ["POSTGRES", "SYNC"],
-    ["INTENTS", "MONITOR"],
-    ["PNL", "STABLE"],
+  const items: Array<[string, string, V2Tone]> = [
+    ["POLY", "LIVE", "emerald"],
+    ["KALSHI", "LIVE", "emerald"],
+    ["ENGINE", "MULTI-ASSET", "indigo"],
+    ["BTC", "15M", "gold"],
+    ["ETH", "15M", "gold"],
+    ["DOGE", "15M", "amber"],
+    ["SOL", "15M", "amber"],
+    ["POSTGRES", "SYNC", "indigo"],
+    ["INTENTS", "MONITOR", "rose"],
+    ["PNL", "STABLE", "emerald"],
   ];
 
   return (
     <div className="sticky top-0 z-20 h-[30px] overflow-hidden border-b border-[var(--wa-gold-border)] bg-[var(--wa-bg0)]">
       <div className="pointer-events-none absolute left-0 right-0 top-0 h-px bg-gradient-to-r from-transparent via-[var(--wa-gold)] to-transparent opacity-45" />
       <div className="wa-ticker flex h-[30px] items-center whitespace-nowrap">
-        {[...items, ...items, ...items].map(([label, value], index) => (
+        {[...items, ...items, ...items].map(([label, value, tone], index) => (
           <div key={`${label}-${index}`} className="flex h-[30px] items-center gap-2 border-r border-[var(--wa-gold-border)] px-4">
             <span className="text-[8px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">{label}</span>
-            <span className="font-mono text-[9px] uppercase tracking-[0.06em] text-[var(--wa-mist)]">{value}</span>
+            <span className={`font-mono text-[9px] uppercase tracking-[0.06em] ${V2_TONE_TEXT[tone]}`}>{value}</span>
           </div>
         ))}
       </div>
@@ -315,7 +315,7 @@ export function MiniLineChart({
   series: Array<{ key: string; color: string; values: Array<number | null> }>;
   height?: number;
 }) {
-  const width = 600;
+  const width = 1000;
   const allValues = series.flatMap((item) => item.values).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (allValues.length === 0) {
     return <div className="flex items-center justify-center text-sm text-[var(--wa-dim)]" style={{ height }}>--</div>;
@@ -324,7 +324,7 @@ export function MiniLineChart({
   const min = Math.min(...allValues);
   const max = Math.max(...allValues);
   const range = max - min || 0.01;
-  const pad = { top: 8, bottom: 20, left: 40, right: 8 };
+  const pad = { top: 10, bottom: 24, left: 52, right: 14 };
   const innerWidth = width - pad.left - pad.right;
   const innerHeight = height - pad.top - pad.bottom;
   const points = (values: Array<number | null>) =>
@@ -351,7 +351,7 @@ export function MiniLineChart({
         return (
           <g key={index}>
             <line x1={pad.left} y1={y} x2={width - pad.right} y2={y} stroke="rgba(201,168,100,0.07)" strokeWidth="1" strokeDasharray="3,4" />
-            <text x={pad.left - 6} y={y + 4} textAnchor="end" fontSize="8" fill="rgba(201,168,100,0.35)" fontFamily="IBM Plex Mono">
+            <text x={pad.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="rgba(201,168,100,0.42)" fontFamily="IBM Plex Mono">
               {value.toFixed(2)}
             </text>
           </g>

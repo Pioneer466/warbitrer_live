@@ -11,8 +11,8 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
 
   if (!settings.data) {
     return (
-      <div className="rounded-full border border-white/8 bg-white/[0.03] px-3 py-2 text-[11px] uppercase tracking-[0.16em] text-mist/70">
-        trading --
+      <div className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2 text-[11px] uppercase tracking-[0.16em] text-[var(--wa-mist)]">
+        {asset.toUpperCase()} --
       </div>
     );
   }
@@ -65,46 +65,45 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
   }
 
   return (
-    <div className="flex items-center gap-2 rounded-full border border-white/8 bg-white/[0.03] p-1">
-      <span className="pl-3 text-[11px] uppercase tracking-[0.18em] text-mist/65">Trading</span>
+    <div className="grid grid-cols-3 overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)]">
       <button
         type="button"
         onClick={() => updateTrading("off")}
         disabled={busy}
         aria-pressed={mode === "off"}
-        className={`rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
+        className={`border-r border-[var(--wa-gold-border)] px-4 py-2 font-mono text-[10px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
           mode !== "off"
-            ? "text-mist/55 hover:text-white"
-            : "border border-white/8 bg-[#07090e] text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+            ? "text-[var(--wa-dim)] hover:text-[var(--wa-ivory)]"
+            : "bg-[rgba(245,184,74,0.10)] text-[var(--wa-amber)] shadow-[inset_0_1px_0_rgba(245,184,74,0.10)]"
         }`}
       >
-        Off
+        {asset.toUpperCase()} Off
       </button>
       <button
         type="button"
         onClick={() => updateTrading("shadow")}
         disabled={busy}
         aria-pressed={mode === "shadow"}
-        className={`rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
+        className={`border-r border-[var(--wa-gold-border)] px-4 py-2 font-mono text-[10px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
           mode === "shadow"
-            ? "border border-indigo/25 bg-[linear-gradient(180deg,rgba(146,160,255,0.28),rgba(146,160,255,0.12))] text-indigo-200 shadow-[0_0_18px_rgba(146,160,255,0.22)]"
-            : "text-mist/55 hover:text-white"
+            ? "bg-[rgba(138,159,255,0.12)] text-[var(--wa-indigo)] shadow-[inset_0_1px_0_rgba(138,159,255,0.10)]"
+            : "text-[var(--wa-dim)] hover:text-[var(--wa-ivory)]"
         }`}
       >
-        Shadow
+        {asset.toUpperCase()} Shadow
       </button>
       <button
         type="button"
         onClick={() => updateTrading("live")}
         disabled={busy}
         aria-pressed={mode === "live"}
-        className={`rounded-full px-3 py-1.5 text-[11px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
+        className={`px-4 py-2 font-mono text-[10px] uppercase tracking-[0.16em] transition disabled:opacity-50 ${
           mode === "live"
-            ? "border border-cyan/25 bg-[linear-gradient(180deg,rgba(28,231,207,0.28),rgba(28,231,207,0.12))] text-cyan shadow-[0_0_18px_rgba(28,231,207,0.22)]"
-            : "text-mist/55 hover:text-white"
+            ? "bg-[rgba(30,216,126,0.13)] text-[var(--wa-emerald)] shadow-[inset_0_1px_0_rgba(30,216,126,0.12)]"
+            : "text-[var(--wa-dim)] hover:text-[var(--wa-ivory)]"
         }`}
       >
-        Live
+        {asset.toUpperCase()} Live
       </button>
     </div>
   );
