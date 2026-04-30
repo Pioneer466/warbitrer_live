@@ -30,7 +30,7 @@ describe("Polymarket helpers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("builds BUY orders as USDC amount market orders", () => {
+  it("builds BUY hedge orders as exact share limit orders by default", () => {
     const plan = buildPolymarketClobOrderPlan({
       marketRef: "market-1",
       tokenId: "token-1",
@@ -44,14 +44,38 @@ describe("Polymarket helpers", () => {
       clientOrderId: "client-1",
     });
 
-    expect(plan.kind).toBe("market-buy");
+    expect(plan.kind).toBe("limit-buy");
     expect(plan.orderType).toBe("FOK");
+    expect(plan.order).toMatchObject({
+      tokenID: "token-1",
+      side: Side.BUY,
+      price: 0.71,
+      size: 10,
+    });
+    expect("amount" in plan.order).toBe(false);
+  });
+
+  it("keeps legacy Polymarket BUY amount mode explicit", () => {
+    const plan = buildPolymarketClobOrderPlan({
+      marketRef: "market-1",
+      tokenId: "token-1",
+      outcome: "DOWN",
+      side: "BUY",
+      size: 10,
+      price: 0.71,
+      maxCostUsd: 7.1,
+      orderType: "FOK",
+      buyMode: "amount",
+      reduceOnly: false,
+      clientOrderId: "client-1",
+    });
+
+    expect(plan.kind).toBe("market-buy");
     expect(plan.order).toMatchObject({
       tokenID: "token-1",
       side: Side.BUY,
       amount: 7.1,
       price: 0.71,
-      orderType: "FOK",
     });
     expect("size" in plan.order).toBe(false);
   });

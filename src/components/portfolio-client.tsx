@@ -178,8 +178,8 @@ function PortfolioVenueRow({ balance, last }: { balance: VenueBalance; last: boo
 
 function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
   const width = 1200;
-  const height = 220;
-  const pad = { top: 42, bottom: 42, left: 72, right: 28 };
+  const height = 280;
+  const pad = { top: 54, bottom: 52, left: 84, right: 44 };
   const innerWidth = width - pad.left - pad.right;
   const innerHeight = height - pad.top - pad.bottom;
   const values = changes.map((change) => change.drawdownUsd);
@@ -191,28 +191,30 @@ function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
   const line = values.map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} className="h-[220px] w-full" preserveAspectRatio="none">
+    <svg viewBox={`0 0 ${width} ${height}`} className="h-[280px] w-full" preserveAspectRatio="xMidYMid meet">
       <line x1={pad.left} y1={y(0)} x2={width - pad.right} y2={y(0)} stroke="rgba(201,168,100,0.16)" strokeDasharray="4,4" />
       <path d={line} fill="none" stroke="var(--wa-gold)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
       {values.map((value, index) => (
         <g key={`${changes[index]!.intentId}-${changes[index]!.changedAt}`}>
           {(() => {
             const label = formatChartUsd(value);
-            const labelWidth = label.length * 8 + 12;
-            const labelY = Math.max(18, Math.min(height - 16, y(value) + (index % 2 === 0 ? -16 : 22)));
+            const labelWidth = label.length * 9 + 16;
+            const labelX = Math.max(pad.left, Math.min(width - pad.right, x(index)));
+            const labelY = Math.max(24, Math.min(height - 18, y(value) + [-24, 30, -38, 44][index % 4]!));
+            const labelRectX = Math.max(8, Math.min(width - labelWidth - 8, labelX - labelWidth / 2));
             return (
               <>
                 <circle cx={x(index)} cy={y(value)} r="4" fill="var(--wa-gold)" />
                 <rect
-                  x={x(index) - labelWidth / 2}
-                  y={labelY - 13}
+                  x={labelRectX}
+                  y={labelY - 16}
                   width={labelWidth}
-                  height="19"
+                  height="24"
                   rx="4"
                   fill="rgba(4,6,12,0.82)"
                   stroke="rgba(201,168,100,0.18)"
                 />
-                <text x={x(index)} y={labelY} textAnchor="middle" fontSize="11" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
+                <text x={labelX} y={labelY} textAnchor="middle" fontSize="13" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
                   {label}
                 </text>
               </>

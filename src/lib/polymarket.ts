@@ -393,12 +393,20 @@ export function createPolymarketAdapter(): VenueAdapter {
       const client = createClobClient();
       try {
         const orderPlan = buildPolymarketClobOrderPlan(order);
-        const response = await withPolymarketClientTimeout("createAndPostMarketOrder", () =>
-          client.createAndPostMarketOrder(
-            orderPlan.order,
-            undefined,
-            orderPlan.orderType,
-          ),
+        const response = await withPolymarketClientTimeout(
+          orderPlan.kind === "limit-buy" ? "createAndPostOrder" : "createAndPostMarketOrder",
+          async () => {
+            if (orderPlan.kind === "limit-buy") {
+              const signed = await client.createOrder(orderPlan.order);
+              return client.postOrder(signed, orderPlan.orderType);
+            }
+
+            return client.createAndPostMarketOrder(
+              orderPlan.order,
+              undefined,
+              orderPlan.orderType,
+            );
+          },
         );
         const noFillMessage = getPolymarketSoftNoFillMessage(response);
         if (noFillMessage) {
@@ -448,6 +456,19 @@ export function buildPolymarketClobOrderPlan(order: VenueOrderRequest) {
   if (order.side === "BUY") {
     if (order.price === null || order.price === undefined) {
       throw new Error("Polymarket BUY market order requires a limit price");
+    }
+
+    if ((order.buyMode ?? "shares") === "shares") {
+      return {
+        kind: "limit-buy" as const,
+        orderType,
+        order: {
+          tokenID: order.tokenId,
+          side: Side.BUY,
+          price: order.price,
+          size: order.size,
+        },
+      };
     }
 
     return {

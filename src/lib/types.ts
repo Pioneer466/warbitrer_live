@@ -190,6 +190,9 @@ export type StrategyConfig = {
   maxLegCapitalShare: number;
   maxSignalAgeMs: number;
   grossEntryThreshold: number;
+  minProjectedNetProfitUsd: number;
+  minProjectedNetReturn: number;
+  minWorstCaseProfitUsd: number;
   maxLegPrice: number;
   reentryImprovement: number;
   pollingIntervalMs: number;
@@ -280,6 +283,7 @@ export type LiveOpportunity = {
   grossCost: number | null;
   threshold: number;
   thresholdMet: boolean;
+  worstCaseProfitUsd: number | null;
   eligible: boolean;
   primaryVenue: Venue | null;
   improvementFromLastEntry: number | null;
@@ -721,6 +725,7 @@ export type VenueOrderRequest = {
   price: number | null;
   maxCostUsd: number;
   orderType: string;
+  buyMode?: "shares" | "amount";
   reduceOnly?: boolean;
   clientOrderId: string;
 };

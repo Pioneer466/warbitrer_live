@@ -170,7 +170,7 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       {settlement ? (
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <Chip tone={settlement.aligned === null ? "mist" : settlement.aligned ? "emerald" : "rose"}>
-            {settlement.aligned === null ? "alignement --" : settlement.aligned ? "aligné" : "non aligné"}
+            {settlement.aligned === null ? "venues --" : settlement.aligned ? "venues alignées" : "venues non alignées"}
           </Chip>
           <span className={`font-mono text-[11px] ${settlement.pnlTone === "emerald" ? "text-[var(--wa-emerald)]" : settlement.pnlTone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
             P&amp;L {formatSignedUsd(intent.realizedPnlUsd)}

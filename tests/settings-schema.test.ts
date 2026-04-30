@@ -8,6 +8,9 @@ describe("settings schema", () => {
     expect(settings.executionPriceBuffer).toBe(0.01);
     expect(settings.maxLegCapitalShare).toBe(0.7);
     expect(settings.maxSignalAgeMs).toBe(1000);
+    expect(settings.minProjectedNetProfitUsd).toBe(0.25);
+    expect(settings.minProjectedNetReturn).toBe(0.02);
+    expect(settings.minWorstCaseProfitUsd).toBe(0.25);
     expect(settings.pollingIntervalMs).toBe(1000);
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.7);

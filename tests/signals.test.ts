@@ -28,6 +28,9 @@ const settings: StrategyConfig = {
   maxLegCapitalShare: 0.7,
   maxSignalAgeMs: 1000,
   grossEntryThreshold: 0.93,
+  minProjectedNetProfitUsd: 0,
+  minProjectedNetReturn: 0,
+  minWorstCaseProfitUsd: 0,
   maxLegPrice: 0.49,
   reentryImprovement: 0.01,
   pollingIntervalMs: 1_000,
@@ -448,6 +451,69 @@ describe("live signal engine", () => {
     expect(polyCost).toBeLessThanOrEqual(14);
     expect(kalshiCost).toBeLessThanOrEqual(14);
     expect(signal.projectedNetProfitUsd).toBeGreaterThan(0);
+  });
+
+  it("blocks otherwise valid signals when configured net profit floors are not met", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket,
+      kalshi,
+      settings: {
+        ...settings,
+        minProjectedNetProfitUsd: 999,
+        minProjectedNetReturn: 0.5,
+        minWorstCaseProfitUsd: 999,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons.join(" | ")).toContain("Profit net projeté trop faible");
+    expect(signal.reasons.join(" | ")).toContain("ROI net projeté trop faible");
+    expect(signal.reasons.join(" | ")).toContain("Profit worst-case trop faible");
+  });
+
+  it("blocks entries whose Polymarket hedge notional is below the $1 execution floor", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: {
+        ...polymarket,
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, {
+            buyPrice: 0.1,
+            depth: 100,
+          }),
+        },
+      },
+      kalshi: {
+        ...kalshi,
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, {
+            buyPrice: 0.78,
+            depth: 100,
+          }),
+        },
+      },
+      settings: {
+        ...settings,
+        maxPairNotionalUsd: 1.1,
+        maxLegCapitalShare: 0.9,
+        minOrderSize: 1,
+        kalshiDepthHeadroomContracts: 0,
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.eligible).toBe(false);
+    expect(signal.reasons).toContain("Hedge Polymarket sous minimum $1.00");
   });
 
   it("blocks a pair above the gross entry threshold even when asymmetric sizing is possible", () => {

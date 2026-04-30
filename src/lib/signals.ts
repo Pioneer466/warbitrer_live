@@ -9,6 +9,7 @@ import {
   KALSHI_ORDER_PRICE_STEP_USD,
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
+import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import type {
   KalshiQuote,
   LiveOpportunity,
@@ -258,9 +259,36 @@ function buildSignal({
   const polyTargetNotionalUsd = balancedSizing.polyNotionalUsd;
   const kalshiTargetNotionalUsd = balancedSizing.kalshiNotionalUsd;
   const estimatedFees = balancedSizing.polyFeeUsd + balancedSizing.kalshiFeeUsd;
+  const projectedNetProfitUsd = grossCost === null ? null : balancedSizing.projectedNetProfitUsd;
+  const projectedNetReturn = grossCost === null ? null : balancedSizing.projectedNetReturn;
+  const worstCaseProfitUsd = projectedNetProfitUsd;
 
   if (grossCost !== null && grossCost > settings.grossEntryThreshold) {
     reasons.push("Seuil brut non atteint");
+  }
+  if (
+    projectedNetProfitUsd !== null &&
+    projectedNetProfitUsd + ORDER_SIZE_TOLERANCE < settings.minProjectedNetProfitUsd
+  ) {
+    reasons.push(`Profit net projeté trop faible (${projectedNetProfitUsd.toFixed(2)} < ${settings.minProjectedNetProfitUsd.toFixed(2)})`);
+  }
+  if (
+    projectedNetReturn !== null &&
+    projectedNetReturn + ORDER_SIZE_TOLERANCE < settings.minProjectedNetReturn
+  ) {
+    reasons.push(`ROI net projeté trop faible (${(projectedNetReturn * 100).toFixed(2)}% < ${(settings.minProjectedNetReturn * 100).toFixed(2)}%)`);
+  }
+  if (
+    worstCaseProfitUsd !== null &&
+    worstCaseProfitUsd + ORDER_SIZE_TOLERANCE < settings.minWorstCaseProfitUsd
+  ) {
+    reasons.push(`Profit worst-case trop faible (${worstCaseProfitUsd.toFixed(2)} < ${settings.minWorstCaseProfitUsd.toFixed(2)})`);
+  }
+  if (
+    balancedSizing.commonSize > 0 &&
+    polyTargetNotionalUsd + ORDER_SIZE_TOLERANCE < POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD
+  ) {
+    reasons.push(`Hedge Polymarket sous minimum $${POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD.toFixed(2)}`);
   }
   if (balancedSizing.polyMaxSize <= 0 && polyDepth !== null) {
     reasons.push("Liquidité Polymarket insuffisante");
@@ -318,9 +346,6 @@ function buildSignal({
     reasons.push(mismatchGuardReason);
   }
 
-  const projectedNetProfitUsd = grossCost === null ? null : balancedSizing.projectedNetProfitUsd;
-  const projectedNetReturn = grossCost === null ? null : balancedSizing.projectedNetReturn;
-
   const primaryVenue = polyDepth === null || kalshiDepth === null ? null : choosePrimaryVenue();
 
   return {
@@ -333,6 +358,7 @@ function buildSignal({
     grossCost,
     threshold: settings.grossEntryThreshold,
     thresholdMet: grossCost !== null ? grossCost <= settings.grossEntryThreshold : false,
+    worstCaseProfitUsd,
     eligible: reasons.length === 0,
     primaryVenue,
     improvementFromLastEntry,

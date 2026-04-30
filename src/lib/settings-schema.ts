@@ -7,6 +7,9 @@ import {
   DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS,
+  DEFAULT_MIN_PROJECTED_NET_PROFIT_USD,
+  DEFAULT_MIN_PROJECTED_NET_RETURN,
+  DEFAULT_MIN_WORST_CASE_PROFIT_USD,
   DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR,
   DEFAULT_KALSHI_PRIMARY_PRICE_TICKS_SLIPPAGE,
@@ -43,6 +46,21 @@ export const settingsSchema = z
     maxLegCapitalShare: z.number().min(0.5).max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare),
     maxSignalAgeMs: z.number().int().min(250).max(5_000).default(DEFAULT_MAX_SIGNAL_AGE_MS),
     grossEntryThreshold: z.number().positive().max(1),
+    minProjectedNetProfitUsd: z
+      .number()
+      .nonnegative()
+      .max(10_000)
+      .default(DEFAULT_MIN_PROJECTED_NET_PROFIT_USD),
+    minProjectedNetReturn: z
+      .number()
+      .nonnegative()
+      .max(1)
+      .default(DEFAULT_MIN_PROJECTED_NET_RETURN),
+    minWorstCaseProfitUsd: z
+      .number()
+      .nonnegative()
+      .max(10_000)
+      .default(DEFAULT_MIN_WORST_CASE_PROFIT_USD),
     maxLegPrice: z.number().positive().max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegPrice),
     reentryImprovement: z.number().nonnegative().max(0.25),
     pollingIntervalMs: z.number().int().min(250).max(10_000),

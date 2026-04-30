@@ -15,6 +15,7 @@ import {
   estimateRescueHedgeLossUsd,
   estimatePrimaryUnwindLossUsd,
   getOpportunitySnapshotAgeMs,
+  getPolymarketHedgeMinNotionalViolation,
   hasKalshiHedgeRetryCapacity,
   isFeedHealthBreaker,
   isBreakerRelevantToSlot,
@@ -635,7 +636,7 @@ describe("kalshi hedge safety guards", () => {
 });
 
 describe("venue order request sizing", () => {
-  it("uses the polymarket leg usd budget as the buy amount", () => {
+  it("uses exact-share mode for Polymarket BUY hedges by default", () => {
     const polymarketLeg = {
       ...buildIntent().legs[0],
       requestedPrice: 0.42,
@@ -648,6 +649,7 @@ describe("venue order request sizing", () => {
     expect(request.price).toBeCloseTo(0.42126, 5);
     expect(request.size).toBe(20);
     expect(request.maxCostUsd).toBe(10);
+    expect(request.buyMode).toBe("shares");
   });
 
   it("keeps kalshi max cost aligned to the derived order limit", () => {
@@ -678,6 +680,27 @@ describe("venue order request sizing", () => {
 
     expect(request.price).toBe(0.5);
     expect(request.maxCostUsd).toBe(10);
+  });
+
+  it("blocks Polymarket hedge entries whose projected hedge notional is below the $1 CLOB floor", () => {
+    expect(
+      getPolymarketHedgeMinNotionalViolation({
+        venue: "polymarket",
+        side: "BUY",
+        requestedNotionalUsd: 0.65,
+      }),
+    ).toEqual({
+      requestedNotionalUsd: 0.65,
+      minimumNotionalUsd: 1,
+    });
+
+    expect(
+      getPolymarketHedgeMinNotionalViolation({
+        venue: "polymarket",
+        side: "BUY",
+        requestedNotionalUsd: 1,
+      }),
+    ).toBeNull();
   });
 });
 

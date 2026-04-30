@@ -8,8 +8,26 @@ import { formatCurrency, formatPrice } from "@/lib/format";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import type { RecoveryResponse } from "@/lib/types";
 
+type BreakerDetailsResponse = {
+  global: {
+    key: string;
+    active: boolean;
+    requiresManualClear: boolean;
+    cooldownUntil: number | null;
+    unresolvedIntentIds: string[];
+  } | null;
+  activeBreakers: Array<{
+    key: string;
+    active: boolean;
+    requiresManualClear: boolean;
+    cooldownUntil: number | null;
+    unresolvedIntentIds: string[];
+  }>;
+};
+
 export function RecoveryClient() {
   const recovery = usePollingJson<RecoveryResponse>("/api/recovery", 4_000);
+  const breakerDetails = usePollingJson<BreakerDetailsResponse>("/api/circuit-breakers?details=1", 2_000);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMessage, setActionMessage] = useState<string | null>(null);
   const [manualTx, setManualTx] = useState<{
@@ -30,7 +48,8 @@ export function RecoveryClient() {
   }
 
   const recoveryData = recovery.data;
-  const globalBreakerActive = recoveryData.globalKillSwitchActive;
+  const globalBreakerActive = breakerDetails.data?.global?.active ?? recoveryData.globalKillSwitchActive;
+  const activeNonGlobalBreakers = breakerDetails.data?.activeBreakers.filter((breaker) => breaker.key !== "global") ?? [];
   const groupedMarkets = ACTIVE_MARKET_ASSETS
     .map((asset) => ({
       asset,
@@ -139,8 +158,19 @@ export function RecoveryClient() {
             <div className="bg-[var(--wa-bg1)] px-5 py-5 sm:px-6">
               <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">Kill Switch</div>
               <div className="text-sm text-[var(--wa-ivory)]">
-                {globalBreakerActive ? "Global actif: aucun nouvel ordre live." : "Global inactif."}
+                {globalBreakerActive
+                  ? "Global actif: aucun nouvel ordre live."
+                  : activeNonGlobalBreakers.length > 0
+                    ? `Global inactif · ${activeNonGlobalBreakers.length} breaker(s) slot/asset encore actif(s).`
+                    : "Global inactif."}
               </div>
+              {activeNonGlobalBreakers.length > 0 ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {activeNonGlobalBreakers.slice(0, 4).map((breaker) => (
+                    <Chip key={breaker.key} tone="rose">{breaker.key}</Chip>
+                  ))}
+                </div>
+              ) : null}
               <button
                 type="button"
                 onClick={toggleKillSwitch}

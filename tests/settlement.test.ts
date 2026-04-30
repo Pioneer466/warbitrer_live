@@ -25,6 +25,7 @@ const opportunity: LiveOpportunity = {
   estimatedFeesUsd: 0.8,
   projectedNetProfitUsd: 4.2,
   projectedNetReturn: 0.08,
+  worstCaseProfitUsd: 4.2,
   reasons: [],
   mismatchGuardAction: "allow",
   mismatchSizeMultiplier: 1,

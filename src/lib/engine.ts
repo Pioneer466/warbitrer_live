@@ -53,6 +53,7 @@ import {
   hasUnresolvedExposureBlocker,
 } from "@/lib/risk";
 import { buildSignals } from "@/lib/signals";
+import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import {
   calculateWinningPayout,
   calculateLegSpentUsd,
@@ -3972,6 +3973,15 @@ async function repriceIntentWithinExecutionBuffer(
   if (balancedSizing.commonSize <= 0) {
     return null;
   }
+  if (
+    !doesSizingMeetProfitThresholds(
+      balancedSizing.projectedNetProfitUsd,
+      balancedSizing.projectedNetReturn,
+      settings,
+    )
+  ) {
+    return null;
+  }
 
   const updatedLegs = intent.legs.map((leg) => {
     const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
@@ -4099,6 +4109,28 @@ async function diagnoseRepriceIntentFailure(
     kalshiMinOrderSize: pair.kalshi.minOrderSize,
     kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   };
+}
+
+function doesSizingMeetProfitThresholds(
+  projectedNetProfitUsd: number | null,
+  projectedNetReturn: number | null,
+  settings: Pick<StrategyConfig, "minProjectedNetProfitUsd" | "minProjectedNetReturn" | "minWorstCaseProfitUsd">,
+  options: { allowUnknownReturn?: boolean } = {},
+) {
+  if (projectedNetProfitUsd === null || !Number.isFinite(projectedNetProfitUsd)) {
+    return false;
+  }
+  if (projectedNetProfitUsd + ORDER_SIZE_TOLERANCE < settings.minProjectedNetProfitUsd) {
+    return false;
+  }
+  if (projectedNetProfitUsd + ORDER_SIZE_TOLERANCE < settings.minWorstCaseProfitUsd) {
+    return false;
+  }
+  if (projectedNetReturn === null) {
+    return options.allowUnknownReturn === true || settings.minProjectedNetReturn <= ORDER_SIZE_TOLERANCE;
+  }
+
+  return projectedNetReturn + ORDER_SIZE_TOLERANCE >= settings.minProjectedNetReturn;
 }
 
 async function repriceSingleHedgeLegWithinExecutionBuffer(
@@ -4570,7 +4602,16 @@ async function resizeKalshiPrimaryIntentFromRestPreflight(
   }
 
   const resizedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now, safePairSize);
-  if (!resizedIntent || resizedIntent.projectedNetProfitUsd === null || resizedIntent.projectedNetProfitUsd <= 0) {
+  if (
+    !resizedIntent ||
+    resizedIntent.projectedNetProfitUsd === null ||
+    !doesSizingMeetProfitThresholds(
+      resizedIntent.projectedNetProfitUsd,
+      null,
+      settings,
+      { allowUnknownReturn: true },
+    )
+  ) {
     return null;
   }
 
@@ -4606,6 +4647,19 @@ async function preflightPolymarketHedgeLiquidity(
   }
 
   const request = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  const minNotionalCheck = getPolymarketHedgeMinNotionalViolation(hedgeLeg);
+  if (minNotionalCheck) {
+    return {
+      status: "insufficient" as const,
+      reason: "polymarket_hedge_notional_below_minimum",
+      requestedSize: request.size,
+      requestedNotionalUsd: minNotionalCheck.requestedNotionalUsd,
+      minimumNotionalUsd: minNotionalCheck.minimumNotionalUsd,
+      orderPrice: request.price,
+      executableDepth: null,
+    };
+  }
+
   if (!hedgeLeg.tokenId || request.price === null) {
     return {
       status: "unavailable" as const,
@@ -4667,6 +4721,23 @@ async function preflightPolymarketHedgeLiquidity(
       executableDepth: null,
     };
   }
+}
+
+export function getPolymarketHedgeMinNotionalViolation(
+  hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side" | "requestedNotionalUsd">,
+) {
+  if (
+    hedgeLeg.venue !== "polymarket" ||
+    hedgeLeg.side !== "BUY" ||
+    hedgeLeg.requestedNotionalUsd + ORDER_SIZE_TOLERANCE >= POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD
+  ) {
+    return null;
+  }
+
+  return {
+    requestedNotionalUsd: round4(hedgeLeg.requestedNotionalUsd),
+    minimumNotionalUsd: POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD,
+  };
 }
 
 export function sumPolymarketAskDepthWithinLimit(
@@ -6873,6 +6944,7 @@ export function buildVenueOrderRequest(
   options?: {
     kalshiPriceTicksSlippage?: number;
     overridePrice?: number | null;
+    polymarketBuyMode?: "shares" | "amount";
   },
 ): VenueOrderRequest {
   const slippageAdjustedPrice =
@@ -6906,6 +6978,9 @@ export function buildVenueOrderRequest(
     price,
     maxCostUsd,
     orderType,
+    buyMode: leg.venue === "polymarket" && leg.side === "BUY"
+      ? options?.polymarketBuyMode ?? "shares"
+      : undefined,
     reduceOnly,
     clientOrderId: crypto.randomUUID(),
   };
@@ -7276,7 +7351,7 @@ async function confirmImmediateOrderExecution(
     const confirmation = await confirmPolymarketOrderExecution({
       orderId: submission.venueOrderId,
       expectedSize: request.size,
-      expectedSizeIsExact: request.side !== "BUY",
+      expectedSizeIsExact: request.side !== "BUY" || request.buyMode !== "amount",
       orderType: request.orderType,
       timeoutMs,
     });
@@ -7285,7 +7360,7 @@ async function confirmImmediateOrderExecution(
       const canceledConfirmation = await confirmPolymarketOrderExecution({
         orderId: submission.venueOrderId,
         expectedSize: request.size,
-        expectedSizeIsExact: request.side !== "BUY",
+        expectedSizeIsExact: request.side !== "BUY" || request.buyMode !== "amount",
         orderType: request.orderType,
         timeoutMs: Math.min(1_000, timeoutMs),
       });
