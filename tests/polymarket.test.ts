@@ -1,6 +1,7 @@
 import { Side } from "@polymarket/clob-client-v2";
 
 import {
+  buildPolymarketClobOrderPlan,
   derivePolymarketDepth,
   derivePolymarketEffectiveFeeRateBps,
   extractPolymarketCollateralAllowanceInfo,
@@ -16,6 +17,7 @@ import {
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
   microUsdcToUsd,
+  resolvePolymarketOrderTruth,
   shouldTreatPolymarketTerminalOrderAsPending,
   summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
@@ -26,6 +28,56 @@ describe("Polymarket helpers", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("builds BUY orders as exact-size limit orders instead of USDC amount market orders", () => {
+    const plan = buildPolymarketClobOrderPlan({
+      marketRef: "market-1",
+      tokenId: "token-1",
+      outcome: "DOWN",
+      side: "BUY",
+      size: 10,
+      price: 0.71,
+      maxCostUsd: 7.1,
+      orderType: "FOK",
+      reduceOnly: false,
+      clientOrderId: "client-1",
+    });
+
+    expect(plan.kind).toBe("limit-buy");
+    expect(plan.orderType).toBe("FOK");
+    expect(plan.order).toMatchObject({
+      tokenID: "token-1",
+      side: Side.BUY,
+      price: 0.71,
+      size: 10,
+    });
+    expect("amount" in plan.order).toBe(false);
+  });
+
+  it("keeps SELL orders share-sized for Polymarket market sells", () => {
+    const plan = buildPolymarketClobOrderPlan({
+      marketRef: "market-1",
+      tokenId: "token-1",
+      outcome: "DOWN",
+      side: "SELL",
+      size: 10,
+      price: 0.68,
+      maxCostUsd: 0,
+      orderType: "FAK",
+      reduceOnly: true,
+      clientOrderId: "client-2",
+    });
+
+    expect(plan.kind).toBe("market-sell");
+    expect(plan.orderType).toBe("FAK");
+    expect(plan.order).toMatchObject({
+      tokenID: "token-1",
+      side: Side.SELL,
+      amount: 10,
+      price: 0.68,
+    });
+    expect("size" in plan.order).toBe(false);
   });
 
   it("detects resolution from terminal outcome prices", () => {
@@ -326,9 +378,111 @@ describe("Polymarket helpers", () => {
     );
 
     expect(mapped.status).toBe("pending");
+    expect(mapped.filledSize).toBe(62.675);
     expect(mapped.requestedSize).toBe(62.675);
     expect(mapped.createdAt).toBe(1775513261000);
     expect(mapped.updatedAt).toBe(1775513261000);
+  });
+
+  it("treats matched size as effective exposure even before trades are confirmed", () => {
+    const truth = resolvePolymarketOrderTruth({
+      orderId: "order-1",
+      order: {
+        id: "order-1",
+        status: "MATCHED",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: "BUY",
+        original_size: "10",
+        size_matched: "10",
+        price: "0.71",
+        outcome: "Down",
+        order_type: "FOK",
+        maker_address: "0xabc",
+        owner: "owner",
+        expiration: "0",
+        associate_trades: [],
+        created_at: 1775513261,
+      } as any,
+      trades: [],
+      expectedSize: 10,
+      expectedSizeIsExact: true,
+      orderType: "FOK",
+    });
+
+    expect(truth.effectiveFilledSize).toBe(10);
+    expect(truth.confirmedFilledSize).toBe(0);
+    expect(truth.hasPendingExposure).toBe(true);
+    expect(truth.terminalZeroFill).toBe(false);
+    expect(truth.status).toBe("pending");
+  });
+
+  it("uses pending Polymarket trades as effective exposure", () => {
+    const truth = resolvePolymarketOrderTruth({
+      orderId: "order-1",
+      order: null,
+      trades: [
+        {
+          id: "trade-1",
+          taker_order_id: "order-1",
+          market: "market-1",
+          asset_id: "asset-1",
+          side: Side.BUY,
+          size: "10",
+          fee_rate_bps: "0",
+          price: "0.71",
+          status: "MATCHED",
+          match_time: new Date(11).toISOString(),
+          last_update: new Date(11).toISOString(),
+          outcome: "DOWN",
+          bucket_index: 0,
+          owner: "owner",
+          maker_address: "maker",
+          maker_orders: [],
+          transaction_hash: "0x2",
+          trader_side: "TAKER" as const,
+        },
+      ] as any,
+      expectedSize: 10,
+      expectedSizeIsExact: true,
+      orderType: "FOK",
+    });
+
+    expect(truth.effectiveFilledSize).toBe(10);
+    expect(truth.pendingFilledSize).toBe(10);
+    expect(truth.status).toBe("pending");
+    expect(truth.terminalZeroFill).toBe(false);
+  });
+
+  it("marks canceled Polymarket orders as retryable only when effective exposure is zero", () => {
+    const truth = resolvePolymarketOrderTruth({
+      orderId: "order-1",
+      order: {
+        id: "order-1",
+        status: "CANCELED",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: "BUY",
+        original_size: "10",
+        size_matched: "0",
+        price: "0.71",
+        outcome: "Down",
+        order_type: "FOK",
+        maker_address: "0xabc",
+        owner: "owner",
+        expiration: "0",
+        associate_trades: [],
+        created_at: 1775513261,
+      } as any,
+      trades: [],
+      expectedSize: 10,
+      expectedSizeIsExact: true,
+      orderType: "FOK",
+    });
+
+    expect(truth.effectiveFilledSize).toBe(0);
+    expect(truth.terminalZeroFill).toBe(true);
+    expect(truth.status).toBe("canceled");
   });
 
   it("treats terminal orders with only pending trades as still pending", () => {

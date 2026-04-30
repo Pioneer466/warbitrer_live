@@ -29,6 +29,7 @@ import {
   shouldKeepSlotExecutionBreakerActive,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatHedgeOrderAsComplete,
+  shouldRetryTerminalZeroFillHedge,
   shouldTreatPrimaryOrderAsFilled,
   shouldTreatPrimaryUnwindOrderAsComplete,
   shouldDeferPolymarketUnwindToSettlement,
@@ -819,9 +820,51 @@ describe("Kalshi primary IOC handling", () => {
     expect(
       shouldTreatHedgeOrderAsComplete(hedgeLeg, {
         filledSize: 9,
-        status: "filled",
+        status: "pending",
       }),
     ).toBe(true);
+
+    expect(
+      shouldTreatHedgeOrderAsComplete(hedgeLeg, {
+        filledSize: 10,
+        status: "filled",
+      }),
+    ).toBe(false);
+  });
+
+  it("allows Polymarket BUY hedge retries only after terminal zero-fill truth", () => {
+    expect(
+      shouldRetryTerminalZeroFillHedge(
+        { hedgeVenue: "polymarket" },
+        { venue: "polymarket", side: "BUY" },
+        {
+          status: "canceled",
+          filledSize: 0,
+          raw: {
+            orderTruth: {
+              terminalZeroFill: true,
+            },
+          },
+        },
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldRetryTerminalZeroFillHedge(
+        { hedgeVenue: "polymarket" },
+        { venue: "polymarket", side: "BUY" },
+        {
+          status: "canceled",
+          filledSize: 0,
+          raw: {
+            orderTruth: {
+              terminalZeroFill: false,
+              pendingFilledSize: 10,
+            },
+          },
+        },
+      ),
+    ).toBe(false);
   });
 });
 
