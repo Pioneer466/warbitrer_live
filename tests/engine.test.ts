@@ -10,6 +10,7 @@ import {
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   evaluateStablePnlChangeReadiness,
+  estimatePrimaryUnwindLossUsd,
   getOpportunitySnapshotAgeMs,
   hasKalshiHedgeRetryCapacity,
   isFeedHealthBreaker,
@@ -822,6 +823,11 @@ describe("forced unwind request pricing", () => {
     expect(request.reduceOnly).toBe(true);
     expect(request.side).toBe("SELL");
   });
+
+  it("estimates primary unwind loss from the filled entry and expected exit", () => {
+    expect(estimatePrimaryUnwindLossUsd(buildIntent().legs[0], 7, 0.4)).toBe(0.35);
+    expect(estimatePrimaryUnwindLossUsd(buildIntent().legs[0], 7, 0.5)).toBe(0);
+  });
 });
 
 describe("primary unwind completion", () => {
@@ -871,7 +877,7 @@ describe("slot execution breakers", () => {
     expect(isBreakerRelevantToSlot({ key: "slot:btc:slot-1" }, "btc", "btc:slot-2")).toBe(false);
   });
 
-  it("keeps a slot hedge breaker active for the rest of the current slot", () => {
+  it("does not keep a recovered slot hedge breaker active just because it is the current slot", () => {
     const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
       key: "slot:btc:slot-1",
       active: true,
@@ -881,8 +887,22 @@ describe("slot execution breakers", () => {
       },
     };
 
-    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(false);
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-2"]), new Set())).toBe(false);
+  });
+
+  it("keeps a slot hedge breaker active while the slot still has unresolved exposure", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "slot:btc:slot-1",
+      active: true,
+      reason: "hedge_failure",
+      payload: {
+        stage: "hedge_failure_unwind_pending",
+      },
+    };
+
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set(["btc:slot-1"]))).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(false);
   });
 
   it("keeps a global hedge breaker active through its cooldown", () => {
@@ -912,7 +932,7 @@ describe("slot execution breakers", () => {
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 1_000, new Set(["btc:slot-1"]), new Set())).toBe(true);
   });
 
-  it("keeps a primary no-fill slot breaker active only for the current slot", () => {
+  it("does not keep a primary no-fill slot breaker active without cooldown or unresolved exposure", () => {
     const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
       key: "slot:eth:slot-1",
       active: true,
@@ -923,7 +943,7 @@ describe("slot execution breakers", () => {
       },
     };
 
-    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-1"]), new Set())).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-1"]), new Set())).toBe(false);
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["eth:slot-2"]), new Set())).toBe(false);
   });
 

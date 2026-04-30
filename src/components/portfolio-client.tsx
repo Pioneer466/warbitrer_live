@@ -241,7 +241,7 @@ function getModeTone(mode: "off" | "shadow" | "live"): Tone {
 }
 
 function getReadinessTone(status: ReadinessStatus): Tone {
-  return status === "ready" ? "emerald" : status === "degraded" ? "amber" : "rose";
+  return status === "ready" ? "emerald" : status === "blocked" ? "rose" : "amber";
 }
 
 function getPillToneClass(tone: Tone) {

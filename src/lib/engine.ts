@@ -138,6 +138,9 @@ const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const SETTINGS_CACHE_TTL_MS = 1_000;
 const VENUE_BALANCES_CACHE_TTL_MS = 750;
 const OPEN_INTENTS_CACHE_TTL_MS = 750;
+const PRIMARY_NO_FILL_COOLDOWN_MS = 10_000;
+const HEDGE_FAILURE_RECOVERED_COOLDOWN_MS = 10_000;
+const HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS = 10_000;
 const LAST_ENTRY_COSTS_CACHE_TTL_MS = 750;
 const EXECUTION_ARBITER_WINDOW_MS = resolveExecutionArbiterWindowMs();
 const EXECUTION_LOCK_BUSY_LOG_INTERVAL_MS = 2_000;
@@ -666,14 +669,16 @@ export function createExecutionCoordinator(
     async execute(slot, now, providedSnapshot = null) {
       const snapshot = providedSnapshot ?? latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
       const readiness = await computeReadiness(snapshot, slot.asset, now);
-      const activeBreakers = readiness.breakers.filter((breaker) => breaker.active);
+      const pausingBreakers = readiness.breakers.filter((breaker) =>
+        shouldPauseExecutionForBreaker(breaker, now, slot.asset, snapshot?.slotKey ?? slot.key),
+      );
 
       await writeAssetWorkerState(slot.asset, {
         readinessStatus: readiness.state.readinessStatus,
         readiness: readiness.state.readiness,
       }, now, false);
 
-      if (!settings.enableTrading || activeBreakers.length > 0) {
+      if (!settings.enableTrading || pausingBreakers.length > 0) {
         return [];
       }
 
@@ -732,7 +737,7 @@ export function createExecutionCoordinator(
           }
 
           const currentBreakers = (await readCircuitBreakers()).filter(
-            (breaker) => breaker.active && isBreakerRelevantToSlot(breaker, slot.asset, slot.key),
+            (breaker) => shouldPauseExecutionForBreaker(breaker, now, slot.asset, slot.key),
           );
           if (currentBreakers.length > 0) {
             break;
@@ -1317,12 +1322,33 @@ async function computeReadiness(
     })),
   );
   const activeBreakers = breakers.filter((breaker) => breaker.active);
-  if (activeBreakers.length > 0) {
+  const blockingBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "blocked");
+  const cooldownBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "cooldown");
+  const degradedBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "degraded");
+  if (blockingBreakers.length > 0) {
     checks.push({
       key: "circuit-breaker",
       label: "Circuit breaker",
       status: "blocked",
-      details: activeBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      details: blockingBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      checkedAt: now,
+    });
+  }
+  if (cooldownBreakers.length > 0) {
+    checks.push({
+      key: "circuit-breaker-cooldown",
+      label: "Circuit breaker cooldown",
+      status: "cooldown",
+      details: cooldownBreakers.map((breaker) => describeCircuitBreakerForReadiness(breaker, now)).join(" | "),
+      checkedAt: now,
+    });
+  }
+  if (degradedBreakers.length > 0) {
+    checks.push({
+      key: "circuit-breaker-degraded",
+      label: "Circuit breaker degraded",
+      status: "degraded",
+      details: degradedBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
       checkedAt: now,
     });
   }
@@ -1331,6 +1357,8 @@ async function computeReadiness(
     state: {
       readinessStatus: checks.some((check) => check.status === "blocked")
         ? "blocked"
+        : checks.some((check) => check.status === "cooldown")
+          ? "cooldown"
         : checks.some((check) => check.status === "degraded")
           ? "degraded"
           : "ready",
@@ -2499,9 +2527,9 @@ async function skipIntentBeforeSubmission(
     payload: {
       intentId: currentIntent.id,
       slotKey: currentIntent.slotKey,
-      stage: "preflight_skipped",
+      stage: "preflight_skipped_cooldown",
       reason,
-      cooldownUntil: now + 5_000,
+      cooldownUntil: now + PRIMARY_NO_FILL_COOLDOWN_MS,
     },
   });
   return currentIntent;
@@ -3380,6 +3408,26 @@ async function unwindPrimaryLeg(
     ? deriveForcedUnwindOrderPrice(primaryLeg, requestedPrice, settings.maxSlippageBps, force.ticks)
     : null;
   const expectedExitPrice = forcedPrice ?? applySlippage(requestedPrice ?? 0, settings.maxSlippageBps, "SELL");
+  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice);
+  await writeRunEvent({
+    asset: intent.asset,
+    level: expectedLossUsd !== null && expectedLossUsd > 0 ? "warn" : "info",
+    eventType: "order.unwind.economic_check",
+    message: `Primary unwind economic check for intent ${intent.id}`,
+    payload: {
+      intentId: intent.id,
+      venue: primaryLeg.venue,
+      requestedSize,
+      entryPrice: primaryLeg.filledPrice,
+      referenceExitPrice: requestedPrice,
+      expectedExitPrice,
+      forcedAttempt: force?.attempt ?? null,
+      forcedTicks: force?.ticks ?? null,
+      expectedLossUsd,
+      maxLossUsd: settings.forcedUnwindMaxLossUsd,
+    },
+    createdAt: now,
+  });
   if (
     force &&
     shouldBlockForcedUnwindLoss(primaryLeg, requestedSize, expectedExitPrice, settings.forcedUnwindMaxLossUsd)
@@ -3450,22 +3498,37 @@ function deriveForcedUnwindOrderPrice(
   return round4(Math.max(0.001, applySlippage(referencePrice, maxSlippageBps + ticks * 100, "SELL")));
 }
 
+export function estimatePrimaryUnwindLossUsd(
+  primaryLeg: OrderIntent["legs"][number],
+  requestedSize: number,
+  expectedExitPrice: number | null,
+) {
+  if (
+    expectedExitPrice === null ||
+    primaryLeg.filledPrice === null ||
+    requestedSize <= 0
+  ) {
+    return null;
+  }
+
+  return round4(requestedSize * Math.max(0, primaryLeg.filledPrice - expectedExitPrice));
+}
+
 function shouldBlockForcedUnwindLoss(
   primaryLeg: OrderIntent["legs"][number],
   requestedSize: number,
   expectedExitPrice: number | null,
   maxLossUsd: number,
 ) {
-  if (
-    maxLossUsd <= 0 ||
-    expectedExitPrice === null ||
-    primaryLeg.filledPrice === null ||
-    requestedSize <= 0
-  ) {
+  if (maxLossUsd <= 0) {
     return false;
   }
 
-  const expectedLossUsd = requestedSize * Math.max(0, primaryLeg.filledPrice - expectedExitPrice);
+  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice);
+  if (expectedLossUsd === null) {
+    return false;
+  }
+
   return expectedLossUsd > maxLossUsd + ORDER_SIZE_TOLERANCE;
 }
 
@@ -4595,6 +4658,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         failureReason: describeUnwoundAfterFailure(failureReason),
       });
       await writeOrderIntent(currentIntent);
+      await armRecoveredHedgeFailureCooldown(currentIntent, Date.now(), "primary_unwound_after_hedge_failure");
       break;
     }
 
@@ -5411,6 +5475,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
             failureReason,
           });
           await writeOrderIntent(currentIntent);
+          await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
           continue;
         }
       }
@@ -5437,6 +5502,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           failureReason: "Primary unwound after hedge failure",
         });
         await writeOrderIntent(currentIntent);
+        await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
         continue;
       }
 
@@ -5476,6 +5542,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           failureReason: "Primary unwound after hedge failure",
         });
         await writeOrderIntent(currentIntent);
+        await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
         continue;
       }
 
@@ -6468,6 +6535,59 @@ function isSlotExecutionBreakerReason(reason: CircuitBreaker["reason"]): reason 
   return reason === "hedge_failure" || reason === "primary_no_fill";
 }
 
+function getCircuitBreakerReadinessStatus(
+  breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
+  now: number,
+): "ready" | "cooldown" | "degraded" | "blocked" {
+  if (!breaker.active) {
+    return "ready";
+  }
+
+  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
+  if (isSlotExecutionBreakerReason(breaker.reason)) {
+    if (getPayloadBoolean(breaker.payload, "requiresManualClear")) {
+      return "blocked";
+    }
+
+    if (cooldownUntil !== null && now < cooldownUntil) {
+      return "cooldown";
+    }
+
+    return "degraded";
+  }
+
+  if (cooldownUntil !== null && now < cooldownUntil) {
+    return "cooldown";
+  }
+
+  return "blocked";
+}
+
+function describeCircuitBreakerForReadiness(
+  breaker: Pick<CircuitBreaker, "key" | "payload" | "reason">,
+  now: number,
+) {
+  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
+  const remainingMs = cooldownUntil === null ? null : Math.max(0, cooldownUntil - now);
+  return remainingMs === null
+    ? `${breaker.key}:${breaker.reason}`
+    : `${breaker.key}:${breaker.reason}:retry_in=${remainingMs}ms`;
+}
+
+function shouldPauseExecutionForBreaker(
+  breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
+  now: number,
+  asset: MarketAsset,
+  slotKey: string | null,
+) {
+  if (!isBreakerRelevantToSlot(breaker, asset, slotKey)) {
+    return false;
+  }
+
+  const status = getCircuitBreakerReadinessStatus(breaker, now);
+  return status === "blocked" || status === "cooldown";
+}
+
 export function shouldKeepSlotExecutionBreakerActive(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
@@ -6500,7 +6620,7 @@ export function shouldKeepSlotExecutionBreakerActive(
     return true;
   }
 
-  return getPayloadBoolean(breaker.payload, "lockSlot") && currentSlotKeys.has(slotKey);
+  return getPayloadBoolean(breaker.payload, "requiresManualClear") && currentSlotKeys.has(slotKey);
 }
 
 export function countRecentKalshiSoftHedgeNoFillEvents(
@@ -6758,9 +6878,9 @@ async function armPrimarySoftNoFillGuard(
       intentId: intent.id,
       slotKey: intent.slotKey,
       venue: intent.primaryVenue,
-      stage: "primary_no_fill_slot_lock",
+      stage: "primary_no_fill_cooldown",
       primaryOrderId: primaryOrder.venueOrderId,
-      lockSlot: true,
+      cooldownUntil: now + PRIMARY_NO_FILL_COOLDOWN_MS,
       softNoFill: true,
     },
   });
@@ -6781,9 +6901,26 @@ async function armHedgeFailureGuards(
       intentId: intent.id,
       slotKey: intent.slotKey,
       venue: intent.hedgeVenue,
-      stage: "hedge_no_fill_slot_lock",
+      stage: "hedge_failure_unwind_pending",
       hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-      lockSlot: true,
+      cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
+    },
+  });
+}
+
+async function armRecoveredHedgeFailureCooldown(intent: OrderIntent, now: number, stage: string) {
+  await writeCircuitBreaker({
+    key: buildSlotBreakerKey(intent.slotKey),
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      venue: intent.hedgeVenue,
+      stage,
+      recovered: true,
+      cooldownUntil: now + HEDGE_FAILURE_RECOVERED_COOLDOWN_MS,
     },
   });
 }

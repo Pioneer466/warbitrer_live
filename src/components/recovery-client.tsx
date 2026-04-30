@@ -198,7 +198,7 @@ export function RecoveryClient() {
             <div key={check.key} className="rounded-[18px] border border-white/6 px-3 py-3 text-sm text-mist">
               <div className="flex items-center justify-between gap-3">
                 <div className="text-white">{check.label}</div>
-                <Badge tone={check.status === "ready" ? "cyan" : check.status === "degraded" ? "amber" : "default"}>
+                <Badge tone={check.status === "ready" ? "cyan" : check.status === "blocked" ? "default" : "amber"}>
                   {check.status}
                 </Badge>
               </div>
