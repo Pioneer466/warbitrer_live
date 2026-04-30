@@ -30,7 +30,7 @@ describe("Polymarket helpers", () => {
     vi.unstubAllGlobals();
   });
 
-  it("builds BUY orders as exact-size limit orders instead of USDC amount market orders", () => {
+  it("builds BUY orders as USDC amount market orders", () => {
     const plan = buildPolymarketClobOrderPlan({
       marketRef: "market-1",
       tokenId: "token-1",
@@ -44,15 +44,16 @@ describe("Polymarket helpers", () => {
       clientOrderId: "client-1",
     });
 
-    expect(plan.kind).toBe("limit-buy");
+    expect(plan.kind).toBe("market-buy");
     expect(plan.orderType).toBe("FOK");
     expect(plan.order).toMatchObject({
       tokenID: "token-1",
       side: Side.BUY,
+      amount: 7.1,
       price: 0.71,
-      size: 10,
+      orderType: "FOK",
     });
-    expect("amount" in plan.order).toBe(false);
+    expect("size" in plan.order).toBe(false);
   });
 
   it("keeps SELL orders share-sized for Polymarket market sells", () => {

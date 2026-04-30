@@ -57,6 +57,7 @@ import {
   calculateWinningPayout,
   calculateLegSpentUsd,
   createIntentFromOpportunity,
+  deriveHedgedPairEconomics,
   finalizeIntent,
   finalizeUnwoundIntent,
   markIntentStatus,
@@ -1854,9 +1855,14 @@ async function executeKalshiPrimaryMultiClip(
       if (currentIntent.legs.find((leg) => leg.id === primaryLeg.id)?.filledSize ?? 0 > 0) {
         const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
         if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
-          currentIntent = markIntentStatus(currentIntent, "hedged", clipAttemptNow, null);
-          await writeOrderIntent(currentIntent);
-          await writeLiveTradeRunEvent(currentIntent, clipAttemptNow, "hedged");
+          currentIntent = await markIntentHedgedAfterEconomicCheck(
+            currentIntent,
+            clipAttemptNow,
+            "primary_multi_clip_stopped_already_hedged",
+          );
+          if (currentIntent.status === "hedged") {
+            await writeLiveTradeRunEvent(currentIntent, clipAttemptNow, "hedged");
+          }
         } else {
           currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, clipAttemptNow), "primary_filled", clipAttemptNow);
           await writeOrderIntent(currentIntent);
@@ -2314,15 +2320,20 @@ async function executeKalshiPrimaryMultiClip(
       if (totalFilledSize > 0) {
         const stopNow = Date.now();
         const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
-        currentIntent =
-          unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE
-            ? markIntentStatus(currentIntent, "hedged", stopNow, null)
-            : markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, stopNow), "primary_filled", stopNow);
-        await writeOrderIntent(currentIntent);
+        if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
+          currentIntent = await markIntentHedgedAfterEconomicCheck(
+            currentIntent,
+            stopNow,
+            "primary_multi_clip_terminal_already_hedged",
+          );
+        } else {
+          currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, stopNow), "primary_filled", stopNow);
+          await writeOrderIntent(currentIntent);
+        }
         await writeLiveTradeRunEvent(
           currentIntent,
           stopNow,
-          unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+          currentIntent.status === "hedged" ? "hedged" : "primary_filled",
         );
         await writeRunEvent({
           level: "warn",
@@ -2468,15 +2479,20 @@ async function executeKalshiPrimaryMultiClip(
 
   const completedNow = Date.now();
   const unhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
-  currentIntent =
-    unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE
-      ? markIntentStatus(currentIntent, "hedged", completedNow, null)
-      : markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, completedNow), "primary_filled", completedNow);
-  await writeOrderIntent(currentIntent);
+  if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
+    currentIntent = await markIntentHedgedAfterEconomicCheck(
+      currentIntent,
+      completedNow,
+      "primary_multi_clip_completed_already_hedged",
+    );
+  } else {
+    currentIntent = markIntentStatus(resizeHedgeLegToFilledPrimary(currentIntent, completedNow), "primary_filled", completedNow);
+    await writeOrderIntent(currentIntent);
+  }
   await writeLiveTradeRunEvent(
     currentIntent,
     completedNow,
-    unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
+    currentIntent.status === "hedged" ? "hedged" : "primary_filled",
   );
   await writeRunEvent({
     level: "info",
@@ -2557,11 +2573,15 @@ async function executeIncrementalHedgeLeg(
 
   const unhedgedPrimarySize = deriveUnhedgedPrimarySize(resizedIntent);
   if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
-    const currentIntent = markIntentStatus(resizedIntent, "hedged", now, null);
-    await writeOrderIntent(currentIntent);
+    const currentIntent = await markIntentHedgedAfterEconomicCheck(
+      resizedIntent,
+      now,
+      "incremental_hedge_already_complete",
+      null,
+    );
     return {
       intent: currentIntent,
-      outcome: "hedged",
+      outcome: currentIntent.status === "hedged" ? "hedged" : "failed",
     };
   }
 
@@ -2665,13 +2685,16 @@ async function executeIncrementalHedgeLeg(
   if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
     currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "hedged", now);
     const remainingUnhedgedPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
-    currentIntent = markIntentStatus(
-      currentIntent,
-      remainingUnhedgedPrimarySize <= ORDER_SIZE_TOLERANCE ? "hedged" : "primary_filled",
-      now,
-      null,
-    );
-    await writeOrderIntent(currentIntent);
+    if (remainingUnhedgedPrimarySize <= ORDER_SIZE_TOLERANCE) {
+      currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "incremental_hedge_filled", hedgeOrder, {
+        remainingUnhedgedPrimarySize,
+        clipIndex: clip.clipIndex,
+        clipCount: clip.clipCount,
+      });
+    } else {
+      currentIntent = markIntentStatus(currentIntent, "primary_filled", now, null);
+      await writeOrderIntent(currentIntent);
+    }
     await writeRunEvent({
       level: "info",
       eventType: "order.hedge.incremental_filled",
@@ -2691,7 +2714,7 @@ async function executeIncrementalHedgeLeg(
     });
     return {
       intent: currentIntent,
-      outcome: "hedged",
+      outcome: currentIntent.status === "hedged" ? "hedged" : "failed",
     };
   }
 
@@ -3126,9 +3149,10 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
     }
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-    currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
-    await writeOrderIntent(currentIntent);
-    await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+    currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_filled", hedgeOrder);
+    if (currentIntent.status === "hedged") {
+      await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+    }
     return currentIntent;
   }
 
@@ -3191,9 +3215,10 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
           currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
         }
         currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-        currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
-        await writeOrderIntent(currentIntent);
-        await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+        currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_retry_filled", hedgeOrder);
+        if (currentIntent.status === "hedged") {
+          await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+        }
         return currentIntent;
       }
 
@@ -4835,8 +4860,11 @@ async function attemptHedgeRescueBeforeUnwind(
 
     const unhedgedSize = deriveUnhedgedPrimarySize(currentIntent);
     if (unhedgedSize <= ORDER_SIZE_TOLERANCE) {
-      currentIntent = markIntentStatus(currentIntent, "hedged", attemptNow, null);
-      await writeOrderIntent(currentIntent);
+      currentIntent = await markIntentHedgedAfterEconomicCheck(
+        currentIntent,
+        attemptNow,
+        "hedge_rescue_already_complete",
+      );
       await writeRunEvent({
         asset: currentIntent.asset,
         level: "info",
@@ -4850,7 +4878,7 @@ async function attemptHedgeRescueBeforeUnwind(
         },
         createdAt: attemptNow,
       });
-      return { intent: currentIntent, recovered: true, hold: false };
+      return { intent: currentIntent, recovered: currentIntent.status === "hedged", hold: false };
     }
 
     const primaryEntryPrice = primaryLeg.filledPrice ?? primaryLeg.requestedPrice;
@@ -5093,10 +5121,17 @@ async function attemptHedgeRescueBeforeUnwind(
       });
 
       if (remainingSize <= ORDER_SIZE_TOLERANCE) {
-        currentIntent = markIntentStatus(currentIntent, "hedged", Date.now(), null);
-        await writeOrderIntent(currentIntent);
-        await writeLiveTradeRunEvent(currentIntent, Date.now(), "hedged");
-        return { intent: currentIntent, recovered: true, hold: false };
+        const completedNow = Date.now();
+        currentIntent = await markIntentHedgedAfterEconomicCheck(
+          currentIntent,
+          completedNow,
+          "hedge_rescue_completed",
+          rescueOrder,
+        );
+        if (currentIntent.status === "hedged") {
+          await writeLiveTradeRunEvent(currentIntent, completedNow, "hedged");
+        }
+        return { intent: currentIntent, recovered: currentIntent.status === "hedged", hold: false };
       }
 
       continue;
@@ -5456,23 +5491,23 @@ async function resolveHedgeExposureBeforePrimaryUnwind(
 
   const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
   if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE && hedgeLeg.filledSize > 0) {
-    const currentIntent = markIntentStatus(
-      {
-        ...intent,
-        legs: intent.legs.map((leg) =>
-          leg.id === hedgeLeg.id
-            ? {
-                ...leg,
-                status: "hedged",
-              }
-            : leg,
-        ) as OrderIntent["legs"],
-      },
-      "hedged",
+    const hedgedCandidate = {
+      ...intent,
+      legs: intent.legs.map((leg) =>
+        leg.id === hedgeLeg.id
+          ? {
+              ...leg,
+              status: "hedged",
+            }
+          : leg,
+      ) as OrderIntent["legs"],
+    };
+    const currentIntent = await markIntentHedgedAfterEconomicCheck(
+      hedgedCandidate,
       now,
-      null,
+      "recovery_hedge_truth_complete",
+      hedgeOrder,
     );
-    await writeOrderIntent(currentIntent);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "warn",
@@ -5489,7 +5524,9 @@ async function resolveHedgeExposureBeforePrimaryUnwind(
       },
       createdAt: now,
     });
-    await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+    if (currentIntent.status === "hedged") {
+      await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+    }
     return currentIntent;
   }
 
@@ -5583,6 +5620,58 @@ async function tripManualInterventionBreaker(
   });
 }
 
+async function markIntentHedgedAfterEconomicCheck(
+  intent: OrderIntent,
+  now: number,
+  stage: string,
+  hedgeOrder: LiveOrder | null = null,
+  extraPayload: Record<string, unknown> = {},
+) {
+  const economics = deriveHedgedPairEconomics(intent.legs);
+  if (
+    economics.polymarketFilledSize <= ORDER_SIZE_TOLERANCE ||
+    economics.kalshiFilledSize <= ORDER_SIZE_TOLERANCE ||
+    economics.netWorstCaseUsd <= ORDER_SIZE_TOLERANCE
+  ) {
+    const currentIntent = markIntentStatus(
+      intent,
+      "unwind_required",
+      now,
+      `Hedged pair worst-case PnL ${economics.netWorstCaseUsd.toFixed(4)} USD; manual intervention required`,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: "error",
+      eventType: "intent.hedge.economic_guard_failed",
+      message: `Intent ${currentIntent.id} failed the hedged-pair economic guard`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        stage,
+        primaryVenue: currentIntent.primaryVenue,
+        hedgeVenue: currentIntent.hedgeVenue,
+        economics,
+        hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+        ...extraPayload,
+      },
+      createdAt: now,
+    });
+    await writeManualInterventionRunEvent(currentIntent, now, "hedged_pair_economic_guard_failed", {
+      stage,
+      economics,
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      ...extraPayload,
+    });
+    await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "hedged_pair_economic_guard_failed");
+    return currentIntent;
+  }
+
+  const currentIntent = markIntentStatus(intent, "hedged", now, null);
+  await writeOrderIntent(currentIntent);
+  return currentIntent;
+}
+
 async function reconcileVenueOrders(asset: MarketAsset, now: number) {
   const [recentOrders, polyOpenOrders, kalshiOrders, polyTrades, kalshiFills] = await Promise.all([
     readRecentVenueOrders(200, asset),
@@ -5650,7 +5739,7 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number) {
       order: extractPolymarketOpenOrderFromRaw(existingOrder.raw),
       trades: matchingTrades,
       expectedSize: existingOrder.requestedSize,
-      expectedSizeIsExact: true,
+      expectedSizeIsExact: existingOrder.side !== "BUY",
       orderType: existingOrder.orderType,
     });
     if (truth.effectiveFilledSize > 0) {
@@ -6541,9 +6630,10 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
 
     if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
       currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-      currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
-      await writeOrderIntent(currentIntent);
-      await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+      currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "reconcile_hedge_filled", hedgeOrder);
+      if (currentIntent.status === "hedged") {
+        await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+      }
       continue;
     }
 
@@ -7186,7 +7276,7 @@ async function confirmImmediateOrderExecution(
     const confirmation = await confirmPolymarketOrderExecution({
       orderId: submission.venueOrderId,
       expectedSize: request.size,
-      expectedSizeIsExact: true,
+      expectedSizeIsExact: request.side !== "BUY",
       orderType: request.orderType,
       timeoutMs,
     });
@@ -7195,7 +7285,7 @@ async function confirmImmediateOrderExecution(
       const canceledConfirmation = await confirmPolymarketOrderExecution({
         orderId: submission.venueOrderId,
         expectedSize: request.size,
-        expectedSizeIsExact: true,
+        expectedSizeIsExact: request.side !== "BUY",
         orderType: request.orderType,
         timeoutMs: Math.min(1_000, timeoutMs),
       });

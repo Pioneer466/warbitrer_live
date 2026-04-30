@@ -219,6 +219,33 @@ export function calculateLegSpentUsd(leg: Pick<OrderIntentLeg, "filledSize" | "f
   return round4(tradedNotional + leg.feeUsd);
 }
 
+export function deriveHedgedPairEconomics(
+  legs: OrderIntent["legs"],
+): {
+  guaranteedPayoutUsd: number;
+  totalSpentUsd: number;
+  netWorstCaseUsd: number;
+  polymarketFilledSize: number;
+  kalshiFilledSize: number;
+  imbalanceSize: number;
+} {
+  const polymarketLeg = legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = legs.find((leg) => leg.venue === "kalshi");
+  const polymarketFilledSize = polymarketLeg?.filledSize ?? 0;
+  const kalshiFilledSize = kalshiLeg?.filledSize ?? 0;
+  const guaranteedPayoutUsd = Math.min(polymarketFilledSize, kalshiFilledSize);
+  const totalSpentUsd = legs.reduce((sum, leg) => sum + calculateLegSpentUsd(leg), 0);
+
+  return {
+    guaranteedPayoutUsd: round4(guaranteedPayoutUsd),
+    totalSpentUsd: round4(totalSpentUsd),
+    netWorstCaseUsd: round4(guaranteedPayoutUsd - totalSpentUsd),
+    polymarketFilledSize: round4(polymarketFilledSize),
+    kalshiFilledSize: round4(kalshiFilledSize),
+    imbalanceSize: round4(Math.abs(polymarketFilledSize - kalshiFilledSize)),
+  };
+}
+
 function buildIntentLeg(
   intentId: string,
   venue: Venue,

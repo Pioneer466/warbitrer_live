@@ -58,7 +58,7 @@ async function main() {
       order: extractPolymarketOpenOrderFromRaw(order.raw),
       trades,
       expectedSize: order.requestedSize,
-      expectedSizeIsExact: true,
+      expectedSizeIsExact: order.side !== "BUY",
       orderType: order.orderType,
     });
 

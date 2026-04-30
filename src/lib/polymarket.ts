@@ -393,19 +393,13 @@ export function createPolymarketAdapter(): VenueAdapter {
       const client = createClobClient();
       try {
         const orderPlan = buildPolymarketClobOrderPlan(order);
-        const response =
-          orderPlan.kind === "limit-buy"
-            ? await withPolymarketClientTimeout("createAndPostOrder", async () => {
-                const signedOrder = await client.createOrder(orderPlan.order);
-                return client.postOrder(signedOrder, orderPlan.orderType);
-              })
-            : await withPolymarketClientTimeout("createAndPostMarketOrder", () =>
-                client.createAndPostMarketOrder(
-                  orderPlan.order,
-                  undefined,
-                  orderPlan.orderType,
-                ),
-              );
+        const response = await withPolymarketClientTimeout("createAndPostMarketOrder", () =>
+          client.createAndPostMarketOrder(
+            orderPlan.order,
+            undefined,
+            orderPlan.orderType,
+          ),
+        );
         const noFillMessage = getPolymarketSoftNoFillMessage(response);
         if (noFillMessage) {
           return buildPolymarketSoftNoFillResult(order, noFillMessage);
@@ -453,17 +447,18 @@ export function buildPolymarketClobOrderPlan(order: VenueOrderRequest) {
 
   if (order.side === "BUY") {
     if (order.price === null || order.price === undefined) {
-      throw new Error("Polymarket BUY limit order requires a price");
+      throw new Error("Polymarket BUY market order requires a limit price");
     }
 
     return {
-      kind: "limit-buy" as const,
+      kind: "market-buy" as const,
       orderType,
       order: {
         tokenID: order.tokenId,
         side: Side.BUY,
+        amount: order.maxCostUsd,
         price: order.price,
-        size: order.size,
+        orderType,
       },
     };
   }
@@ -1265,7 +1260,7 @@ export function mapPolymarketOrder(order: OpenOrder, intentId: string): LiveOrde
     order,
     trades: [],
     expectedSize: Number(order.original_size),
-    expectedSizeIsExact: true,
+    expectedSizeIsExact: String(order.side).toUpperCase() !== "BUY",
     orderType: order.order_type,
   });
   return {

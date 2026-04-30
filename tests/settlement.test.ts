@@ -1,6 +1,7 @@
 import {
   calculateWinningPayout,
   createIntentFromOpportunity,
+  deriveHedgedPairEconomics,
   finalizeIntent,
   finalizeUnwoundIntent,
   markIntentStatus,
@@ -181,6 +182,54 @@ describe("live intent settlement", () => {
     expect(settled.realizedPnlUsd).toBeCloseTo(8.2783, 4);
     expect(settled.realizedPnlUsd).not.toBeNull();
     expect(settled.polyResolution).toBe("UP");
+  });
+
+  it("detects a hedged pair whose worst-case payout is negative after real fills", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity,
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+    intent.legs[0].filledSize = 11.59;
+    intent.legs[0].filledPrice = 0.69025;
+    intent.legs[0].feeUsd = 0;
+    intent.legs[1].filledSize = 10;
+    intent.legs[1].filledPrice = 0.295;
+    intent.legs[1].feeUsd = 0.15;
+
+    expect(deriveHedgedPairEconomics(intent.legs)).toMatchObject({
+      guaranteedPayoutUsd: 10,
+      totalSpentUsd: 11.1,
+      netWorstCaseUsd: -1.1,
+      imbalanceSize: 1.59,
+    });
+  });
+
+  it("keeps a hedged pair valid when the guaranteed payout covers costs and fees", () => {
+    const intent = createIntentFromOpportunity({
+      opportunity,
+      slotStartTs: 1774899000000,
+      slotEndTs: 1774899900000,
+      now: 1774899060000,
+      maxSlippageBps: 30,
+      shadow: false,
+    });
+    intent.legs[0].filledSize = 10;
+    intent.legs[0].filledPrice = 0.62;
+    intent.legs[0].feeUsd = 0;
+    intent.legs[1].filledSize = 10;
+    intent.legs[1].filledPrice = 0.325;
+    intent.legs[1].feeUsd = 0.15;
+
+    expect(deriveHedgedPairEconomics(intent.legs)).toMatchObject({
+      guaranteedPayoutUsd: 10,
+      totalSpentUsd: 9.6,
+      netWorstCaseUsd: 0.4,
+      imbalanceSize: 0,
+    });
   });
 
   it("clears a stale failure reason when an intent recovers", () => {
