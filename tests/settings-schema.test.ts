@@ -15,10 +15,19 @@ describe("settings schema", () => {
     expect(settings.kalshiPrimaryProbeClipContracts).toBe(5);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(10);
     expect(settings.kalshiPrimaryMaxClips).toBe(4);
+    expect(settings.polymarketHedgeDepthSafetyFactor).toBe(0.8);
+    expect(settings.polymarketHedgeHeadroomShares).toBe(1);
+    expect(settings.polymarketHedgeBookMaxAgeMs).toBe(500);
     expect(settings.primaryRetryAttempts).toBe(2);
     expect(settings.primaryRetryDelayMs).toBe(200);
     expect(settings.hedgeRetryAttempts).toBe(3);
     expect(settings.hedgeRetryDelayMs).toBe(350);
+    expect(settings.hedgeRescueEnabled).toBe(true);
+    expect(settings.hedgeRescueMaxAttempts).toBe(3);
+    expect(settings.hedgeRescueDelayMs).toBe(150);
+    expect(settings.hedgeRescueMaxLossUsd).toBe(1);
+    expect(settings.hedgeRescueMinAdvantageUsd).toBe(0.05);
+    expect(settings.hedgeRescueAllowPartial).toBe(true);
     expect(settings.forcedUnwindEnabled).toBe(true);
     expect(settings.forcedUnwindMaxAttempts).toBe(3);
     expect(settings.forcedUnwindTickLadder).toEqual([1, 3, 6]);
@@ -52,10 +61,19 @@ describe("settings schema", () => {
       kalshiPrimaryProbeClipContracts: 6,
       kalshiPrimaryMaxClipContracts: 8,
       kalshiPrimaryMaxClips: 3,
+      polymarketHedgeDepthSafetyFactor: 0.75,
+      polymarketHedgeHeadroomShares: 2,
+      polymarketHedgeBookMaxAgeMs: 400,
       primaryRetryAttempts: 4,
       primaryRetryDelayMs: 250,
       hedgeRetryAttempts: 5,
       hedgeRetryDelayMs: 500,
+      hedgeRescueEnabled: true,
+      hedgeRescueMaxAttempts: 4,
+      hedgeRescueDelayMs: 100,
+      hedgeRescueMaxLossUsd: 0.75,
+      hedgeRescueMinAdvantageUsd: 0.03,
+      hedgeRescueAllowPartial: false,
       forcedUnwindEnabled: true,
       forcedUnwindMaxAttempts: 4,
       forcedUnwindTickLadder: [1, 2, 4, 8],
@@ -77,10 +95,18 @@ describe("settings schema", () => {
     expect(settings.kalshiPrimaryProbeClipContracts).toBe(6);
     expect(settings.kalshiPrimaryMaxClipContracts).toBe(8);
     expect(settings.kalshiPrimaryMaxClips).toBe(3);
+    expect(settings.polymarketHedgeDepthSafetyFactor).toBe(0.75);
+    expect(settings.polymarketHedgeHeadroomShares).toBe(2);
+    expect(settings.polymarketHedgeBookMaxAgeMs).toBe(400);
     expect(settings.primaryRetryAttempts).toBe(4);
     expect(settings.primaryRetryDelayMs).toBe(250);
     expect(settings.hedgeRetryAttempts).toBe(5);
     expect(settings.hedgeRetryDelayMs).toBe(500);
+    expect(settings.hedgeRescueMaxAttempts).toBe(4);
+    expect(settings.hedgeRescueDelayMs).toBe(100);
+    expect(settings.hedgeRescueMaxLossUsd).toBe(0.75);
+    expect(settings.hedgeRescueMinAdvantageUsd).toBe(0.03);
+    expect(settings.hedgeRescueAllowPartial).toBe(false);
     expect(settings.forcedUnwindMaxAttempts).toBe(4);
     expect(settings.forcedUnwindTickLadder).toEqual([1, 2, 4, 8]);
     expect(settings.forcedUnwindMaxLossUsd).toBe(3);

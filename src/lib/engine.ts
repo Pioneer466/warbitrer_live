@@ -3008,7 +3008,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     hedgeOrder = recovered.order;
   }
 
-  if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
+  if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
     if (currentIntent.hedgeVenue === "polymarket") {
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
     }
@@ -3020,32 +3020,32 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
   }
 
   if (hedgeOrder.filledSize > 0) {
-    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "failed", now);
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "failed",
-      now,
-      `Hedge order partially filled or not final (${hedgeResult.status}); manual intervention required`,
-    );
+    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
     await writeOrderIntent(currentIntent);
-    await writeManualInterventionRunEvent(currentIntent, now, "hedge_partial_fill", {
-      venue: currentIntent.hedgeVenue,
-      orderId: hedgeOrder.venueOrderId,
-      orderStatus: hedgeResult.status,
-    });
-    await writeCircuitBreaker({
-      key: buildSlotBreakerKey(currentIntent.slotKey),
-      active: true,
-      reason: "hedge_failure",
-      triggeredAt: now,
+    await writeRunEvent({
+      level: "warn",
+      eventType: "order.hedge.partial_fill_rescue",
+      message: `Hedge ${currentIntent.hedgeVenue} partially filled for intent ${currentIntent.id}; entering recovery`,
       payload: {
         intentId: currentIntent.id,
         venue: currentIntent.hedgeVenue,
-        stage: "hedge_partial_fill",
         orderId: hedgeOrder.venueOrderId,
+        requestedSize: hedgeOrder.requestedSize,
+        filledSize: hedgeOrder.filledSize,
+        orderStatus: hedgeResult.status,
       },
+      createdAt: now,
     });
-    return currentIntent;
+    return attemptPrimaryUnwindAfterHedgeFailure(
+      currentIntent,
+      primaryLeg,
+      hedgeLeg,
+      hedgeOrder,
+      settings,
+      now,
+      `Hedge order partially filled or not final (${hedgeResult.status})`,
+      hedgeResult,
+    );
   }
 
   if (isTerminalOrderStatus(hedgeResult.status)) {
@@ -3064,7 +3064,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       hedgeResult = retried.result;
       hedgeOrder = retried.order;
 
-      if (hedgeResult.status === "filled" && hedgeOrder.filledSize > 0) {
+      if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
         if (currentIntent.hedgeVenue === "polymarket") {
           currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
         }
@@ -3076,32 +3076,32 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       }
 
       if (hedgeOrder.filledSize > 0) {
-        currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "failed", now);
-        currentIntent = markIntentStatus(
-          currentIntent,
-          "failed",
-          now,
-          `Hedge retry partially filled or not final (${hedgeResult.status}); manual intervention required`,
-        );
+        currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
         await writeOrderIntent(currentIntent);
-        await writeManualInterventionRunEvent(currentIntent, now, "hedge_retry_partial_fill", {
-          venue: currentIntent.hedgeVenue,
-          orderId: hedgeOrder.venueOrderId,
-          orderStatus: hedgeResult.status,
-        });
-        await writeCircuitBreaker({
-          key: buildSlotBreakerKey(currentIntent.slotKey),
-          active: true,
-          reason: "hedge_failure",
-          triggeredAt: now,
+        await writeRunEvent({
+          level: "warn",
+          eventType: "order.hedge_retry.partial_fill_rescue",
+          message: `Hedge retry ${currentIntent.hedgeVenue} partially filled for intent ${currentIntent.id}; entering recovery`,
           payload: {
             intentId: currentIntent.id,
             venue: currentIntent.hedgeVenue,
-            stage: "hedge_retry_partial_fill",
             orderId: hedgeOrder.venueOrderId,
+            requestedSize: hedgeOrder.requestedSize,
+            filledSize: hedgeOrder.filledSize,
+            orderStatus: hedgeResult.status,
           },
+          createdAt: now,
         });
-        return currentIntent;
+        return attemptPrimaryUnwindAfterHedgeFailure(
+          currentIntent,
+          primaryLeg,
+          hedgeLeg,
+          hedgeOrder,
+          settings,
+          now,
+          `Hedge retry partially filled or not final (${hedgeResult.status})`,
+          hedgeResult,
+        );
       }
     }
   }
@@ -3381,11 +3381,16 @@ async function unwindPrimaryLeg(
   }
 
   const requestedSize = await resolvePrimaryExitSize(intent, primaryLeg, now);
-  if (requestedSize <= 0) {
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
+  const effectiveRequestedSize =
+    unhedgedPrimarySize > ORDER_SIZE_TOLERANCE
+      ? Math.min(requestedSize, unhedgedPrimarySize)
+      : requestedSize;
+  if (effectiveRequestedSize <= 0) {
     throw new Error(`Unable to unwind intent ${intent.id}: no exitable size`);
   }
 
-  if (requestedSize + ORDER_SIZE_TOLERANCE < primaryLeg.filledSize) {
+  if (effectiveRequestedSize + ORDER_SIZE_TOLERANCE < primaryLeg.filledSize) {
     await writeRunEvent({
       level: "warn",
       eventType: "order.unwind.size_capped",
@@ -3394,7 +3399,8 @@ async function unwindPrimaryLeg(
         intentId: intent.id,
         venue: primaryLeg.venue,
         filledSize: primaryLeg.filledSize,
-        requestedSize,
+        requestedSize: effectiveRequestedSize,
+        unhedgedPrimarySize,
       },
       createdAt: now,
     });
@@ -3408,7 +3414,7 @@ async function unwindPrimaryLeg(
     ? deriveForcedUnwindOrderPrice(primaryLeg, requestedPrice, settings.maxSlippageBps, force.ticks)
     : null;
   const expectedExitPrice = forcedPrice ?? applySlippage(requestedPrice ?? 0, settings.maxSlippageBps, "SELL");
-  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice);
+  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, effectiveRequestedSize, expectedExitPrice);
   await writeRunEvent({
     asset: intent.asset,
     level: expectedLossUsd !== null && expectedLossUsd > 0 ? "warn" : "info",
@@ -3417,7 +3423,8 @@ async function unwindPrimaryLeg(
     payload: {
       intentId: intent.id,
       venue: primaryLeg.venue,
-      requestedSize,
+      requestedSize: effectiveRequestedSize,
+      unhedgedPrimarySize,
       entryPrice: primaryLeg.filledPrice,
       referenceExitPrice: requestedPrice,
       expectedExitPrice,
@@ -3430,7 +3437,7 @@ async function unwindPrimaryLeg(
   });
   if (
     force &&
-    shouldBlockForcedUnwindLoss(primaryLeg, requestedSize, expectedExitPrice, settings.forcedUnwindMaxLossUsd)
+    shouldBlockForcedUnwindLoss(primaryLeg, effectiveRequestedSize, expectedExitPrice, settings.forcedUnwindMaxLossUsd)
   ) {
     throw new Error(
       `Forced unwind blocked by max loss: expected exit ${expectedExitPrice.toFixed(4)} exceeds configured loss cap`,
@@ -3442,8 +3449,8 @@ async function unwindPrimaryLeg(
       ...primaryLeg,
       requestedPrice,
       side: "SELL",
-      requestedSize,
-      requestedNotionalUsd: requestedSize * (requestedPrice ?? primaryLeg.filledPrice ?? primaryLeg.requestedPrice ?? 0),
+      requestedSize: effectiveRequestedSize,
+      requestedNotionalUsd: effectiveRequestedSize * (requestedPrice ?? primaryLeg.filledPrice ?? primaryLeg.requestedPrice ?? 0),
     },
     settings.maxSlippageBps,
     primaryLeg.venue === "polymarket" ? "FAK" : "IOC",
@@ -3460,7 +3467,7 @@ async function unwindPrimaryLeg(
         venue: primaryLeg.venue,
         attempt: force.attempt,
         ticks: force.ticks,
-        requestedSize,
+        requestedSize: effectiveRequestedSize,
         referencePrice: requestedPrice,
         orderPrice: request.price,
         maxLossUsd: settings.forcedUnwindMaxLossUsd,
@@ -4426,7 +4433,13 @@ async function resizeKalshiPrimaryIntentFromRestPreflight(
 
 async function preflightPolymarketHedgeLiquidity(
   intent: OrderIntent,
-  settings: Pick<StrategyConfig, "maxSlippageBps">,
+  settings: Pick<
+    StrategyConfig,
+    | "maxSlippageBps"
+    | "polymarketHedgeDepthSafetyFactor"
+    | "polymarketHedgeHeadroomShares"
+    | "polymarketHedgeBookMaxAgeMs"
+  >,
 ) {
   const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!hedgeLeg || hedgeLeg.venue !== "polymarket" || hedgeLeg.side !== "BUY") {
@@ -4448,15 +4461,41 @@ async function preflightPolymarketHedgeLiquidity(
   }
 
   try {
+    const fetchStartedAt = Date.now();
     const book = await fetchPolymarketBook(hedgeLeg.tokenId);
-    const executableDepth = sumPolymarketAskDepthWithinLimit(book.asks, request.price);
+    const capturedAt = Date.now();
+    const bookAgeMs = capturedAt - fetchStartedAt;
+    if (bookAgeMs > settings.polymarketHedgeBookMaxAgeMs) {
+      return {
+        status: "unavailable" as const,
+        reason: "polymarket_book_too_slow",
+        requestedSize: request.size,
+        orderPrice: request.price,
+        bookAgeMs,
+        maxBookAgeMs: settings.polymarketHedgeBookMaxAgeMs,
+        executableDepth: null,
+      };
+    }
+
+    const rawDepth = sumPolymarketAskDepthWithinLimit(book.asks, request.price);
+    const executableDepth = deriveSafePolymarketHedgeDepth(
+      rawDepth,
+      settings.polymarketHedgeDepthSafetyFactor,
+      settings.polymarketHedgeHeadroomShares,
+    );
+    const executableQuote = quotePolymarketBuyFromAsks(book.asks, request.price, Math.min(request.size, executableDepth));
     const insufficient = executableDepth + ORDER_SIZE_TOLERANCE < request.size;
     return {
       status: insufficient ? "insufficient" as const : "ready" as const,
       reason: insufficient ? "polymarket_depth_below_requested_size" : null,
       requestedSize: request.size,
       orderPrice: request.price,
+      rawDepth,
+      depthSafetyFactor: settings.polymarketHedgeDepthSafetyFactor,
+      headroomShares: settings.polymarketHedgeHeadroomShares,
       executableDepth,
+      executableVwap: executableQuote.vwap,
+      bookAgeMs,
       topLevels: book.asks
         .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
         .filter((level) => Number.isFinite(level.price) && Number.isFinite(level.size))
@@ -4491,6 +4530,495 @@ export function sumPolymarketAskDepthWithinLimit(
   );
 }
 
+export function deriveSafePolymarketHedgeDepth(rawDepth: number, safetyFactor: number, headroomShares: number) {
+  if (!Number.isFinite(rawDepth) || rawDepth <= 0) {
+    return 0;
+  }
+
+  return round4(Math.max(0, rawDepth * safetyFactor - Math.max(0, headroomShares)));
+}
+
+export function quotePolymarketBuyFromAsks(
+  asks: Array<{ price: string; size: string }>,
+  limitPrice: number,
+  targetSize: number,
+) {
+  if (targetSize <= 0) {
+    return {
+      filledSize: 0,
+      costUsd: 0,
+      vwap: null,
+    };
+  }
+
+  let remaining = targetSize;
+  let filledSize = 0;
+  let costUsd = 0;
+  const sortedAsks = [...asks]
+    .map((level) => ({ price: Number(level.price), size: Number(level.size) }))
+    .filter(
+      (level) =>
+        Number.isFinite(level.price) &&
+        Number.isFinite(level.size) &&
+        level.size > 0 &&
+        level.price <= limitPrice + ORDER_SIZE_TOLERANCE,
+    )
+    .sort((left, right) => left.price - right.price);
+
+  for (const level of sortedAsks) {
+    if (remaining <= ORDER_SIZE_TOLERANCE) {
+      break;
+    }
+
+    const fillSize = Math.min(remaining, level.size);
+    filledSize += fillSize;
+    costUsd += fillSize * level.price;
+    remaining -= fillSize;
+  }
+
+  return {
+    filledSize: roundToSixDecimals(filledSize),
+    costUsd: round4(costUsd),
+    vwap: filledSize > 0 ? round4(costUsd / filledSize) : null,
+  };
+}
+
+type RecoveryDecision = "rescue_hedge_full" | "rescue_hedge_partial" | "unwind" | "hold_to_settlement";
+
+export function estimateRescueHedgeLossUsd(input: {
+  primaryEntryPrice: number | null;
+  hedgePrice: number | null;
+  size: number;
+  primaryFeeUsd?: number | null;
+  hedgeFeeUsd?: number | null;
+}) {
+  if (
+    input.primaryEntryPrice === null ||
+    input.hedgePrice === null ||
+    input.size <= 0
+  ) {
+    return null;
+  }
+
+  const primaryFeeUsd = input.primaryFeeUsd ?? 0;
+  const hedgeFeeUsd = input.hedgeFeeUsd ?? 0;
+  return round4(Math.max(0, input.size * input.primaryEntryPrice + input.size * input.hedgePrice + primaryFeeUsd + hedgeFeeUsd - input.size));
+}
+
+export function evaluateExposureRecoveryOptions(input: {
+  rescueHedgeLossUsd: number | null;
+  rescueHedgeSize: number;
+  unhedgedSize: number;
+  unwindLossUsd: number | null;
+  holdExpectedLossUsd: number | null;
+  holdWorstCaseLossUsd: number | null;
+  hedgeRescueMaxLossUsd: number;
+  hedgeRescueMinAdvantageUsd: number;
+  secondsToSettlement: number;
+  holdWindowSeconds: number;
+  allowPartial: boolean;
+}) {
+  const fullHedge =
+    input.rescueHedgeSize + ORDER_SIZE_TOLERANCE >= input.unhedgedSize &&
+    input.rescueHedgeLossUsd !== null &&
+    input.rescueHedgeLossUsd <= input.hedgeRescueMaxLossUsd + ORDER_SIZE_TOLERANCE;
+  if (fullHedge) {
+    return {
+      decision: "rescue_hedge_full" as RecoveryDecision,
+      reason: "full_hedge_within_loss_cap",
+    };
+  }
+
+  const partialHedge =
+    input.allowPartial &&
+    input.rescueHedgeSize > ORDER_SIZE_TOLERANCE &&
+    input.rescueHedgeLossUsd !== null &&
+    input.rescueHedgeLossUsd <= input.hedgeRescueMaxLossUsd + ORDER_SIZE_TOLERANCE &&
+    (input.unwindLossUsd === null ||
+      input.rescueHedgeLossUsd + input.hedgeRescueMinAdvantageUsd <= input.unwindLossUsd);
+  if (partialHedge) {
+    return {
+      decision: "rescue_hedge_partial" as RecoveryDecision,
+      reason: "partial_hedge_cheaper_than_unwind",
+    };
+  }
+
+  const holdToSettlement =
+    input.secondsToSettlement >= 0 &&
+    input.secondsToSettlement <= input.holdWindowSeconds &&
+    input.holdExpectedLossUsd !== null &&
+    input.holdWorstCaseLossUsd !== null &&
+    input.holdWorstCaseLossUsd <= input.hedgeRescueMaxLossUsd + ORDER_SIZE_TOLERANCE &&
+    (input.unwindLossUsd === null ||
+      input.holdExpectedLossUsd + input.hedgeRescueMinAdvantageUsd <= input.unwindLossUsd) &&
+    (input.rescueHedgeLossUsd === null ||
+      input.holdExpectedLossUsd + input.hedgeRescueMinAdvantageUsd <= input.rescueHedgeLossUsd);
+  if (holdToSettlement) {
+    return {
+      decision: "hold_to_settlement" as RecoveryDecision,
+      reason: "hold_ev_better_near_settlement",
+    };
+  }
+
+  return {
+    decision: "unwind" as RecoveryDecision,
+    reason: "unwind_best_available_recovery",
+  };
+}
+
+async function attemptHedgeRescueBeforeUnwind(
+  intent: OrderIntent,
+  settings: StrategyConfig,
+  now: number,
+) {
+  if (!settings.hedgeRescueEnabled) {
+    return { intent, recovered: false, hold: false };
+  }
+
+  let currentIntent = resizeHedgeLegToUnhedgedPrimary(intent, now);
+  let primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+  let hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+  if (
+    !primaryLeg ||
+    !hedgeLeg ||
+    primaryLeg.filledSize <= 0 ||
+    hedgeLeg.venue !== "polymarket" ||
+    hedgeLeg.side !== "BUY" ||
+    !hedgeLeg.tokenId
+  ) {
+    return { intent: currentIntent, recovered: false, hold: false };
+  }
+
+  for (let attempt = 1; attempt <= settings.hedgeRescueMaxAttempts; attempt += 1) {
+    if (attempt > 1 && settings.hedgeRescueDelayMs > 0) {
+      await sleep(settings.hedgeRescueDelayMs);
+    }
+
+    const attemptNow = Date.now();
+    currentIntent = resizeHedgeLegToUnhedgedPrimary(currentIntent, attemptNow);
+    primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+    hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg || !hedgeLeg.tokenId) {
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    const unhedgedSize = deriveUnhedgedPrimarySize(currentIntent);
+    if (unhedgedSize <= ORDER_SIZE_TOLERANCE) {
+      currentIntent = markIntentStatus(currentIntent, "hedged", attemptNow, null);
+      await writeOrderIntent(currentIntent);
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "info",
+        eventType: "order.hedge_rescue.completed",
+        message: `Hedge rescue completed for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attempt,
+          unhedgedSize,
+        },
+        createdAt: attemptNow,
+      });
+      return { intent: currentIntent, recovered: true, hold: false };
+    }
+
+    const primaryEntryPrice = primaryLeg.filledPrice ?? primaryLeg.requestedPrice;
+    if (primaryEntryPrice === null) {
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    const maxRescueLossUsd = Math.min(
+      settings.hedgeRescueMaxLossUsd,
+      settings.forcedUnwindMaxLossUsd > 0 ? settings.forcedUnwindMaxLossUsd : settings.hedgeRescueMaxLossUsd,
+    );
+    const maxHedgePrice = Math.min(0.99, Math.max(0.001, 1 - primaryEntryPrice + maxRescueLossUsd / unhedgedSize));
+    const bookFetchStartedAt = Date.now();
+    let book: Awaited<ReturnType<typeof fetchPolymarketBook>>;
+    try {
+      book = await fetchPolymarketBook(hedgeLeg.tokenId);
+    } catch (error) {
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.hedge_rescue.evaluated",
+        message: `Hedge rescue book unavailable for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attempt,
+          error: toErrorMessage(error),
+        },
+        createdAt: Date.now(),
+      });
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    const bookAgeMs = Date.now() - bookFetchStartedAt;
+    if (bookAgeMs > settings.polymarketHedgeBookMaxAgeMs) {
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.hedge_rescue.evaluated",
+        message: `Hedge rescue book too slow for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attempt,
+          bookAgeMs,
+          maxBookAgeMs: settings.polymarketHedgeBookMaxAgeMs,
+        },
+        createdAt: Date.now(),
+      });
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    const rawDepth = sumPolymarketAskDepthWithinLimit(book.asks, maxHedgePrice);
+    const executableDepth = deriveSafePolymarketHedgeDepth(
+      rawDepth,
+      settings.polymarketHedgeDepthSafetyFactor,
+      settings.polymarketHedgeHeadroomShares,
+    );
+    const minimumHedgeSize = getVenueMinimumOrderSize("polymarket", null, settings.minOrderSize);
+    const targetSize = Math.min(unhedgedSize, executableDepth);
+    const normalizedTargetSize = normalizeVenueTargetSize("polymarket", targetSize, null, settings.minOrderSize);
+    const quote = quotePolymarketBuyFromAsks(book.asks, maxHedgePrice, normalizedTargetSize);
+    const hedgeLossUsd = estimateRescueHedgeLossUsd({
+      primaryEntryPrice,
+      hedgePrice: quote.vwap ?? maxHedgePrice,
+      size: quote.filledSize,
+      primaryFeeUsd: primaryLeg.feeUsd ? (primaryLeg.feeUsd * quote.filledSize) / Math.max(primaryLeg.filledSize, ORDER_SIZE_TOLERANCE) : 0,
+    });
+    const unwindEstimate = await estimatePrimaryUnwindRecoveryLoss(currentIntent, primaryLeg, attemptNow, settings);
+    const holdEstimate = await estimateHoldToSettlementLoss(currentIntent, primaryLeg, attemptNow);
+    const secondsToSettlement = Math.ceil((currentIntent.slotEndTs - attemptNow) / 1_000);
+    const decision = evaluateExposureRecoveryOptions({
+      rescueHedgeLossUsd: hedgeLossUsd,
+      rescueHedgeSize: quote.filledSize,
+      unhedgedSize,
+      unwindLossUsd: unwindEstimate.expectedLossUsd,
+      holdExpectedLossUsd: holdEstimate.expectedLossUsd,
+      holdWorstCaseLossUsd: holdEstimate.worstCaseLossUsd,
+      hedgeRescueMaxLossUsd: maxRescueLossUsd,
+      hedgeRescueMinAdvantageUsd: settings.hedgeRescueMinAdvantageUsd,
+      secondsToSettlement,
+      holdWindowSeconds: settings.forcedUnwindHoldSecondsToSettlement,
+      allowPartial: settings.hedgeRescueAllowPartial && normalizedTargetSize + ORDER_SIZE_TOLERANCE >= minimumHedgeSize,
+    });
+
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: "info",
+      eventType: "order.hedge_rescue.evaluated",
+      message: `Hedge rescue evaluated for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        attempt,
+        decision: decision.decision,
+        reason: decision.reason,
+        unhedgedSize,
+        rawDepth,
+        executableDepth,
+        targetSize: normalizedTargetSize,
+        quote,
+        maxHedgePrice,
+        hedgeLossUsd,
+        unwindLossUsd: unwindEstimate.expectedLossUsd,
+        holdExpectedLossUsd: holdEstimate.expectedLossUsd,
+        holdWorstCaseLossUsd: holdEstimate.worstCaseLossUsd,
+        secondsToSettlement,
+      },
+      createdAt: Date.now(),
+    });
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: decision.decision === "unwind" ? "warn" : "info",
+      eventType: "order.recovery.decision",
+      message: `Recovery decision ${decision.decision} for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        attempt,
+        decision: decision.decision,
+        reason: decision.reason,
+        unhedgedSize,
+        hedgeLossUsd,
+        unwindLossUsd: unwindEstimate.expectedLossUsd,
+        holdExpectedLossUsd: holdEstimate.expectedLossUsd,
+        holdWorstCaseLossUsd: holdEstimate.worstCaseLossUsd,
+      },
+      createdAt: Date.now(),
+    });
+
+    if (decision.decision === "hold_to_settlement") {
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.recovery.hold_to_settlement",
+        message: `Recovery held to settlement for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          unhedgedSize,
+          holdExpectedLossUsd: holdEstimate.expectedLossUsd,
+          holdWorstCaseLossUsd: holdEstimate.worstCaseLossUsd,
+          unwindLossUsd: unwindEstimate.expectedLossUsd,
+        },
+        createdAt: Date.now(),
+      });
+      return { intent: currentIntent, recovered: false, hold: true };
+    }
+
+    if (decision.decision !== "rescue_hedge_full" && decision.decision !== "rescue_hedge_partial") {
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    if (quote.filledSize + ORDER_SIZE_TOLERANCE < minimumHedgeSize) {
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+
+    const rescueLeg = {
+      ...hedgeLeg,
+      requestedPrice: maxHedgePrice,
+      requestedSize: quote.filledSize,
+      requestedNotionalUsd: round4(quote.filledSize * maxHedgePrice),
+    };
+    const orderType = decision.decision === "rescue_hedge_full" ? "FOK" : "FAK";
+    const rescueRequest = buildVenueOrderRequest(rescueLeg, 0, orderType, false, { overridePrice: maxHedgePrice });
+    let rescueResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
+    try {
+      const rescueSubmission = await adapterFor("polymarket").placeOrder(rescueRequest);
+      rescueResult = await confirmImmediateOrderExecution(
+        "polymarket",
+        rescueRequest,
+        rescueSubmission,
+        settings.immediateOrderConfirmationTimeoutMs,
+      );
+    } catch (error) {
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.hedge_rescue.submit_failed",
+        message: `Hedge rescue submission failed for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attempt,
+          orderType,
+          error: toErrorMessage(error),
+        },
+        createdAt: Date.now(),
+      });
+      return { intent: currentIntent, recovered: false, hold: false };
+    }
+    const rescueOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, rescueLeg, rescueRequest, rescueResult, Date.now());
+    await writeVenueOrder(rescueOrder);
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: rescueOrder.filledSize > 0 ? "warn" : "info",
+      eventType: "order.hedge_rescue.submitted",
+      message: `Hedge rescue ${orderType} submitted for intent ${currentIntent.id}`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        attempt,
+        orderType,
+        orderId: rescueOrder.venueOrderId,
+        orderStatus: rescueOrder.status,
+        requestedSize: rescueOrder.requestedSize,
+        filledSize: rescueOrder.filledSize,
+        averageFillPrice: rescueOrder.averageFillPrice,
+      },
+      createdAt: Date.now(),
+    });
+
+    if (rescueOrder.filledSize > 0) {
+      currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, rescueOrder, "hedged", Date.now());
+      await writeOrderIntent(currentIntent);
+      await attachRecentPolymarketFillsSafely(currentIntent, "hedge", Date.now()).then((updated) => {
+        currentIntent = updated;
+      });
+      const remainingSize = deriveUnhedgedPrimarySize(currentIntent);
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: remainingSize <= ORDER_SIZE_TOLERANCE ? "info" : "warn",
+        eventType:
+          remainingSize <= ORDER_SIZE_TOLERANCE
+            ? "order.hedge_rescue.completed"
+            : "order.hedge_rescue.partial_filled",
+        message:
+          remainingSize <= ORDER_SIZE_TOLERANCE
+            ? `Hedge rescue completed for intent ${currentIntent.id}`
+            : `Hedge rescue partially filled for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attempt,
+          orderId: rescueOrder.venueOrderId,
+          filledSize: rescueOrder.filledSize,
+          remainingSize,
+        },
+        createdAt: Date.now(),
+      });
+
+      if (remainingSize <= ORDER_SIZE_TOLERANCE) {
+        currentIntent = markIntentStatus(currentIntent, "hedged", Date.now(), null);
+        await writeOrderIntent(currentIntent);
+        await writeLiveTradeRunEvent(currentIntent, Date.now(), "hedged");
+        return { intent: currentIntent, recovered: true, hold: false };
+      }
+
+      continue;
+    }
+  }
+
+  return { intent: currentIntent, recovered: false, hold: false };
+}
+
+async function estimatePrimaryUnwindRecoveryLoss(
+  intent: OrderIntent,
+  primaryLeg: OrderIntent["legs"][number],
+  now: number,
+  settings: StrategyConfig,
+) {
+  const exitableSize = await resolvePrimaryExitSize(intent, primaryLeg, now).catch(() => 0);
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
+  const requestedSize =
+    unhedgedPrimarySize > ORDER_SIZE_TOLERANCE ? Math.min(exitableSize, unhedgedPrimarySize) : exitableSize;
+  const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
+  const fallbackExitPrice =
+    primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99;
+  const expectedExitPrice = applySlippage(liveExitPrice ?? fallbackExitPrice ?? 0, settings.maxSlippageBps, "SELL");
+
+  return {
+    requestedSize,
+    expectedExitPrice,
+    expectedLossUsd: estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice),
+  };
+}
+
+async function estimateHoldToSettlementLoss(
+  intent: OrderIntent,
+  primaryLeg: OrderIntent["legs"][number],
+  now: number,
+) {
+  const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
+  if (unhedgedPrimarySize <= ORDER_SIZE_TOLERANCE || primaryLeg.filledPrice === null) {
+    return {
+      expectedLossUsd: null,
+      worstCaseLossUsd: null,
+    };
+  }
+
+  const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
+  const currentMark = liveExitPrice ?? primaryLeg.filledPrice;
+  const entryCostUsd = unhedgedPrimarySize * primaryLeg.filledPrice;
+  return {
+    expectedLossUsd: round4(Math.max(0, entryCostUsd - unhedgedPrimarySize * currentMark)),
+    worstCaseLossUsd: round4(entryCostUsd),
+  };
+}
+
 async function attemptPrimaryUnwindAfterHedgeFailure(
   intent: OrderIntent,
   primaryLeg: OrderIntent["legs"][number],
@@ -4507,6 +5035,12 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   currentIntent = markIntentStatus(currentIntent, "unwind_required", now, failureReason);
   await writeOrderIntent(currentIntent);
   await armHedgeFailureGuards(currentIntent, hedgeOrder, hedgeResult ?? null, now);
+
+  const rescue = await attemptHedgeRescueBeforeUnwind(currentIntent, settings, Date.now());
+  currentIntent = rescue.intent;
+  if (rescue.recovered || rescue.hold) {
+    return currentIntent;
+  }
 
   if (shouldDeferPolymarketUnwindToSettlement(currentIntent, now)) {
     await writeRunEvent({
@@ -5742,7 +6276,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
       await writeOrderIntent(currentIntent);
     }
 
-    if (hedgeOrder.status === "filled") {
+    if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
       currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
       currentIntent = markIntentStatus(currentIntent, "hedged", now, null);
       await writeOrderIntent(currentIntent);
@@ -5751,32 +6285,32 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
 
     if (hedgeOrder.filledSize > 0) {
-      currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "failed", now);
-      currentIntent = markIntentStatus(
-        currentIntent,
-        "failed",
-        now,
-        `Hedge order partially filled or not final (${hedgeOrder.status}); manual intervention required`,
-      );
+      currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
       await writeOrderIntent(currentIntent);
-      await writeManualInterventionRunEvent(currentIntent, now, "hedge_partial_fill_reconcile", {
-        venue: currentIntent.hedgeVenue,
-        orderId: hedgeOrder.venueOrderId,
-        orderStatus: hedgeOrder.status,
-      });
-      await writeCircuitBreaker({
-        key: buildSlotBreakerKey(currentIntent.slotKey),
-        active: true,
-        reason: "hedge_failure",
-        triggeredAt: now,
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.hedge.partial_fill_rescue_reconcile",
+        message: `Hedge order partially filled for intent ${currentIntent.id}; entering recovery`,
         payload: {
           intentId: currentIntent.id,
           venue: currentIntent.hedgeVenue,
-          stage: "hedge_partial_fill",
           orderId: hedgeOrder.venueOrderId,
           orderStatus: hedgeOrder.status,
+          requestedSize: hedgeOrder.requestedSize,
+          filledSize: hedgeOrder.filledSize,
         },
+        createdAt: now,
       });
+      await attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
+        currentIntent,
+        primaryLeg,
+        hedgeLeg,
+        hedgeOrder,
+        settings,
+        now,
+        `Hedge order partially filled or not final (${hedgeOrder.status})`,
+      );
       continue;
     }
 
@@ -6672,6 +7206,21 @@ export function shouldTreatPrimaryOrderAsFilled(
   }
 
   return order.status === "filled" || (intent.primaryVenue === "kalshi" && order.status === "partially_filled");
+}
+
+export function shouldTreatHedgeOrderAsComplete(
+  hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "requestedSize">,
+  order: Pick<LiveOrder, "filledSize" | "status">,
+) {
+  if (order.filledSize <= 0) {
+    return false;
+  }
+
+  if (hedgeLeg.venue === "polymarket") {
+    return order.filledSize + ORDER_SIZE_TOLERANCE >= hedgeLeg.requestedSize;
+  }
+
+  return order.status === "filled" && order.filledSize + ORDER_SIZE_TOLERANCE >= hedgeLeg.requestedSize;
 }
 
 export function shouldTreatPrimaryExecutionAsFilled(

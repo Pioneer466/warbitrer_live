@@ -614,6 +614,15 @@ async function bootstrapDatabase(pool: Pool) {
       "forcedUnwindTickLadder",
       "forcedUnwindMaxLossUsd",
       "forcedUnwindHoldSecondsToSettlement",
+      "polymarketHedgeDepthSafetyFactor",
+      "polymarketHedgeHeadroomShares",
+      "polymarketHedgeBookMaxAgeMs",
+      "hedgeRescueEnabled",
+      "hedgeRescueMaxAttempts",
+      "hedgeRescueDelayMs",
+      "hedgeRescueMaxLossUsd",
+      "hedgeRescueMinAdvantageUsd",
+      "hedgeRescueAllowPartial",
     ] as const) {
       await pool.query(
         `

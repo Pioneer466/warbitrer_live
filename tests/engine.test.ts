@@ -9,7 +9,10 @@ import {
   deriveSettledVenueResolutions,
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
+  deriveSafePolymarketHedgeDepth,
+  evaluateExposureRecoveryOptions,
   evaluateStablePnlChangeReadiness,
+  estimateRescueHedgeLossUsd,
   estimatePrimaryUnwindLossUsd,
   getOpportunitySnapshotAgeMs,
   hasKalshiHedgeRetryCapacity,
@@ -25,12 +28,14 @@ import {
   shouldKeepPolymarketLegForResolution,
   shouldKeepSlotExecutionBreakerActive,
   shouldTreatPrimaryExecutionAsFilled,
+  shouldTreatHedgeOrderAsComplete,
   shouldTreatPrimaryOrderAsFilled,
   shouldTreatPrimaryUnwindOrderAsComplete,
   shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
   selectWinningExecutionCandidate,
   sumPolymarketAskDepthWithinLimit,
+  quotePolymarketBuyFromAsks,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
 } from "@/lib/engine";
@@ -796,6 +801,28 @@ describe("Kalshi primary IOC handling", () => {
       ),
     ).toBe(false);
   });
+
+  it("requires a Polymarket hedge to cover the requested size before marking it complete", () => {
+    const hedgeLeg = {
+      ...buildIntent().legs[0],
+      venue: "polymarket" as const,
+      requestedSize: 9,
+    };
+
+    expect(
+      shouldTreatHedgeOrderAsComplete(hedgeLeg, {
+        filledSize: 8.99,
+        status: "filled",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldTreatHedgeOrderAsComplete(hedgeLeg, {
+        filledSize: 9,
+        status: "filled",
+      }),
+    ).toBe(true);
+  });
 });
 
 describe("forced unwind request pricing", () => {
@@ -975,6 +1002,113 @@ describe("Polymarket hedge preflight helpers", () => {
         0.13,
       ),
     ).toBe(7);
+  });
+
+  it("applies safety factor and headroom to Polymarket hedge depth", () => {
+    expect(deriveSafePolymarketHedgeDepth(10, 0.8, 1)).toBe(7);
+    expect(deriveSafePolymarketHedgeDepth(1, 0.8, 1)).toBe(0);
+  });
+
+  it("quotes Polymarket buy VWAP from executable asks", () => {
+    expect(
+      quotePolymarketBuyFromAsks(
+        [
+          { price: "0.12", size: "3" },
+          { price: "0.13", size: "4" },
+          { price: "0.14", size: "100" },
+        ],
+        0.13,
+        5,
+      ),
+    ).toEqual({
+      filledSize: 5,
+      costUsd: 0.62,
+      vwap: 0.124,
+    });
+  });
+});
+
+describe("recovery option evaluation", () => {
+  it("chooses a full rescue hedge inside the loss cap", () => {
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: 0.2,
+        rescueHedgeSize: 9,
+        unhedgedSize: 9,
+        unwindLossUsd: 0.5,
+        holdExpectedLossUsd: null,
+        holdWorstCaseLossUsd: null,
+        hedgeRescueMaxLossUsd: 1,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 400,
+        holdWindowSeconds: 45,
+        allowPartial: true,
+      }),
+    ).toMatchObject({ decision: "rescue_hedge_full" });
+  });
+
+  it("chooses a partial rescue hedge when it is cheaper than unwind", () => {
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: 0.2,
+        rescueHedgeSize: 5,
+        unhedgedSize: 9,
+        unwindLossUsd: 0.4,
+        holdExpectedLossUsd: null,
+        holdWorstCaseLossUsd: null,
+        hedgeRescueMaxLossUsd: 1,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 400,
+        holdWindowSeconds: 45,
+        allowPartial: true,
+      }),
+    ).toMatchObject({ decision: "rescue_hedge_partial" });
+  });
+
+  it("chooses hold near settlement when EV and worst case fit the cap", () => {
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: 0.6,
+        rescueHedgeSize: 0,
+        unhedgedSize: 5,
+        unwindLossUsd: 0.5,
+        holdExpectedLossUsd: 0.1,
+        holdWorstCaseLossUsd: 0.8,
+        hedgeRescueMaxLossUsd: 1,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 20,
+        holdWindowSeconds: 45,
+        allowPartial: true,
+      }),
+    ).toMatchObject({ decision: "hold_to_settlement" });
+  });
+
+  it("falls back to unwind when rescue is too expensive", () => {
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: 1.2,
+        rescueHedgeSize: 9,
+        unhedgedSize: 9,
+        unwindLossUsd: 0.4,
+        holdExpectedLossUsd: 0.8,
+        holdWorstCaseLossUsd: 2,
+        hedgeRescueMaxLossUsd: 1,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 20,
+        holdWindowSeconds: 45,
+        allowPartial: true,
+      }),
+    ).toMatchObject({ decision: "unwind" });
+  });
+
+  it("estimates the locked loss of a rescue hedge", () => {
+    expect(
+      estimateRescueHedgeLossUsd({
+        primaryEntryPrice: 0.53,
+        hedgePrice: 0.49,
+        size: 10,
+      }),
+    ).toBe(0.2);
   });
 });
 

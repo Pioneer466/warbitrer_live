@@ -13,7 +13,16 @@ import {
   DEFAULT_KALSHI_PRIMARY_PROBE_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_MAX_CLIPS,
+  DEFAULT_POLYMARKET_HEDGE_BOOK_MAX_AGE_MS,
+  DEFAULT_POLYMARKET_HEDGE_DEPTH_SAFETY_FACTOR,
+  DEFAULT_POLYMARKET_HEDGE_HEADROOM_SHARES,
   DEFAULT_MAX_SIGNAL_AGE_MS,
+  DEFAULT_HEDGE_RESCUE_ALLOW_PARTIAL,
+  DEFAULT_HEDGE_RESCUE_DELAY_MS,
+  DEFAULT_HEDGE_RESCUE_ENABLED,
+  DEFAULT_HEDGE_RESCUE_MAX_ATTEMPTS,
+  DEFAULT_HEDGE_RESCUE_MAX_LOSS_USD,
+  DEFAULT_HEDGE_RESCUE_MIN_ADVANTAGE_USD,
   DEFAULT_FORCED_UNWIND_ENABLED,
   DEFAULT_FORCED_UNWIND_HOLD_SECONDS_TO_SETTLEMENT,
   DEFAULT_FORCED_UNWIND_MAX_ATTEMPTS,
@@ -76,10 +85,36 @@ export const settingsSchema = z
       .min(1)
       .max(20)
       .default(DEFAULT_KALSHI_PRIMARY_MAX_CLIPS),
+    polymarketHedgeDepthSafetyFactor: z
+      .number()
+      .positive()
+      .max(1)
+      .default(DEFAULT_POLYMARKET_HEDGE_DEPTH_SAFETY_FACTOR),
+    polymarketHedgeHeadroomShares: z
+      .number()
+      .nonnegative()
+      .max(1_000)
+      .default(DEFAULT_POLYMARKET_HEDGE_HEADROOM_SHARES),
+    polymarketHedgeBookMaxAgeMs: z
+      .number()
+      .int()
+      .min(100)
+      .max(5_000)
+      .default(DEFAULT_POLYMARKET_HEDGE_BOOK_MAX_AGE_MS),
     primaryRetryAttempts: z.number().int().min(0).max(10),
     primaryRetryDelayMs: z.number().int().min(0).max(5_000),
     hedgeRetryAttempts: z.number().int().min(0).max(10),
     hedgeRetryDelayMs: z.number().int().min(0).max(5_000),
+    hedgeRescueEnabled: z.boolean().default(DEFAULT_HEDGE_RESCUE_ENABLED),
+    hedgeRescueMaxAttempts: z.number().int().min(1).max(10).default(DEFAULT_HEDGE_RESCUE_MAX_ATTEMPTS),
+    hedgeRescueDelayMs: z.number().int().min(0).max(5_000).default(DEFAULT_HEDGE_RESCUE_DELAY_MS),
+    hedgeRescueMaxLossUsd: z.number().nonnegative().max(10_000).default(DEFAULT_HEDGE_RESCUE_MAX_LOSS_USD),
+    hedgeRescueMinAdvantageUsd: z
+      .number()
+      .nonnegative()
+      .max(10_000)
+      .default(DEFAULT_HEDGE_RESCUE_MIN_ADVANTAGE_USD),
+    hedgeRescueAllowPartial: z.boolean().default(DEFAULT_HEDGE_RESCUE_ALLOW_PARTIAL),
     forcedUnwindEnabled: z.boolean().default(DEFAULT_FORCED_UNWIND_ENABLED),
     forcedUnwindMaxAttempts: z.number().int().min(1).max(10).default(DEFAULT_FORCED_UNWIND_MAX_ATTEMPTS),
     forcedUnwindTickLadder: z
