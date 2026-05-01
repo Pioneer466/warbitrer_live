@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
 import {
@@ -20,6 +21,8 @@ import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePn
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 1_000);
+  const [globalBreakerBusy, setGlobalBreakerBusy] = useState(false);
+  const [globalBreakerMessage, setGlobalBreakerMessage] = useState<string | null>(null);
 
   if (portfolio.loading && !portfolio.data) {
     return <PanelMessage title="Chargement" message="Connexion au portefeuille multi-actifs." />;
@@ -30,6 +33,8 @@ export function PortfolioClient() {
   }
 
   const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers } = portfolio.data;
+  const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
+  const globalBreakerActive = globalBreaker?.active === true;
   const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowCount = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
@@ -39,12 +44,44 @@ export function PortfolioClient() {
   const drawdownUsd = pnl?.drawdownUsd ?? null;
   const drawdownTone: V2Tone = drawdownUsd === null ? "mist" : drawdownUsd >= 0 ? "emerald" : "rose";
 
+  async function toggleGlobalBreaker() {
+    setGlobalBreakerBusy(true);
+    setGlobalBreakerMessage(null);
+    try {
+      const nextActive = !globalBreakerActive;
+      const response = await fetch("/api/circuit-breakers", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          key: "global",
+          active: nextActive,
+          reason: "manual",
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      setGlobalBreakerMessage(nextActive ? "Global circuit breaker activé." : "Global circuit breaker désactivé.");
+    } catch (error) {
+      setGlobalBreakerMessage(error instanceof Error ? error.message : "Impossible de modifier le global circuit breaker.");
+    } finally {
+      setGlobalBreakerBusy(false);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-8">
       <PageSection watermark="PORT">
         <div className="mb-4">
-          <div className="mb-2 text-[9px] uppercase tracking-[0.30em] text-[rgba(201,168,100,0.45)]">
-            Vue Multi-Actifs · {new Date(portfolio.data.fetchedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
+            <div className="text-[9px] uppercase tracking-[0.30em] text-[rgba(201,168,100,0.45)]">
+              Vue Multi-Actifs · {new Date(portfolio.data.fetchedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+            </div>
+            <GlobalBreakerButton active={globalBreakerActive} busy={globalBreakerBusy} onClick={toggleGlobalBreaker} />
           </div>
           <div className="flex flex-wrap gap-2">
             <Chip tone={breakerCount > 0 ? "rose" : "emerald"}>{readyCount}/{assets.length} ready</Chip>
@@ -53,6 +90,28 @@ export function PortfolioClient() {
             {breakerCount > 0 ? <Chip tone="rose">{breakerCount} breakers</Chip> : null}
           </div>
         </div>
+
+        {globalBreakerActive ? (
+          <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.10)] px-5 py-4 shadow-[0_0_28px_rgba(232,80,106,0.08)]">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--wa-rose)]">Global circuit breaker actif</div>
+                <div className="mt-2 text-sm leading-6 text-[var(--wa-ivory)]">
+                  Aucun nouvel ordre live ne doit être lancé tant que ce breaker global est actif.
+                </div>
+                <div className="mt-1 text-xs text-[var(--wa-mist)]">
+                  Raison: {globalBreaker.reason ?? "manual"} · déclenché: {globalBreaker.triggeredAt ? new Date(globalBreaker.triggeredAt).toLocaleString("fr-FR") : "--"}
+                </div>
+              </div>
+              <GlobalBreakerButton active={globalBreakerActive} busy={globalBreakerBusy} onClick={toggleGlobalBreaker} emphasis />
+            </div>
+          </div>
+        ) : null}
+        {globalBreakerMessage ? (
+          <div className="mb-4 rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.05)] px-4 py-3 text-sm text-[var(--wa-mist)]">
+            {globalBreakerMessage}
+          </div>
+        ) : null}
 
         <Surface glow>
           <div className="grid border-b border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-4">
@@ -103,6 +162,33 @@ export function PortfolioClient() {
         </Surface>
       </section>
     </div>
+  );
+}
+
+function GlobalBreakerButton({
+  active,
+  busy,
+  emphasis = false,
+  onClick,
+}: {
+  active: boolean;
+  busy: boolean;
+  emphasis?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={busy}
+      className={`rounded border px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] transition disabled:cursor-not-allowed disabled:opacity-50 ${
+        active
+          ? "border-[rgba(232,80,106,0.36)] bg-[rgba(232,80,106,0.13)] text-[var(--wa-rose)] hover:bg-[rgba(232,80,106,0.18)]"
+          : "border-[rgba(30,216,126,0.28)] bg-[rgba(30,216,126,0.08)] text-[var(--wa-emerald)] hover:bg-[rgba(30,216,126,0.12)]"
+      } ${emphasis ? "w-full sm:w-auto" : ""}`}
+    >
+      {busy ? "mise à jour" : active ? "Désactiver global" : "Activer global"}
+    </button>
   );
 }
 

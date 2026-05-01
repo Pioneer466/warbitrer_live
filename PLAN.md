@@ -1,94 +1,65 @@
-# Plan: Vérité Effective Polymarket Et Retries Sûrs
+# Plan De Correction Incidents Trading / UI / P&L
 
-## Summary
-Le problème principal n’est pas seulement le sizing du BUY Polymarket: c’est que le bot a traité un hedge déjà effectivement rempli comme non rempli, puis a retry plusieurs fois, puis a lancé un unwind sur une lecture fausse de l’exposition.
+## Diagnostic Actuel
 
-On garde donc le multi-clipping/retry, mais uniquement après preuve forte que l’ordre précédent n’a pas rempli. Un ordre Polymarket `MATCHED`, `MINED`, `RETRYING` ou avec `size_matched > 0` doit compter comme exposition réelle, même si le trade n’est pas encore `CONFIRMED`.
+- Le `curl` de breaker global écrit bien `active:false`, mais l’UI peut encore afficher un breaker si un `slot:*` reste actif, si le `workerState` n’a pas encore été rafraîchi, ou si un nouvel incident réarme `global`.
+  Commande de vérification immédiate :
+  ```bash
+  curl -fsS -u 'ethan:lechatestnoir' http://localhost:3000/api/circuit-breakers | jq '.[] | select(.active)'
+  ```
 
-## Key Changes
-- Remplacer les patchs “single-submit” par un `PolymarketOrderTruth` central:
-  - `effectiveFilledSize = max(order.size_matched, confirmedTrades + pendingTrades)`.
-  - `confirmedFilledSize` reste séparé pour PnL/fills définitifs.
-  - `MATCHED/MINED/RETRYING` comptent comme exposition, pas comme zéro fill.
-  - `terminal_zero_fill` uniquement si order terminal + aucun trade pending/confirmed + `size_matched = 0`.
+- Le SOL `filled 6.09` pour `req 6.00` vient du mode Polymarket BUY en dollars : si le prix réel est meilleur que le prix limite, l’ordre achète plus de shares que prévu. C’est la cause directe du `overfilled by 0.085713`.
 
-- Garder le BUY Polymarket en share-size:
-  - `createAndPostMarketOrder` BUY utilise `amount` en USDC selon le SDK, donc ce n’est pas adapté à un hedge “10 shares”.
-  - Utiliser un ordre limit `size` pour BUY Polymarket avec `FOK/FAK` conserve le comportement immédiat, mais plafonne la quantité.
-  - SELL Polymarket reste en quantité de shares.
+- Le BTC `invalid amount for a marketable BUY order ($0.65), min size: $1)` vient du même problème : Polymarket BUY en dollars impose un minimum de montant. Le code vérifie surtout la taille en shares, pas le montant minimum Polymarket.
 
-- Refaire le retry hedge autour de la vérité effective:
-  - Avant chaque retry, resynchroniser tous les `venue_orders` de l’intent/leg.
-  - Retry autorisé seulement si le dernier ordre est `terminal_zero_fill`.
-  - Si fill partiel effectif: recalculer le reliquat et retry uniquement le reliquat.
-  - Si vérité pending/unknown: rester en `hedging`/order `pending`, ne pas retry, laisser le reconciler terminer.
+- L’affichage `aligné` dans Trades doit être clarifié : `aligné` veut dire que les venues résolvent le même mouvement sous-jacent (`Polymarket UP` et `Kalshi YES`, ou `Polymarket DOWN` et `Kalshi NO`), pas que les deux jambes du pari gagnent.
 
-- Protéger l’unwind:
-  - Avant tout unwind après hedge failure, refaire une sync vérité Polymarket.
-  - Si hedge effectif >= primary: marquer `hedged`, aucun unwind.
-  - Si hedge > primary: classer `overhedged`, ne pas unwind primary; tenter de vendre uniquement l’excès Polymarket sous slippage cap, sinon manuel.
-  - Si hedge partiel: retry reliquat si possible, sinon recovery économique existante.
+- La perte inexpliquée de ~$6 doit être auditée à partir des snapshots de balances, settlements, fees, positions redeemable/mergeable et intents du créneau `2026-05-01 00:00-00:15`.
 
-- Ajouter une review/audit destructive-fail:
-  - Ajouter un script/commande d’audit d’un intent: orders, trades Polymarket, `size_matched`, pending/confirmed, fills DB, positions, exposition nette.
-  - Ajouter événements runtime: `polymarket.order_truth.resolved`, `order.hedge.retry_allowed_zero_fill`, `order.hedge.retry_blocked_pending_truth`, `order.recovery.overhedged`.
-  - Ne jamais downgrader une leg de filled nonzero vers zéro à cause d’une sync confirmed-only.
+## Changements À Implémenter
 
-## Test Plan
-- Polymarket truth:
-  - `MATCHED` exact-size sans `CONFIRMED` => hedge effectif complet, aucun retry.
-  - `size_matched = 10`, trades endpoint vide => hedge effectif complet/pending.
-  - `canceled` + zéro trade + `size_matched = 0` => retry autorisé.
-  - timeout/unknown => aucun retry, intent reste awaiting truth.
+- Breakers :
+  - Ajouter une réponse UI/API plus explicite : `global`, `asset`, `slot`, `requiresManualClear`, `cooldownUntil`, `unresolvedIntentIds`.
+  - Ajouter une commande/script `breaker:audit` qui affiche tous les breakers actifs et pourquoi ils restent actifs.
+  - Après clear manuel, forcer l’UI à distinguer “global cleared” de “slot breaker still active”.
 
-- Incident regression:
-  - Trois BUY Polymarket successifs 10/11/12 shares sont agrégés à 33 shares.
-  - Le bot classe `overhedged`, ne lance pas d’unwind primary.
-  - Le bot tente uniquement la sortie de l’excès ou demande manuel.
+- Exécution Polymarket :
+  - Séparer les modes BUY Polymarket :
+    - hedge/incremental hedge/recovery : exact-size shares, jamais dollar-market flexible.
+    - si exact-size CLOB n’est pas disponible, refuser le trade avant primaire plutôt que soumettre un BUY dollar qui peut overfill.
+  - Ajouter une garde `maxHedgeOverfillShares = 0` pour les hedges : tout ordre Polymarket hedge doit être borné à la taille primaire restante.
+  - Ajouter une garde minimum Polymarket market-buy amount : si le hedge restant coûte `< $1`, ne pas soumettre un marketable BUY dollar ; classer en `hold_to_settlement` ou `dust_unhedged` selon risque, pas unwind automatique.
+  - En préflight primaire Kalshi, refuser toute entrée si le hedge Polymarket exact ne peut pas être exécuté proprement à la taille demandée.
 
-- Execution/reconcile:
-  - Multi-clipping reste actif après zéro fill prouvé.
-  - Fill partiel effectif retry seulement le reliquat.
-  - Reconcile pending -> confirmed ne change pas l’exposition, seulement la finalité/frais.
-  - `npm run typecheck`, `npm test`, `git diff --check`.
+- Rentabilité / sizing :
+  - Ajouter des seuils configurables :
+    - `minProjectedNetProfitUsd`
+    - `minProjectedNetReturn`
+    - `minWorstCaseProfitUsd`
+  - L’éligibilité ne doit plus se baser seulement sur `grossCost <= threshold`; elle doit exiger un profit net après fees et slippage suffisamment large.
+  - Telegram doit notifier le trade final `hedged`, pas le premier état `primary_filled`, pour éviter les notionnels tronqués.
 
-## Assumptions
-- On privilégie “attendre vérité” sur “retry rapide” pour Polymarket BUY.
-- Les pending trades Polymarket sont traités comme exposition réelle côté risque.
-- Le retry agressif reste acceptable pour Kalshi et pour Polymarket uniquement après zéro fill prouvé.
-- Le patch local qui bloque tous les retries Polymarket doit être remplacé, pas conservé tel quel.
+- UI / Audit :
+  - Page Portfolio : rendre les labels du graphe `P&L Global` plus gros, espacés, avec décimales visibles.
+  - Page Trades : renommer `aligné` en `venues alignées` pour éviter l’ambiguïté.
+  - Ajouter un audit créneau :
+    ```bash
+    npm run slot:audit -- --from "2026-05-01T00:00:00+02:00" --to "2026-05-01T00:15:00+02:00"
+    ```
+    Sortie attendue : intents, legs, fees, payouts, settlements, balance deltas, positions ouvertes/redeemable, P&L expliqué ligne par ligne.
 
+## Tests À Ajouter
 
+- Polymarket hedge BUY ne peut jamais remplir plus que la taille primaire restante.
+- Un hedge Polymarket dont le coût est `< $1` ne déclenche pas d’unwind automatique de la primaire.
+- Un overfill Polymarket est impossible en mode hedge exact-size.
+- Les breakers affichent correctement global vs slot vs asset.
+- `venues alignées` utilise bien `YES = UP` et `NO = DOWN`.
+- Telegram envoie le notionnel final après `hedged`.
+- Audit slot reconstruit correctement un créneau avec settled, unwound, failed, fees et positions reclaimables.
 
-Plan validé et implémenté.
+## Hypothèses
 
-J’ai remplacé le patch “single-submit” par une vérité effective Polymarket centralisée dans src/lib/polymarket.ts (line 565): filledSize effectif = max(size_matched, trades confirmed + pending). Les statuts MATCHED, MINED, RETRYING et les trades pending comptent maintenant comme exposition réelle, donc le bot ne peut plus considérer “0 fill” alors qu’il a déjà acheté.
-
-Changements clés :
-
-BUY Polymarket reste en ordre limit exact-size, pas en montant USDC, dans src/lib/polymarket.ts (line 448).
-Multi-clipping conservé, mais retry Polymarket BUY autorisé seulement après vérité terminalZeroFill, via src/lib/engine.ts (line 7482).
-Avant tout unwind primaire, le moteur bloque si le hedge couvre déjà la primaire, et classe en intervention manuelle si overhedged, dans src/lib/engine.ts (line 5406).
-Reconcile ne downgrade plus une exposition Polymarket effective vers une lecture confirmed-only.
-Ajout d’un audit intent : npm run intent:audit -- --intent-id <id> via scripts/audit-intent.ts (line 22).
-Tests ajoutés pour les cas MATCHED sans confirmation, trades pending, terminal zero-fill, retry Polymarket, et sizing BUY/SELL.
-
-Vérifié :
-
-npm run typecheck OK
-npm test OK, 224 tests
-git diff --check OK
-Note : .gitignore et PLAN.md étaient déjà modifiés/non suivis dans le workspace; je ne les ai pas touchés.
-
-6 files changed
-+1083
--170
-Undo
-
-Review
-package.json
-audit-intent.ts
-engine.ts
-polymarket.ts
-engine.test.ts
-polymarket.test.ts
+- On met la sécurité en priorité : tant que ces corrections ne sont pas déployées, il vaut mieux passer les assets en `shadow` ou `off`.
+- La perte de ~$6 ne sera pas diagnostiquée par lecture des screenshots seuls ; il faut l’audit DB du créneau `00:00-00:15`.
+- Le correctif principal est de supprimer le Polymarket BUY flexible en dollars pour les hedges, car c’est lui qui crée à la fois les overfills et les rejets `$1 min`.
