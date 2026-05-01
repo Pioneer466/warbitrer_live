@@ -2723,6 +2723,32 @@ async function executeIncrementalHedgeLeg(
     currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "submitted", now);
     const overfilledHedgeSize = deriveOverfilledHedgeSize(currentIntent);
     if (overfilledHedgeSize > ORDER_SIZE_TOLERANCE) {
+      const acceptedIntent = await acceptBenignOverfilledHedge(
+        currentIntent,
+        hedgeOrder,
+        settings,
+        now,
+        "incremental_hedge_overfill_accepted",
+        "order.hedge.incremental_overfill_accepted",
+        `Accepted small incremental hedge overfill for intent ${currentIntent.id}`,
+        {
+          venue: currentIntent.hedgeVenue,
+          orderId: hedgeOrder.venueOrderId,
+          requestedSize: hedgeOrder.requestedSize,
+          filledSize: hedgeOrder.filledSize,
+          overfilledHedgeSize,
+          orderStatus: hedgeResult.status,
+          clipIndex: clip.clipIndex,
+          clipCount: clip.clipCount,
+        },
+      );
+      if (acceptedIntent) {
+        return {
+          intent: acceptedIntent,
+          outcome: acceptedIntent.status === "hedged" ? "hedged" : "failed",
+        };
+      }
+
       return failOverfilledIncrementalHedge(
         currentIntent,
         hedgeOrder,
@@ -2776,13 +2802,18 @@ async function executeIncrementalHedgeLeg(
 
   if (isTerminalOrderStatus(hedgeResult.status)) {
     if (!shouldRetryTerminalZeroFillHedge(currentIntent, hedgeLeg, hedgeResult)) {
-      currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-      await writeOrderIntent(currentIntent);
-      await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
-        orderStatus: hedgeResult.status,
-        clipIndex: clip.clipIndex,
-        clipCount: clip.clipCount,
-      });
+      currentIntent = await holdPolymarketHedgeFailurePendingTruth(
+        currentIntent,
+        hedgeLeg,
+        hedgeOrder,
+        now,
+        "incremental_hedge_no_fill_truth_pending",
+        {
+          orderStatus: hedgeResult.status,
+          clipIndex: clip.clipIndex,
+          clipCount: clip.clipCount,
+        },
+      );
       return {
         intent: currentIntent,
         outcome: "awaiting_confirmation",
@@ -2844,6 +2875,32 @@ async function executeIncrementalHedgeLeg(
         currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, hedgeOrder, "submitted", retryNow);
         const overfilledHedgeSize = deriveOverfilledHedgeSize(currentIntent);
         if (overfilledHedgeSize > ORDER_SIZE_TOLERANCE) {
+          const acceptedIntent = await acceptBenignOverfilledHedge(
+            currentIntent,
+            hedgeOrder,
+            settings,
+            retryNow,
+            "incremental_hedge_retry_overfill_accepted",
+            "order.hedge.incremental_retry_overfill_accepted",
+            `Accepted small incremental hedge retry overfill for intent ${currentIntent.id}`,
+            {
+              venue: currentIntent.hedgeVenue,
+              orderId: hedgeOrder.venueOrderId,
+              requestedSize: hedgeOrder.requestedSize,
+              filledSize: hedgeOrder.filledSize,
+              overfilledHedgeSize,
+              orderStatus: hedgeResult.status,
+              clipIndex: clip.clipIndex,
+              clipCount: clip.clipCount,
+            },
+          );
+          if (acceptedIntent) {
+            return {
+              intent: acceptedIntent,
+              outcome: acceptedIntent.status === "hedged" ? "hedged" : "failed",
+            };
+          }
+
           return failOverfilledIncrementalHedge(
             currentIntent,
             hedgeOrder,
@@ -2958,6 +3015,120 @@ async function executeIncrementalHedgeLeg(
   );
 }
 
+async function acceptBenignOverfilledHedge(
+  intent: OrderIntent,
+  hedgeOrder: LiveOrder | null,
+  settings: Pick<StrategyConfig, "minWorstCaseProfitUsd">,
+  now: number,
+  stage: string,
+  eventType: string,
+  message: string,
+  payload: Record<string, unknown>,
+) {
+  const evaluation = evaluateBenignHedgeOverfill(intent, settings);
+  if (!evaluation.benign) {
+    return null;
+  }
+
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!hedgeLeg) {
+    return null;
+  }
+
+  const hedgedCandidate = {
+    ...intent,
+    legs: intent.legs.map((leg) =>
+      leg.id === hedgeLeg.id
+        ? {
+            ...leg,
+            status: "hedged",
+          }
+        : leg,
+    ) as OrderIntent["legs"],
+  };
+
+  const currentIntent = await markIntentHedgedAfterEconomicCheck(hedgedCandidate, now, stage, hedgeOrder, {
+    ...payload,
+    benignOverfill: evaluation,
+  });
+  await writeRunEvent({
+    asset: currentIntent.asset,
+    level: "warn",
+    eventType,
+    message,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      primaryVenue: currentIntent.primaryVenue,
+      hedgeVenue: currentIntent.hedgeVenue,
+      ...payload,
+      benignOverfill: evaluation,
+    },
+    createdAt: now,
+  });
+  if (currentIntent.status === "hedged") {
+    await writeLiveTradeRunEvent(currentIntent, now, "hedged");
+  }
+
+  return currentIntent;
+}
+
+function shouldHoldPolymarketHedgeFailurePendingTruth(
+  intent: Pick<OrderIntent, "hedgeVenue">,
+  hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side">,
+  result: Pick<LiveOrder, "filledSize" | "raw" | "status" | "venueOrderId"> | null,
+) {
+  if (intent.hedgeVenue !== "polymarket" || hedgeLeg.venue !== "polymarket" || hedgeLeg.side !== "BUY") {
+    return false;
+  }
+
+  if (!result || result.filledSize > ORDER_SIZE_TOLERANCE) {
+    return false;
+  }
+
+  const truth = extractPolymarketOrderTruthFromRaw(result.raw);
+  return truth?.terminalZeroFill !== true;
+}
+
+async function holdPolymarketHedgeFailurePendingTruth(
+  intent: OrderIntent,
+  hedgeLeg: OrderIntent["legs"][number],
+  hedgeOrder: LiveOrder | null,
+  now: number,
+  stage: string,
+  payload: Record<string, unknown>,
+) {
+  let currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
+  currentIntent = markIntentStatus(
+    currentIntent,
+    "primary_filled",
+    now,
+    "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked",
+  );
+  await writeOrderIntent(currentIntent);
+  await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
+    stage,
+    ...payload,
+  });
+  await writeCircuitBreaker({
+    key: buildSlotBreakerKey(currentIntent.slotKey),
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: now,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      venue: currentIntent.hedgeVenue,
+      stage: "polymarket_hedge_no_fill_truth_pending",
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
+      ...payload,
+    },
+  });
+  return currentIntent;
+}
+
 async function failOverfilledIncrementalHedge(
   intent: OrderIntent,
   hedgeOrder: LiveOrder,
@@ -3005,10 +3176,21 @@ async function failIncrementalHedge(
   stage: string,
   payload: Record<string, unknown>,
   hedgeResult?: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
-): Promise<{ intent: OrderIntent; outcome: "failed" }> {
+): Promise<{ intent: OrderIntent; outcome: "failed" | "awaiting_confirmation" }> {
   const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   if (primaryLeg && hedgeLeg) {
+    if (shouldHoldPolymarketHedgeFailurePendingTruth(intent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null)) {
+      return {
+        intent: await holdPolymarketHedgeFailurePendingTruth(intent, hedgeLeg, hedgeOrder, now, stage, {
+          ...payload,
+          orderStatus: hedgeOrder?.status ?? hedgeResult?.status ?? null,
+          hedgeOrderId: hedgeOrder?.venueOrderId ?? hedgeResult?.venueOrderId ?? null,
+        }),
+        outcome: "awaiting_confirmation",
+      };
+    }
+
     return {
       intent: await attemptPrimaryUnwindAfterHedgeFailure(
         intent,
@@ -3188,12 +3370,9 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
 
   if (isTerminalOrderStatus(hedgeResult.status)) {
     if (!shouldRetryTerminalZeroFillHedge(currentIntent, hedgeLeg, hedgeResult)) {
-      currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-      await writeOrderIntent(currentIntent);
-      await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
+      return holdPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder, now, "hedge_no_fill_truth_pending", {
         orderStatus: hedgeResult.status,
       });
-      return currentIntent;
     }
 
     const retried = await retryLegWithinExecutionBufferWithAttempts(
@@ -3287,6 +3466,23 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     },
     createdAt: now,
   });
+
+  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder)) {
+    return holdPolymarketHedgeFailurePendingTruth(
+      currentIntent,
+      hedgeLeg,
+      hedgeOrder,
+      now,
+      "hedge_no_fill_truth_pending",
+      {
+        venue: currentIntent.hedgeVenue,
+        orderId: hedgeOrder.venueOrderId,
+        orderStatus: hedgeResult.status,
+        detail: extractTerminalNoFillDetail(hedgeResult),
+        softNoFill: Boolean(hedgeResult.raw?.softNoFill),
+      },
+    );
+  }
 
   return attemptPrimaryUnwindAfterHedgeFailure(
     currentIntent,
@@ -5269,6 +5465,14 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   let currentIntent = hedgeOrder
     ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "failed", now)
     : intent;
+  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null)) {
+    return holdPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder, now, "hedge_no_fill_truth_pending", {
+      failureReason,
+      orderStatus: hedgeOrder?.status ?? hedgeResult?.status ?? null,
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? hedgeResult?.venueOrderId ?? null,
+    });
+  }
+
   const exposureResolution = await resolveHedgeExposureBeforePrimaryUnwind(currentIntent, hedgeOrder, settings, now);
   if (exposureResolution) {
     return exposureResolution;
@@ -5523,6 +5727,28 @@ async function resolveHedgeExposureBeforePrimaryUnwind(
 
   const overfilledHedgeSize = deriveOverfilledHedgeSize(intent);
   if (overfilledHedgeSize > ORDER_SIZE_TOLERANCE) {
+    const acceptedIntent = await acceptBenignOverfilledHedge(
+      intent,
+      hedgeOrder,
+      settings,
+      now,
+      "recovery_overhedged_accepted",
+      "order.recovery.overhedged_accepted",
+      `Accepted small overhedged recovery exposure for intent ${intent.id}`,
+      {
+        primaryVenue: intent.primaryVenue,
+        hedgeVenue: intent.hedgeVenue,
+        primaryFilledSize: primaryLeg.filledSize,
+        hedgeFilledSize: hedgeLeg.filledSize,
+        overfilledHedgeSize,
+        hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+        maxSlippageBps: settings.maxSlippageBps,
+      },
+    );
+    if (acceptedIntent) {
+      return acceptedIntent;
+    }
+
     const currentIntent = markIntentStatus(
       intent,
       "failed",
@@ -6739,6 +6965,24 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
 
     if (stale && (isTerminalOrderStatus(hedgeOrder.status) || isAwaitingOrderConfirmation(hedgeOrder.status))) {
+      if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder)) {
+        await holdPolymarketHedgeFailurePendingTruth(
+          currentIntent,
+          hedgeLeg,
+          hedgeOrder,
+          now,
+          "reconcile_hedge_no_fill_truth_pending",
+          {
+            venue: currentIntent.hedgeVenue,
+            orderId: hedgeOrder.venueOrderId,
+            orderStatus: hedgeOrder.status,
+            requestedSize: hedgeOrder.requestedSize,
+            filledSize: hedgeOrder.filledSize,
+          },
+        );
+        continue;
+      }
+
       await attemptPrimaryUnwindAfterHedgeFailureFromReconcile(
         currentIntent,
         primaryLeg,
@@ -7275,6 +7519,46 @@ function deriveOverfilledHedgeSize(intent: Pick<OrderIntent, "primaryVenue" | "h
   return roundToSixDecimals(Math.max(0, hedgeLeg.filledSize - primaryLeg.filledSize));
 }
 
+export function evaluateBenignHedgeOverfill(
+  intent: Pick<OrderIntent, "primaryVenue" | "hedgeVenue" | "legs">,
+  settings: Pick<StrategyConfig, "minWorstCaseProfitUsd">,
+) {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  const overfilledHedgeSize = deriveOverfilledHedgeSize(intent);
+  const economics = deriveHedgedPairEconomics(intent.legs);
+  const hedgeFilledPrice = hedgeLeg?.filledPrice ?? null;
+  const hedgeRequestedPrice = hedgeLeg?.requestedPrice ?? null;
+  const hedgePrice =
+    hedgeFilledPrice !== null && Number.isFinite(hedgeFilledPrice) && hedgeFilledPrice > 0
+      ? hedgeFilledPrice
+      : hedgeRequestedPrice !== null && Number.isFinite(hedgeRequestedPrice) && hedgeRequestedPrice > 0
+        ? hedgeRequestedPrice
+        : null;
+  const overfillNotionalUsd =
+    hedgePrice !== null && Number.isFinite(hedgePrice) ? round4(overfilledHedgeSize * hedgePrice) : null;
+  const maxBenignOverfillNotionalUsd = round4(Math.max(0, settings.minWorstCaseProfitUsd));
+  const economicallyCovered =
+    economics.polymarketFilledSize > ORDER_SIZE_TOLERANCE &&
+    economics.kalshiFilledSize > ORDER_SIZE_TOLERANCE &&
+    economics.netWorstCaseUsd > ORDER_SIZE_TOLERANCE;
+  const withinBenignBudget =
+    overfillNotionalUsd !== null &&
+    overfillNotionalUsd > ORDER_SIZE_TOLERANCE &&
+    overfillNotionalUsd <= maxBenignOverfillNotionalUsd + ORDER_SIZE_TOLERANCE;
+
+  return {
+    benign: overfilledHedgeSize > ORDER_SIZE_TOLERANCE && economicallyCovered && withinBenignBudget,
+    overfilledHedgeSize,
+    overfillNotionalUsd,
+    maxBenignOverfillNotionalUsd,
+    economicallyCovered,
+    economics,
+    primaryFilledSize: primaryLeg?.filledSize ?? 0,
+    hedgeFilledSize: hedgeLeg?.filledSize ?? 0,
+  };
+}
+
 function resizeHedgeLegToUnhedgedPrimary(intent: OrderIntent, now: number) {
   const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!hedgeLeg) {
@@ -7343,11 +7627,15 @@ async function confirmImmediateOrderExecution(
   submission: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
   timeoutMs: number,
 ) {
-  if (submission.status === "rejected" || submission.status === "canceled" || submission.status === "expired") {
-    return submission;
-  }
-
   if (venue === "polymarket") {
+    const canQueryOrderTruth =
+      typeof submission.venueOrderId === "string" &&
+      submission.venueOrderId.length > 0 &&
+      !submission.venueOrderId.startsWith("killed:");
+    if (!canQueryOrderTruth) {
+      return submission;
+    }
+
     const confirmation = await confirmPolymarketOrderExecution({
       orderId: submission.venueOrderId,
       expectedSize: request.size,
@@ -7355,6 +7643,14 @@ async function confirmImmediateOrderExecution(
       orderType: request.orderType,
       timeoutMs,
     });
+    const confirmedResult = {
+      ...confirmation.result,
+      raw: {
+        ...(submission.raw ?? {}),
+        ...(confirmation.result.raw ?? {}),
+        initialSubmissionStatus: submission.status,
+      },
+    };
     if (request.orderType === "FOK" && confirmation.result.status === "live") {
       await polymarketAdapter.cancelOrder(submission.venueOrderId).catch(() => null);
       const canceledConfirmation = await confirmPolymarketOrderExecution({
@@ -7367,13 +7663,19 @@ async function confirmImmediateOrderExecution(
       return {
         ...canceledConfirmation.result,
         raw: {
+          ...(submission.raw ?? {}),
           ...(canceledConfirmation.result.raw ?? {}),
+          initialSubmissionStatus: submission.status,
           cancelAttemptedAfterTimeout: true,
         },
       };
     }
 
-    return confirmation.result;
+    return confirmedResult;
+  }
+
+  if (submission.status === "rejected" || submission.status === "canceled" || submission.status === "expired") {
+    return submission;
   }
 
   if (submission.status !== "live" && submission.status !== "pending" && submission.status !== "partially_filled") {
@@ -7655,10 +7957,6 @@ export function shouldRetryTerminalZeroFillHedge(
 
   if (result.filledSize > ORDER_SIZE_TOLERANCE) {
     return false;
-  }
-
-  if (Boolean(result.raw?.softNoFill)) {
-    return true;
   }
 
   const truth = extractPolymarketOrderTruthFromRaw(result.raw);

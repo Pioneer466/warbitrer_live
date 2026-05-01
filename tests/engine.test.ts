@@ -10,6 +10,7 @@ import {
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   deriveSafePolymarketHedgeDepth,
+  evaluateBenignHedgeOverfill,
   evaluateExposureRecoveryOptions,
   evaluateStablePnlChangeReadiness,
   estimateRescueHedgeLossUsd,
@@ -113,6 +114,57 @@ function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
     ...overrides,
     asset: overrides.asset ?? base.asset,
   };
+}
+
+function buildKalshiPrimaryPolymarketHedgeIntent(
+  overrides: {
+    kalshiPrice?: number;
+    kalshiFeeUsd?: number;
+    polymarketPrice?: number;
+    polymarketFilledSize?: number;
+  } = {},
+): OrderIntent {
+  const base = buildIntent();
+  const kalshiPrice = overrides.kalshiPrice ?? 0.417;
+  const polymarketPrice = overrides.polymarketPrice ?? 0.49;
+
+  return buildIntent({
+    primaryVenue: "kalshi",
+    hedgeVenue: "polymarket",
+    combination: "POLY_UP_KALSHI_NO",
+    status: "hedging",
+    failureReason: null,
+    legs: [
+      {
+        ...base.legs[1],
+        id: "leg-primary",
+        venue: "kalshi",
+        outcome: "NO",
+        requestedPrice: kalshiPrice,
+        requestedSize: 10,
+        requestedNotionalUsd: kalshiPrice * 10,
+        filledPrice: kalshiPrice,
+        filledSize: 10,
+        feeUsd: overrides.kalshiFeeUsd ?? 0.17,
+        status: "filled",
+        venueOrderId: "kalshi-order",
+      },
+      {
+        ...base.legs[0],
+        id: "leg-hedge",
+        venue: "polymarket",
+        outcome: "UP",
+        requestedPrice: polymarketPrice,
+        requestedSize: 10,
+        requestedNotionalUsd: 5,
+        filledPrice: polymarketPrice,
+        filledSize: overrides.polymarketFilledSize ?? 10.2,
+        feeUsd: 0,
+        status: "submitted",
+        venueOrderId: "poly-order",
+      },
+    ],
+  });
 }
 
 function buildOrder(overrides: Partial<LiveOrder> = {}): LiveOrder {
@@ -855,6 +907,43 @@ describe("Kalshi primary IOC handling", () => {
     ).toBe(false);
   });
 
+  it("classifies a small profitable hedge overfill as benign", () => {
+    const evaluation = evaluateBenignHedgeOverfill(buildKalshiPrimaryPolymarketHedgeIntent(), {
+      minWorstCaseProfitUsd: 0.25,
+    });
+
+    expect(evaluation.benign).toBe(true);
+    expect(evaluation.overfilledHedgeSize).toBeCloseTo(0.2, 6);
+    expect(evaluation.overfillNotionalUsd).toBeCloseTo(0.098, 6);
+    expect(evaluation.economics.netWorstCaseUsd).toBeCloseTo(0.662, 6);
+  });
+
+  it("rejects hedge overfills that are too large even when still profitable", () => {
+    const evaluation = evaluateBenignHedgeOverfill(
+      buildKalshiPrimaryPolymarketHedgeIntent({ polymarketFilledSize: 10.7 }),
+      {
+        minWorstCaseProfitUsd: 0.25,
+      },
+    );
+
+    expect(evaluation.economicallyCovered).toBe(true);
+    expect(evaluation.overfillNotionalUsd).toBeCloseTo(0.343, 6);
+    expect(evaluation.benign).toBe(false);
+  });
+
+  it("rejects small hedge overfills when the actual pair is not economically covered", () => {
+    const evaluation = evaluateBenignHedgeOverfill(
+      buildKalshiPrimaryPolymarketHedgeIntent({ kalshiPrice: 0.49 }),
+      {
+        minWorstCaseProfitUsd: 0.25,
+      },
+    );
+
+    expect(evaluation.overfillNotionalUsd).toBeCloseTo(0.098, 6);
+    expect(evaluation.economicallyCovered).toBe(false);
+    expect(evaluation.benign).toBe(false);
+  });
+
   it("allows Polymarket BUY hedge retries only after terminal zero-fill truth", () => {
     expect(
       shouldRetryTerminalZeroFillHedge(
@@ -884,6 +973,21 @@ describe("Kalshi primary IOC handling", () => {
               terminalZeroFill: false,
               pendingFilledSize: 10,
             },
+          },
+        },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldRetryTerminalZeroFillHedge(
+        { hedgeVenue: "polymarket" },
+        { venue: "polymarket", side: "BUY" },
+        {
+          status: "canceled",
+          filledSize: 0,
+          raw: {
+            softNoFill: true,
+            error: "order couldn't be fully filled. FOK orders are fully filled or killed.",
           },
         },
       ),

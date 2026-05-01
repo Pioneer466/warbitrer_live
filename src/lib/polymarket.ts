@@ -410,7 +410,7 @@ export function createPolymarketAdapter(): VenueAdapter {
         );
         const noFillMessage = getPolymarketSoftNoFillMessage(response);
         if (noFillMessage) {
-          return buildPolymarketSoftNoFillResult(order, noFillMessage);
+          return buildPolymarketSoftNoFillResult(order, noFillMessage, response);
         }
 
         return {
@@ -429,7 +429,7 @@ export function createPolymarketAdapter(): VenueAdapter {
       } catch (error) {
         const noFillMessage = getPolymarketSoftNoFillMessage(error);
         if (noFillMessage) {
-          return buildPolymarketSoftNoFillResult(order, noFillMessage);
+          return buildPolymarketSoftNoFillResult(order, noFillMessage, error);
         }
 
         throw error;
@@ -687,10 +687,22 @@ export function getPolymarketSoftNoFillMessage(error: unknown) {
   return null;
 }
 
-function buildPolymarketSoftNoFillResult(order: VenueOrderRequest, noFillMessage: string): VenueOrderResult {
+function buildPolymarketSoftNoFillResult(
+  order: VenueOrderRequest,
+  noFillMessage: string,
+  rawResponse?: unknown,
+): VenueOrderResult {
+  const responseOrderId =
+    rawResponse !== null &&
+    typeof rawResponse === "object" &&
+    "orderID" in rawResponse &&
+    typeof rawResponse.orderID === "string"
+      ? rawResponse.orderID
+      : null;
+
   return {
     venue: "polymarket",
-    venueOrderId: `killed:${order.clientOrderId}`,
+    venueOrderId: responseOrderId ?? `killed:${order.clientOrderId}`,
     status: "canceled",
     filledSize: 0,
     averageFillPrice: null,
@@ -701,6 +713,7 @@ function buildPolymarketSoftNoFillResult(order: VenueOrderRequest, noFillMessage
       clientOrderId: order.clientOrderId,
       marketRef: order.marketRef,
       orderType: order.orderType,
+      response: rawResponse instanceof Error ? { message: rawResponse.message } : rawResponse,
     },
   };
 }
