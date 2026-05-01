@@ -15,6 +15,7 @@ import type {
   MarketSlot,
   NotificationDelivery,
   OpportunitySnapshot,
+  OrderAttempt,
   OrderIntent,
   PortfolioDashboardResponse,
   PnlSnapshot,
@@ -111,6 +112,14 @@ export async function findOrderIntent(intentId: string) {
 
 export async function writeVenueOrder(order: LiveOrder) {
   return postgres.upsertVenueOrder(await db(), order);
+}
+
+export async function writeOrderAttempt(attempt: OrderAttempt) {
+  return postgres.upsertOrderAttempt(await db(), attempt);
+}
+
+export async function readRecentOrderAttempts(limit?: number, asset?: MarketAsset) {
+  return postgres.listRecentOrderAttempts(await db(), limit, asset);
 }
 
 export async function readOpenVenueOrders(asset?: MarketAsset) {

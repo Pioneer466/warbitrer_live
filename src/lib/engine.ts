@@ -79,6 +79,7 @@ import {
   readPositions,
   readRunEvents,
   readRecentFills,
+  readRecentOrderAttempts,
   readRecentOrderIntents,
   readRecentSettledOrderIntents,
   readRecentVenueOrders,
@@ -92,6 +93,7 @@ import {
   writeCircuitBreaker,
   writeExecutionCandidate,
   writeFill,
+  writeOrderAttempt,
   writeOrderIntent,
   writePnlSnapshot,
   writeRunEvent,
@@ -1449,7 +1451,8 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
           settings.kalshiPrimaryMaxClips,
           settings.kalshiPrimaryProbeClipContracts,
         );
-  if (currentIntent.primaryVenue === "kalshi" && primaryClipPlan.length > 1) {
+  const useLegacyKalshiMultiClipPrimary = false;
+  if (useLegacyKalshiMultiClipPrimary && currentIntent.primaryVenue === "kalshi" && primaryClipPlan.length > 1) {
     const multiClipResult = await executeKalshiPrimaryMultiClip(
       currentIntent,
       primaryLeg,
@@ -1545,15 +1548,16 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let primaryOrder: LiveOrder;
   try {
-    const primarySubmission = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
-    primaryResult = await confirmImmediateOrderExecution(
-      currentIntent.primaryVenue,
-      primaryRequest,
-      primarySubmission,
-      settings.immediateOrderConfirmationTimeoutMs,
-    );
-    primaryOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, executionPrimaryLeg, primaryRequest, primaryResult, now);
-    await writeVenueOrder(primaryOrder);
+    const primaryExecution = await submitAndConfirmOrder({
+      intent: currentIntent,
+      leg: executionPrimaryLeg,
+      request: primaryRequest,
+      stage: "primary",
+      now,
+      timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+    });
+    primaryResult = primaryExecution.result;
+    primaryOrder = primaryExecution.order;
     await writeRunEvent({
       level: "info",
       eventType: "order.primary.submitted",
@@ -1643,55 +1647,6 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     }
 
     return executeHedgeLeg(currentIntent, slot, settings, now);
-  }
-
-  if (isTerminalOrderStatus(primaryResult.status)) {
-    const primaryRetryPlan = resolvePrimaryRetryPlan(currentIntent.primaryVenue, primaryResult, settings);
-    const retried = await retryLegWithinExecutionBufferWithAttempts(
-      currentIntent,
-      primaryLeg,
-      slot,
-      settings,
-      now,
-      "primary",
-      primaryRetryPlan.attempts,
-      primaryRetryPlan.retryDelayMs,
-    );
-    if (retried) {
-      currentIntent = retried.intent;
-      primaryResult = retried.result;
-      primaryOrder = retried.order;
-      if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
-        currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
-        currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
-        await writeOrderIntent(currentIntent);
-        await writeLiveTradeRunEvent(currentIntent, now);
-        if (primaryResult.status !== "filled") {
-          await writeRunEvent({
-            level: "warn",
-            eventType: "order.primary.partial_filled",
-            message: `Primary ${currentIntent.primaryVenue} order ${primaryOrder.venueOrderId} filled partially after retry; hedging the executed size`,
-            payload: {
-              intentId: currentIntent.id,
-              slotKey: currentIntent.slotKey,
-              venue: currentIntent.primaryVenue,
-              orderId: primaryOrder.venueOrderId,
-              orderStatus: primaryResult.status,
-              filledSize: primaryOrder.filledSize,
-              requestedSize: primaryOrder.requestedSize,
-              retried: true,
-            },
-            createdAt: now,
-          });
-        }
-
-        if (currentIntent.primaryVenue === "polymarket") {
-          currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
-        }
-
-        return executeHedgeLeg(currentIntent, slot, settings, now);
-      }
-    }
   }
 
   if (isTerminalOrderStatus(primaryResult.status)) {
@@ -2064,22 +2019,16 @@ async function executeKalshiPrimaryMultiClip(
     let primaryOrder: LiveOrder;
 
     try {
-      const submission = await adapterFor(currentIntent.primaryVenue).placeOrder(primaryRequest);
-      primaryResult = await confirmImmediateOrderExecution(
-        currentIntent.primaryVenue,
-        primaryRequest,
-        submission,
-        settings.immediateOrderConfirmationTimeoutMs,
-      );
-      primaryOrder = buildLiveOrderRecord(
-        currentIntent.asset,
-        currentIntent.id,
-        executionPrimaryLeg,
-        primaryRequest,
-        primaryResult,
-        clipAttemptNow,
-      );
-      await writeVenueOrder(primaryOrder);
+      const primaryExecution = await submitAndConfirmOrder({
+        intent: currentIntent,
+        leg: executionPrimaryLeg,
+        request: primaryRequest,
+        stage: "primary_legacy_multi_clip",
+        now: clipAttemptNow,
+        timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      });
+      primaryResult = primaryExecution.result;
+      primaryOrder = primaryExecution.order;
       await writeRunEvent({
         level: "info",
         eventType: "order.primary.clip_submitted",
@@ -2627,15 +2576,16 @@ async function executeIncrementalHedgeLeg(
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
   try {
-    const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
-    hedgeResult = await confirmImmediateOrderExecution(
-      currentIntent.hedgeVenue,
-      hedgeRequest,
-      hedgeSubmission,
-      settings.immediateOrderConfirmationTimeoutMs,
-    );
-    hedgeOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
-    await writeVenueOrder(hedgeOrder);
+    const hedgeExecution = await submitAndConfirmOrder({
+      intent: currentIntent,
+      leg: hedgeLeg,
+      request: hedgeRequest,
+      stage: "incremental_hedge",
+      now,
+      timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+    });
+    hedgeResult = hedgeExecution.result;
+    hedgeOrder = hedgeExecution.order;
     await writeRunEvent({
       level: "info",
       eventType: "order.hedge.incremental_submitted",
@@ -3102,7 +3052,7 @@ async function holdPolymarketHedgeFailurePendingTruth(
   let currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
   currentIntent = markIntentStatus(
     currentIntent,
-    "primary_filled",
+    "truth_pending",
     now,
     "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked",
   );
@@ -3111,6 +3061,16 @@ async function holdPolymarketHedgeFailurePendingTruth(
     stage,
     ...payload,
   });
+  await writeIntentIncidentRunEvent(
+    currentIntent,
+    now,
+    "truth_pending",
+    "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked",
+    {
+      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      ...payload,
+    },
+  );
   await writeCircuitBreaker({
     key: buildSlotBreakerKey(currentIntent.slotKey),
     active: true,
@@ -3139,7 +3099,7 @@ async function failOverfilledIncrementalHedge(
 ): Promise<{ intent: OrderIntent; outcome: "failed" }> {
   const overfilledHedgeSize = deriveOverfilledHedgeSize(intent);
   const failureReason = `Incremental hedge overfilled by ${overfilledHedgeSize.toFixed(6)}; manual intervention required`;
-  const currentIntent = markIntentStatus(intent, "failed", now, failureReason);
+  const currentIntent = markIntentStatus(intent, "manual_required", now, failureReason);
   await writeOrderIntent(currentIntent);
   await writeManualInterventionRunEvent(currentIntent, now, stage, {
     ...payload,
@@ -3272,15 +3232,16 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
   try {
-    const hedgeSubmission = await adapterFor(currentIntent.hedgeVenue).placeOrder(hedgeRequest);
-    hedgeResult = await confirmImmediateOrderExecution(
-      currentIntent.hedgeVenue,
-      hedgeRequest,
-      hedgeSubmission,
-      settings.immediateOrderConfirmationTimeoutMs,
-    );
-    hedgeOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, hedgeLeg, hedgeRequest, hedgeResult, now);
-    await writeVenueOrder(hedgeOrder);
+    const hedgeExecution = await submitAndConfirmOrder({
+      intent: currentIntent,
+      leg: hedgeLeg,
+      request: hedgeRequest,
+      stage: "hedge",
+      now,
+      timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+    });
+    hedgeResult = hedgeExecution.result;
+    hedgeOrder = hedgeExecution.order;
     await writeRunEvent({
       level: "info",
       eventType: "order.hedge.submitted",
@@ -3819,14 +3780,15 @@ async function unwindPrimaryLeg(
       createdAt: now,
     });
   }
-  const submission = await adapterFor(primaryLeg.venue).placeOrder(request);
-  const result = await confirmImmediateOrderExecution(
-    primaryLeg.venue,
+  const unwindExecution = await submitAndConfirmOrder({
+    intent,
+    leg: { ...primaryLeg, side: "SELL" },
     request,
-    submission,
-    settings.immediateOrderConfirmationTimeoutMs,
-  );
-  return buildLiveOrderRecord(intent.asset, intent.id, { ...primaryLeg, side: "SELL" }, request, result, now);
+    stage: force ? "primary_unwind_forced" : "primary_unwind",
+    now,
+    timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+  });
+  return unwindExecution.order;
 }
 
 function deriveForcedUnwindOrderPrice(
@@ -3944,15 +3906,16 @@ async function retryLegWithinExecutionBuffer(
     createdAt: now,
   });
 
-  const submission = await adapterFor(repricedLeg.venue).placeOrder(request);
-  const result = await confirmImmediateOrderExecution(
-    repricedLeg.venue,
+  const retryExecution = await submitAndConfirmOrder({
+    intent: repricedIntent,
+    leg: repricedLeg,
     request,
-    submission,
-    settings.immediateOrderConfirmationTimeoutMs,
-  );
-  const order = buildLiveOrderRecord(repricedIntent.asset, repricedIntent.id, repricedLeg, request, result, now);
-  await writeVenueOrder(order);
+    stage: `${stage}_retry`,
+    now,
+    timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+  });
+  const result = retryExecution.result;
+  const order = retryExecution.order;
   await writeRunEvent({
     level: "info",
     eventType: `order.${stage}.resubmitted`,
@@ -5228,7 +5191,7 @@ async function attemptHedgeRescueBeforeUnwind(
       hedgeRescueMinAdvantageUsd: settings.hedgeRescueMinAdvantageUsd,
       secondsToSettlement,
       holdWindowSeconds: settings.forcedUnwindHoldSecondsToSettlement,
-      allowPartial: settings.hedgeRescueAllowPartial && normalizedTargetSize + ORDER_SIZE_TOLERANCE >= minimumHedgeSize,
+      allowPartial: false,
     });
 
     await writeRunEvent({
@@ -5295,7 +5258,7 @@ async function attemptHedgeRescueBeforeUnwind(
       return { intent: currentIntent, recovered: false, hold: true };
     }
 
-    if (decision.decision !== "rescue_hedge_full" && decision.decision !== "rescue_hedge_partial") {
+    if (decision.decision !== "rescue_hedge_full") {
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
@@ -5309,17 +5272,23 @@ async function attemptHedgeRescueBeforeUnwind(
       requestedSize: quote.filledSize,
       requestedNotionalUsd: round4(quote.filledSize * maxHedgePrice),
     };
-    const orderType = decision.decision === "rescue_hedge_full" ? "FOK" : "FAK";
+    const orderType = "FOK";
     const rescueRequest = buildVenueOrderRequest(rescueLeg, 0, orderType, false, { overridePrice: maxHedgePrice });
     let rescueResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
+    let rescueOrder: LiveOrder;
+    currentIntent = markIntentStatus(currentIntent, "rescue_hedge", Date.now(), "Attempting full hedge rescue before primary unwind");
+    await writeOrderIntent(currentIntent);
     try {
-      const rescueSubmission = await adapterFor("polymarket").placeOrder(rescueRequest);
-      rescueResult = await confirmImmediateOrderExecution(
-        "polymarket",
-        rescueRequest,
-        rescueSubmission,
-        settings.immediateOrderConfirmationTimeoutMs,
-      );
+      const rescueExecution = await submitAndConfirmOrder({
+        intent: currentIntent,
+        leg: rescueLeg,
+        request: rescueRequest,
+        stage: "hedge_rescue",
+        now: Date.now(),
+        timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      });
+      rescueResult = rescueExecution.result;
+      rescueOrder = rescueExecution.order;
     } catch (error) {
       await writeRunEvent({
         asset: currentIntent.asset,
@@ -5335,10 +5304,18 @@ async function attemptHedgeRescueBeforeUnwind(
         },
         createdAt: Date.now(),
       });
+      await writeIntentIncidentRunEvent(
+        currentIntent,
+        Date.now(),
+        "hedge_rescue_submit_failed",
+        `Hedge rescue submission failed (${toErrorMessage(error)})`,
+        {
+          attempt,
+          orderType,
+        },
+      );
       return { intent: currentIntent, recovered: false, hold: false };
     }
-    const rescueOrder = buildLiveOrderRecord(currentIntent.asset, currentIntent.id, rescueLeg, rescueRequest, rescueResult, Date.now());
-    await writeVenueOrder(rescueOrder);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: rescueOrder.filledSize > 0 ? "warn" : "info",
@@ -5401,7 +5378,18 @@ async function attemptHedgeRescueBeforeUnwind(
         return { intent: currentIntent, recovered: currentIntent.status === "hedged", hold: false };
       }
 
-      continue;
+      currentIntent = await markIntentManualRequired(
+        currentIntent,
+        Date.now(),
+        "hedge_rescue_partial_fill",
+        `Full hedge rescue filled only partially; remaining hedge size ${remainingSize.toFixed(6)}`,
+        {
+          orderId: rescueOrder.venueOrderId,
+          filledSize: rescueOrder.filledSize,
+          remainingSize,
+        },
+      );
+      return { intent: currentIntent, recovered: false, hold: true };
     }
   }
 
@@ -5525,6 +5513,31 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       createdAt: now,
     });
     return currentIntent;
+  }
+
+  const currentPrimaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue) ?? primaryLeg;
+  const unwindEstimate = await estimatePrimaryUnwindRecoveryLoss(currentIntent, currentPrimaryLeg, Date.now(), settings);
+  const unwindCapUsd = settings.forcedUnwindMaxLossUsd;
+  if (
+    unwindCapUsd <= 0 ||
+    unwindEstimate.expectedLossUsd === null ||
+    unwindEstimate.expectedLossUsd > unwindCapUsd + ORDER_SIZE_TOLERANCE
+  ) {
+    return markIntentManualRequired(
+      currentIntent,
+      Date.now(),
+      "primary_unwind_loss_cap_blocked",
+      unwindEstimate.expectedLossUsd === null
+        ? "Primary unwind loss could not be estimated"
+        : `Primary unwind expected loss ${unwindEstimate.expectedLossUsd.toFixed(4)} exceeds cap ${unwindCapUsd.toFixed(4)}`,
+      {
+        requestedSize: unwindEstimate.requestedSize,
+        expectedExitPrice: unwindEstimate.expectedExitPrice,
+        expectedLossUsd: unwindEstimate.expectedLossUsd,
+        forcedUnwindMaxLossUsd: unwindCapUsd,
+      },
+      hedgeOrder,
+    );
   }
 
   const normalAttempts = Math.max(1, settings.hedgeRetryAttempts);
@@ -5751,7 +5764,7 @@ async function resolveHedgeExposureBeforePrimaryUnwind(
 
     const currentIntent = markIntentStatus(
       intent,
-      "failed",
+      "manual_required",
       now,
       `Hedge exposure exceeds primary by ${overfilledHedgeSize.toFixed(6)}; manual intervention required`,
     );
@@ -5917,6 +5930,24 @@ async function tripManualInterventionBreaker(
   });
 }
 
+async function markIntentManualRequired(
+  intent: OrderIntent,
+  now: number,
+  stage: string,
+  reason: string,
+  payload: Record<string, unknown> = {},
+  hedgeOrder: LiveOrder | null = null,
+) {
+  const failureReason = reason.toLowerCase().includes("manual intervention required")
+    ? reason
+    : `${reason}; manual intervention required`;
+  const currentIntent = markIntentStatus(intent, "manual_required", now, failureReason);
+  await writeOrderIntent(currentIntent);
+  await writeManualInterventionRunEvent(currentIntent, now, stage, payload);
+  await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, stage);
+  return currentIntent;
+}
+
 async function markIntentHedgedAfterEconomicCheck(
   intent: OrderIntent,
   now: number,
@@ -5932,7 +5963,7 @@ async function markIntentHedgedAfterEconomicCheck(
   ) {
     const currentIntent = markIntentStatus(
       intent,
-      "unwind_required",
+      "manual_required",
       now,
       `Hedged pair worst-case PnL ${economics.netWorstCaseUsd.toFixed(4)} USD; manual intervention required`,
     );
@@ -6571,6 +6602,8 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     if (
       intent.status !== "executing_primary" &&
       intent.status !== "primary_filled" &&
+      intent.status !== "truth_pending" &&
+      intent.status !== "rescue_hedge" &&
       intent.status !== "hedging" &&
       intent.status !== "unwind_required"
     ) {
@@ -6879,12 +6912,25 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
       if (!primaryOrderSummary && !shouldTreatPrimaryOrderAsFilled(currentIntent, primaryOrder)) {
         continue;
       }
-    } else if (currentIntent.status !== "primary_filled" && currentIntent.status !== "hedging") {
+    } else if (
+      currentIntent.status !== "primary_filled" &&
+      currentIntent.status !== "truth_pending" &&
+      currentIntent.status !== "rescue_hedge" &&
+      currentIntent.status !== "hedging"
+    ) {
       continue;
     }
 
     if (!hedgeOrder) {
-      if (stale && (currentIntent.status === "primary_filled" || currentIntent.status === "hedging")) {
+      if (
+        stale &&
+        (
+          currentIntent.status === "primary_filled" ||
+          currentIntent.status === "truth_pending" ||
+          currentIntent.status === "rescue_hedge" ||
+          currentIntent.status === "hedging"
+        )
+      ) {
         await writeRunEvent({
           level: "error",
           eventType: "intent.failed.hedge_missing",
@@ -7001,7 +7047,14 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
 async function syncActiveSlotExecutionBreakers(now: number) {
   const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
   const unresolvedSlots = new Set(
-    openIntents.filter((intent) => intent.status === "unwind_required").map((intent) => intent.slotKey),
+    openIntents
+      .filter((intent) =>
+        intent.status === "unwind_required" ||
+        intent.status === "manual_required" ||
+        intent.status === "truth_pending" ||
+        intent.status === "rescue_hedge"
+      )
+      .map((intent) => intent.slotKey),
   );
   const currentSlotKeys = new Set(ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
 
@@ -7261,6 +7314,373 @@ function buildLiveOrderRecord(
     updatedAt: now,
     raw: result.raw,
   };
+}
+
+async function submitAndConfirmOrder(input: {
+  intent: OrderIntent;
+  leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
+  request: VenueOrderRequest;
+  stage: string;
+  now: number;
+  timeoutMs: number;
+}) {
+  input.request.clientOrderId = buildStableClientOrderId(input);
+  const attemptId = `${input.intent.id}:${input.leg.id}:${input.stage}:${input.request.clientOrderId}`;
+  const reusableAttempt = await findReusableOrderAttempt(input, attemptId);
+  if (reusableAttempt) {
+    return reusableAttempt;
+  }
+
+  await writeOrderAttempt({
+    id: attemptId,
+    asset: input.intent.asset,
+    shadow: input.intent.shadow,
+    intentId: input.intent.id,
+    legId: input.leg.id,
+    stage: input.stage,
+    venue: input.leg.venue,
+    side: input.request.side,
+    orderType: input.request.orderType,
+    clientOrderId: input.request.clientOrderId,
+    venueOrderId: null,
+    status: "planned",
+    truthStatus: null,
+    request: serializeVenueOrderRequest(input.request),
+    result: null,
+    error: null,
+    createdAt: input.now,
+    updatedAt: input.now,
+  });
+
+  try {
+    const submission = await adapterFor(input.leg.venue).placeOrder(input.request);
+    await writeOrderAttempt({
+      id: attemptId,
+      asset: input.intent.asset,
+      shadow: input.intent.shadow,
+      intentId: input.intent.id,
+      legId: input.leg.id,
+      stage: input.stage,
+      venue: input.leg.venue,
+      side: input.request.side,
+      orderType: input.request.orderType,
+      clientOrderId: input.request.clientOrderId,
+      venueOrderId: submission.venueOrderId,
+      status: "submitted",
+      truthStatus: extractVenueTruthStatus(submission.raw),
+      request: serializeVenueOrderRequest(input.request),
+      result: serializeVenueOrderResult(submission),
+      error: null,
+      createdAt: input.now,
+      updatedAt: Date.now(),
+    });
+
+    const result = await confirmImmediateOrderExecution(
+      input.leg.venue,
+      input.request,
+      submission,
+      input.timeoutMs,
+    );
+    const order = buildLiveOrderRecord(input.intent.asset, input.intent.id, input.leg, input.request, result, input.now);
+    await writeVenueOrder(order);
+    await writeOrderAttempt({
+      id: attemptId,
+      asset: input.intent.asset,
+      shadow: input.intent.shadow,
+      intentId: input.intent.id,
+      legId: input.leg.id,
+      stage: input.stage,
+      venue: input.leg.venue,
+      side: input.request.side,
+      orderType: input.request.orderType,
+      clientOrderId: input.request.clientOrderId,
+      venueOrderId: result.venueOrderId,
+      status: "confirmed",
+      truthStatus: extractVenueTruthStatus(result.raw) ?? result.status,
+      request: serializeVenueOrderRequest(input.request),
+      result: serializeVenueOrderResult(result),
+      error: null,
+      createdAt: input.now,
+      updatedAt: Date.now(),
+    });
+
+    return {
+      submission,
+      result,
+      order,
+    };
+  } catch (error) {
+    const recovered = await recoverSubmittedKalshiOrderAttempt(input, attemptId);
+    if (recovered) {
+      return recovered;
+    }
+
+    await writeOrderAttempt({
+      id: attemptId,
+      asset: input.intent.asset,
+      shadow: input.intent.shadow,
+      intentId: input.intent.id,
+      legId: input.leg.id,
+      stage: input.stage,
+      venue: input.leg.venue,
+      side: input.request.side,
+      orderType: input.request.orderType,
+      clientOrderId: input.request.clientOrderId,
+      venueOrderId: null,
+      status: "failed",
+      truthStatus: null,
+      request: serializeVenueOrderRequest(input.request),
+      result: null,
+      error: toErrorMessage(error),
+      createdAt: input.now,
+      updatedAt: Date.now(),
+    });
+    throw error;
+  }
+}
+
+function buildStableClientOrderId(input: {
+  intent: OrderIntent;
+  leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
+  request: VenueOrderRequest;
+  stage: string;
+}) {
+  const seed = JSON.stringify({
+    intentId: input.intent.id,
+    legId: input.leg.id,
+    stage: input.stage,
+    venue: input.leg.venue,
+    marketRef: input.request.marketRef,
+    tokenId: input.request.tokenId ?? null,
+    outcome: input.request.outcome,
+    side: input.request.side,
+    size: input.request.size,
+    price: input.request.price,
+    maxCostUsd: input.request.maxCostUsd,
+    orderType: input.request.orderType,
+    buyMode: input.request.buyMode ?? null,
+    reduceOnly: input.request.reduceOnly ?? false,
+  });
+  return `wa-${stableHexHash(seed, 30)}`;
+}
+
+function stableHexHash(value: string, length: number) {
+  let hashA = 0x811c9dc5;
+  let hashB = 0x9e3779b9;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    hashA ^= code;
+    hashA = Math.imul(hashA, 0x01000193) >>> 0;
+    hashB ^= code + index;
+    hashB = Math.imul(hashB, 0x85ebca6b) >>> 0;
+  }
+  const hex = `${hashA.toString(16).padStart(8, "0")}${hashB.toString(16).padStart(8, "0")}`;
+  return hex.repeat(Math.ceil(length / hex.length)).slice(0, length);
+}
+
+async function findReusableOrderAttempt(
+  input: {
+    intent: OrderIntent;
+    leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
+    request: VenueOrderRequest;
+    stage: string;
+    now: number;
+    timeoutMs: number;
+  },
+  attemptId: string,
+) {
+  const existingAttempts = await readRecentOrderAttempts(500, input.intent.asset);
+  const existing = existingAttempts.find(
+    (attempt) =>
+      attempt.id === attemptId ||
+      (
+        attempt.intentId === input.intent.id &&
+        attempt.legId === input.leg.id &&
+        attempt.stage === input.stage &&
+        attempt.clientOrderId === input.request.clientOrderId
+      ),
+  );
+
+  if (!existing) {
+    return null;
+  }
+
+  if (existing.status === "confirmed" && existing.result) {
+    const result = deserializeVenueOrderResult(existing.result, input.leg.venue, existing.venueOrderId);
+    const order = buildLiveOrderRecord(input.intent.asset, input.intent.id, input.leg, input.request, result, input.now);
+    await writeVenueOrder(order);
+    return {
+      submission: result,
+      result,
+      order,
+    };
+  }
+
+  if ((existing.status === "submitted" || existing.status === "failed") && existing.venueOrderId) {
+    const submission = existing.result
+      ? deserializeVenueOrderResult(existing.result, input.leg.venue, existing.venueOrderId)
+      : buildPendingVenueOrderResult(input.leg.venue, existing.venueOrderId, {
+          recoveredFromOrderAttempt: true,
+          clientOrderId: existing.clientOrderId,
+        });
+    const result = await confirmImmediateOrderExecution(input.leg.venue, input.request, submission, input.timeoutMs);
+    const order = buildLiveOrderRecord(input.intent.asset, input.intent.id, input.leg, input.request, result, input.now);
+    await writeVenueOrder(order);
+    await writeOrderAttempt({
+      ...existing,
+      venueOrderId: result.venueOrderId,
+      status: "confirmed",
+      truthStatus: extractVenueTruthStatus(result.raw) ?? result.status,
+      result: serializeVenueOrderResult(result),
+      error: null,
+      updatedAt: Date.now(),
+    });
+    return {
+      submission,
+      result,
+      order,
+    };
+  }
+
+  if (existing.status === "planned" && input.leg.venue === "kalshi") {
+    return recoverSubmittedKalshiOrderAttempt(input, attemptId);
+  }
+
+  throw new Error(`Existing ${input.stage} order attempt ${existing.id} has no reusable venue truth; resubmission blocked`);
+}
+
+async function recoverSubmittedKalshiOrderAttempt(
+  input: {
+    intent: OrderIntent;
+    leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
+    request: VenueOrderRequest;
+    stage: string;
+    now: number;
+  },
+  attemptId: string,
+) {
+  const recovered = await recoverKalshiOrderSubmissionForIntent(
+    input.intent,
+    input.leg,
+    input.request,
+    input.now,
+    input.stage.includes("primary") ? "primary" : "hedge",
+  );
+  if (!recovered) {
+    return null;
+  }
+
+  await writeOrderAttempt({
+    id: attemptId,
+    asset: input.intent.asset,
+    shadow: input.intent.shadow,
+    intentId: input.intent.id,
+    legId: input.leg.id,
+    stage: input.stage,
+    venue: input.leg.venue,
+    side: input.request.side,
+    orderType: input.request.orderType,
+    clientOrderId: input.request.clientOrderId,
+    venueOrderId: recovered.result.venueOrderId,
+    status: "confirmed",
+    truthStatus: extractVenueTruthStatus(recovered.result.raw) ?? recovered.result.status,
+    request: serializeVenueOrderRequest(input.request),
+    result: serializeVenueOrderResult(recovered.result),
+    error: null,
+    createdAt: input.now,
+    updatedAt: Date.now(),
+  });
+
+  return {
+    submission: recovered.result,
+    result: recovered.result,
+    order: recovered.order,
+  };
+}
+
+function serializeVenueOrderRequest(request: VenueOrderRequest): Record<string, unknown> {
+  return {
+    marketRef: request.marketRef,
+    tokenId: request.tokenId ?? null,
+    outcome: request.outcome,
+    side: request.side,
+    size: request.size,
+    price: request.price,
+    maxCostUsd: request.maxCostUsd,
+    orderType: request.orderType,
+    buyMode: request.buyMode ?? null,
+    reduceOnly: request.reduceOnly ?? false,
+    clientOrderId: request.clientOrderId,
+  };
+}
+
+function serializeVenueOrderResult(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>): Record<string, unknown> {
+  return {
+    venue: result.venue,
+    venueOrderId: result.venueOrderId,
+    status: result.status,
+    filledSize: result.filledSize,
+    averageFillPrice: result.averageFillPrice,
+    feeUsd: result.feeUsd,
+    raw: result.raw,
+  };
+}
+
+function deserializeVenueOrderResult(
+  result: Record<string, unknown>,
+  venue: Venue,
+  fallbackOrderId: string | null,
+): Awaited<ReturnType<VenueAdapter["placeOrder"]>> {
+  return {
+    venue,
+    venueOrderId: typeof result.venueOrderId === "string" ? result.venueOrderId : fallbackOrderId ?? "unknown",
+    status: isVenueOrderStatus(result.status) ? result.status : "pending",
+    filledSize: typeof result.filledSize === "number" ? result.filledSize : 0,
+    averageFillPrice: typeof result.averageFillPrice === "number" ? result.averageFillPrice : null,
+    feeUsd: typeof result.feeUsd === "number" ? result.feeUsd : 0,
+    raw: result.raw && typeof result.raw === "object" ? result.raw as Record<string, unknown> : result,
+  };
+}
+
+function buildPendingVenueOrderResult(
+  venue: Venue,
+  venueOrderId: string,
+  raw: Record<string, unknown>,
+): Awaited<ReturnType<VenueAdapter["placeOrder"]>> {
+  return {
+    venue,
+    venueOrderId,
+    status: "pending",
+    filledSize: 0,
+    averageFillPrice: null,
+    feeUsd: 0,
+    raw,
+  };
+}
+
+function isVenueOrderStatus(value: unknown): value is Awaited<ReturnType<VenueAdapter["placeOrder"]>>["status"] {
+  return (
+    value === "pending" ||
+    value === "live" ||
+    value === "filled" ||
+    value === "partially_filled" ||
+    value === "canceled" ||
+    value === "expired" ||
+    value === "rejected"
+  );
+}
+
+function extractVenueTruthStatus(raw: Record<string, unknown> | null | undefined) {
+  const truth = raw?.orderTruth;
+  if (truth && typeof truth === "object" && "status" in truth && typeof truth.status === "string") {
+    return truth.status;
+  }
+
+  if (truth && typeof truth === "object" && "terminalZeroFill" in truth && truth.terminalZeroFill === true) {
+    return "terminal_zero_fill";
+  }
+
+  return null;
 }
 
 function buildShadowOrder(
@@ -8133,6 +8553,37 @@ async function writeManualInterventionRunEvent(
       hedgeVenue: intent.hedgeVenue,
       failureReason: intent.failureReason,
       stage,
+      ...extraPayload,
+    },
+    createdAt: now,
+  });
+}
+
+async function writeIntentIncidentRunEvent(
+  intent: Pick<OrderIntent, "id" | "asset" | "shadow" | "slotKey" | "combination" | "primaryVenue" | "hedgeVenue">,
+  now: number,
+  stage: string,
+  reason: string,
+  extraPayload: Record<string, unknown> = {},
+) {
+  if (intent.shadow) {
+    return;
+  }
+
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "error",
+    eventType: "intent.incident",
+    message: `Incident for intent ${intent.id}: ${reason}`,
+    payload: {
+      intentId: intent.id,
+      asset: intent.asset,
+      slotKey: intent.slotKey,
+      combination: intent.combination,
+      primaryVenue: intent.primaryVenue,
+      hedgeVenue: intent.hedgeVenue,
+      stage,
+      reason,
       ...extraPayload,
     },
     createdAt: now,

@@ -268,12 +268,18 @@ function PanelMessage({ title, message, tone = "default" }: { title: string; mes
 }
 
 function isErrorIntent(intent: OrderIntent) {
-  return Boolean(intent.failureReason) || ["failed", "canceled", "unwound", "unwind_required"].includes(intent.status);
+  return (
+    Boolean(intent.failureReason) ||
+    ["failed", "canceled", "unwound", "unwind_required", "truth_pending", "manual_required"].includes(intent.status)
+  );
 }
 
 function getIntentTone(intent: OrderIntent): V2Tone {
   if (intent.status === "hedged" || intent.status === "settled") {
     return "emerald";
+  }
+  if (intent.status === "rescue_hedge") {
+    return "amber";
   }
   if (isErrorIntent(intent)) {
     return "rose";

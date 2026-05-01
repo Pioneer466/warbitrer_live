@@ -1235,6 +1235,24 @@ describe("recovery option evaluation", () => {
     ).toMatchObject({ decision: "rescue_hedge_partial" });
   });
 
+  it("rejects partial rescue hedges when partial rescue is disabled", () => {
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: 0.2,
+        rescueHedgeSize: 5,
+        unhedgedSize: 9,
+        unwindLossUsd: 0.4,
+        holdExpectedLossUsd: null,
+        holdWorstCaseLossUsd: null,
+        hedgeRescueMaxLossUsd: 1,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 400,
+        holdWindowSeconds: 45,
+        allowPartial: false,
+      }),
+    ).toMatchObject({ decision: "unwind" });
+  });
+
   it("chooses hold near settlement when EV and worst case fit the cap", () => {
     expect(
       evaluateExposureRecoveryOptions({

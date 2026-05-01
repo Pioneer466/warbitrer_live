@@ -103,6 +103,34 @@ describe("telegram notification mapping", () => {
     expect(notification?.message).toContain("stage primary_unwind_failed");
   });
 
+  it("maps a recoverable execution incident to a telegram notification", () => {
+    const event: RunEvent = {
+      asset: "btc",
+      level: "error",
+      eventType: "intent.incident",
+      message: "Incident for intent intent-3",
+      payload: {
+        intentId: "intent-3",
+        asset: "btc",
+        slotKey: "btc:1777000000000",
+        combination: "POLY_UP_KALSHI_NO",
+        stage: "truth_pending",
+        reason: "Polymarket hedge no-fill awaiting authoritative zero-fill truth",
+      },
+      createdAt: 1_777_000_000_000,
+    };
+
+    const notification = buildQueuedNotificationFromRunEvent(event);
+
+    expect(notification).toMatchObject({
+      asset: "btc",
+      kind: "incident",
+      dedupeKey: "incident:intent-3:truth_pending",
+    });
+    expect(notification?.message).toContain("INCIDENT");
+    expect(notification?.message).toContain("stage truth_pending");
+  });
+
   it("ignores unrelated run events", () => {
     const event: RunEvent = {
       asset: "btc",

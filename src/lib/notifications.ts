@@ -63,6 +63,18 @@ export function buildQueuedNotificationFromRunEvent(event: RunEvent): QueuedNoti
     };
   }
 
+  if (event.eventType === "intent.incident") {
+    const stage = typeof payload.stage === "string" ? payload.stage : "incident";
+    return {
+      asset: event.asset ?? null,
+      kind: "incident",
+      dedupeKey: `incident:${intentId}:${stage}`,
+      message: buildIncidentMessage(event),
+      payload,
+      createdAt: event.createdAt,
+    };
+  }
+
   return null;
 }
 
@@ -222,6 +234,23 @@ function buildManualInterventionMessage(event: RunEvent) {
     `${formatDateTime(event.createdAt)} · ${slotKey}`,
     `stage ${stage}`,
     failureReason,
+  ].join("\n");
+}
+
+function buildIncidentMessage(event: RunEvent) {
+  const payload = event.payload as Record<string, unknown>;
+  const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
+  const combination = typeof payload.combination === "string" ? payload.combination : "--";
+  const slotKey = typeof payload.slotKey === "string" ? payload.slotKey : "--";
+  const reason = typeof payload.reason === "string" ? payload.reason : event.message;
+  const stage = typeof payload.stage === "string" ? payload.stage : "--";
+
+  return [
+    "INCIDENT",
+    `${asset} · ${combination}`,
+    `${formatDateTime(event.createdAt)} · ${slotKey}`,
+    `stage ${stage}`,
+    reason,
   ].join("\n");
 }
 

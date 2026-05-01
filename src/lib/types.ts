@@ -14,8 +14,11 @@ export type OrderIntentStatus =
   | "executing_primary"
   | "primary_filled"
   | "hedging"
+  | "truth_pending"
+  | "rescue_hedge"
   | "hedged"
   | "unwind_required"
+  | "manual_required"
   | "unwound"
   | "settled"
   | "failed"
@@ -46,7 +49,7 @@ export type CircuitBreakerReason =
   | "risk_limit";
 export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" | "failed";
 export type RunEventLevel = "info" | "warn" | "error";
-export type NotificationKind = "trade_live" | "manual_intervention";
+export type NotificationKind = "trade_live" | "manual_intervention" | "incident";
 export type NotificationChannel = "telegram";
 export type NotificationDeliveryStatus = "pending" | "sent" | "failed";
 
@@ -388,6 +391,29 @@ export type LiveOrder = {
   createdAt: number;
   updatedAt: number;
   raw: Record<string, unknown>;
+};
+
+export type OrderAttemptStatus = "planned" | "submitted" | "confirmed" | "failed";
+
+export type OrderAttempt = {
+  id: string;
+  asset: MarketAsset;
+  shadow: boolean;
+  intentId: string;
+  legId: string;
+  stage: string;
+  venue: Venue;
+  side: OrderSide;
+  orderType: string;
+  clientOrderId: string;
+  venueOrderId: string | null;
+  status: OrderAttemptStatus;
+  truthStatus: string | null;
+  request: Record<string, unknown>;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type LiveFill = {

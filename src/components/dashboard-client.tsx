@@ -393,8 +393,18 @@ function getIntentTone(intent: OrderIntent): V2Tone {
   if (intent.status === "hedged" || intent.status === "settled") {
     return "emerald";
   }
-  if (intent.status === "failed" || intent.status === "unwind_required" || intent.status === "unwound" || intent.status === "canceled") {
+  if (
+    intent.status === "failed" ||
+    intent.status === "unwind_required" ||
+    intent.status === "truth_pending" ||
+    intent.status === "manual_required" ||
+    intent.status === "unwound" ||
+    intent.status === "canceled"
+  ) {
     return "rose";
+  }
+  if (intent.status === "rescue_hedge") {
+    return "amber";
   }
   if (intent.status === "skipped") {
     return "indigo";

@@ -21,6 +21,7 @@ import type {
   LiveOrder,
   MarketSlot,
   NotificationDelivery,
+  OrderAttempt,
   OrderIntent,
   PairCombination,
   PnlSnapshot,
@@ -178,6 +179,33 @@ async function bootstrapDatabase(pool: Pool) {
       ON venue_orders(venue, venue_order_id);
     CREATE INDEX IF NOT EXISTS venue_orders_updated_idx
       ON venue_orders(updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS order_attempts (
+      id TEXT PRIMARY KEY,
+      asset TEXT NOT NULL,
+      shadow BOOLEAN NOT NULL DEFAULT false,
+      intent_id TEXT NOT NULL REFERENCES order_intents(id) ON DELETE CASCADE,
+      leg_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      side TEXT NOT NULL,
+      order_type TEXT NOT NULL,
+      client_order_id TEXT NOT NULL,
+      venue_order_id TEXT,
+      status TEXT NOT NULL,
+      truth_status TEXT,
+      request_json JSONB NOT NULL,
+      result_json JSONB,
+      error TEXT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS order_attempts_client_idx
+      ON order_attempts(venue, client_order_id);
+    CREATE INDEX IF NOT EXISTS order_attempts_intent_idx
+      ON order_attempts(intent_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS order_attempts_asset_updated_idx
+      ON order_attempts(asset, updated_at DESC);
 
     CREATE TABLE IF NOT EXISTS fills (
       id TEXT PRIMARY KEY,
@@ -1238,6 +1266,62 @@ export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
       JSON.stringify(order.raw),
     ],
   );
+}
+
+export async function upsertOrderAttempt(pool: Pool, attempt: OrderAttempt) {
+  await pool.query(
+    `
+      INSERT INTO order_attempts (
+        id, asset, shadow, intent_id, leg_id, stage, venue, side, order_type, client_order_id,
+        venue_order_id, status, truth_status, request_json, result_json, error, created_at, updated_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+        $11, $12, $13, $14::jsonb, $15::jsonb, $16, $17, $18
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        venue_order_id = EXCLUDED.venue_order_id,
+        status = EXCLUDED.status,
+        truth_status = EXCLUDED.truth_status,
+        result_json = EXCLUDED.result_json,
+        error = EXCLUDED.error,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [
+      attempt.id,
+      attempt.asset,
+      attempt.shadow,
+      attempt.intentId,
+      attempt.legId,
+      attempt.stage,
+      attempt.venue,
+      attempt.side,
+      attempt.orderType,
+      attempt.clientOrderId,
+      attempt.venueOrderId,
+      attempt.status,
+      attempt.truthStatus,
+      JSON.stringify(attempt.request),
+      attempt.result === null ? null : JSON.stringify(attempt.result),
+      attempt.error,
+      attempt.createdAt,
+      attempt.updatedAt,
+    ],
+  );
+}
+
+export async function listRecentOrderAttempts(pool: Pool, limit = 100, asset?: MarketAsset): Promise<OrderAttempt[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM order_attempts
+      ${asset ? "WHERE asset = $2" : ""}
+      ORDER BY updated_at DESC
+      LIMIT $1
+    `,
+    asset ? [limit, asset] : [limit],
+  );
+  return result.rows.map(mapOrderAttemptRow);
 }
 
 export async function listRecentVenueOrders(pool: Pool, limit = 50, asset?: MarketAsset): Promise<LiveOrder[]> {
@@ -2368,6 +2452,29 @@ function mapVenueOrderRow(row: any): LiveOrder {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     raw: row.raw_json ?? {},
+  };
+}
+
+function mapOrderAttemptRow(row: any): OrderAttempt {
+  return {
+    id: row.id,
+    asset: row.asset,
+    shadow: row.shadow,
+    intentId: row.intent_id,
+    legId: row.leg_id,
+    stage: row.stage,
+    venue: row.venue,
+    side: row.side,
+    orderType: row.order_type,
+    clientOrderId: row.client_order_id,
+    venueOrderId: row.venue_order_id,
+    status: row.status,
+    truthStatus: row.truth_status,
+    request: row.request_json ?? {},
+    result: row.result_json ?? null,
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
