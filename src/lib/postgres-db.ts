@@ -25,6 +25,7 @@ import type {
   PairCombination,
   PnlSnapshot,
   PositionSnapshot,
+  ReadinessCheck,
   RunEvent,
   StablePnlChange,
   StrategyConfig,
@@ -2058,6 +2059,127 @@ export async function tryWithGlobalLiveExecutionLock<T>(
   }
 }
 
+const CIRCUIT_BREAKER_READINESS_KEYS = new Set([
+  "circuit-breaker",
+  "circuit-breaker-cooldown",
+  "circuit-breaker-degraded",
+]);
+
+function reconcileCircuitBreakerReadiness(
+  workerState: WorkerState,
+  relevantBreakers: CircuitBreaker[],
+  now: number,
+): WorkerState {
+  const nonBreakerReadiness = workerState.readiness.filter((check) => !CIRCUIT_BREAKER_READINESS_KEYS.has(check.key));
+  const readiness = [
+    ...nonBreakerReadiness,
+    ...buildCircuitBreakerReadinessChecks(relevantBreakers.filter((breaker) => breaker.active), now),
+  ];
+
+  return {
+    ...workerState,
+    readiness,
+    readinessStatus: deriveReadinessStatus(readiness),
+  };
+}
+
+function buildCircuitBreakerReadinessChecks(activeBreakers: CircuitBreaker[], now: number): ReadinessCheck[] {
+  const blockingBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "blocked");
+  const cooldownBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "cooldown");
+  const degradedBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "degraded");
+  const checks: ReadinessCheck[] = [];
+
+  if (blockingBreakers.length > 0) {
+    checks.push({
+      key: "circuit-breaker",
+      label: "Circuit breaker",
+      status: "blocked",
+      details: blockingBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      checkedAt: now,
+    });
+  }
+  if (cooldownBreakers.length > 0) {
+    checks.push({
+      key: "circuit-breaker-cooldown",
+      label: "Circuit breaker cooldown",
+      status: "cooldown",
+      details: cooldownBreakers.map((breaker) => describeCircuitBreakerForReadiness(breaker, now)).join(" | "),
+      checkedAt: now,
+    });
+  }
+  if (degradedBreakers.length > 0) {
+    checks.push({
+      key: "circuit-breaker-degraded",
+      label: "Circuit breaker degraded",
+      status: "degraded",
+      details: degradedBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      checkedAt: now,
+    });
+  }
+
+  return checks;
+}
+
+function deriveReadinessStatus(readiness: ReadinessCheck[]): WorkerState["readinessStatus"] {
+  if (readiness.some((check) => check.status === "blocked")) {
+    return "blocked";
+  }
+  if (readiness.some((check) => check.status === "cooldown")) {
+    return "cooldown";
+  }
+  if (readiness.some((check) => check.status === "degraded")) {
+    return "degraded";
+  }
+  return "ready";
+}
+
+function getCircuitBreakerReadinessStatus(
+  breaker: Pick<CircuitBreaker, "active" | "payload" | "reason">,
+  now: number,
+): WorkerState["readinessStatus"] {
+  if (!breaker.active) {
+    return "ready";
+  }
+
+  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
+  if (isSlotExecutionBreakerReason(breaker.reason)) {
+    if (getPayloadBoolean(breaker.payload, "requiresManualClear")) {
+      return "blocked";
+    }
+    if (cooldownUntil !== null && now < cooldownUntil) {
+      return "cooldown";
+    }
+    return "degraded";
+  }
+
+  if (cooldownUntil !== null && now < cooldownUntil) {
+    return "cooldown";
+  }
+
+  return "blocked";
+}
+
+function isSlotExecutionBreakerReason(reason: CircuitBreaker["reason"]): reason is "hedge_failure" | "primary_no_fill" {
+  return reason === "hedge_failure" || reason === "primary_no_fill";
+}
+
+function describeCircuitBreakerForReadiness(breaker: Pick<CircuitBreaker, "key" | "payload" | "reason">, now: number) {
+  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
+  const remainingMs = cooldownUntil === null ? null : Math.max(0, cooldownUntil - now);
+  return remainingMs === null
+    ? `${breaker.key}:${breaker.reason}`
+    : `${breaker.key}:${breaker.reason}:retry_in=${remainingMs}ms`;
+}
+
+function getPayloadBoolean(payload: Record<string, unknown> | null, key: string) {
+  return payload?.[key] === true;
+}
+
+function getPayloadNumber(payload: Record<string, unknown> | null, key: string) {
+  const value = payload?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
   const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.asset, slot.key);
   const allBreakers = await listCircuitBreakers(pool);
@@ -2073,11 +2195,12 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   const [baselineEquityUsd, peakEquityUsd] = pnl
     ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
     : [null, null];
+  const workerState = await getWorkerState(pool, slot.asset);
   return {
     fetchedAt: Date.now(),
     slot,
     config: await getStrategyConfig(pool, slot.asset),
-    workerState: await getWorkerState(pool, slot.asset),
+    workerState: reconcileCircuitBreakerReadiness(workerState, relevantBreakers, Date.now()),
     latestSnapshot,
     feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
     opportunities: latestSnapshot?.opportunities ?? [],
@@ -2107,18 +2230,25 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
     listPositions(pool),
   ]);
   const snapshots = await Promise.all(slots.map((slot) => getLatestOpportunitySnapshot(pool, slot.asset, slot.key)));
+  const now = Date.now();
 
   return {
-    fetchedAt: Date.now(),
+    fetchedAt: now,
     assets: slots.map((slot, index) => {
       const latestSnapshot = snapshots[index];
       const assetBreakerKey = `asset:${slot.asset}`;
       const slotBreakerKey = `slot:${slot.key}`;
+      const relevantBreakers = breakers.filter(
+        (breaker) =>
+          breaker.key === "global" ||
+          breaker.key === assetBreakerKey ||
+          breaker.key === slotBreakerKey,
+      );
       return {
         asset: slot.asset,
         slot,
         config: configs[slot.asset],
-        workerState: workerStates[slot.asset],
+        workerState: reconcileCircuitBreakerReadiness(workerStates[slot.asset], relevantBreakers, now),
         latestSnapshot,
         bestOpportunity:
           latestSnapshot?.opportunities
@@ -2128,11 +2258,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
                 (left.grossCost ?? Number.POSITIVE_INFINITY) - (right.grossCost ?? Number.POSITIVE_INFINITY),
             )[0] ?? null,
         feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
-        activeBreakers: breakers.filter(
-          (breaker) =>
-            breaker.active &&
-            (breaker.key === "global" || breaker.key === assetBreakerKey || breaker.key === slotBreakerKey),
-        ),
+        activeBreakers: relevantBreakers.filter((breaker) => breaker.active),
       };
     }),
     openPositionsCount: positions.filter(isRiskActivePosition).length,
