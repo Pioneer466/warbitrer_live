@@ -29,6 +29,7 @@ import {
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
   shouldKeepSlotExecutionBreakerActive,
+  shouldPauseExecutionForBreaker,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatHedgeOrderAsComplete,
   shouldRetryTerminalZeroFillHedge,
@@ -1114,6 +1115,20 @@ describe("slot execution breakers", () => {
 
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 150, new Set(["btc:slot-1"]), new Set())).toBe(true);
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 250, new Set(["btc:slot-1"]), new Set())).toBe(false);
+  });
+
+  it("pauses live execution while any global breaker remains active", () => {
+    const breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason"> = {
+      key: "global",
+      active: true,
+      reason: "hedge_failure",
+      payload: {
+        cooldownUntil: 200,
+      },
+    };
+
+    expect(shouldPauseExecutionForBreaker(breaker, 150, "btc", "btc:slot-1")).toBe(true);
+    expect(shouldPauseExecutionForBreaker(breaker, 250, "btc", "btc:slot-1")).toBe(true);
   });
 
   it("keeps a manual-clear global hedge breaker active until an operator clears it", () => {

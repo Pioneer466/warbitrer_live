@@ -3101,43 +3101,62 @@ async function holdPolymarketHedgeFailurePendingTruth(
   stage: string,
   payload: Record<string, unknown>,
 ) {
+  const pendingTruthReason = "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked";
+  const breakerKey = buildSlotBreakerKey(intent.slotKey);
+  const existingBreaker = (await readCircuitBreakers()).find((breaker) => breaker.key === breakerKey) ?? null;
+  const alreadyPendingSameOrder =
+    intent.status === "truth_pending" &&
+    intent.failureReason === pendingTruthReason &&
+    (hedgeOrder === null || hedgeLeg.venueOrderId === hedgeOrder.venueOrderId);
+  const existingPendingTruthBreaker =
+    existingBreaker?.active === true &&
+    existingBreaker.reason === "hedge_failure" &&
+    existingBreaker.payload?.intentId === intent.id &&
+    existingBreaker.payload?.stage === "polymarket_hedge_no_fill_truth_pending";
+
   let currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
   currentIntent = markIntentStatus(
     currentIntent,
     "truth_pending",
     now,
-    "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked",
+    pendingTruthReason,
   );
   await writeOrderIntent(currentIntent);
-  await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
-    stage,
-    ...payload,
-  });
-  await writeIntentIncidentRunEvent(
-    currentIntent,
-    now,
-    "truth_pending",
-    "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked",
-    {
-      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+
+  if (!alreadyPendingSameOrder || !existingPendingTruthBreaker) {
+    await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
+      stage,
       ...payload,
-    },
-  );
-  await writeCircuitBreaker({
-    key: buildSlotBreakerKey(currentIntent.slotKey),
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: currentIntent.id,
-      slotKey: currentIntent.slotKey,
-      venue: currentIntent.hedgeVenue,
-      stage: "polymarket_hedge_no_fill_truth_pending",
-      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-      cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
-      ...payload,
-    },
-  });
+    });
+    await writeIntentIncidentRunEvent(
+      currentIntent,
+      now,
+      "truth_pending",
+      pendingTruthReason,
+      {
+        hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+        ...payload,
+      },
+    );
+  }
+
+  if (!existingPendingTruthBreaker) {
+    await writeCircuitBreaker({
+      key: breakerKey,
+      active: true,
+      reason: "hedge_failure",
+      triggeredAt: now,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        venue: currentIntent.hedgeVenue,
+        stage: "polymarket_hedge_no_fill_truth_pending",
+        hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+        cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
+        ...payload,
+      },
+    });
+  }
   return currentIntent;
 }
 
@@ -8641,6 +8660,10 @@ function getCircuitBreakerReadinessStatus(
       return "cooldown";
     }
 
+    if (breaker.key === "global") {
+      return "blocked";
+    }
+
     return "degraded";
   }
 
@@ -8662,7 +8685,7 @@ function describeCircuitBreakerForReadiness(
     : `${breaker.key}:${breaker.reason}:retry_in=${remainingMs}ms`;
 }
 
-function shouldPauseExecutionForBreaker(
+export function shouldPauseExecutionForBreaker(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
   asset: MarketAsset,
@@ -8670,6 +8693,10 @@ function shouldPauseExecutionForBreaker(
 ) {
   if (!isBreakerRelevantToSlot(breaker, asset, slotKey)) {
     return false;
+  }
+
+  if (breaker.active && breaker.key === "global") {
+    return true;
   }
 
   const status = getCircuitBreakerReadinessStatus(breaker, now);

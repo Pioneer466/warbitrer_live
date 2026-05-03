@@ -34,6 +34,7 @@ export function PortfolioClient() {
 
   const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers } = portfolio.data;
   const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
+  const nonGlobalBreakers = activeBreakers.filter((breaker) => breaker.key !== "global");
   const globalBreakerActive = globalBreaker?.active === true;
   const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
@@ -112,6 +113,7 @@ export function PortfolioClient() {
             {globalBreakerMessage}
           </div>
         ) : null}
+        {nonGlobalBreakers.length > 0 ? <ActiveBreakerList breakers={nonGlobalBreakers} /> : null}
 
         <Surface glow>
           <div className="grid border-b border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-4">
@@ -161,6 +163,23 @@ export function PortfolioClient() {
           {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
         </Surface>
       </section>
+    </div>
+  );
+}
+
+function ActiveBreakerList({ breakers }: { breakers: PortfolioDashboardResponse["activeBreakers"] }) {
+  return (
+    <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.22)] bg-[rgba(232,80,106,0.06)] px-5 py-4">
+      <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--wa-rose)]">
+        Breakers slot / asset actifs
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {breakers.map((breaker) => (
+          <Chip key={breaker.key} tone="rose">
+            {breaker.key} · {breaker.reason ?? "unknown"}
+          </Chip>
+        ))}
+      </div>
     </div>
   );
 }

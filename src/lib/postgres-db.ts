@@ -2348,7 +2348,7 @@ function deriveReadinessStatus(readiness: ReadinessCheck[]): WorkerState["readin
 }
 
 function getCircuitBreakerReadinessStatus(
-  breaker: Pick<CircuitBreaker, "active" | "payload" | "reason">,
+  breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
 ): WorkerState["readinessStatus"] {
   if (!breaker.active) {
@@ -2362,6 +2362,9 @@ function getCircuitBreakerReadinessStatus(
     }
     if (cooldownUntil !== null && now < cooldownUntil) {
       return "cooldown";
+    }
+    if (breaker.key === "global") {
+      return "blocked";
     }
     return "degraded";
   }
