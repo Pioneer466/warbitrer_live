@@ -46,7 +46,11 @@ export type CircuitBreakerReason =
   | "primary_no_fill"
   | "readiness_failed"
   | "venue_error"
-  | "risk_limit";
+  | "risk_limit"
+  | "daily_loss_cap"
+  | "market_degraded"
+  | "rpc_unhealthy";
+export type PrimarySelectionMode = "kalshi_only" | "shadow" | "dynamic";
 export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" | "failed";
 export type RunEventLevel = "info" | "warn" | "error";
 export type NotificationKind = "trade_live" | "manual_intervention" | "incident";
@@ -201,6 +205,13 @@ export type StrategyConfig = {
   pollingIntervalMs: number;
   minOrderSize: number;
   maxSlippageBps: number;
+  primarySelectionMode: PrimarySelectionMode;
+  minimumEntryDepthCoverageRatio: number;
+  adaptiveSlippageTightBps: number;
+  adaptiveSlippageDefaultBps: number;
+  adaptiveSlippageThinBps: number;
+  dailyLossCapEnabled: boolean;
+  dailyLossHardCapUsd: number;
   immediateOrderConfirmationTimeoutMs: number;
   executionPriceBuffer: number;
   kalshiDepthHeadroomContracts: number;
@@ -289,6 +300,7 @@ export type LiveOpportunity = {
   worstCaseProfitUsd: number | null;
   eligible: boolean;
   primaryVenue: Venue | null;
+  primarySelection: PrimarySelectionAudit | null;
   improvementFromLastEntry: number | null;
   estimatedFeesUsd: number;
   projectedNetProfitUsd: number | null;
@@ -308,6 +320,19 @@ export type LiveOpportunity = {
   chainlinkLivePriceUsd: number | null;
   observedSlotOpenPriceUsd: number | null;
   kalshiTargetPriceUsd: number | null;
+};
+
+export type PrimarySelectionAudit = {
+  mode: PrimarySelectionMode;
+  livePrimaryVenue: Venue | null;
+  recommendedPrimaryVenue: Venue | null;
+  polymarketScore: number | null;
+  kalshiScore: number | null;
+  polymarketCoveredSize: number | null;
+  kalshiCoveredSize: number | null;
+  polymarketCoverageRatio: number | null;
+  kalshiCoverageRatio: number | null;
+  reason: string | null;
 };
 
 export type OpportunitySnapshot = {
@@ -484,6 +509,59 @@ export type PnlSnapshot = {
   venueBreakdown: VenueBalance[];
 };
 
+export type MarketFillQualityOutcome =
+  | "full_fill"
+  | "partial_fill"
+  | "no_fill"
+  | "rescue"
+  | "unwind"
+  | "manual_required";
+
+export type MarketFillQualityEvent = {
+  id: string;
+  asset: MarketAsset;
+  slotKey: string;
+  intentId: string | null;
+  combination: PairCombination | null;
+  primaryVenue: Venue | null;
+  hedgeVenue: Venue | null;
+  outcome: MarketFillQualityOutcome;
+  stage: string;
+  slippageBps: number | null;
+  payload: Record<string, unknown>;
+  createdAt: number;
+};
+
+export type FillQualityBucket = {
+  attempts: number;
+  fullFills: number;
+  partialFills: number;
+  noFills: number;
+  rescues: number;
+  unwinds: number;
+  manualRequired: number;
+  fullRate: number;
+  partialRate: number;
+  noFillRate: number;
+  rescueRate: number;
+  avgSlippageBps: number | null;
+};
+
+export type FillQualitySummary = {
+  last24h: FillQualityBucket;
+  perAsset: Array<{
+    asset: MarketAsset;
+    bucket: FillQualityBucket;
+  }>;
+  blacklisted: Array<{
+    key: CircuitBreakerKey;
+    asset: MarketAsset | null;
+    slotKey: string | null;
+    until: number | null;
+    reason: CircuitBreakerReason | null;
+  }>;
+};
+
 export type StablePnlChange = {
   intentId: string;
   asset: MarketAsset;
@@ -636,6 +714,7 @@ export type DashboardResponse = {
   positions: PositionSnapshot[];
   pnl: PnlSnapshot | null;
   stablePnlChanges: StablePnlChange[];
+  fillQuality: FillQualitySummary;
   bridgeTransfers: BridgeTransfer[];
   circuitBreakers: CircuitBreaker[];
   runEvents: RunEvent[];
@@ -659,6 +738,7 @@ export type PortfolioDashboardResponse = {
   venueBalances: VenueBalance[];
   pnl: PnlSnapshot | null;
   stablePnlChanges: StablePnlChange[];
+  fillQuality: FillQualitySummary;
   activeBreakers: CircuitBreaker[];
 };
 

@@ -63,5 +63,9 @@ describe("postgres bootstrap strategy configs", () => {
     expect(configs.bnb.shadowMode).toBe(true);
     expect(configs.hype.enableTrading).toBe(true);
     expect(configs.hype.shadowMode).toBe(true);
+    expect(configs.btc.primarySelectionMode).toBe("shadow");
+    expect(configs.btc.dailyLossCapEnabled).toBe(true);
+    expect(configs.btc.dailyLossHardCapUsd).toBe(20);
+    expect(configs.btc.minimumEntryDepthCoverageRatio).toBe(0.5);
   });
 });

@@ -10,6 +10,7 @@ import {
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
+import { choosePrimaryVenueForOpportunity } from "@/lib/primary-selection";
 import type {
   KalshiQuote,
   LiveOpportunity,
@@ -346,7 +347,37 @@ function buildSignal({
     reasons.push(mismatchGuardReason);
   }
 
-  const primaryVenue = polyDepth === null || kalshiDepth === null ? null : choosePrimaryVenue();
+  const legs: LiveOpportunity["legs"] = [
+    {
+      venue: "polymarket",
+      outcome: polyOutcome,
+      marketRef: polymarket.ref.conditionId ?? polymarket.ref.id,
+      tokenId: polyTokenId,
+      price: polyPrice,
+      depth: polyDepth,
+      targetNotionalUsd: polyTargetNotionalUsd,
+      size: polyUnits,
+      tickSize: polymarket.outcomes[polyOutcome === "UP" ? "up" : "down"].tickSize,
+      minOrderSize: polyMinOrderSize,
+      feeEstimateUsd: balancedSizing.polyFeeUsd,
+    },
+    {
+      venue: "kalshi",
+      outcome: kalshiOutcome,
+      marketRef: kalshi.ref.id,
+      price: kalshiPrice,
+      depth: sizingKalshiDepth,
+      targetNotionalUsd: kalshiTargetNotionalUsd,
+      size: kalshiUnits,
+      tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,
+      minOrderSize: kalshiMinOrderSize,
+      feeEstimateUsd: balancedSizing.kalshiFeeUsd,
+    },
+  ];
+  const primarySelection =
+    polyDepth === null || kalshiDepth === null
+      ? { primaryVenue: null, audit: null }
+      : choosePrimaryVenueForOpportunity({ legs }, settings.primarySelectionMode);
 
   return {
     asset: polymarket.ref.asset,
@@ -360,7 +391,8 @@ function buildSignal({
     thresholdMet: grossCost !== null ? grossCost <= settings.grossEntryThreshold : false,
     worstCaseProfitUsd,
     eligible: reasons.length === 0,
-    primaryVenue,
+    primaryVenue: primarySelection.primaryVenue,
+    primarySelection: primarySelection.audit,
     improvementFromLastEntry,
     estimatedFeesUsd: round4(estimatedFees),
     projectedNetProfitUsd,
@@ -379,38 +411,8 @@ function buildSignal({
     chainlinkLivePriceUsd: mismatchGuard.chainlinkLivePriceUsd,
     observedSlotOpenPriceUsd: mismatchGuard.observedSlotOpenPriceUsd,
     kalshiTargetPriceUsd: mismatchGuard.kalshiTargetPriceUsd,
-    legs: [
-      {
-        venue: "polymarket",
-        outcome: polyOutcome,
-        marketRef: polymarket.ref.conditionId ?? polymarket.ref.id,
-        tokenId: polyTokenId,
-        price: polyPrice,
-        depth: polyDepth,
-        targetNotionalUsd: polyTargetNotionalUsd,
-        size: polyUnits,
-        tickSize: polymarket.outcomes[polyOutcome === "UP" ? "up" : "down"].tickSize,
-        minOrderSize: polyMinOrderSize,
-        feeEstimateUsd: balancedSizing.polyFeeUsd,
-      },
-      {
-        venue: "kalshi",
-        outcome: kalshiOutcome,
-        marketRef: kalshi.ref.id,
-        price: kalshiPrice,
-        depth: sizingKalshiDepth,
-        targetNotionalUsd: kalshiTargetNotionalUsd,
-        size: kalshiUnits,
-        tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,
-        minOrderSize: kalshiMinOrderSize,
-        feeEstimateUsd: balancedSizing.kalshiFeeUsd,
-      },
-    ],
+    legs,
   };
-}
-
-function choosePrimaryVenue(): Venue {
-  return "kalshi";
 }
 
 function outcomeMidPrice(outcome: OutcomeQuote): number | null {

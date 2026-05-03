@@ -61,12 +61,12 @@ function parseBreakerScope(key: CircuitBreakerKey) {
     return { type: "asset" as const, asset: isMarketAsset(asset) ? asset : null, slotKey: null };
   }
 
-  const [, asset, ...slotParts] = key.split(":");
-  const slotKey = slotParts.join(":") || null;
+  const rest = key.slice("slot:".length);
+  const [asset] = rest.split(":");
   return {
     type: "slot" as const,
     asset: asset && isMarketAsset(asset) ? asset : null,
-    slotKey,
+    slotKey: rest || null,
   };
 }
 

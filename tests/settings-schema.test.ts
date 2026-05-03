@@ -11,6 +11,13 @@ describe("settings schema", () => {
     expect(settings.minProjectedNetProfitUsd).toBe(0.25);
     expect(settings.minProjectedNetReturn).toBe(0.02);
     expect(settings.minWorstCaseProfitUsd).toBe(0.25);
+    expect(settings.primarySelectionMode).toBe("shadow");
+    expect(settings.minimumEntryDepthCoverageRatio).toBe(0.5);
+    expect(settings.adaptiveSlippageTightBps).toBe(15);
+    expect(settings.adaptiveSlippageDefaultBps).toBe(30);
+    expect(settings.adaptiveSlippageThinBps).toBe(60);
+    expect(settings.dailyLossCapEnabled).toBe(true);
+    expect(settings.dailyLossHardCapUsd).toBe(20);
     expect(settings.pollingIntervalMs).toBe(1000);
     expect(settings.kalshiDepthHeadroomContracts).toBe(2);
     expect(settings.kalshiPrimaryDepthSafetyFactor).toBe(0.7);

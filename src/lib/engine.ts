@@ -85,7 +85,9 @@ import {
   readRecentVenueOrders,
   readSettings,
   readSettingsMap,
+  readStableRealizedPnlSince,
   readVenueBalances,
+  readDegradedMarketFillQualityCounts,
   replaceVenuePositions,
   runDatabaseMaintenance,
   tryWithGlobalLiveExecutionLock,
@@ -93,6 +95,7 @@ import {
   writeCircuitBreaker,
   writeExecutionCandidate,
   writeFill,
+  writeMarketFillQualityEvent,
   writeOrderAttempt,
   writeOrderIntent,
   writePnlSnapshot,
@@ -110,6 +113,7 @@ import type {
   LiveFill,
   LiveOpportunity,
   LiveOrder,
+  MarketFillQualityOutcome,
   MarketAsset,
   MarketSlot,
   OpportunitySnapshot,
@@ -155,6 +159,9 @@ const RECONCILE_SLOW_LOG_THRESHOLD_MS = 5_000;
 const SETTLEMENT_RECONCILE_INTERVAL_MS = 30_000;
 const PNL_RECONCILE_INTERVAL_MS = 15_000;
 const DATABASE_MAINTENANCE_RECONCILE_INTERVAL_MS = 60_000;
+const MARKET_DEGRADED_WINDOW_MS = 30 * 60 * 1000;
+const MARKET_DEGRADED_THRESHOLD = 3;
+const MARKET_DEGRADED_COOLDOWN_MS = 30 * 60 * 1000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -822,6 +829,7 @@ export function createExecutionCoordinator(
             payload: {
               slotKey: intent.slotKey,
               primaryVenue: intent.primaryVenue,
+              primarySelection: opportunity.primarySelection ?? null,
             },
             createdAt: now,
           });
@@ -946,7 +954,21 @@ export function createExecutionCoordinator(
             }
           })),
         );
+
+        reconcileErrors.push(
+          ...(await runReconcileStep("enforce_daily_loss_cap", now, async () => {
+            if (asset === "btc") {
+              await enforceDailyLossCap(now);
+            }
+          })),
+        );
       }
+
+      reconcileErrors.push(
+        ...(await runReconcileStep("evaluate_market_blacklist", now, async () => {
+          await evaluateMarketDegradedBreakers(asset, now);
+        })),
+      );
 
       if (shouldRunReconcileCadence(asset, "database_maintenance", now, DATABASE_MAINTENANCE_RECONCILE_INTERVAL_MS)) {
         reconcileErrors.push(
@@ -1433,14 +1455,34 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
 }
 
 async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
-  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
-  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  let primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  let hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {
     throw new Error(`Intent ${intent.id} missing legs`);
   }
 
   let currentIntent = markIntentStatus(intent, "executing_primary", now);
   await writeOrderIntent(currentIntent);
+  const entryDepthPreflight = await preflightEntryDepthAndAdjustIntent(currentIntent, slot, settings, now);
+  if (entryDepthPreflight.status === "skipped") {
+    return skipIntentBeforeSubmission(
+      currentIntent,
+      Date.now(),
+      entryDepthPreflight.reason,
+      "insufficient_depth",
+      { entryDepthPreflight },
+    );
+  }
+  if (entryDepthPreflight.intent !== currentIntent) {
+    currentIntent = entryDepthPreflight.intent;
+    await writeOrderIntent(currentIntent);
+    primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+    hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg) {
+      throw new Error(`Intent ${currentIntent.id} missing legs after entry depth preflight`);
+    }
+  }
+  const primaryMaxSlippageBps = entryDepthPreflight.maxSlippageBps;
 
   const primaryClipPlan =
     currentIntent.primaryVenue === "kalshi"
@@ -1473,7 +1515,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   let executionPrimaryLeg = primaryLeg;
-  let primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+  let primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, primaryMaxSlippageBps, "IOC", false, {
     kalshiPriceTicksSlippage: currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
   });
   const primaryRestPreflight =
@@ -1515,7 +1557,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       );
     }
     executionPrimaryLeg = resizedPrimaryLeg;
-    primaryRequest = buildVenueOrderRequest(resizedPrimaryLeg, settings.maxSlippageBps, "IOC", false, {
+    primaryRequest = buildVenueOrderRequest(resizedPrimaryLeg, primaryMaxSlippageBps, "IOC", false, {
       kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
     });
     await writeRunEvent({
@@ -1570,6 +1612,8 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         orderPrice: primaryRequest.price,
         requestedSize: primaryRequest.size,
         restPreflight: primaryRestPreflight,
+        entryDepthPreflight,
+        computedMaxSlippageBps: primaryMaxSlippageBps,
       },
       createdAt: now,
     });
@@ -1710,6 +1754,12 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
           kalshiBookRestAtFailure: failureKalshiBookRest,
         },
         createdAt: now,
+      });
+      await recordMarketFillQualityForIntent(currentIntent, "no_fill", "primary_no_fill", now, {
+        venue: currentIntent.primaryVenue,
+        orderId: primaryOrder.venueOrderId,
+        orderStatus: primaryResult.status,
+        softNoFill: Boolean(primaryResult.raw?.softNoFill),
       });
     }
     return currentIntent;
@@ -2572,7 +2622,8 @@ async function executeIncrementalHedgeLeg(
   let currentIntent = markIntentStatus(resizedIntent, "hedging", now);
   await writeOrderIntent(currentIntent);
 
-  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  const hedgeMaxSlippageBps = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, "FOK", false);
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
   try {
@@ -2595,6 +2646,7 @@ async function executeIncrementalHedgeLeg(
         venue: currentIntent.hedgeVenue,
         orderId: hedgeOrder.venueOrderId,
         requestedSize: hedgeRequest.size,
+        computedMaxSlippageBps: hedgeMaxSlippageBps,
         unhedgedPrimarySize,
         clipIndex: clip.clipIndex,
         clipCount: clip.clipCount,
@@ -3228,7 +3280,8 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
   let currentIntent = markIntentStatus(resizedIntent, "hedging", now);
   await writeOrderIntent(currentIntent);
 
-  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, settings.maxSlippageBps, "FOK", false);
+  const hedgeMaxSlippageBps = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, "FOK", false);
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
   try {
@@ -3249,6 +3302,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       payload: {
         intentId: currentIntent.id,
         venue: currentIntent.hedgeVenue,
+        computedMaxSlippageBps: hedgeMaxSlippageBps,
       },
       createdAt: now,
     });
@@ -4743,6 +4797,185 @@ async function preflightKalshiPrimaryRestLiquidity(
   }
 }
 
+async function preflightEntryDepthAndAdjustIntent(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+): Promise<
+  | {
+      status: "ready";
+      intent: OrderIntent;
+      maxSlippageBps: number;
+      primary: EntryDepthCheck;
+      hedge: EntryDepthCheck;
+      resized: boolean;
+    }
+  | {
+      status: "skipped";
+      reason: string;
+      maxSlippageBps: number;
+      primary: EntryDepthCheck | null;
+      hedge: EntryDepthCheck | null;
+    }
+> {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    return {
+      status: "skipped",
+      reason: "Entry depth preflight skipped primary submission (missing leg)",
+      maxSlippageBps: settings.maxSlippageBps,
+      primary: null,
+      hedge: null,
+    };
+  }
+
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const primaryLive = getLiveIntentLegSnapshot(primaryLeg, polymarketState.quote, kalshiState.quote);
+  const hedgeLive = getLiveIntentLegSnapshot(hedgeLeg, polymarketState.quote, kalshiState.quote);
+  const primaryCheck = buildEntryDepthCheck(primaryLeg, primaryLive, settings);
+  const hedgeCheck = buildEntryDepthCheck(hedgeLeg, hedgeLive, settings);
+  const limitingCoverage = Math.min(primaryCheck.coverageRatio, hedgeCheck.coverageRatio);
+  const maxSlippageBps = deriveAdaptiveSlippageBps(limitingCoverage, settings);
+
+  if (
+    primaryCheck.coverageRatio + ORDER_SIZE_TOLERANCE < settings.minimumEntryDepthCoverageRatio ||
+    hedgeCheck.coverageRatio + ORDER_SIZE_TOLERANCE < settings.minimumEntryDepthCoverageRatio
+  ) {
+    return {
+      status: "skipped",
+      reason: `Entry depth preflight skipped primary submission (coverage ${limitingCoverage.toFixed(2)} below ${settings.minimumEntryDepthCoverageRatio.toFixed(2)})`,
+      maxSlippageBps,
+      primary: primaryCheck,
+      hedge: hedgeCheck,
+    };
+  }
+
+  if (limitingCoverage + ORDER_SIZE_TOLERANCE >= 1) {
+    return {
+      status: "ready",
+      intent,
+      maxSlippageBps,
+      primary: primaryCheck,
+      hedge: hedgeCheck,
+      resized: false,
+    };
+  }
+
+  const safePairSize = Math.min(primaryCheck.executableDepth, hedgeCheck.executableDepth);
+  const resizedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now, safePairSize);
+  if (!resizedIntent) {
+    return {
+      status: "skipped",
+      reason: "Entry depth preflight skipped primary submission (depth downsize failed economics or minimum size)",
+      maxSlippageBps,
+      primary: primaryCheck,
+      hedge: hedgeCheck,
+    };
+  }
+
+  return {
+    status: "ready",
+    intent: {
+      ...resizedIntent,
+      maxSlippageBps,
+      entrySizingReason:
+        resizedIntent.entrySizingReason ??
+        `Notionnel réduit par preflight depth: coverage ${(limitingCoverage * 100).toFixed(1)}%`,
+    },
+    maxSlippageBps,
+    primary: primaryCheck,
+    hedge: hedgeCheck,
+    resized: true,
+  };
+}
+
+type EntryDepthCheck = {
+  venue: Venue;
+  requestedSize: number;
+  livePrice: number | null;
+  displayedDepth: number | null;
+  executableDepth: number;
+  coverageRatio: number;
+};
+
+function buildEntryDepthCheck(
+  leg: OrderIntent["legs"][number],
+  liveLeg: ReturnType<typeof getLiveIntentLegSnapshot>,
+  settings: StrategyConfig,
+): EntryDepthCheck {
+  const displayedDepth = liveLeg?.depth ?? null;
+  const executableDepth = deriveEntryExecutableDepth(leg, displayedDepth, settings);
+  return {
+    venue: leg.venue,
+    requestedSize: leg.requestedSize,
+    livePrice: liveLeg?.price ?? null,
+    displayedDepth,
+    executableDepth,
+    coverageRatio: leg.requestedSize > 0 ? executableDepth / leg.requestedSize : 0,
+  };
+}
+
+function deriveEntryExecutableDepth(
+  leg: Pick<OrderIntent["legs"][number], "venue" | "side">,
+  displayedDepth: number | null,
+  settings: Pick<
+    StrategyConfig,
+    "kalshiPrimaryDepthSafetyFactor" | "kalshiDepthHeadroomContracts" | "polymarketHedgeDepthSafetyFactor" | "polymarketHedgeHeadroomShares"
+  >,
+) {
+  if (displayedDepth === null || !Number.isFinite(displayedDepth) || displayedDepth <= 0) {
+    return 0;
+  }
+
+  if (leg.venue === "kalshi") {
+    return getVenueExecutableDepth(
+      "kalshi",
+      applyKalshiPrimaryDepthSafetyFactor(displayedDepth, settings.kalshiPrimaryDepthSafetyFactor),
+      settings.kalshiDepthHeadroomContracts,
+    ) ?? 0;
+  }
+
+  if (leg.venue === "polymarket" && leg.side === "BUY") {
+    return deriveSafePolymarketHedgeDepth(
+      displayedDepth,
+      settings.polymarketHedgeDepthSafetyFactor,
+      settings.polymarketHedgeHeadroomShares,
+    );
+  }
+
+  return displayedDepth;
+}
+
+function deriveAdaptiveSlippageBps(
+  coverageRatio: number,
+  settings: Pick<
+    StrategyConfig,
+    "adaptiveSlippageTightBps" | "adaptiveSlippageDefaultBps" | "adaptiveSlippageThinBps" | "maxSlippageBps"
+  >,
+) {
+  if (coverageRatio >= 2) {
+    return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageTightBps);
+  }
+  if (coverageRatio >= 1) {
+    return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageDefaultBps);
+  }
+  return Math.max(settings.maxSlippageBps, settings.adaptiveSlippageThinBps);
+}
+
+async function resolveAdaptiveSlippageForLiveLeg(
+  leg: OrderIntent["legs"][number],
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+) {
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const liveLeg = getLiveIntentLegSnapshot(leg, polymarketState.quote, kalshiState.quote);
+  const check = buildEntryDepthCheck(leg, liveLeg, settings);
+  return deriveAdaptiveSlippageBps(check.coverageRatio, settings);
+}
+
 async function resizeKalshiPrimaryIntentFromRestPreflight(
   intent: OrderIntent,
   primaryLegId: OrderIntent["legs"][number]["id"],
@@ -5651,6 +5884,10 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         failureReason: describeUnwoundAfterFailure(failureReason),
       });
       await writeOrderIntent(currentIntent);
+      await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_hedge_failure", now, {
+        venue: currentIntent.primaryVenue,
+        unwindOrderId: unwindResult.venueOrderId,
+      });
       await armRecoveredHedgeFailureCooldown(currentIntent, Date.now(), "primary_unwound_after_hedge_failure");
       break;
     }
@@ -5943,6 +6180,7 @@ async function markIntentManualRequired(
     : `${reason}; manual intervention required`;
   const currentIntent = markIntentStatus(intent, "manual_required", now, failureReason);
   await writeOrderIntent(currentIntent);
+  await recordMarketFillQualityForIntent(currentIntent, "manual_required", stage, now, payload);
   await writeManualInterventionRunEvent(currentIntent, now, stage, payload);
   await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, stage);
   return currentIntent;
@@ -5968,6 +6206,11 @@ async function markIntentHedgedAfterEconomicCheck(
       `Hedged pair worst-case PnL ${economics.netWorstCaseUsd.toFixed(4)} USD; manual intervention required`,
     );
     await writeOrderIntent(currentIntent);
+    await recordMarketFillQualityForIntent(currentIntent, "manual_required", "hedged_pair_economic_guard_failed", now, {
+      stage,
+      economics,
+      ...extraPayload,
+    });
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "error",
@@ -5997,6 +6240,13 @@ async function markIntentHedgedAfterEconomicCheck(
 
   const currentIntent = markIntentStatus(intent, "hedged", now, null);
   await writeOrderIntent(currentIntent);
+  await recordMarketFillQualityForIntent(
+    currentIntent,
+    stage.includes("rescue") ? "rescue" : "full_fill",
+    stage,
+    now,
+    extraPayload,
+  );
   return currentIntent;
 }
 
@@ -6691,6 +6941,11 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
             failureReason,
           });
           await writeOrderIntent(currentIntent);
+          await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
+            venue: currentIntent.primaryVenue,
+            exitFilledSize,
+            remainingExposureSize,
+          });
           await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
           continue;
         }
@@ -6718,6 +6973,10 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
           failureReason: "Primary unwound after hedge failure",
         });
         await writeOrderIntent(currentIntent);
+        await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
+          venue: currentIntent.primaryVenue,
+          exitFilledSize,
+        });
         await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
         continue;
       }
@@ -7091,6 +7350,132 @@ async function syncActiveSlotExecutionBreakers(now: number) {
       }
     }
   }
+}
+
+async function enforceDailyLossCap(now: number) {
+  const settingsMap = await readCachedSettingsMap(now);
+  const enabled = Object.values(settingsMap).some((settings) => settings.dailyLossCapEnabled);
+  if (!enabled) {
+    return;
+  }
+  const capUsd = Math.min(...Object.values(settingsMap).map((settings) => settings.dailyLossHardCapUsd));
+  const dayStart = startOfUtcDay(now);
+  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
+  const realizedToday = await readStableRealizedPnlSince(dayStart, dayEnd);
+  const breakers = await readCircuitBreakers();
+  const globalBreaker = breakers.find((breaker) => breaker.key === "global") ?? null;
+
+  if (realizedToday <= -capUsd + ORDER_SIZE_TOLERANCE) {
+    if (globalBreaker?.active && globalBreaker.reason === "daily_loss_cap") {
+      return;
+    }
+    await writeCircuitBreaker({
+      key: "global",
+      active: true,
+      reason: "daily_loss_cap",
+      triggeredAt: now,
+      payload: {
+        realizedToday,
+        thresholdUsd: -capUsd,
+        dayStart,
+        requiresManualClear: false,
+      },
+    });
+    await writeRunEvent({
+      level: "error",
+      eventType: "killswitch.daily_loss_cap",
+      message: `Daily stable realized PnL ${realizedToday.toFixed(2)} breached cap -${capUsd.toFixed(2)}`,
+      payload: {
+        realizedToday,
+        thresholdUsd: -capUsd,
+        dayStart,
+      },
+      createdAt: now,
+    });
+    return;
+  }
+
+  if (
+    globalBreaker?.active &&
+    globalBreaker.reason === "daily_loss_cap" &&
+    typeof globalBreaker.payload?.dayStart === "number" &&
+    globalBreaker.payload.dayStart < dayStart
+  ) {
+    await writeCircuitBreaker({
+      key: "global",
+      active: false,
+      reason: null,
+      triggeredAt: null,
+      payload: null,
+    });
+  }
+}
+
+async function evaluateMarketDegradedBreakers(asset: MarketAsset, now: number) {
+  const since = now - MARKET_DEGRADED_WINDOW_MS;
+  const degradedCounts = await readDegradedMarketFillQualityCounts(since, asset);
+  const breakers = await readCircuitBreakers();
+  const degradedSlotKeys = new Set<string>();
+
+  for (const count of degradedCounts) {
+    if (count.degradedCount < MARKET_DEGRADED_THRESHOLD) {
+      continue;
+    }
+    degradedSlotKeys.add(count.slotKey);
+    const key = buildSlotBreakerKey(count.slotKey);
+    const existing = breakers.find((breaker) => breaker.key === key);
+    const cooldownUntil = now + MARKET_DEGRADED_COOLDOWN_MS;
+    if (existing?.active && existing.reason === "market_degraded") {
+      continue;
+    }
+    await writeCircuitBreaker({
+      key,
+      active: true,
+      reason: "market_degraded",
+      triggeredAt: now,
+      payload: {
+        asset: count.asset,
+        slotKey: count.slotKey,
+        degradedCount: count.degradedCount,
+        windowMs: MARKET_DEGRADED_WINDOW_MS,
+        cooldownUntil,
+      },
+    });
+    await writeRunEvent({
+      asset: count.asset,
+      level: "warn",
+      eventType: "breaker.market_degraded",
+      message: `Slot ${count.slotKey} degraded after ${count.degradedCount} bad fill outcomes`,
+      payload: {
+        slotKey: count.slotKey,
+        degradedCount: count.degradedCount,
+        cooldownUntil,
+      },
+      createdAt: now,
+    });
+  }
+
+  for (const breaker of breakers) {
+    if (!breaker.active || breaker.reason !== "market_degraded" || !breaker.key.startsWith("slot:")) {
+      continue;
+    }
+    const slotKey = breaker.key.slice("slot:".length);
+    const cooldownUntil = typeof breaker.payload?.cooldownUntil === "number" ? breaker.payload.cooldownUntil : null;
+    if (!degradedSlotKeys.has(slotKey) && cooldownUntil !== null && cooldownUntil <= now) {
+      await writeCircuitBreaker({
+        key: breaker.key,
+        active: false,
+        reason: null,
+        triggeredAt: null,
+        payload: null,
+      });
+    }
+  }
+}
+
+function startOfUtcDay(now: number) {
+  const date = new Date(now);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
 }
 
 async function refreshPnl(now: number, positions: PositionSnapshot[]) {
@@ -8588,6 +8973,52 @@ async function writeIntentIncidentRunEvent(
     },
     createdAt: now,
   });
+}
+
+async function recordMarketFillQualityForIntent(
+  intent: Pick<OrderIntent, "id" | "asset" | "shadow" | "slotKey" | "combination" | "primaryVenue" | "hedgeVenue" | "legs">,
+  outcome: MarketFillQualityOutcome,
+  stage: string,
+  now: number,
+  payload: Record<string, unknown> = {},
+) {
+  if (intent.shadow) {
+    return;
+  }
+
+  await writeMarketFillQualityEvent({
+    id: `mfq:${intent.id}:${outcome}:${stage}`,
+    asset: intent.asset,
+    slotKey: intent.slotKey,
+    intentId: intent.id,
+    combination: intent.combination,
+    primaryVenue: intent.primaryVenue,
+    hedgeVenue: intent.hedgeVenue,
+    outcome,
+    stage,
+    slippageBps: deriveIntentAverageSlippageBps(intent.legs),
+    payload,
+    createdAt: now,
+  });
+}
+
+function deriveIntentAverageSlippageBps(legs: Pick<OrderIntent["legs"][number], "requestedPrice" | "filledPrice">[]) {
+  const samples = legs
+    .map((leg) => {
+      if (
+        leg.requestedPrice === null ||
+        leg.filledPrice === null ||
+        !Number.isFinite(leg.requestedPrice) ||
+        !Number.isFinite(leg.filledPrice) ||
+        leg.requestedPrice <= 0
+      ) {
+        return null;
+      }
+      return Math.abs((leg.filledPrice - leg.requestedPrice) / leg.requestedPrice) * 10_000;
+    })
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+
+  return samples.length > 0 ? round4(samples.reduce((sum, value) => sum + value, 0) / samples.length) : null;
 }
 
 function extractTerminalNoFillDetail(result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>) {

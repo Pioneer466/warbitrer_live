@@ -36,6 +36,13 @@ const settings: StrategyConfig = {
   pollingIntervalMs: 1_000,
   minOrderSize: 0.01,
   maxSlippageBps: 30,
+  primarySelectionMode: "shadow",
+  minimumEntryDepthCoverageRatio: 0.5,
+  adaptiveSlippageTightBps: 15,
+  adaptiveSlippageDefaultBps: 30,
+  adaptiveSlippageThinBps: 60,
+  dailyLossCapEnabled: true,
+  dailyLossHardCapUsd: 20,
   immediateOrderConfirmationTimeoutMs: 8_000,
   executionPriceBuffer: 0.01,
   kalshiDepthHeadroomContracts: 2,
@@ -628,6 +635,63 @@ describe("live signal engine", () => {
 
     expect(signal.eligible).toBe(true);
     expect(signal.primaryVenue).toBe("kalshi");
+  });
+
+  it("keeps Kalshi primary in shadow selection mode while attaching audit details", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: tradablePolymarket({
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, { depth: 500 }),
+        },
+      }),
+      kalshi: tradableKalshi({
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, { depth: 1 }),
+        },
+      }),
+      settings,
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.primaryVenue).toBe("kalshi");
+    expect(signal.primarySelection?.mode).toBe("shadow");
+    expect(signal.primarySelection?.livePrimaryVenue).toBe("kalshi");
+    expect(signal.primarySelection?.recommendedPrimaryVenue).not.toBeNull();
+  });
+
+  it("allows dynamic primary selection mode in signal audit", () => {
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      polymarket: tradablePolymarket({
+        outcomes: {
+          ...polymarket.outcomes,
+          up: withOutcomeQuote(polymarket.outcomes.up, { depth: 500 }),
+        },
+      }),
+      kalshi: tradableKalshi({
+        outcomes: {
+          ...kalshi.outcomes,
+          no: withOutcomeQuote(kalshi.outcomes.no, { depth: 1 }),
+        },
+      }),
+      settings: {
+        ...settings,
+        primarySelectionMode: "dynamic",
+      },
+      balances,
+      lastEntryCosts: {},
+      secondsRemaining: 180,
+    });
+
+    expect(signal.primarySelection?.mode).toBe("dynamic");
+    expect(signal.primarySelection?.recommendedPrimaryVenue).not.toBeNull();
   });
 
   it("clips the pair size to safe Kalshi executable depth instead of blocking the opportunity", () => {

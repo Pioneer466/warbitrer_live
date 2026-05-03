@@ -20,11 +20,14 @@ import type {
   LiveOpportunity,
   LiveOrder,
   MarketSlot,
+  MarketFillQualityEvent,
+  MarketFillQualityOutcome,
   NotificationDelivery,
   OrderAttempt,
   OrderIntent,
   PairCombination,
   PnlSnapshot,
+  FillQualitySummary,
   PositionSnapshot,
   ReadinessCheck,
   RunEvent,
@@ -272,6 +275,15 @@ async function bootstrapDatabase(pool: Pool) {
       venue_breakdown_json JSONB NOT NULL
     );
     CREATE INDEX IF NOT EXISTS pnl_snapshots_captured_idx ON pnl_snapshots(captured_at DESC);
+    CREATE INDEX IF NOT EXISTS pnl_snapshots_valid_latest_idx
+      ON pnl_snapshots(captured_at DESC, id DESC)
+      WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity') AND equity_usd > 0;
+    CREATE INDEX IF NOT EXISTS pnl_snapshots_valid_first_idx
+      ON pnl_snapshots(captured_at ASC, id ASC)
+      WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity') AND equity_usd > 0;
+    CREATE INDEX IF NOT EXISTS pnl_snapshots_valid_peak_idx
+      ON pnl_snapshots(equity_usd DESC)
+      WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity') AND equity_usd > 0;
 
     CREATE TABLE IF NOT EXISTS stable_pnl_changes (
       intent_id TEXT PRIMARY KEY REFERENCES order_intents(id) ON DELETE CASCADE,
@@ -297,6 +309,30 @@ async function bootstrapDatabase(pool: Pool) {
       ON stable_pnl_changes(changed_at DESC);
     CREATE INDEX IF NOT EXISTS stable_pnl_changes_asset_changed_idx
       ON stable_pnl_changes(asset, changed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS market_fill_quality_events (
+      id TEXT PRIMARY KEY,
+      asset TEXT NOT NULL,
+      slot_key TEXT NOT NULL,
+      intent_id TEXT REFERENCES order_intents(id) ON DELETE SET NULL,
+      combination TEXT,
+      primary_venue TEXT,
+      hedge_venue TEXT,
+      outcome TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      slippage_bps DOUBLE PRECISION,
+      payload_json JSONB NOT NULL,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS market_fill_quality_events_created_idx
+      ON market_fill_quality_events(created_at DESC);
+    CREATE INDEX IF NOT EXISTS market_fill_quality_events_asset_created_idx
+      ON market_fill_quality_events(asset, created_at DESC);
+    CREATE INDEX IF NOT EXISTS market_fill_quality_events_slot_created_idx
+      ON market_fill_quality_events(slot_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS market_fill_quality_events_degraded_idx
+      ON market_fill_quality_events(asset, slot_key, created_at DESC)
+      WHERE outcome IN ('partial_fill', 'no_fill', 'rescue', 'unwind', 'manual_required');
 
     CREATE TABLE IF NOT EXISTS bridge_transfers (
       id TEXT PRIMARY KEY,
@@ -652,6 +688,13 @@ async function bootstrapDatabase(pool: Pool) {
       "hedgeRescueMaxLossUsd",
       "hedgeRescueMinAdvantageUsd",
       "hedgeRescueAllowPartial",
+      "primarySelectionMode",
+      "minimumEntryDepthCoverageRatio",
+      "adaptiveSlippageTightBps",
+      "adaptiveSlippageDefaultBps",
+      "adaptiveSlippageThinBps",
+      "dailyLossCapEnabled",
+      "dailyLossHardCapUsd",
     ] as const) {
       await pool.query(
         `
@@ -1643,10 +1686,12 @@ export async function insertStablePnlChange(
         LIMIT 1
       ),
       peak AS (
-        SELECT MAX(equity_usd) AS equity_usd
+        SELECT equity_usd
         FROM pnl_snapshots
         WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
           AND equity_usd > 0
+        ORDER BY equity_usd DESC, captured_at DESC, id DESC
+        LIMIT 1
       )
       INSERT INTO stable_pnl_changes (
         intent_id, asset, combination, changed_at, settled_at, realized_pnl_usd, roi,
@@ -1706,6 +1751,89 @@ export async function listStablePnlChanges(
   return result.rows.map(mapStablePnlChangeRow);
 }
 
+export async function sumStableRealizedPnlSince(pool: Pool, since: number, until: number) {
+  const result = await pool.query<{ total: number | null }>(
+    `
+      SELECT COALESCE(SUM(realized_pnl_usd), 0) AS total
+      FROM stable_pnl_changes
+      WHERE changed_at >= $1
+        AND changed_at < $2
+    `,
+    [since, until],
+  );
+  return Number(result.rows[0]?.total ?? 0);
+}
+
+export async function insertMarketFillQualityEvent(pool: Pool, event: MarketFillQualityEvent) {
+  await pool.query(
+    `
+      INSERT INTO market_fill_quality_events (
+        id, asset, slot_key, intent_id, combination, primary_venue, hedge_venue,
+        outcome, stage, slippage_bps, payload_json, created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+      ON CONFLICT (id) DO NOTHING
+    `,
+    [
+      event.id,
+      event.asset,
+      event.slotKey,
+      event.intentId,
+      event.combination,
+      event.primaryVenue,
+      event.hedgeVenue,
+      event.outcome,
+      event.stage,
+      event.slippageBps,
+      JSON.stringify(event.payload),
+      event.createdAt,
+    ],
+  );
+}
+
+export async function listRecentMarketFillQualityEvents(
+  pool: Pool,
+  since: number,
+  asset?: MarketAsset,
+): Promise<MarketFillQualityEvent[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM market_fill_quality_events
+      WHERE created_at >= $1
+        ${asset ? "AND asset = $2" : ""}
+      ORDER BY created_at DESC
+    `,
+    asset ? [since, asset] : [since],
+  );
+  return result.rows.map(mapMarketFillQualityEventRow);
+}
+
+export async function listDegradedMarketFillQualityCounts(
+  pool: Pool,
+  since: number,
+  asset?: MarketAsset,
+): Promise<Array<{ asset: MarketAsset; slotKey: string; degradedCount: number; lastEventAt: number }>> {
+  const result = await pool.query(
+    `
+      SELECT asset, slot_key, COUNT(*)::int AS degraded_count, MAX(created_at) AS last_event_at
+      FROM market_fill_quality_events
+      WHERE created_at >= $1
+        AND outcome IN ('partial_fill', 'no_fill', 'rescue', 'unwind', 'manual_required')
+        ${asset ? "AND asset = $2" : ""}
+      GROUP BY asset, slot_key
+      ORDER BY degraded_count DESC, last_event_at DESC
+    `,
+    asset ? [since, asset] : [since],
+  );
+  return result.rows.map((row) => ({
+    asset: row.asset,
+    slotKey: row.slot_key,
+    degradedCount: Number(row.degraded_count),
+    lastEventAt: Number(row.last_event_at),
+  }));
+}
+
 async function getFirstTrackedEquityUsd(pool: Pool) {
   const result = await pool.query<{ equity_usd: number }>(
     `
@@ -1723,10 +1851,12 @@ async function getFirstTrackedEquityUsd(pool: Pool) {
 async function getPeakTrackedEquityUsd(pool: Pool) {
   const result = await pool.query<{ equity_usd: number }>(
     `
-      SELECT MAX(equity_usd) AS equity_usd
+      SELECT equity_usd
       FROM pnl_snapshots
       WHERE equity_usd::text NOT IN ('NaN', 'Infinity', '-Infinity')
         AND equity_usd > 0
+      ORDER BY equity_usd DESC, captured_at DESC, id DESC
+      LIMIT 1
     `,
   );
   return result.rows[0]?.equity_usd !== null && result.rows[0]?.equity_usd !== undefined
@@ -2264,7 +2394,81 @@ function getPayloadNumber(payload: Record<string, unknown> | null, key: string) 
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+async function buildFillQualitySummary(pool: Pool, now: number, breakers: CircuitBreaker[]): Promise<FillQualitySummary> {
+  const since = now - 24 * 60 * 60 * 1000;
+  const events = await listRecentMarketFillQualityEvents(pool, since);
+  const blacklisted = breakers
+    .filter((breaker) => breaker.active && breaker.reason === "market_degraded")
+    .map((breaker) => {
+      const scope = parseBreakerScope(breaker.key);
+      return {
+        key: breaker.key,
+        asset: scope.asset,
+        slotKey: scope.slotKey,
+        until: getPayloadNumber(breaker.payload, "cooldownUntil"),
+        reason: breaker.reason,
+      };
+    });
+
+  return {
+    last24h: summarizeFillQualityEvents(events),
+    perAsset: MARKET_ASSETS.map((asset) => ({
+      asset,
+      bucket: summarizeFillQualityEvents(events.filter((event) => event.asset === asset)),
+    })),
+    blacklisted,
+  };
+}
+
+function parseBreakerScope(key: CircuitBreaker["key"]) {
+  if (key === "global") {
+    return { asset: null, slotKey: null };
+  }
+  if (key.startsWith("asset:")) {
+    return { asset: key.slice("asset:".length) as MarketAsset, slotKey: null };
+  }
+  if (key.startsWith("slot:")) {
+    const rest = key.slice("slot:".length);
+    const [asset] = rest.split(":");
+    return { asset: asset as MarketAsset, slotKey: rest };
+  }
+  return { asset: null, slotKey: null };
+}
+
+function summarizeFillQualityEvents(events: MarketFillQualityEvent[]) {
+  const attempts = events.length;
+  const count = (outcome: MarketFillQualityOutcome) => events.filter((event) => event.outcome === outcome).length;
+  const fullFills = count("full_fill");
+  const partialFills = count("partial_fill");
+  const noFills = count("no_fill");
+  const rescues = count("rescue");
+  const unwinds = count("unwind");
+  const manualRequired = count("manual_required");
+  const slippageSamples = events
+    .map((event) => event.slippageBps)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+
+  return {
+    attempts,
+    fullFills,
+    partialFills,
+    noFills,
+    rescues,
+    unwinds,
+    manualRequired,
+    fullRate: attempts > 0 ? fullFills / attempts : 0,
+    partialRate: attempts > 0 ? partialFills / attempts : 0,
+    noFillRate: attempts > 0 ? noFills / attempts : 0,
+    rescueRate: attempts > 0 ? rescues / attempts : 0,
+    avgSlippageBps:
+      slippageSamples.length > 0
+        ? slippageSamples.reduce((sum, value) => sum + value, 0) / slippageSamples.length
+        : null,
+  };
+}
+
 export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Promise<DashboardResponse> {
+  const now = Date.now();
   const latestSnapshot = await getLatestOpportunitySnapshot(pool, slot.asset, slot.key);
   const allBreakers = await listCircuitBreakers(pool);
   const assetBreakerKey = `asset:${slot.asset}`;
@@ -2295,6 +2499,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     positions: await listPositions(pool, slot.asset),
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
     stablePnlChanges: await listStablePnlChanges(pool, 5, slot.asset),
+    fillQuality: await buildFillQualitySummary(pool, now, allBreakers),
     bridgeTransfers: await listRecentBridgeTransfers(pool, 5),
     circuitBreakers: relevantBreakers,
     runEvents: await listRecentRunEvents(pool, 10, slot.asset),
@@ -2315,6 +2520,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
   ]);
   const snapshots = await Promise.all(slots.map((slot) => getLatestOpportunitySnapshot(pool, slot.asset, slot.key)));
   const now = Date.now();
+  const fillQuality = await buildFillQualitySummary(pool, now, breakers);
 
   return {
     fetchedAt: now,
@@ -2349,6 +2555,7 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
     venueBalances,
     pnl: pnl ? enrichPnlSnapshot(pnl, baselineEquityUsd, peakEquityUsd) : null,
     stablePnlChanges: await listStablePnlChanges(pool, 25),
+    fillQuality,
     activeBreakers: breakers.filter((breaker) => breaker.active),
   };
 }
@@ -2558,6 +2765,23 @@ function mapStablePnlChangeRow(row: any): StablePnlChange {
     roi: row.roi === null || row.roi === undefined ? null : Number(row.roi),
     targetNotionalUsd: Number(row.target_notional_usd),
     stability: row.stability_json ?? {},
+  };
+}
+
+function mapMarketFillQualityEventRow(row: any): MarketFillQualityEvent {
+  return {
+    id: row.id,
+    asset: row.asset,
+    slotKey: row.slot_key,
+    intentId: row.intent_id,
+    combination: row.combination,
+    primaryVenue: row.primary_venue,
+    hedgeVenue: row.hedge_venue,
+    outcome: row.outcome,
+    stage: row.stage,
+    slippageBps: row.slippage_bps === null || row.slippage_bps === undefined ? null : Number(row.slippage_bps),
+    payload: row.payload_json ?? {},
+    createdAt: row.created_at,
   };
 }
 

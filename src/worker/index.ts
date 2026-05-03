@@ -5,17 +5,24 @@ import {
   processReconcileTick,
   processScanTick,
 } from "@/lib/engine";
+import { isTruthyEnv, readEnv } from "@/lib/env";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import { schedulePendingNotificationFlush } from "@/lib/notifications";
-import { storageMode } from "@/lib/storage";
+import { storageMode, writeCircuitBreaker } from "@/lib/storage";
 import type { MarketAsset } from "@/lib/types";
+import {
+  COLD_SCAN_INTERVAL_MS,
+  deriveNextScanIntervalMs,
+  HOT_SCAN_INTERVAL_MS,
+  HOT_SIGNAL_TTL_MS,
+  isHotOpportunitySnapshot,
+} from "@/worker/hot-cold";
 import { parseWorkerRuntimeOptions } from "@/worker/runtime";
 
 const SCAN_TICK_TIMEOUT_MS = 15_000;
 const EXECUTION_TICK_TIMEOUT_MS = 90_000;
 const RECONCILE_TICK_TIMEOUT_MS = 120_000;
 const NOTIFICATION_FLUSH_INTERVAL_MS = 1_000;
-const SCAN_INTERVAL_MS = 250;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const EXECUTION_INTERVAL_MS = 100;
 const RECONCILE_INTERVAL_MS = 3_000;
@@ -35,6 +42,8 @@ async function run() {
   process.once("SIGTERM", requestShutdown);
   process.once("SIGINT", requestShutdown);
 
+  await checkPolygonRpcHealth();
+
   if (runtime.startupJitterMs > 0) {
     console.log(`[worker] startup jitter ${runtime.startupJitterMs}ms`);
     await sleep(runtime.startupJitterMs);
@@ -46,7 +55,7 @@ async function run() {
       throw new Error("asset-live requires an asset");
     }
     console.log(
-      `[worker] asset-live started: asset=${asset} scan=${SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms`,
+      `[worker] asset-live started: asset=${asset} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms`,
     );
     await Promise.all([runScanLoop(asset), runExecutionLoop(asset)]);
     return;
@@ -65,7 +74,7 @@ async function run() {
   }
 
   console.log(
-    `[worker] legacy realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
+    `[worker] legacy realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
   );
   await Promise.all([runScanLoop(), runExecutionLoop(), runReconcileLoop(), runNotificationFlushLoop()]);
 }
@@ -77,15 +86,23 @@ run().catch(async (error) => {
 });
 
 async function runScanLoop(asset?: MarketAsset) {
+  let hotUntil = 0;
   await runLoop({
     name: asset ? `scan:${asset}` : "scan",
     timeoutMs: SCAN_TICK_TIMEOUT_MS,
-    resolveIntervalMs: async () => SCAN_INTERVAL_MS,
+    resolveIntervalMs: async () => deriveNextScanIntervalMs(Date.now(), hotUntil),
     tick: async () => {
+      const now = Date.now();
       if (asset) {
-        await processAssetScanTick(asset);
+        const snapshot = await processAssetScanTick(asset);
+        if (isHotOpportunitySnapshot(snapshot)) {
+          hotUntil = now + HOT_SIGNAL_TTL_MS;
+        }
       } else {
-        await processScanTick();
+        const snapshots = await processScanTick();
+        if (snapshots.some(isHotOpportunitySnapshot)) {
+          hotUntil = now + HOT_SIGNAL_TTL_MS;
+        }
       }
       wakeExecutor();
     },
@@ -219,6 +236,61 @@ function sleepUntilExecutionWake(ms: number) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function checkPolygonRpcHealth() {
+  const env = readEnv();
+  const autoConvertEnabled = isTruthyEnv(env.POLY_AUTO_CONVERT);
+  if (!env.POLYGON_RPC_URL) {
+    if (autoConvertEnabled) {
+      await writeRpcUnhealthyBreaker("POLYGON_RPC_URL missing while POLY_AUTO_CONVERT=true");
+    } else {
+      console.warn("[worker] POLYGON_RPC_URL missing; Polymarket auto-convert RPC health check skipped");
+    }
+    return;
+  }
+
+  try {
+    const response = await fetch(env.POLYGON_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_blockNumber",
+        params: [],
+      }),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const payload = await response.json() as { result?: unknown; error?: unknown };
+    if (typeof payload.result !== "string") {
+      throw new Error(payload.error ? JSON.stringify(payload.error) : "missing eth_blockNumber result");
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (autoConvertEnabled) {
+      await writeRpcUnhealthyBreaker(message);
+    } else {
+      console.warn(`[worker] POLYGON_RPC_URL health check failed: ${message}`);
+    }
+  }
+}
+
+async function writeRpcUnhealthyBreaker(reason: string) {
+  await writeCircuitBreaker({
+    key: "global",
+    active: true,
+    reason: "rpc_unhealthy",
+    triggeredAt: Date.now(),
+    payload: {
+      reason,
+      checkedAt: Date.now(),
+      requiresManualClear: true,
+    },
+  });
 }
 
 class WorkerLoopTimeoutError extends Error {

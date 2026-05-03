@@ -21,6 +21,7 @@ const opportunity: LiveOpportunity = {
   thresholdMet: true,
   eligible: true,
   primaryVenue: "kalshi",
+  primarySelection: null,
   improvementFromLastEntry: null,
   estimatedFeesUsd: 0.8,
   projectedNetProfitUsd: 4.2,
@@ -107,7 +108,7 @@ describe("live intent settlement", () => {
     expect(intent.entrySizingReason).toBe("Notionnel réduit par safeguard mismatch (medium): taille x0.5");
   });
 
-  it("does not trust a stale snapshot primary venue when rebuilding a live intent", () => {
+  it("uses the primary venue selected by the signal", () => {
     const intent = createIntentFromOpportunity({
       opportunity: {
         ...opportunity,
@@ -120,8 +121,8 @@ describe("live intent settlement", () => {
       shadow: false,
     });
 
-    expect(intent.primaryVenue).toBe("kalshi");
-    expect(intent.hedgeVenue).toBe("polymarket");
+    expect(intent.primaryVenue).toBe("polymarket");
+    expect(intent.hedgeVenue).toBe("kalshi");
   });
 
   it("computes payout from the winning leg only", () => {

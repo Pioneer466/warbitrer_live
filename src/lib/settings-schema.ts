@@ -10,6 +10,13 @@ import {
   DEFAULT_MIN_PROJECTED_NET_PROFIT_USD,
   DEFAULT_MIN_PROJECTED_NET_RETURN,
   DEFAULT_MIN_WORST_CASE_PROFIT_USD,
+  DEFAULT_PRIMARY_SELECTION_MODE,
+  DEFAULT_MINIMUM_ENTRY_DEPTH_COVERAGE_RATIO,
+  DEFAULT_ADAPTIVE_SLIPPAGE_TIGHT_BPS,
+  DEFAULT_ADAPTIVE_SLIPPAGE_DEFAULT_BPS,
+  DEFAULT_ADAPTIVE_SLIPPAGE_THIN_BPS,
+  DEFAULT_DAILY_LOSS_CAP_ENABLED,
+  DEFAULT_DAILY_LOSS_HARD_CAP_USD,
   DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS,
   DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR,
   DEFAULT_KALSHI_PRIMARY_PRICE_TICKS_SLIPPAGE,
@@ -66,6 +73,34 @@ export const settingsSchema = z
     pollingIntervalMs: z.number().int().min(250).max(10_000),
     minOrderSize: z.number().positive().max(10_000),
     maxSlippageBps: z.number().int().min(1).max(2_000),
+    primarySelectionMode: z
+      .enum(["kalshi_only", "shadow", "dynamic"])
+      .default(DEFAULT_PRIMARY_SELECTION_MODE),
+    minimumEntryDepthCoverageRatio: z
+      .number()
+      .positive()
+      .max(1)
+      .default(DEFAULT_MINIMUM_ENTRY_DEPTH_COVERAGE_RATIO),
+    adaptiveSlippageTightBps: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_000)
+      .default(DEFAULT_ADAPTIVE_SLIPPAGE_TIGHT_BPS),
+    adaptiveSlippageDefaultBps: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_000)
+      .default(DEFAULT_ADAPTIVE_SLIPPAGE_DEFAULT_BPS),
+    adaptiveSlippageThinBps: z
+      .number()
+      .int()
+      .min(1)
+      .max(2_000)
+      .default(DEFAULT_ADAPTIVE_SLIPPAGE_THIN_BPS),
+    dailyLossCapEnabled: z.boolean().default(DEFAULT_DAILY_LOSS_CAP_ENABLED),
+    dailyLossHardCapUsd: z.number().positive().max(1_000_000).default(DEFAULT_DAILY_LOSS_HARD_CAP_USD),
     immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
     executionPriceBuffer: z.number().nonnegative().max(0.1),
     kalshiDepthHeadroomContracts: z
@@ -194,6 +229,17 @@ export const settingsSchema = z
         code: z.ZodIssueCode.custom,
         path: ["mismatchGuardPhase2MinMoveBps"],
         message: "Phase 2 mismatch guard move threshold must be >= the standard threshold",
+      });
+    }
+
+    if (
+      settings.adaptiveSlippageTightBps > settings.adaptiveSlippageDefaultBps ||
+      settings.adaptiveSlippageDefaultBps > settings.adaptiveSlippageThinBps
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["adaptiveSlippageDefaultBps"],
+        message: "Adaptive slippage tiers must be ordered tight <= default <= thin",
       });
     }
 

@@ -13,6 +13,7 @@ import type {
   LiveFill,
   LiveOrder,
   MarketSlot,
+  MarketFillQualityEvent,
   NotificationDelivery,
   OpportunitySnapshot,
   OrderAttempt,
@@ -120,6 +121,18 @@ export async function writeOrderAttempt(attempt: OrderAttempt) {
 
 export async function readRecentOrderAttempts(limit?: number, asset?: MarketAsset) {
   return postgres.listRecentOrderAttempts(await db(), limit, asset);
+}
+
+export async function writeMarketFillQualityEvent(event: MarketFillQualityEvent) {
+  return postgres.insertMarketFillQualityEvent(await db(), event);
+}
+
+export async function readDegradedMarketFillQualityCounts(since: number, asset?: MarketAsset) {
+  return postgres.listDegradedMarketFillQualityCounts(await db(), since, asset);
+}
+
+export async function readStableRealizedPnlSince(since: number, until: number) {
+  return postgres.sumStableRealizedPnlSince(await db(), since, until);
 }
 
 export async function readOpenVenueOrders(asset?: MarketAsset) {

@@ -72,6 +72,10 @@ function deriveEntrySizingReason(opportunity: LiveOpportunity) {
 }
 
 function deriveExecutionPrimaryVenue(opportunity: Pick<LiveOpportunity, "legs" | "primaryVenue">): Venue | null {
+  if (opportunity.primaryVenue) {
+    return opportunity.primaryVenue;
+  }
+
   const venues = new Set(opportunity.legs.map((leg) => leg.venue));
   if (venues.has("kalshi") && venues.has("polymarket")) {
     return "kalshi";
