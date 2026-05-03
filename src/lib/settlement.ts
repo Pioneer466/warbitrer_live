@@ -218,9 +218,11 @@ export function summarizeVenueFills(
   };
 }
 
-export function calculateLegSpentUsd(leg: Pick<OrderIntentLeg, "filledSize" | "filledPrice" | "requestedNotionalUsd" | "feeUsd">) {
+export function calculateLegSpentUsd(
+  leg: Pick<OrderIntentLeg, "filledSize" | "filledPrice" | "requestedNotionalUsd" | "feeUsd" | "cashAdjustmentUsd">,
+) {
   const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
-  return round4(tradedNotional + leg.feeUsd);
+  return round4(tradedNotional + leg.feeUsd + (leg.cashAdjustmentUsd ?? 0));
 }
 
 export function deriveHedgedPairEconomics(
@@ -274,6 +276,7 @@ function buildIntentLeg(
     filledPrice: null,
     filledSize: 0,
     feeUsd: 0,
+    cashAdjustmentUsd: 0,
     status: "pending",
     venueOrderId: null,
     payoutUsd: null,

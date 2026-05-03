@@ -183,12 +183,20 @@ export async function readLatestPnlSnapshot() {
   return postgres.getLatestPnlSnapshot(await db());
 }
 
+export async function readPolymarketCashAdjustmentObservation(intentId: string) {
+  return postgres.getPolymarketCashAdjustmentObservation(await db(), intentId);
+}
+
 export async function writeStablePnlChange(
   intent: OrderIntent,
   changedAt: number,
   stability: Record<string, unknown>,
 ) {
   return postgres.insertStablePnlChange(await db(), intent, changedAt, stability);
+}
+
+export async function updateStablePnlChangeFromIntent(intent: OrderIntent) {
+  return postgres.updateStablePnlChangeFromIntent(await db(), intent);
 }
 
 export async function readLiveRealizedPnlUsd() {

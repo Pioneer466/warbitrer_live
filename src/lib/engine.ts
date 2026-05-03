@@ -77,6 +77,7 @@ import {
   readLiveFeesUsd,
   readLiveRealizedPnlUsd,
   readOpenOrderIntents,
+  readPolymarketCashAdjustmentObservation,
   readPositions,
   readRunEvents,
   readRecentFills,
@@ -92,6 +93,7 @@ import {
   replaceVenuePositions,
   runDatabaseMaintenance,
   tryWithGlobalLiveExecutionLock,
+  updateStablePnlChangeFromIntent,
   writeStablePnlChange,
   writeCircuitBreaker,
   writeExecutionCandidate,
@@ -164,6 +166,10 @@ const DATABASE_MAINTENANCE_RECONCILE_INTERVAL_MS = 60_000;
 const MARKET_DEGRADED_WINDOW_MS = 30 * 60 * 1000;
 const MARKET_DEGRADED_THRESHOLD = 3;
 const MARKET_DEGRADED_COOLDOWN_MS = 30 * 60 * 1000;
+const POLYMARKET_CASH_ADJUSTMENT_MIN_USD = 0.005;
+const POLYMARKET_CASH_ADJUSTMENT_MAX_USD = 1;
+const POLYMARKET_CASH_ADJUSTMENT_MAX_RATIO = 0.25;
+const POLYMARKET_CASH_ADJUSTMENT_MAX_SNAPSHOT_LAG_MS = 5 * 60 * 1000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
@@ -6690,6 +6696,7 @@ async function reconcileSettlements(asset: MarketAsset, now: number) {
           slotKey: settled.slotKey,
           filledSize: leg.filledSize,
           filledPrice: leg.filledPrice,
+          cashAdjustmentUsd: leg.cashAdjustmentUsd ?? 0,
           legPayoutUsd,
           polyResolution: venueResolutions.polyResolution,
           kalshiResolution: venueResolutions.kalshiResolution,
@@ -6793,6 +6800,7 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
   };
 
   await writeOrderIntent(repairedIntent);
+  await updateStablePnlChangeFromIntent(repairedIntent);
   for (const leg of repairedIntent.legs) {
     const resolvedOutcome =
       leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
@@ -6811,6 +6819,7 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
         slotKey: repairedIntent.slotKey,
         filledSize: leg.filledSize,
         filledPrice: leg.filledPrice,
+        cashAdjustmentUsd: leg.cashAdjustmentUsd ?? 0,
         legPayoutUsd,
         polyResolution: venueResolutions.polyResolution,
         kalshiResolution: venueResolutions.kalshiResolution,
@@ -6855,10 +6864,89 @@ async function refreshIntentFromStoredFills(intent: OrderIntent, now: number) {
     refreshed = await syncIntentFromStoredVenueFills(intent.id, venue, refreshed) ?? refreshed;
   }
 
+  refreshed = await applyPolymarketCashAdjustmentFromSnapshots(refreshed, now);
+
   return {
     ...refreshed,
     updatedAt: now,
   };
+}
+
+async function applyPolymarketCashAdjustmentFromSnapshots(intent: OrderIntent, now: number): Promise<OrderIntent> {
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  if (!polymarketLeg || polymarketLeg.filledSize <= ORDER_SIZE_TOLERANCE) {
+    return intent;
+  }
+
+  const observation = await readPolymarketCashAdjustmentObservation(intent.id).catch(() => null);
+  if (!observation) {
+    return intent;
+  }
+
+  const cashAdjustmentUsd = deriveValidPolymarketCashAdjustmentUsd(observation);
+  if (cashAdjustmentUsd === null) {
+    return intent;
+  }
+
+  if (round4(polymarketLeg.cashAdjustmentUsd ?? 0) === cashAdjustmentUsd) {
+    return intent;
+  }
+
+  return {
+    ...intent,
+    updatedAt: now,
+    legs: intent.legs.map((leg) =>
+      leg.id === polymarketLeg.id
+        ? {
+            ...leg,
+            cashAdjustmentUsd,
+          }
+        : leg,
+    ) as OrderIntent["legs"],
+  };
+}
+
+function deriveValidPolymarketCashAdjustmentUsd(
+  observation: Awaited<ReturnType<typeof readPolymarketCashAdjustmentObservation>>,
+) {
+  if (!observation) {
+    return null;
+  }
+
+  const beforeLagMs = observation.firstOrderCreatedAt - observation.beforeCapturedAt;
+  const afterLagMs = observation.afterCapturedAt - observation.lastOrderCreatedAt;
+  if (
+    beforeLagMs < 0 ||
+    afterLagMs < 0 ||
+    beforeLagMs > POLYMARKET_CASH_ADJUSTMENT_MAX_SNAPSHOT_LAG_MS ||
+    afterLagMs > POLYMARKET_CASH_ADJUSTMENT_MAX_SNAPSHOT_LAG_MS
+  ) {
+    return null;
+  }
+
+  if (
+    !Number.isFinite(observation.theoreticalCashDebitUsd) ||
+    !Number.isFinite(observation.observedCashDebitUsd) ||
+    observation.theoreticalCashDebitUsd <= 0 ||
+    observation.observedCashDebitUsd <= 0
+  ) {
+    return null;
+  }
+
+  const adjustmentUsd = round4(observation.adjustmentUsd);
+  if (adjustmentUsd < POLYMARKET_CASH_ADJUSTMENT_MIN_USD) {
+    return 0;
+  }
+
+  const maxAllowedUsd = Math.min(
+    POLYMARKET_CASH_ADJUSTMENT_MAX_USD,
+    observation.theoreticalCashDebitUsd * POLYMARKET_CASH_ADJUSTMENT_MAX_RATIO,
+  );
+  if (adjustmentUsd > maxAllowedUsd) {
+    return null;
+  }
+
+  return adjustmentUsd;
 }
 
 export async function repairSettledIntentResolutions(options?: {
@@ -6891,6 +6979,7 @@ export async function repairSettledIntentResolutions(options?: {
       polyResolution: result.intent.polyResolution,
       kalshiResolution: result.intent.kalshiResolution,
       realizedPnlUsd: result.intent.realizedPnlUsd,
+      polymarketCashAdjustmentUsd: result.intent.legs.find((leg) => leg.venue === "polymarket")?.cashAdjustmentUsd ?? 0,
     };
   }
 

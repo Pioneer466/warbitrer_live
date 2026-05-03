@@ -271,7 +271,7 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
             <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">{leg.venue} · {leg.outcome}</div>
             <div className="text-[10px] text-[var(--wa-mist)]">
               {leg.filledSize > 0 && leg.filledPrice !== null
-                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}`
+                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}`
                 : `notionnel ${formatV2Usd(leg.requestedNotionalUsd)} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}`}
             </div>
           </div>
@@ -418,7 +418,11 @@ function deriveIntentCapitalUsd(intent: OrderIntent) {
 
 function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
   const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
-  return Math.round((tradedNotional + leg.feeUsd) * 10_000) / 10_000;
+  return Math.round((tradedNotional + leg.feeUsd + deriveLegCashAdjustmentUsd(leg)) * 10_000) / 10_000;
+}
+
+function deriveLegCashAdjustmentUsd(leg: OrderIntent["legs"][number]) {
+  return leg.cashAdjustmentUsd ?? 0;
 }
 
 function formatSignedUsd(value: number | null | undefined) {

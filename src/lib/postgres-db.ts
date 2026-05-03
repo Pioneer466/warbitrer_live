@@ -37,6 +37,7 @@ import type {
   TradesResponse,
   Venue,
   VenueBalance,
+  VenueCashAdjustmentObservation,
   WorkerLoopHealth,
   WorkerState,
 } from "@/lib/types";
@@ -1657,6 +1658,98 @@ export async function getLatestPnlSnapshot(pool: Pool): Promise<PnlSnapshot | nu
   return result.rows[0] ? mapPnlSnapshotRow(result.rows[0]) : null;
 }
 
+export async function getPolymarketCashAdjustmentObservation(
+  pool: Pool,
+  intentId: string,
+): Promise<VenueCashAdjustmentObservation | null> {
+  const result = await pool.query(
+    `
+      WITH poly_orders AS (
+        SELECT
+          intent_id,
+          venue,
+          MIN(created_at) AS first_order_created_at,
+          MAX(created_at) AS last_order_created_at,
+          COUNT(*)::int AS order_count,
+          SUM(
+            COALESCE(
+              NULLIF(raw_json->>'makingAmount', '')::double precision,
+              average_fill_price * filled_size,
+              requested_price * filled_size,
+              0
+            )
+          ) AS theoretical_cash_debit_usd
+        FROM venue_orders
+        WHERE intent_id = $1
+          AND venue = 'polymarket'
+          AND side = 'BUY'
+          AND filled_size > 0
+        GROUP BY intent_id, venue
+      ),
+      before_snap AS (
+        SELECT
+          p.captured_at,
+          (venue_json->>'availableBalanceUsd')::double precision AS cash_usd
+        FROM pnl_snapshots p
+        CROSS JOIN LATERAL jsonb_array_elements(p.venue_breakdown_json) venue_json
+        WHERE venue_json->>'venue' = 'polymarket'
+          AND p.captured_at < (SELECT first_order_created_at FROM poly_orders)
+        ORDER BY p.captured_at DESC, p.id DESC
+        LIMIT 1
+      ),
+      after_snap AS (
+        SELECT
+          p.captured_at,
+          (venue_json->>'availableBalanceUsd')::double precision AS cash_usd
+        FROM pnl_snapshots p
+        CROSS JOIN LATERAL jsonb_array_elements(p.venue_breakdown_json) venue_json
+        WHERE venue_json->>'venue' = 'polymarket'
+          AND p.captured_at > (SELECT last_order_created_at FROM poly_orders)
+        ORDER BY p.captured_at ASC, p.id ASC
+        LIMIT 1
+      )
+      SELECT
+        o.intent_id,
+        o.venue,
+        o.order_count,
+        o.first_order_created_at,
+        o.last_order_created_at,
+        b.captured_at AS before_captured_at,
+        a.captured_at AS after_captured_at,
+        b.cash_usd AS cash_before_usd,
+        a.cash_usd AS cash_after_usd,
+        (b.cash_usd - a.cash_usd) AS observed_cash_debit_usd,
+        o.theoretical_cash_debit_usd,
+        (b.cash_usd - a.cash_usd - o.theoretical_cash_debit_usd) AS adjustment_usd
+      FROM poly_orders o
+      CROSS JOIN before_snap b
+      CROSS JOIN after_snap a
+      LIMIT 1
+    `,
+    [intentId],
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    intentId: row.intent_id,
+    venue: row.venue,
+    orderCount: Number(row.order_count),
+    firstOrderCreatedAt: Number(row.first_order_created_at),
+    lastOrderCreatedAt: Number(row.last_order_created_at),
+    beforeCapturedAt: Number(row.before_captured_at),
+    afterCapturedAt: Number(row.after_captured_at),
+    cashBeforeUsd: Number(row.cash_before_usd),
+    cashAfterUsd: Number(row.cash_after_usd),
+    observedCashDebitUsd: round4(Number(row.observed_cash_debit_usd)),
+    theoreticalCashDebitUsd: round4(Number(row.theoretical_cash_debit_usd)),
+    adjustmentUsd: round4(Number(row.adjustment_usd)),
+  };
+}
+
 export async function insertStablePnlChange(
   pool: Pool,
   intent: OrderIntent,
@@ -1712,7 +1805,16 @@ export async function insertStablePnlChange(
       FROM latest
       CROSS JOIN baseline
       CROSS JOIN peak
-      ON CONFLICT (intent_id) DO NOTHING
+      ON CONFLICT (intent_id) DO UPDATE SET
+        settled_at = EXCLUDED.settled_at,
+        realized_pnl_usd = EXCLUDED.realized_pnl_usd,
+        roi = EXCLUDED.roi,
+        target_notional_usd = EXCLUDED.target_notional_usd,
+        stability_json = EXCLUDED.stability_json
+      WHERE stable_pnl_changes.settled_at IS DISTINCT FROM EXCLUDED.settled_at
+        OR stable_pnl_changes.realized_pnl_usd IS DISTINCT FROM EXCLUDED.realized_pnl_usd
+        OR stable_pnl_changes.roi IS DISTINCT FROM EXCLUDED.roi
+        OR stable_pnl_changes.target_notional_usd IS DISTINCT FROM EXCLUDED.target_notional_usd
       RETURNING intent_id
     `,
     [
@@ -1726,6 +1828,33 @@ export async function insertStablePnlChange(
       intent.targetNotionalUsd,
       JSON.stringify(stability),
     ],
+  );
+
+  return (result.rowCount ?? 0) > 0;
+}
+
+export async function updateStablePnlChangeFromIntent(pool: Pool, intent: OrderIntent) {
+  if (intent.realizedPnlUsd === null) {
+    return false;
+  }
+
+  const result = await pool.query(
+    `
+      UPDATE stable_pnl_changes
+      SET
+        settled_at = $2,
+        realized_pnl_usd = $3,
+        roi = $4,
+        target_notional_usd = $5
+      WHERE intent_id = $1
+        AND (
+          settled_at IS DISTINCT FROM $2
+          OR realized_pnl_usd IS DISTINCT FROM $3
+          OR roi IS DISTINCT FROM $4
+          OR target_notional_usd IS DISTINCT FROM $5
+        )
+    `,
+    [intent.id, intent.resolvedAt, intent.realizedPnlUsd, intent.roi, intent.targetNotionalUsd],
   );
 
   return (result.rowCount ?? 0) > 0;
@@ -2836,4 +2965,8 @@ async function deleteBefore(
   const cutoff = now - retentionMs;
   const result = await pool.query(sql, [cutoff]);
   return result.rowCount ?? 0;
+}
+
+function round4(value: number) {
+  return Math.round(value * 10_000) / 10_000;
 }

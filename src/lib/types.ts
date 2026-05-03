@@ -361,6 +361,7 @@ export type OrderIntentLeg = {
   filledPrice: number | null;
   filledSize: number;
   feeUsd: number;
+  cashAdjustmentUsd?: number;
   status: ExecutionLegStatus;
   venueOrderId: string | null;
   payoutUsd: number | null;
@@ -507,6 +508,21 @@ export type PnlSnapshot = {
   drawdownUsd: number;
   feesUsd: number;
   venueBreakdown: VenueBalance[];
+};
+
+export type VenueCashAdjustmentObservation = {
+  intentId: string;
+  venue: Venue;
+  orderCount: number;
+  firstOrderCreatedAt: number;
+  lastOrderCreatedAt: number;
+  beforeCapturedAt: number;
+  afterCapturedAt: number;
+  cashBeforeUsd: number;
+  cashAfterUsd: number;
+  observedCashDebitUsd: number;
+  theoreticalCashDebitUsd: number;
+  adjustmentUsd: number;
 };
 
 export type MarketFillQualityOutcome =
