@@ -646,6 +646,7 @@ export async function fetchKalshiFills() {
       count_fp: string;
       taker_fees_dollars?: string;
       maker_fees_dollars?: string;
+      fees_paid_dollars?: string;
       created_time?: string;
       ts?: number;
     }>;
@@ -695,8 +696,9 @@ export function getKalshiOrderPriceUsd(
 export function getKalshiFillFeeUsd(fill: {
   taker_fees_dollars?: string;
   maker_fees_dollars?: string;
+  fees_paid_dollars?: string;
 }) {
-  return Number(fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
+  return Number(fill.fees_paid_dollars ?? fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
 }
 
 export function mapKalshiFillToLiveFill(
@@ -712,6 +714,7 @@ export function mapKalshiFillToLiveFill(
     count_fp: string;
     taker_fees_dollars?: string;
     maker_fees_dollars?: string;
+    fees_paid_dollars?: string;
     created_time?: string;
   },
   order: Pick<LiveOrder, "intentId" | "venueOrderId" | "marketRef" | "side"> & { outcome: "YES" | "NO" },

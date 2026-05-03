@@ -2480,7 +2480,8 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
     (breaker) =>
       breaker.key === "global" ||
       breaker.key === assetBreakerKey ||
-      breaker.key === slotBreakerKey,
+      breaker.key === slotBreakerKey ||
+      getBreakerAsset(breaker.key) === slot.asset,
   );
   const pnl = await getLatestPnlSnapshot(pool);
   const [baselineEquityUsd, peakEquityUsd] = pnl
@@ -2535,7 +2536,8 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
         (breaker) =>
           breaker.key === "global" ||
           breaker.key === assetBreakerKey ||
-          breaker.key === slotBreakerKey,
+          breaker.key === slotBreakerKey ||
+          getBreakerAsset(breaker.key) === slot.asset,
       );
       return {
         asset: slot.asset,
@@ -2786,6 +2788,20 @@ function mapMarketFillQualityEventRow(row: any): MarketFillQualityEvent {
     payload: row.payload_json ?? {},
     createdAt: row.created_at,
   };
+}
+
+function getBreakerAsset(key: CircuitBreaker["key"]): MarketAsset | null {
+  if (key.startsWith("asset:")) {
+    const asset = key.slice("asset:".length);
+    return MARKET_ASSETS.includes(asset as MarketAsset) ? asset as MarketAsset : null;
+  }
+
+  if (key.startsWith("slot:")) {
+    const asset = key.slice("slot:".length).split(":")[0];
+    return MARKET_ASSETS.includes(asset as MarketAsset) ? asset as MarketAsset : null;
+  }
+
+  return null;
 }
 
 function mapBridgeTransferRow(row: any): BridgeTransfer {

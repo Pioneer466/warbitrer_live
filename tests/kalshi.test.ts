@@ -190,6 +190,13 @@ describe("Kalshi quote derivation", () => {
         taker_fees_dollars: "0.27",
       }),
     ).toBe(0.27);
+
+    expect(
+      getKalshiFillFeeUsd({
+        taker_fees_dollars: "0.11",
+        fees_paid_dollars: "0.20",
+      }),
+    ).toBe(0.2);
   });
 
   it("paginates Kalshi markets so the current slot is not lost after the first page", async () => {

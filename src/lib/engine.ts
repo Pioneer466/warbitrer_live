@@ -6569,13 +6569,14 @@ async function reconcileSettlements(asset: MarketAsset, now: number) {
       continue;
     }
 
+    const settlementIntent = await refreshIntentFromStoredFills(intent, now);
     const payoutUsd = calculateWinningPayout(
-      intent.legs,
+      settlementIntent.legs,
       venueResolutions.polyResolution,
       venueResolutions.kalshiResolution,
     );
     const settled = finalizeIntent({
-      intent,
+      intent: settlementIntent,
       polyResolution: venueResolutions.polyResolution,
       kalshiResolution: venueResolutions.kalshiResolution,
       payoutUsd,
@@ -6670,24 +6671,31 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
     };
   }
 
+  const refreshedIntent = await refreshIntentFromStoredFills(intent, now);
+  const payoutUsd = calculateWinningPayout(
+    refreshedIntent.legs,
+    venueResolutions.polyResolution,
+    venueResolutions.kalshiResolution,
+  );
+  const repaired = finalizeIntent({
+    intent: refreshedIntent,
+    polyResolution: venueResolutions.polyResolution,
+    kalshiResolution: venueResolutions.kalshiResolution,
+    payoutUsd,
+    now: intent.resolvedAt ?? now,
+  });
+
   if (
     intent.polyResolution === venueResolutions.polyResolution &&
-    intent.kalshiResolution === venueResolutions.kalshiResolution
+    intent.kalshiResolution === venueResolutions.kalshiResolution &&
+    intent.realizedPnlUsd === repaired.realizedPnlUsd &&
+    intent.roi === repaired.roi
   ) {
     return {
       status: "unchanged" as const,
       intent,
     };
   }
-
-  const payoutUsd = calculateWinningPayout(intent.legs, venueResolutions.polyResolution, venueResolutions.kalshiResolution);
-  const repaired = finalizeIntent({
-    intent,
-    polyResolution: venueResolutions.polyResolution,
-    kalshiResolution: venueResolutions.kalshiResolution,
-    payoutUsd,
-    now: intent.resolvedAt ?? now,
-  });
 
   const repairedIntent: OrderIntent = {
     ...repaired,
@@ -6721,6 +6729,7 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
           polyResolution: intent.polyResolution,
           kalshiResolution: intent.kalshiResolution,
           realizedPnlUsd: intent.realizedPnlUsd,
+          roi: intent.roi,
         },
       },
     });
@@ -6739,6 +6748,8 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
       repairedKalshiResolution: venueResolutions.kalshiResolution,
       previousRealizedPnlUsd: intent.realizedPnlUsd,
       repairedRealizedPnlUsd: repairedIntent.realizedPnlUsd,
+      previousRoi: intent.roi,
+      repairedRoi: repairedIntent.roi,
     },
     createdAt: now,
   });
@@ -6746,6 +6757,18 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
   return {
     status: "repaired" as const,
     intent: repairedIntent,
+  };
+}
+
+async function refreshIntentFromStoredFills(intent: OrderIntent, now: number) {
+  let refreshed = intent;
+  for (const venue of ["polymarket", "kalshi"] as const) {
+    refreshed = await syncIntentFromStoredVenueFills(intent.id, venue, refreshed) ?? refreshed;
+  }
+
+  return {
+    ...refreshed,
+    updatedAt: now,
   };
 }
 
