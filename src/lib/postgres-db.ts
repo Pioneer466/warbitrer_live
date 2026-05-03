@@ -1703,8 +1703,11 @@ export async function getPolymarketCashAdjustmentObservation(
           (venue_json->>'availableBalanceUsd')::double precision AS cash_usd
         FROM pnl_snapshots p
         CROSS JOIN LATERAL jsonb_array_elements(p.venue_breakdown_json) venue_json
+        CROSS JOIN before_snap b
+        CROSS JOIN poly_orders o
         WHERE venue_json->>'venue' = 'polymarket'
-          AND p.captured_at > (SELECT last_order_created_at FROM poly_orders)
+          AND p.captured_at > o.last_order_created_at
+          AND b.cash_usd - (venue_json->>'availableBalanceUsd')::double precision >= o.theoretical_cash_debit_usd * 0.5
         ORDER BY p.captured_at ASC, p.id ASC
         LIMIT 1
       )
