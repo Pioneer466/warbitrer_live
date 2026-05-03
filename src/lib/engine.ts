@@ -3086,9 +3086,10 @@ async function acceptBenignOverfilledHedge(
 }
 
 function shouldHoldPolymarketHedgeFailurePendingTruth(
-  intent: Pick<OrderIntent, "hedgeVenue">,
+  intent: Pick<OrderIntent, "hedgeVenue" | "status" | "updatedAt">,
   hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side">,
   result: Pick<LiveOrder, "filledSize" | "raw" | "status" | "venueOrderId"> | null,
+  now = Date.now(),
 ) {
   if (intent.hedgeVenue !== "polymarket" || hedgeLeg.venue !== "polymarket" || hedgeLeg.side !== "BUY") {
     return false;
@@ -3099,7 +3100,54 @@ function shouldHoldPolymarketHedgeFailurePendingTruth(
   }
 
   const truth = extractPolymarketOrderTruthFromRaw(result.raw);
-  return truth?.terminalZeroFill !== true;
+  if (truth?.terminalZeroFill === true) {
+    return false;
+  }
+
+  if (hasPolymarketPendingExposureTruth(truth)) {
+    return true;
+  }
+
+  return !isAgedPolymarketSoftNoFillSafeToRecover(intent, result, now);
+}
+
+function hasPolymarketPendingExposureTruth(
+  truth:
+    | {
+        effectiveFilledSize?: number;
+        confirmedFilledSize?: number;
+        pendingFilledSize?: number;
+        hasPendingExposure?: boolean;
+      }
+    | null
+    | undefined,
+) {
+  return Boolean(
+    truth?.hasPendingExposure ||
+      (truth?.effectiveFilledSize ?? 0) > ORDER_SIZE_TOLERANCE ||
+      (truth?.confirmedFilledSize ?? 0) > ORDER_SIZE_TOLERANCE ||
+      (truth?.pendingFilledSize ?? 0) > ORDER_SIZE_TOLERANCE,
+  );
+}
+
+function isAgedPolymarketSoftNoFillSafeToRecover(
+  intent: Pick<OrderIntent, "status" | "updatedAt">,
+  result: Pick<LiveOrder, "filledSize" | "raw" | "status" | "venueOrderId">,
+  now: number,
+) {
+  if (intent.status !== "truth_pending") {
+    return false;
+  }
+
+  if (now - intent.updatedAt < HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS) {
+    return false;
+  }
+
+  if (result.filledSize > ORDER_SIZE_TOLERANCE || !isTerminalOrderStatus(result.status)) {
+    return false;
+  }
+
+  return Boolean(result.raw?.softNoFill || result.venueOrderId.startsWith("killed:"));
 }
 
 async function holdPolymarketHedgeFailurePendingTruth(
@@ -3220,7 +3268,7 @@ async function failIncrementalHedge(
   const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   if (primaryLeg && hedgeLeg) {
-    if (shouldHoldPolymarketHedgeFailurePendingTruth(intent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null)) {
+    if (shouldHoldPolymarketHedgeFailurePendingTruth(intent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null, now)) {
       return {
         intent: await holdPolymarketHedgeFailurePendingTruth(intent, hedgeLeg, hedgeOrder, now, stage, {
           ...payload,
@@ -3510,7 +3558,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     createdAt: now,
   });
 
-  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder)) {
+  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder, now)) {
     return holdPolymarketHedgeFailurePendingTruth(
       currentIntent,
       hedgeLeg,
@@ -5714,7 +5762,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   let currentIntent = hedgeOrder
     ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "failed", now)
     : intent;
-  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null)) {
+  if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder ?? hedgeResult ?? null, now)) {
     return holdPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder, now, "hedge_no_fill_truth_pending", {
       failureReason,
       orderStatus: hedgeOrder?.status ?? hedgeResult?.status ?? null,
@@ -7490,7 +7538,7 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
 
     if (stale && (isTerminalOrderStatus(hedgeOrder.status) || isAwaitingOrderConfirmation(hedgeOrder.status))) {
-      if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder)) {
+      if (shouldHoldPolymarketHedgeFailurePendingTruth(currentIntent, hedgeLeg, hedgeOrder, now)) {
         await holdPolymarketHedgeFailurePendingTruth(
           currentIntent,
           hedgeLeg,
