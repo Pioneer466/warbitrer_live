@@ -18,6 +18,7 @@ import {
   fetchKalshiFills,
   fetchKalshiOrders,
   fetchKalshiResolution,
+  fetchKalshiSeries,
   getKalshiOrderPriceUsd,
   KALSHI_ORDER_PRICE_STEP_USD,
   mapKalshiFillToLiveFill,
@@ -147,6 +148,7 @@ const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const SETTINGS_CACHE_TTL_MS = 1_000;
 const VENUE_BALANCES_CACHE_TTL_MS = 750;
 const OPEN_INTENTS_CACHE_TTL_MS = 750;
+const KALSHI_FEE_MULTIPLIER_CACHE_TTL_MS = 60 * 60 * 1000;
 const PRIMARY_NO_FILL_COOLDOWN_MS = 10_000;
 const HEDGE_FAILURE_RECOVERED_COOLDOWN_MS = 10_000;
 const HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS = 10_000;
@@ -180,6 +182,7 @@ const lastExecutionLockBusyLogAtByAsset: Partial<Record<MarketAsset, number>> = 
 const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
 const loopHealthByAsset: Partial<Record<MarketAsset, WorkerState["loopHealth"]>> = {};
 const settingsCacheByAsset: Partial<Record<MarketAsset, { value: StrategyConfig; capturedAt: number }>> = {};
+const kalshiFeeMultiplierCacheByAsset: Partial<Record<MarketAsset, { value: number; capturedAt: number }>> = {};
 let venueBalancesCache: { value: VenueBalance[]; capturedAt: number } | null = null;
 let openIntentsCache: { value: OrderIntent[]; capturedAt: number } | null = null;
 const lastEntryCostsCache = new Map<string, { value: Awaited<ReturnType<typeof readLastEntryCosts>>; capturedAt: number }>();
@@ -6309,16 +6312,27 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number) {
             no_price_dollars: order.no_price_dollars,
           })
         : null;
+    const filledSize = Number(order.fill_count_fp ?? existing.filledSize);
+    const explicitFeeUsd = getExplicitKalshiFeeUsd(order);
+    const estimatedFeeUsd =
+      explicitFeeUsd ??
+      await estimateKalshiFeeUsd({
+        asset: existing.asset,
+        contracts: filledSize,
+        price: outcomePrice ?? existing.averageFillPrice,
+        liquidity: "TAKER",
+        now,
+      });
     await writeVenueOrder({
       ...existing,
       status: mapKalshiOrderStatus(
         order.status,
-        Number(order.fill_count_fp ?? existing.filledSize),
+        filledSize,
         Number(order.remaining_count_fp ?? 0),
       ),
-      filledSize: Number(order.fill_count_fp ?? existing.filledSize),
+      filledSize,
       averageFillPrice: outcomePrice ?? existing.averageFillPrice,
-      feeUsd: Number(order.taker_fees_dollars ?? order.maker_fees_dollars ?? existing.feeUsd ?? 0),
+      feeUsd: Math.max(existing.feeUsd ?? 0, estimatedFeeUsd ?? 0),
       updatedAt: now,
       raw: order as unknown as Record<string, unknown>,
     });
@@ -6397,7 +6411,25 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number) {
       outcome: existingOrder.outcome,
     };
 
-    await writeFill(mapKalshiFillToLiveFill(fill, canonicalKalshiOrder, now));
+    const mappedFill = mapKalshiFillToLiveFill(fill, canonicalKalshiOrder, now);
+    const explicitFeeUsd = getExplicitKalshiFeeUsd(fill);
+    const estimatedFeeUsd =
+      explicitFeeUsd ??
+      await estimateKalshiFeeUsd({
+        asset: mappedFill.asset,
+        contracts: mappedFill.size,
+        price: mappedFill.price,
+        liquidity: mappedFill.liquidity,
+        now,
+      });
+    await writeFill({
+      ...mappedFill,
+      feeUsd: estimatedFeeUsd ?? mappedFill.feeUsd,
+      raw: {
+        ...mappedFill.raw,
+        estimatedFeeUsd: explicitFeeUsd === null ? estimatedFeeUsd : undefined,
+      },
+    });
     touchedIntentLegs.add(`${existingOrder.intentId}:kalshi`);
   }
 
@@ -6407,6 +6439,63 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number) {
   }
 
   await reconcileLatePrimaryFillRescue(asset, now);
+}
+
+function getExplicitKalshiFeeUsd(raw: {
+  fees_paid_dollars?: string;
+  taker_fees_dollars?: string;
+  maker_fees_dollars?: string;
+}) {
+  const value = raw.fees_paid_dollars ?? raw.taker_fees_dollars ?? raw.maker_fees_dollars;
+  if (value === undefined || value === null || value === "") {
+    return null;
+  }
+
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function estimateKalshiFeeUsd(input: {
+  asset: MarketAsset;
+  contracts: number;
+  price: number | null;
+  liquidity: LiveFill["liquidity"];
+  now: number;
+}) {
+  if (
+    !Number.isFinite(input.contracts) ||
+    input.contracts <= 0 ||
+    input.price === null ||
+    !Number.isFinite(input.price) ||
+    input.price <= 0 ||
+    input.price >= 1
+  ) {
+    return null;
+  }
+
+  const feeMultiplier = await readCachedKalshiFeeMultiplier(input.asset, input.now);
+  return calculateKalshiFee({
+    contracts: input.contracts,
+    price: input.price,
+    feeMultiplier,
+    maker: input.liquidity === "MAKER",
+  });
+}
+
+async function readCachedKalshiFeeMultiplier(asset: MarketAsset, now: number) {
+  const cached = kalshiFeeMultiplierCacheByAsset[asset];
+  if (cached && now - cached.capturedAt <= KALSHI_FEE_MULTIPLIER_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  const value = await fetchKalshiSeries(asset)
+    .then((response) => {
+      const parsed = Number(response.series.fee_multiplier);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+    })
+    .catch(() => 1);
+  kalshiFeeMultiplierCacheByAsset[asset] = { value, capturedAt: now };
+  return value;
 }
 
 async function writePolymarketFillSafely(
