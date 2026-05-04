@@ -1,4 +1,10 @@
-import { deriveNextScanIntervalMs, HOT_SCAN_INTERVAL_MS, COLD_SCAN_INTERVAL_MS, isHotOpportunitySnapshot } from "@/worker/hot-cold";
+import {
+  deriveNextScanIntervalMs,
+  HOT_SCAN_INTERVAL_MS,
+  COLD_SCAN_INTERVAL_MS,
+  isHotOpportunitySnapshot,
+  resolveHotColdConfig,
+} from "@/worker/hot-cold";
 import type { OpportunitySnapshot } from "@/lib/types";
 
 describe("hot/cold scan cadence", () => {
@@ -30,5 +36,19 @@ describe("hot/cold scan cadence", () => {
     } as Pick<OpportunitySnapshot, "opportunities">;
 
     expect(isHotOpportunitySnapshot(snapshot)).toBe(false);
+  });
+
+  it("reads configurable hot/cold intervals from env-like input", () => {
+    expect(
+      resolveHotColdConfig({
+        WARBITRER_COLD_SCAN_INTERVAL_MS: "1500",
+        WARBITRER_HOT_SCAN_INTERVAL_MS: "300",
+        WARBITRER_HOT_SIGNAL_TTL_MS: "12000",
+      }),
+    ).toEqual({
+      coldScanIntervalMs: 1500,
+      hotScanIntervalMs: 300,
+      hotSignalTtlMs: 12000,
+    });
   });
 });

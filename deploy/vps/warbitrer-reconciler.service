@@ -1,0 +1,24 @@
+[Unit]
+Description=Warbitrer Reconciler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=warbitrer
+Group=warbitrer
+WorkingDirectory=/opt/warbitrer-live/app
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStart=/usr/bin/npm run start:worker:reconcile:prod
+Restart=always
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=15
+KillSignal=SIGTERM
+FinalKillSignal=SIGKILL
+KillMode=control-group
+SyslogIdentifier=warbitrer-reconciler
+
+[Install]
+WantedBy=multi-user.target

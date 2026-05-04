@@ -59,7 +59,7 @@ export async function getPgDb() {
   if (!poolSingleton) {
     poolSingleton = new Pool({
       connectionString: process.env.DATABASE_URL,
-      max: 10,
+      max: resolvePgPoolMax(),
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
     });
@@ -74,6 +74,20 @@ export async function getPgDb() {
 
   await bootstrapPromise;
   return poolSingleton;
+}
+
+function resolvePgPoolMax() {
+  const raw = process.env.PG_POOL_MAX;
+  if (!raw) {
+    return 3;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return 3;
+  }
+
+  return Math.min(50, Math.max(1, Math.floor(parsed)));
 }
 
 async function bootstrapDatabase(pool: Pool) {
@@ -492,6 +506,11 @@ async function bootstrapDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS order_intents_asset_slot_idx
     ON order_intents(asset, slot_key, created_at DESC)
   `);
+    await pool.query(`
+    CREATE INDEX IF NOT EXISTS order_intents_open_asset_updated_idx
+    ON order_intents(asset, updated_at DESC)
+    WHERE status NOT IN ('settled', 'failed', 'skipped', 'canceled', 'unwound')
+  `);
 
     await pool.query(`
     ALTER TABLE venue_orders
@@ -509,6 +528,11 @@ async function bootstrapDatabase(pool: Pool) {
     await pool.query(`
     CREATE INDEX IF NOT EXISTS venue_orders_asset_updated_idx
     ON venue_orders(asset, updated_at DESC)
+  `);
+    await pool.query(`
+    CREATE INDEX IF NOT EXISTS venue_orders_open_asset_updated_idx
+    ON venue_orders(asset, updated_at DESC)
+    WHERE status IN ('pending', 'live', 'partially_filled')
   `);
 
     await pool.query(`

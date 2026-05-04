@@ -16,6 +16,9 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 
 - `warbitrer-web.service`
 - `warbitrer-worker.service`
+- `warbitrer-asset@.service`
+- `warbitrer-reconciler.service`
+- `warbitrer-notifier.service`
 - `warbitrer-postgres-backup.service`
 - `warbitrer-postgres-backup.timer`
 - `Caddyfile`
@@ -39,16 +42,20 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
    - `/etc/warbitrer/kalshi-private-key.pem`
    - `/etc/warbitrer/polymarket-private-key.txt`
 6. Installer les dépendances et builder:
-   `cd /opt/warbitrer-live/app && npm ci && npm run build`
+   `cd /opt/warbitrer-live/app && npm ci && npm run build && npm run build:worker`
 7. Copier les services:
    - `sudo cp deploy/vps/warbitrer-web.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-worker.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-asset@.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-reconciler.service /etc/systemd/system/`
+   - `sudo cp deploy/vps/warbitrer-notifier.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.timer /etc/systemd/system/`
 8. Recharger et activer:
    - `sudo systemctl daemon-reload`
    - `sudo systemctl enable --now warbitrer-web`
-   - `sudo systemctl enable --now warbitrer-worker`
+   - `sudo systemctl enable --now warbitrer-asset@btc warbitrer-asset@eth warbitrer-asset@sol warbitrer-asset@xrp warbitrer-asset@doge`
+   - `sudo systemctl enable --now warbitrer-reconciler warbitrer-notifier`
    - `sudo systemctl enable --now warbitrer-postgres-backup.timer`
 9. Configurer Caddy avec `deploy/vps/Caddyfile`
 10. Générer le mot de passe Caddy:

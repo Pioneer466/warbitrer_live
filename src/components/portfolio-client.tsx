@@ -20,7 +20,7 @@ import {
 import type { CircuitBreakerKey, MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
-  const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 1_000);
+  const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
   const [globalBreakerBusy, setGlobalBreakerBusy] = useState(false);
   const [breakerClearBusyKey, setBreakerClearBusyKey] = useState<string | null>(null);
   const [globalBreakerMessage, setGlobalBreakerMessage] = useState<string | null>(null);

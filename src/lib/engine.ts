@@ -146,6 +146,8 @@ const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_INTERVAL_MS = 5 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LIMIT = 500;
 const EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS = 5_000;
+const EXECUTION_CANDIDATE_WRITE_THROTTLE_MS = 1_000;
+const EXECUTION_CANDIDATE_LOG_INTERVAL_MS = 2_000;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const SETTINGS_CACHE_TTL_MS = 1_000;
 const VENUE_BALANCES_CACHE_TTL_MS = 750;
@@ -170,18 +172,22 @@ const POLYMARKET_CASH_ADJUSTMENT_MIN_USD = 0.005;
 const POLYMARKET_CASH_ADJUSTMENT_MAX_USD = 1;
 const POLYMARKET_CASH_ADJUSTMENT_MAX_RATIO = 0.25;
 const POLYMARKET_CASH_ADJUSTMENT_MAX_SNAPSHOT_LAG_MS = 5 * 60 * 1000;
+const POSITION_WRITE_THROTTLE_MS = 10_000;
 
 const kalshiAdapter = createKalshiAdapter();
 const polymarketAdapter = createPolymarketAdapter();
 const marketDataSupervisor = getMarketDataSupervisor();
 let lastDatabaseMaintenanceAttemptAt: number | null = null;
 const lastSettledResolutionRepairAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastPositionWriteByVenueAsset = new Map<string, { signature: string; writtenAt: number }>();
 let nextScanSequence = 1;
 let executionTickInFlight = false;
 const latestScanByAsset = new Map<MarketAsset, RealtimeScanState>();
 const executionTickInFlightByAsset: Partial<Record<MarketAsset, boolean>> = {};
 const lastExecutedScanSequenceByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastPersistedScanSnapshotAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastExecutionCandidateWriteByAsset = new Map<MarketAsset, { signature: string; writtenAt: number }>();
+const lastExecutionCandidateLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastPersistedWorkerStateAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastExecutionLockBusyLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
@@ -299,12 +305,20 @@ function buildPolymarketSlotSlug(asset: MarketAsset, slotStartTs: number) {
 type TickSharedContext = {
   venueBalances?: VenueBalance[];
   openIntents?: OrderIntent[];
+  recentVenueOrders?: LiveOrder[];
+  circuitBreakers?: CircuitBreaker[];
   lastEntryCosts?: Awaited<ReturnType<typeof readLastEntryCosts>>;
   venuePositions?: {
     polymarket: PositionSnapshot[];
     kalshi: PositionSnapshot[];
   } | null;
   storedPositions?: PositionSnapshot[];
+  venueOrderReconcileData?: {
+    polyOpenOrders: Awaited<ReturnType<typeof fetchPolymarketOpenOrders>>;
+    kalshiOrders: Awaited<ReturnType<typeof fetchKalshiOrders>>;
+    polyTrades: Awaited<ReturnType<typeof fetchPolymarketTrades>>;
+    kalshiFills: Awaited<ReturnType<typeof fetchKalshiFills>>;
+  };
 };
 
 export async function processTick(now = new Date()) {
@@ -406,11 +420,10 @@ async function scanAsset(
   latestScanByAsset.set(asset, scanState);
 
   const candidate = buildExecutionCandidate(scanState, nowTs);
-  if (candidate) {
+  if (candidate && shouldWriteExecutionCandidate(candidate, nowTs)) {
     await writeExecutionCandidate(candidate);
-    console.log(
-      `[worker] candidate published: asset=${asset} slot=${candidate.slotKey} profit=${candidate.projectedNetProfitUsd.toFixed(4)} age=${candidate.signalAgeMs}ms`,
-    );
+    markExecutionCandidateWritten(candidate, nowTs);
+    maybeLogExecutionCandidatePublished(candidate, nowTs);
   }
 
   const loopHealth = updateLoopHealth(asset, {
@@ -552,7 +565,7 @@ async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
   if (candidate) {
     const candidates = await readExecutionCandidates(nowTs);
     const winner = selectWinningExecutionCandidate(candidates, nowTs);
-    if (!winner || winner.asset !== scanState.asset || winner.scanSequence !== scanState.sequence) {
+    if (!winner || !isWinningCandidateForScanState(winner, scanState, nowTs)) {
       return created;
     }
     console.log(
@@ -585,14 +598,25 @@ export async function processReconcileTick(now = new Date()) {
   const sharedVenueBalances = await refreshBalances(getGlobalPolyBridgeLowWaterUsdc(settingsMap), nowTs);
   const sharedVenuePositions = await refreshVenuePositions();
   const storedPositions = sharedVenuePositions === null ? await readPositions() : undefined;
+  const [sharedOpenIntents, sharedRecentVenueOrders, sharedCircuitBreakers, venueOrderReconcileData] =
+    await Promise.all([
+      readOpenOrderIntents(),
+      readRecentVenueOrders(1_000),
+      readCircuitBreakers(),
+      prefetchVenueOrderReconcileData(),
+    ]);
 
   for (const asset of ACTIVE_MARKET_ASSETS) {
     const settings = settingsMap[asset];
     const slot = getCurrentSlot(asset, now);
     const coordinator = createExecutionCoordinator(asset, settings, {
       venueBalances: sharedVenueBalances,
+      openIntents: sharedOpenIntents,
+      recentVenueOrders: sharedRecentVenueOrders,
+      circuitBreakers: sharedCircuitBreakers,
       venuePositions: sharedVenuePositions,
       storedPositions,
+      venueOrderReconcileData,
     });
 
     try {
@@ -627,6 +651,62 @@ export async function processReconcileTick(now = new Date()) {
   if (errors.length > 0) {
     throw new Error(errors.join(" | "));
   }
+}
+
+async function prefetchVenueOrderReconcileData(): Promise<NonNullable<TickSharedContext["venueOrderReconcileData"]>> {
+  const [polyOpenOrders, kalshiOrders, polyTrades, kalshiFills] = await Promise.all([
+    fetchPolymarketOpenOrders().catch(() => []),
+    fetchKalshiOrders().catch(() => []),
+    fetchPolymarketTrades().catch(() => []),
+    fetchKalshiFills().catch(() => []),
+  ]);
+
+  return {
+    polyOpenOrders,
+    kalshiOrders,
+    polyTrades,
+    kalshiFills,
+  };
+}
+
+async function replaceVenuePositionsIfChanged(
+  venue: "polymarket" | "kalshi",
+  asset: MarketAsset,
+  positions: PositionSnapshot[],
+  now: number,
+) {
+  const key = `${venue}:${asset}`;
+  const signature = serializePositionSignature(positions);
+  const previous = lastPositionWriteByVenueAsset.get(key);
+  if (previous && previous.signature === signature && now - previous.writtenAt < POSITION_WRITE_THROTTLE_MS) {
+    return;
+  }
+
+  await replaceVenuePositions(venue, asset, positions);
+  lastPositionWriteByVenueAsset.set(key, { signature, writtenAt: now });
+}
+
+function serializePositionSignature(positions: PositionSnapshot[]) {
+  return JSON.stringify(
+    positions
+      .map((position) => ({
+        venue: position.venue,
+        asset: position.asset,
+        marketRef: position.marketRef,
+        outcome: position.outcome,
+        size: round4(position.size),
+        averagePrice: position.averagePrice === null ? null : round4(position.averagePrice),
+        currentPrice: position.currentPrice === null ? null : round4(position.currentPrice),
+        currentValueUsd: round4(position.currentValueUsd),
+        redeemable: position.redeemable,
+        mergeable: position.mergeable,
+      }))
+      .sort((left, right) =>
+        `${left.venue}:${left.asset}:${left.marketRef}:${left.outcome}`.localeCompare(
+          `${right.venue}:${right.asset}:${right.marketRef}:${right.outcome}`,
+        ),
+      ),
+  );
 }
 
 export function createExecutionCoordinator(
@@ -887,8 +967,8 @@ export function createExecutionCoordinator(
       reconcileErrors.push(
         ...(await runReconcileStep("replace_positions", now, async () => {
           await Promise.all([
-            replaceVenuePositions("polymarket", asset, assetPolyPositions),
-            replaceVenuePositions("kalshi", asset, assetKalshiPositions),
+            replaceVenuePositionsIfChanged("polymarket", asset, assetPolyPositions, now),
+            replaceVenuePositionsIfChanged("kalshi", asset, assetKalshiPositions, now),
           ]);
         })),
       );
@@ -911,13 +991,13 @@ export function createExecutionCoordinator(
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_venue_orders", now, async () => {
-          await reconcileVenueOrders(asset, now);
+          await reconcileVenueOrders(asset, now, sharedContext);
         })),
       );
 
       reconcileErrors.push(
         ...(await runReconcileStep("reconcile_inflight_intents", now, async () => {
-          await reconcileInFlightIntentStates(asset, now);
+          await reconcileInFlightIntentStates(asset, now, settings, sharedContext);
         })),
       );
 
@@ -1072,6 +1152,63 @@ function buildExecutionCandidate(scanState: RealtimeScanState, now: number): Exe
     signalAgeMs: Math.max(0, now - scanState.capturedAt),
     updatedAt: now,
   };
+}
+
+function shouldWriteExecutionCandidate(candidate: ExecutionCandidate, now: number) {
+  const signature = buildExecutionCandidateSignature(candidate);
+  const previous = lastExecutionCandidateWriteByAsset.get(candidate.asset);
+  if (
+    previous &&
+    previous.signature === signature &&
+    now - previous.writtenAt < EXECUTION_CANDIDATE_WRITE_THROTTLE_MS
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function markExecutionCandidateWritten(candidate: ExecutionCandidate, now: number) {
+  lastExecutionCandidateWriteByAsset.set(candidate.asset, {
+    signature: buildExecutionCandidateSignature(candidate),
+    writtenAt: now,
+  });
+}
+
+function buildExecutionCandidateSignature(candidate: ExecutionCandidate) {
+  return [
+    candidate.slotKey,
+    candidate.combination,
+    round4(candidate.projectedNetProfitUsd),
+    round4(candidate.grossCost),
+  ].join(":");
+}
+
+function isWinningCandidateForScanState(
+  winner: ExecutionCandidate,
+  scanState: RealtimeScanState,
+  now: number,
+) {
+  if (winner.asset !== scanState.asset || winner.slotKey !== scanState.slot.key) {
+    return false;
+  }
+  if (winner.scanSequence === scanState.sequence) {
+    return true;
+  }
+
+  return now - winner.updatedAt <= EXECUTION_CANDIDATE_WRITE_THROTTLE_MS + EXECUTION_ARBITER_WINDOW_MS;
+}
+
+function maybeLogExecutionCandidatePublished(candidate: ExecutionCandidate, now: number) {
+  const lastLogAt = lastExecutionCandidateLogAtByAsset[candidate.asset] ?? 0;
+  if (now - lastLogAt < EXECUTION_CANDIDATE_LOG_INTERVAL_MS) {
+    return;
+  }
+
+  lastExecutionCandidateLogAtByAsset[candidate.asset] = now;
+  console.log(
+    `[worker] candidate published: asset=${candidate.asset} slot=${candidate.slotKey} profit=${candidate.projectedNetProfitUsd.toFixed(4)} age=${candidate.signalAgeMs}ms`,
+  );
 }
 
 function resolveExecutionArbiterWindowMs() {
@@ -6326,19 +6463,21 @@ async function markIntentHedgedAfterEconomicCheck(
   return currentIntent;
 }
 
-async function reconcileVenueOrders(asset: MarketAsset, now: number) {
-  const [recentOrders, polyOpenOrders, kalshiOrders, polyTrades, kalshiFills] = await Promise.all([
-    readRecentVenueOrders(200, asset),
-    fetchPolymarketOpenOrders().catch(() => []),
-    fetchKalshiOrders().catch(() => []),
-    fetchPolymarketTrades().catch(() => []),
-    fetchKalshiFills().catch(() => []),
-  ]);
+async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedContext: TickSharedContext = {}) {
+  const recentOrders = sharedContext.recentVenueOrders
+    ? sharedContext.recentVenueOrders.filter((order) => order.asset === asset).slice(0, 200)
+    : await readRecentVenueOrders(200, asset);
+  const { polyOpenOrders, kalshiOrders, polyTrades, kalshiFills } =
+    sharedContext.venueOrderReconcileData ?? (await prefetchVenueOrderReconcileData());
+  const recentOrderByVenueId = new Map(recentOrders.map((order) => [`${order.venue}:${order.venueOrderId}`, order]));
   const touchedIntentLegs = new Set<string>();
 
   for (const order of polyOpenOrders) {
-    const existing = await findVenueOrder("polymarket", order.id);
+    const existing = recentOrderByVenueId.get(`polymarket:${order.id}`) ?? (await findVenueOrder("polymarket", order.id));
     if (!existing) {
+      continue;
+    }
+    if (existing.asset !== asset) {
       continue;
     }
     const mappedOrder = {
@@ -6355,8 +6494,11 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number) {
   }
 
   for (const order of kalshiOrders) {
-    const existing = await findVenueOrder("kalshi", order.order_id);
+    const existing = recentOrderByVenueId.get(`kalshi:${order.order_id}`) ?? (await findVenueOrder("kalshi", order.order_id));
     if (!existing) {
+      continue;
+    }
+    if (existing.asset !== asset) {
       continue;
     }
     const outcomePrice =
@@ -7108,13 +7250,22 @@ async function backfillUnwoundIntentPnl(asset: MarketAsset, now: number) {
   }
 }
 
-async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
-  const [openIntents, recentOrders, settings, livePositions] = await Promise.all([
-    readOpenOrderIntents(asset),
-    readRecentVenueOrders(200, asset),
-    readSettings(asset),
-    readPositions(asset),
-  ]);
+async function reconcileInFlightIntentStates(
+  asset: MarketAsset,
+  now: number,
+  settings: StrategyConfig,
+  sharedContext: TickSharedContext = {},
+) {
+  const openIntents = await readOpenOrderIntents(asset);
+  const recentOrders = await readRecentVenueOrders(200, asset);
+  const livePositions =
+    sharedContext.venuePositions === null
+      ? (sharedContext.storedPositions ?? []).filter((position) => position.asset === asset)
+      : sharedContext.venuePositions
+        ? [...sharedContext.venuePositions.polymarket, ...sharedContext.venuePositions.kalshi].filter(
+            (position) => position.asset === asset,
+          )
+        : await readPositions(asset);
 
   for (const intent of openIntents) {
     if (
@@ -7568,11 +7719,14 @@ async function reconcileInFlightIntentStates(asset: MarketAsset, now: number) {
     }
   }
 
-  await syncActiveSlotExecutionBreakers(now);
+  await syncActiveSlotExecutionBreakers(now, sharedContext);
 }
 
-async function syncActiveSlotExecutionBreakers(now: number) {
-  const [openIntents, breakers] = await Promise.all([readOpenOrderIntents(), readCircuitBreakers()]);
+async function syncActiveSlotExecutionBreakers(now: number, sharedContext: TickSharedContext = {}) {
+  const [openIntents, breakers] = await Promise.all([
+    sharedContext.openIntents ?? readOpenOrderIntents(),
+    sharedContext.circuitBreakers ?? readCircuitBreakers(),
+  ]);
   const unresolvedSlots = new Set(
     openIntents
       .filter((intent) =>

@@ -28,8 +28,8 @@ import type {
 } from "@/lib/types";
 
 export function DashboardClient({ asset }: { asset: MarketAsset }) {
-  const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 1_000);
-  const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 1_000);
+  const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 2_000);
+  const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 2_000);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;

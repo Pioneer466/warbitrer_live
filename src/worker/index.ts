@@ -24,7 +24,7 @@ const EXECUTION_TICK_TIMEOUT_MS = 90_000;
 const RECONCILE_TICK_TIMEOUT_MS = 120_000;
 const NOTIFICATION_FLUSH_INTERVAL_MS = 1_000;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
-const EXECUTION_INTERVAL_MS = 100;
+const EXECUTION_IDLE_INTERVAL_MS = readPositiveIntEnv("WARBITRER_EXECUTION_IDLE_INTERVAL_MS", 1_000, 100, 10_000);
 const RECONCILE_INTERVAL_MS = 3_000;
 const WORKER_FATAL_EXIT_DELAY_MS = 5_000;
 const MIN_LOOP_SLEEP_MS = 10;
@@ -55,7 +55,7 @@ async function run() {
       throw new Error("asset-live requires an asset");
     }
     console.log(
-      `[worker] asset-live started: asset=${asset} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms`,
+      `[worker] asset-live started: asset=${asset} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms hotTtl=${HOT_SIGNAL_TTL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executorIdle=${EXECUTION_IDLE_INTERVAL_MS}ms`,
     );
     await Promise.all([runScanLoop(asset), runExecutionLoop(asset)]);
     return;
@@ -74,7 +74,7 @@ async function run() {
   }
 
   console.log(
-    `[worker] legacy realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executor=${EXECUTION_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
+    `[worker] legacy realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms hotTtl=${HOT_SIGNAL_TTL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executorIdle=${EXECUTION_IDLE_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
   );
   await Promise.all([runScanLoop(), runExecutionLoop(), runReconcileLoop(), runNotificationFlushLoop()]);
 }
@@ -128,7 +128,7 @@ async function runExecutionLoop(asset?: MarketAsset) {
     }
 
     const elapsed = Date.now() - startedAt;
-    const waitMs = Math.max(MIN_LOOP_SLEEP_MS, EXECUTION_INTERVAL_MS - elapsed);
+    const waitMs = Math.max(MIN_LOOP_SLEEP_MS, EXECUTION_IDLE_INTERVAL_MS - elapsed);
     await sleepUntilExecutionWake(waitMs);
   }
 }
@@ -236,6 +236,20 @@ function sleepUntilExecutionWake(ms: number) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function readPositiveIntEnv(name: string, fallback: number, min: number, max: number) {
+  const raw = process.env[name];
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, Math.floor(parsed)));
 }
 
 async function checkPolygonRpcHealth() {
