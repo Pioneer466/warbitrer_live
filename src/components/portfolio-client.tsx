@@ -81,9 +81,15 @@ export function PortfolioClient() {
       return;
     }
 
+    const shouldCloseUnresolvedIntents =
+      breaker.reason === "hedge_failure" || typeof breaker.payload?.intentId === "string";
     if (
-      breaker.payload?.requiresManualClear === true &&
-      !window.confirm(`Clear ${key} ? Ce breaker demandait un clear manuel.`)
+      (breaker.payload?.requiresManualClear === true || shouldCloseUnresolvedIntents) &&
+      !window.confirm(
+        shouldCloseUnresolvedIntents
+          ? `Clear ${key} et fermer l'intent non résolu associé ? À faire uniquement si l'exposition a été traitée manuellement.`
+          : `Clear ${key} ? Ce breaker demandait un clear manuel.`,
+      )
     ) {
       return;
     }
@@ -99,6 +105,7 @@ export function PortfolioClient() {
         body: JSON.stringify({
           key,
           active: false,
+          closeUnresolvedIntents: shouldCloseUnresolvedIntents,
         }),
       });
 
@@ -106,7 +113,13 @@ export function PortfolioClient() {
         throw new Error(await response.text());
       }
 
-      setGlobalBreakerMessage(`Breaker ${key} désactivé.`);
+      const result = await response.json().catch(() => null) as { closedIntentIds?: string[] } | null;
+      const closedCount = result?.closedIntentIds?.length ?? 0;
+      setGlobalBreakerMessage(
+        closedCount > 0
+          ? `Breaker ${key} désactivé; ${closedCount} intent(s) non résolu(s) fermé(s).`
+          : `Breaker ${key} désactivé.`,
+      );
     } catch (error) {
       setGlobalBreakerMessage(error instanceof Error ? error.message : `Impossible de désactiver ${key}.`);
     } finally {

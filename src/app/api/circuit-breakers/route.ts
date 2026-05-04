@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { readCircuitBreakers, readOpenOrderIntents, writeCircuitBreaker } from "@/lib/storage";
+import { readCircuitBreakers, readOpenOrderIntents, writeCircuitBreaker, writeOrderIntent } from "@/lib/storage";
 import { isMarketAsset } from "@/lib/market-catalog";
 import type { CircuitBreaker, CircuitBreakerKey, CircuitBreakerReason, OrderIntent } from "@/lib/types";
 
@@ -108,6 +108,7 @@ export async function PUT(request: Request) {
       active?: boolean;
       reason?: CircuitBreakerReason | null;
       payload?: Record<string, unknown> | null;
+      closeUnresolvedIntents?: boolean;
     };
 
     if (!body.key || typeof body.active !== "boolean") {
@@ -119,17 +120,65 @@ export async function PUT(request: Request) {
       );
     }
 
+    const now = Date.now();
+    const existingBreakers = await readCircuitBreakers();
+    const existingBreaker = existingBreakers.find((candidate) => candidate.key === body.key) ?? null;
+    const closedIntentIds =
+      body.active === false && body.closeUnresolvedIntents === true
+        ? await closeBreakerUnresolvedIntents(body.key, existingBreaker, now)
+        : [];
+
     const breaker = {
       key: body.key,
       active: body.active,
       reason: body.active ? body.reason ?? "manual" : null,
-      triggeredAt: body.active ? Date.now() : null,
+      triggeredAt: body.active ? now : null,
       payload: body.payload ?? null,
     };
 
     await writeCircuitBreaker(breaker);
-    return NextResponse.json(breaker);
+    return NextResponse.json({ ...breaker, closedIntentIds });
   } catch (error) {
     return createApiErrorResponse(error);
   }
+}
+
+const UNRESOLVED_INTENT_STATUSES = new Set<OrderIntent["status"]>([
+  "executing_primary",
+  "primary_filled",
+  "truth_pending",
+  "rescue_hedge",
+  "hedging",
+  "unwind_required",
+  "manual_required",
+]);
+
+async function closeBreakerUnresolvedIntents(
+  key: CircuitBreakerKey,
+  breaker: CircuitBreaker | null,
+  now: number,
+) {
+  const scope = parseBreakerScope(key);
+  const openIntents = await readOpenOrderIntents();
+  const payloadIntentId = typeof breaker?.payload?.intentId === "string" ? breaker.payload.intentId : null;
+  const closeableIntents = openIntents.filter((intent) => {
+    if (!UNRESOLVED_INTENT_STATUSES.has(intent.status)) {
+      return false;
+    }
+    if (payloadIntentId !== null) {
+      return intent.id === payloadIntentId;
+    }
+    return scope.type !== "global" && matchesBreakerScope(scope, intent);
+  });
+
+  for (const intent of closeableIntents) {
+    await writeOrderIntent({
+      ...intent,
+      status: "failed",
+      updatedAt: now,
+      failureReason: "Manually closed unresolved breaker exposure from portfolio clear button",
+    });
+  }
+
+  return closeableIntents.map((intent) => intent.id);
 }
