@@ -17,11 +17,12 @@ import {
   V2_TONE_TEXT,
   type V2Tone,
 } from "@/components/v2-ui";
-import type { MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import type { CircuitBreakerKey, MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 1_000);
   const [globalBreakerBusy, setGlobalBreakerBusy] = useState(false);
+  const [breakerClearBusyKey, setBreakerClearBusyKey] = useState<string | null>(null);
   const [globalBreakerMessage, setGlobalBreakerMessage] = useState<string | null>(null);
 
   if (portfolio.loading && !portfolio.data) {
@@ -74,6 +75,45 @@ export function PortfolioClient() {
     }
   }
 
+  async function clearBreaker(key: CircuitBreakerKey) {
+    const breaker = activeBreakers.find((candidate) => candidate.key === key);
+    if (!breaker?.active) {
+      return;
+    }
+
+    if (
+      breaker.payload?.requiresManualClear === true &&
+      !window.confirm(`Clear ${key} ? Ce breaker demandait un clear manuel.`)
+    ) {
+      return;
+    }
+
+    setBreakerClearBusyKey(key);
+    setGlobalBreakerMessage(null);
+    try {
+      const response = await fetch("/api/circuit-breakers", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          key,
+          active: false,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(await response.text());
+      }
+
+      setGlobalBreakerMessage(`Breaker ${key} désactivé.`);
+    } catch (error) {
+      setGlobalBreakerMessage(error instanceof Error ? error.message : `Impossible de désactiver ${key}.`);
+    } finally {
+      setBreakerClearBusyKey(null);
+    }
+  }
+
   return (
     <div className="flex flex-col gap-8">
       <PageSection watermark="PORT">
@@ -113,7 +153,13 @@ export function PortfolioClient() {
             {globalBreakerMessage}
           </div>
         ) : null}
-        {nonGlobalBreakers.length > 0 ? <ActiveBreakerList breakers={nonGlobalBreakers} /> : null}
+        {nonGlobalBreakers.length > 0 ? (
+          <ActiveBreakerList
+            breakers={nonGlobalBreakers}
+            busyKey={breakerClearBusyKey}
+            onClear={clearBreaker}
+          />
+        ) : null}
 
         <Surface glow>
           <div className="grid border-b border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-4">
@@ -167,17 +213,44 @@ export function PortfolioClient() {
   );
 }
 
-function ActiveBreakerList({ breakers }: { breakers: PortfolioDashboardResponse["activeBreakers"] }) {
+function ActiveBreakerList({
+  breakers,
+  busyKey,
+  onClear,
+}: {
+  breakers: PortfolioDashboardResponse["activeBreakers"];
+  busyKey: string | null;
+  onClear: (key: CircuitBreakerKey) => void;
+}) {
   return (
     <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.22)] bg-[rgba(232,80,106,0.06)] px-5 py-4">
       <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--wa-rose)]">
         Breakers slot / asset actifs
       </div>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-col gap-2">
         {breakers.map((breaker) => (
-          <Chip key={breaker.key} tone="rose">
-            {breaker.key} · {breaker.reason ?? "unknown"}
-          </Chip>
+          <div
+            key={breaker.key}
+            className="flex flex-col gap-2 rounded border border-[rgba(232,80,106,0.18)] bg-[rgba(10,14,22,0.22)] px-3 py-3 sm:flex-row sm:items-center sm:justify-between"
+          >
+            <div className="flex min-w-0 flex-col gap-1">
+              <div className="flex flex-wrap gap-2">
+                <Chip tone="rose">{breaker.key}</Chip>
+                <Chip tone="rose">{breaker.reason ?? "unknown"}</Chip>
+              </div>
+              <div className="truncate text-[10px] text-[var(--wa-mist)]">
+                {breaker.triggeredAt ? new Date(breaker.triggeredAt).toLocaleString("fr-FR") : "déclenchement inconnu"}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => onClear(breaker.key)}
+              disabled={busyKey === breaker.key}
+              className="w-full rounded border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.10)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--wa-rose)] transition hover:bg-[rgba(232,80,106,0.16)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
+            >
+              {busyKey === breaker.key ? "clear..." : "clear"}
+            </button>
+          </div>
         ))}
       </div>
     </div>
