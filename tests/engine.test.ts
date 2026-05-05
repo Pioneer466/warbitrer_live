@@ -28,6 +28,7 @@ import {
   resolveKalshiPrimaryMultiClipRetryPlan,
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
+  shouldHoldPolymarketHedgeFailurePendingTruth,
   shouldKeepSlotExecutionBreakerActive,
   shouldPauseExecutionForBreaker,
   shouldTreatPrimaryExecutionAsFilled,
@@ -993,6 +994,75 @@ describe("Kalshi primary IOC handling", () => {
         },
       ),
     ).toBe(false);
+  });
+
+  it("holds soft Polymarket hedge no-fills only until the truth-pending age expires", () => {
+    const now = 1774899060000;
+    const hedgeLeg = { venue: "polymarket" as const, side: "BUY" as const };
+    const softNoFillOrder = {
+      status: "canceled" as const,
+      filledSize: 0,
+      venueOrderId: "killed:order-1",
+      raw: {
+        softNoFill: true,
+        orderTruth: {
+          terminalZeroFill: false,
+        },
+      },
+    };
+
+    expect(
+      shouldHoldPolymarketHedgeFailurePendingTruth(
+        {
+          hedgeVenue: "polymarket",
+          status: "truth_pending",
+          updatedAt: now - 9_000,
+        },
+        hedgeLeg,
+        softNoFillOrder,
+        now,
+      ),
+    ).toBe(true);
+
+    expect(
+      shouldHoldPolymarketHedgeFailurePendingTruth(
+        {
+          hedgeVenue: "polymarket",
+          status: "truth_pending",
+          updatedAt: now - 11_000,
+        },
+        hedgeLeg,
+        softNoFillOrder,
+        now,
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps holding when Polymarket reports pending exposure truth", () => {
+    const now = 1774899060000;
+
+    expect(
+      shouldHoldPolymarketHedgeFailurePendingTruth(
+        {
+          hedgeVenue: "polymarket",
+          status: "truth_pending",
+          updatedAt: now - 60_000,
+        },
+        { venue: "polymarket", side: "BUY" },
+        {
+          status: "canceled",
+          filledSize: 0,
+          venueOrderId: "killed:order-1",
+          raw: {
+            orderTruth: {
+              terminalZeroFill: false,
+              pendingFilledSize: 5,
+            },
+          },
+        },
+        now,
+      ),
+    ).toBe(true);
   });
 });
 

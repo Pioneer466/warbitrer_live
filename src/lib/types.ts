@@ -157,6 +157,12 @@ export type PolymarketQuote = {
     up: string;
     down: string;
   };
+  orderbookLevels?: {
+    upBids: Array<[number, number]>;
+    upAsks: Array<[number, number]>;
+    downBids: Array<[number, number]>;
+    downAsks: Array<[number, number]>;
+  } | null;
   chainlinkLivePriceUsd: number | null;
   chainlinkLivePriceCapturedAt: number | null;
   observedSlotOpenPriceUsd: number | null;

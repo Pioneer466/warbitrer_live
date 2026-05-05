@@ -331,11 +331,13 @@ class PolymarketRealtimeFeed {
       subscriptions: this.subscriptions,
     });
 
+    const upBookSnapshot = upBook ? serializePolymarketBook(upBook) : null;
+    const downBookSnapshot = downBook ? serializePolymarketBook(downBook) : null;
     const upOutcome =
       upBook
         ? buildPolymarketOutcomeQuoteFromBook(
             "UP",
-            serializePolymarketBook(upBook),
+            upBookSnapshot!,
             feedHealth.source,
             upBook.lastUpdatedAt,
             upBook.lastTradePrice,
@@ -346,7 +348,7 @@ class PolymarketRealtimeFeed {
       downBook
         ? buildPolymarketOutcomeQuoteFromBook(
             "DOWN",
-            serializePolymarketBook(downBook),
+            downBookSnapshot!,
             feedHealth.source,
             downBook.lastUpdatedAt,
             downBook.lastTradePrice,
@@ -381,6 +383,7 @@ class PolymarketRealtimeFeed {
       },
       resolution: extractPolymarketResolution(this.market.outcomePrices),
       tokenIds: this.tokenIds,
+      orderbookLevels: buildPolymarketOrderbookLevels(upBookSnapshot, downBookSnapshot),
       chainlinkLivePriceUsd: this.chainlinkLivePriceUsd,
       chainlinkLivePriceCapturedAt: this.chainlinkLivePriceCapturedAt,
       observedSlotOpenPriceUsd: this.observedSlotOpenPriceUsd,
@@ -1684,6 +1687,29 @@ function serializePolymarketBook(state: PolymarketBookState) {
     tick_size: state.tickSize === null ? undefined : String(state.tickSize),
     min_order_size: state.minOrderSize === null ? undefined : String(state.minOrderSize),
   };
+}
+
+function buildPolymarketOrderbookLevels(
+  upBook: ReturnType<typeof serializePolymarketBook> | null,
+  downBook: ReturnType<typeof serializePolymarketBook> | null,
+): PolymarketQuote["orderbookLevels"] {
+  if (!upBook || !downBook) {
+    return null;
+  }
+
+  return {
+    upBids: toNumericBookLevels(upBook.bids),
+    upAsks: toNumericBookLevels(upBook.asks),
+    downBids: toNumericBookLevels(downBook.bids),
+    downAsks: toNumericBookLevels(downBook.asks),
+  };
+}
+
+function toNumericBookLevels(levels: Array<{ price: string; size: string }>) {
+  return levels
+    .slice(0, 10)
+    .map((level) => [Number(level.price), Number(level.size)] as [number, number])
+    .filter(([price, size]) => Number.isFinite(price) && Number.isFinite(size) && size > 0);
 }
 
 function syncPolymarketTopOfBook(state: PolymarketBookState) {

@@ -3222,7 +3222,7 @@ async function acceptBenignOverfilledHedge(
   return currentIntent;
 }
 
-function shouldHoldPolymarketHedgeFailurePendingTruth(
+export function shouldHoldPolymarketHedgeFailurePendingTruth(
   intent: Pick<OrderIntent, "hedgeVenue" | "status" | "updatedAt">,
   hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side">,
   result: Pick<LiveOrder, "filledSize" | "raw" | "status" | "venueOrderId"> | null,
@@ -3308,14 +3308,17 @@ async function holdPolymarketHedgeFailurePendingTruth(
     existingBreaker.payload?.intentId === intent.id &&
     existingBreaker.payload?.stage === "polymarket_hedge_no_fill_truth_pending";
 
-  let currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
-  currentIntent = markIntentStatus(
-    currentIntent,
-    "truth_pending",
-    now,
-    pendingTruthReason,
-  );
-  await writeOrderIntent(currentIntent);
+  let currentIntent = intent;
+  if (!alreadyPendingSameOrder) {
+    currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "truth_pending",
+      now,
+      pendingTruthReason,
+    );
+    await writeOrderIntent(currentIntent);
+  }
 
   if (!alreadyPendingSameOrder || !existingPendingTruthBreaker) {
     await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
