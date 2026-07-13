@@ -17,7 +17,7 @@ import {
   V2_TONE_TEXT,
   type V2Tone,
 } from "@/components/v2-ui";
-import type { CircuitBreakerKey, MarketAsset, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import type { CircuitBreaker, CircuitBreakerKey, MarketAsset, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
@@ -33,7 +33,7 @@ export function PortfolioClient() {
     return <PanelMessage title="Erreur" message={portfolio.error ?? "Aucune donnée portefeuille."} tone="rose" />;
   }
 
-  const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers } = portfolio.data;
+  const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers, manualRequiredIntents } = portfolio.data;
   const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
   const nonGlobalBreakers = activeBreakers.filter((breaker) => breaker.key !== "global");
   const globalBreakerActive = globalBreaker?.active === true;
@@ -75,14 +75,14 @@ export function PortfolioClient() {
     }
   }
 
-  async function clearBreaker(key: CircuitBreakerKey) {
+  async function clearBreaker(key: CircuitBreakerKey, options: { intentId?: string; forceCloseIntent?: boolean } = {}) {
     const breaker = activeBreakers.find((candidate) => candidate.key === key);
     if (!breaker?.active) {
       return;
     }
 
     const shouldCloseUnresolvedIntents =
-      breaker.reason === "hedge_failure" || typeof breaker.payload?.intentId === "string";
+      options.forceCloseIntent === true || breaker.reason === "hedge_failure" || typeof breaker.payload?.intentId === "string";
     if (
       (breaker.payload?.requiresManualClear === true || shouldCloseUnresolvedIntents) &&
       !window.confirm(
@@ -106,6 +106,7 @@ export function PortfolioClient() {
           key,
           active: false,
           closeUnresolvedIntents: shouldCloseUnresolvedIntents,
+          intentId: options.intentId,
         }),
       });
 
@@ -125,6 +126,15 @@ export function PortfolioClient() {
     } finally {
       setBreakerClearBusyKey(null);
     }
+  }
+
+  async function clearManualIntervention(intent: OrderIntent) {
+    const breaker = findBreakerForIntent(activeBreakers, intent);
+    if (!breaker) {
+      setGlobalBreakerMessage(`Aucun breaker actif trouvé pour l'intent ${intent.id}.`);
+      return;
+    }
+    await clearBreaker(breaker.key, { intentId: intent.id, forceCloseIntent: true });
   }
 
   return (
@@ -165,6 +175,14 @@ export function PortfolioClient() {
           <div className="mb-4 rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.05)] px-4 py-3 text-sm text-[var(--wa-mist)]">
             {globalBreakerMessage}
           </div>
+        ) : null}
+        {manualRequiredIntents.length > 0 ? (
+          <ManualInterventionList
+            intents={manualRequiredIntents}
+            breakers={activeBreakers}
+            busyKey={breakerClearBusyKey}
+            onClear={clearManualIntervention}
+          />
         ) : null}
         {nonGlobalBreakers.length > 0 ? (
           <ActiveBreakerList
@@ -222,6 +240,91 @@ export function PortfolioClient() {
           {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
         </Surface>
       </section>
+    </div>
+  );
+}
+
+function ManualInterventionList({
+  intents,
+  breakers,
+  busyKey,
+  onClear,
+}: {
+  intents: OrderIntent[];
+  breakers: CircuitBreaker[];
+  busyKey: string | null;
+  onClear: (intent: OrderIntent) => void;
+}) {
+  return (
+    <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.10)] px-5 py-4 shadow-[0_0_28px_rgba(232,80,106,0.08)]">
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--wa-rose)]">
+            Intervention manuelle requise
+          </div>
+          <div className="mt-1 text-sm text-[var(--wa-mist)]">
+            Vérifie que l'exposition a été traitée avant de lever le blocage.
+          </div>
+        </div>
+        <Chip tone="rose">{intents.length} intent(s)</Chip>
+      </div>
+      <div className="flex flex-col gap-3">
+        {intents.map((intent) => {
+          const breaker = findBreakerForIntent(breakers, intent);
+          const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+          const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+          return (
+            <div
+              key={intent.id}
+              className="grid gap-3 rounded border border-[rgba(232,80,106,0.22)] bg-[rgba(10,14,22,0.30)] px-3 py-3 lg:grid-cols-[1fr_auto]"
+            >
+              <div className="min-w-0">
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <Chip tone="rose">{intent.asset.toUpperCase()}</Chip>
+                  <Chip tone="rose">{intent.status}</Chip>
+                  <Chip tone={intent.shadow ? "indigo" : "gold"}>{intent.shadow ? "shadow" : "live"}</Chip>
+                  {breaker ? <Chip tone="rose">{breaker.reason ?? "breaker"}</Chip> : <Chip tone="amber">sans breaker</Chip>}
+                </div>
+                <div className="text-sm text-[var(--wa-ivory)]">
+                  {intent.combination} · {intent.primaryVenue} → {intent.hedgeVenue}
+                </div>
+                <div className="mt-1 text-xs text-[var(--wa-mist)]">
+                  {new Date(intent.createdAt).toLocaleString("fr-FR")} · slot {intent.slotKey}
+                </div>
+                <div className="mt-2 grid gap-1 text-xs text-[var(--wa-mist)] sm:grid-cols-2">
+                  <IntentLegLine label="primaire" leg={primaryLeg} />
+                  <IntentLegLine label="hedge" leg={hedgeLeg} />
+                </div>
+                {intent.failureReason ? (
+                  <div className="mt-2 text-xs leading-5 text-[var(--wa-rose)]">{intent.failureReason}</div>
+                ) : null}
+              </div>
+              <div className="flex items-start lg:justify-end">
+                <button
+                  type="button"
+                  onClick={() => onClear(intent)}
+                  disabled={!breaker || busyKey === breaker.key}
+                  className="w-full rounded border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.12)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--wa-rose)] transition hover:bg-[rgba(232,80,106,0.18)] disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
+                  title={breaker ? "Clear le breaker et fermer cet intent" : "Aucun breaker actif associé"}
+                >
+                  {breaker && busyKey === breaker.key ? "levée..." : "Lever breaker + intent"}
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function IntentLegLine({ label, leg }: { label: string; leg: OrderIntent["legs"][number] | undefined }) {
+  if (!leg) {
+    return <div>{label}: --</div>;
+  }
+  return (
+    <div>
+      {label}: {leg.venue} · {leg.outcome} · filled {formatSize(leg.filledSize)}/{formatSize(leg.requestedSize)}
     </div>
   );
 }
@@ -464,6 +567,16 @@ function getReadinessTone(status: ReadinessStatus): V2Tone {
   return status === "ready" ? "emerald" : status === "blocked" ? "rose" : "amber";
 }
 
+function findBreakerForIntent(breakers: CircuitBreaker[], intent: OrderIntent) {
+  return (
+    breakers.find((breaker) => breaker.active && breaker.payload?.intentId === intent.id) ??
+    breakers.find((breaker) => breaker.active && breaker.key === `slot:${intent.slotKey}`) ??
+    breakers.find((breaker) => breaker.active && breaker.key === `asset:${intent.asset}`) ??
+    breakers.find((breaker) => breaker.active && breaker.key === "global") ??
+    null
+  );
+}
+
 function formatSignedUsd(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) {
     return "--";
@@ -475,4 +588,8 @@ function formatSignedUsd(value: number | null | undefined) {
 function formatChartUsd(value: number) {
   const sign = value >= 0 ? "+" : "-";
   return `${sign}$${Math.abs(value).toFixed(2)}`;
+}
+
+function formatSize(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(4);
 }

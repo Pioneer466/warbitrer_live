@@ -762,6 +762,7 @@ export type PortfolioDashboardResponse = {
   stablePnlChanges: StablePnlChange[];
   fillQuality: FillQualitySummary;
   activeBreakers: CircuitBreaker[];
+  manualRequiredIntents: OrderIntent[];
 };
 
 export type TradesResponse = {

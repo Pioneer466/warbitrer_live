@@ -109,6 +109,7 @@ export async function PUT(request: Request) {
       reason?: CircuitBreakerReason | null;
       payload?: Record<string, unknown> | null;
       closeUnresolvedIntents?: boolean;
+      intentId?: string;
     };
 
     if (!body.key || typeof body.active !== "boolean") {
@@ -125,7 +126,7 @@ export async function PUT(request: Request) {
     const existingBreaker = existingBreakers.find((candidate) => candidate.key === body.key) ?? null;
     const closedIntentIds =
       body.active === false && body.closeUnresolvedIntents === true
-        ? await closeBreakerUnresolvedIntents(body.key, existingBreaker, now)
+        ? await closeBreakerUnresolvedIntents(body.key, existingBreaker, now, body.intentId)
         : [];
 
     const breaker = {
@@ -157,16 +158,19 @@ async function closeBreakerUnresolvedIntents(
   key: CircuitBreakerKey,
   breaker: CircuitBreaker | null,
   now: number,
+  requestedIntentId?: string,
 ) {
   const scope = parseBreakerScope(key);
   const openIntents = await readOpenOrderIntents();
+  const explicitIntentId = typeof requestedIntentId === "string" && requestedIntentId.trim() ? requestedIntentId.trim() : null;
   const payloadIntentId = typeof breaker?.payload?.intentId === "string" ? breaker.payload.intentId : null;
+  const targetIntentId = explicitIntentId ?? payloadIntentId;
   const closeableIntents = openIntents.filter((intent) => {
     if (!UNRESOLVED_INTENT_STATUSES.has(intent.status)) {
       return false;
     }
-    if (payloadIntentId !== null) {
-      return intent.id === payloadIntentId;
+    if (targetIntentId !== null) {
+      return intent.id === targetIntentId;
     }
     return scope.type !== "global" && matchesBreakerScope(scope, intent);
   });

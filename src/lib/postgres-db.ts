@@ -2671,12 +2671,13 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
   const [baselineEquityUsd, peakEquityUsd] = pnl
     ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
     : [null, null];
-  const [configs, workerStates, breakers, venueBalances, positions] = await Promise.all([
+  const [configs, workerStates, breakers, venueBalances, positions, openIntents] = await Promise.all([
     listStrategyConfigs(pool),
     listWorkerStates(pool),
     listCircuitBreakers(pool),
     listVenueBalances(pool),
     listPositions(pool),
+    listOpenOrderIntents(pool),
   ]);
   const snapshots = await Promise.all(slots.map((slot) => getLatestOpportunitySnapshot(pool, slot.asset, slot.key)));
   const now = Date.now();
@@ -2718,6 +2719,9 @@ export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketS
     stablePnlChanges: await listStablePnlChanges(pool, 25),
     fillQuality,
     activeBreakers: breakers.filter((breaker) => breaker.active),
+    manualRequiredIntents: openIntents.filter(
+      (intent) => intent.status === "manual_required" || intent.status === "unwind_required",
+    ),
   };
 }
 
