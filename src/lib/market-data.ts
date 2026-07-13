@@ -13,7 +13,7 @@ import {
   deriveKalshiOutcomeQuotesFromMarketWithSource,
   extractKalshiLastTradePrices,
   fetchKalshiMarket,
-  fetchKalshiMarkets,
+  fetchKalshiMarketsForSlot,
   fetchKalshiOrderbook,
   fetchKalshiSeries,
   fetchKalshiTrades,
@@ -239,6 +239,14 @@ function toSubscriptionState(
 
 function nextReconnectDelay(attempt: number) {
   return Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * 2 ** attempt);
+}
+
+function hasKalshiCredentialsSafe() {
+  try {
+    return hasKalshiCredentials();
+  } catch {
+    return false;
+  }
 }
 
 class PolymarketRealtimeFeed {
@@ -1074,7 +1082,7 @@ class KalshiRealtimeFeed {
       lastWsMessageAt: this.lastWsMessageAt,
       lastRestSyncAt: this.lastRestSyncAt,
       dataReady: Boolean(this.market && this.series && this.orderbookInSync),
-      details: [this.lastError ?? (this.orderbookInSync ? "Feed Kalshi actif" : "Resync orderbook Kalshi en cours")],
+      details: this.describeFeedDetails(now),
       subscriptions: this.subscriptions,
     });
 
@@ -1091,7 +1099,7 @@ class KalshiRealtimeFeed {
 
     const marketQuotes = deriveKalshiOutcomeQuotesFromMarketWithSource(
       this.market,
-      this.subscriptions[0]?.lastMessageAt !== null ? "ws" : "rest-bootstrap",
+      this.resolveTickerQuoteSource(now),
       parseTimestamp(this.market.updated_time) ?? lastMessageAt,
     );
     const orderbookQuotes = this.orderbook
@@ -1248,7 +1256,7 @@ class KalshiRealtimeFeed {
       return { markets: this.marketsCache.markets };
     }
 
-    const response = await fetchKalshiMarkets(slot.asset);
+    const response = await fetchKalshiMarketsForSlot(slot);
     this.marketsCache = {
       markets: response.markets,
       capturedAt: now,
@@ -1294,8 +1302,9 @@ class KalshiRealtimeFeed {
   }
 
   private ensureWs() {
-    if (!this.market || this.ws || !hasKalshiCredentials()) {
-      if (!hasKalshiCredentials()) {
+    const hasCredentials = hasKalshiCredentialsSafe();
+    if (!this.market || this.ws || !hasCredentials) {
+      if (!hasCredentials) {
         this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
           status: "idle",
           source: "rest-fallback",
@@ -1346,7 +1355,6 @@ class KalshiRealtimeFeed {
 
       const nowTs = Date.now();
       this.applyWsPayload(payload, nowTs);
-      this.lastWsMessageAt = nowTs;
     });
 
     ws.on("error", (error: unknown) => {
@@ -1389,7 +1397,7 @@ class KalshiRealtimeFeed {
     if (type === "error") {
       const details = typeof message?.msg === "string" ? message.msg : JSON.stringify(message);
       this.lastError = `Kalshi WS error: ${details}`;
-      return;
+      return false;
     }
 
     if (type === "subscribed") {
@@ -1403,7 +1411,7 @@ class KalshiRealtimeFeed {
           details: `sid ${message.sid ?? "?"}`,
         });
       }
-      return;
+      return false;
     }
 
     if (type === "ticker") {
@@ -1450,7 +1458,9 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "ticker live",
       });
-      return;
+      this.lastWsMessageAt = now;
+      this.lastError = null;
+      return true;
     }
 
     if (type === "orderbook_snapshot") {
@@ -1465,7 +1475,11 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "orderbook snapshot live",
       });
-      return;
+      if (orderbook) {
+        this.lastWsMessageAt = now;
+      }
+      this.lastError = null;
+      return orderbook !== null;
     }
 
     if (type === "orderbook_delta") {
@@ -1476,7 +1490,8 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "orderbook delta live",
       });
-      return;
+      this.lastWsMessageAt = now;
+      return true;
     }
 
     if (type === "trade") {
@@ -1487,7 +1502,12 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "trade live",
       });
+      this.lastWsMessageAt = now;
+      this.lastError = null;
+      return true;
     }
+
+    return false;
   }
 
   private applyKalshiDelta(message: any, now: number) {
@@ -1581,6 +1601,39 @@ class KalshiRealtimeFeed {
     }
 
     return now - this.orderbook.lastUpdatedAt <= FEED_BLOCKED_MS;
+  }
+
+  private resolveTickerQuoteSource(now: number) {
+    const tickerLastMessageAt = this.subscriptions[0]?.lastMessageAt ?? null;
+    return chooseFeedSource(tickerLastMessageAt, this.lastRestSyncAt, now);
+  }
+
+  private describeFeedDetails(now: number) {
+    const details: string[] = [];
+    if (this.lastError) {
+      details.push(this.lastError);
+    } else if (!this.market) {
+      details.push("Kalshi REST bootstrap en attente du ticker courant");
+    } else if (!hasKalshiCredentialsSafe()) {
+      details.push("Kalshi WS inactif sans credentials; REST fallback uniquement");
+    } else if (this.ws && this.lastWsMessageAt === null) {
+      details.push("Kalshi WS connecte, en attente du premier payload de donnees");
+    } else if (this.lastWsMessageAt === null) {
+      details.push("Kalshi WS pas encore actif; REST bootstrap utilise");
+    } else if (!this.orderbookInSync) {
+      details.push("Resync orderbook Kalshi en cours");
+    } else {
+      const stalenessMs = Math.max(0, now - this.lastWsMessageAt);
+      details.push(stalenessMs <= FEED_BLOCKED_MS ? "Kalshi WS actif" : "Kalshi WS stale; REST fallback conserve");
+    }
+
+    for (const subscription of this.subscriptions) {
+      const age =
+        subscription.lastMessageAt === null ? "no-data" : `${Math.max(0, now - subscription.lastMessageAt)}ms`;
+      details.push(`${subscription.channel}: ${subscription.status} · ${subscription.source} · ${age} · ${subscription.details ?? "--"}`);
+    }
+
+    return details;
   }
 }
 

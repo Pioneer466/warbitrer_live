@@ -147,6 +147,8 @@ type KalshiOrderResponse = {
 };
 
 const SLOT_TOLERANCE_MS = 60_000;
+const KALSHI_SLOT_PREFETCH_MS = 15 * 60 * 1_000;
+const KALSHI_CURRENT_MARKETS_LIMIT = 100;
 const KALSHI_MARKETS_PAGE_LIMIT = 1_000;
 const KALSHI_MARKETS_MAX_PAGES = 10;
 
@@ -172,7 +174,7 @@ export function getKalshiWsUrl() {
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   const marketConfig = getMarketCatalogEntry(slot.asset);
   const [list, series] = await Promise.all([
-    fetchKalshiMarkets(slot.asset),
+    fetchKalshiMarketsForSlot(slot),
     fetchKalshiSeries(slot.asset),
   ]);
 
@@ -271,6 +273,15 @@ export async function fetchKalshiSeries(asset: MarketSlot["asset"]) {
   );
 }
 
+export async function fetchKalshiMarketsForSlot(slot: MarketSlot) {
+  const targeted = await fetchKalshiMarketsForSlotWindow(slot);
+  if (resolveKalshiMarketForSlot(targeted.markets, slot)) {
+    return targeted;
+  }
+
+  return fetchKalshiMarkets(slot.asset);
+}
+
 export async function fetchKalshiMarkets(asset: MarketSlot["asset"]) {
   const marketConfig = getMarketCatalogEntry(asset);
   const markets: KalshiMarketSummary[] = [];
@@ -303,6 +314,19 @@ export async function fetchKalshiMarkets(asset: MarketSlot["asset"]) {
   }
 
   return { markets };
+}
+
+async function fetchKalshiMarketsForSlotWindow(slot: MarketSlot) {
+  const marketConfig = getMarketCatalogEntry(slot.asset);
+  const params = new URLSearchParams({
+    series_ticker: marketConfig.kalshiSeriesTicker,
+    min_close_ts: String(Math.floor((slot.endTs - SLOT_TOLERANCE_MS) / 1_000)),
+    max_close_ts: String(Math.ceil((slot.endTs + KALSHI_SLOT_PREFETCH_MS + SLOT_TOLERANCE_MS) / 1_000)),
+    limit: String(KALSHI_CURRENT_MARKETS_LIMIT),
+  });
+
+  const response = await fetchJson<KalshiMarketList>(`${getKalshiMarketDataBaseUrl()}/markets?${params.toString()}`);
+  return { markets: response.markets ?? [] };
 }
 
 export async function fetchKalshiMarket(ticker: string) {

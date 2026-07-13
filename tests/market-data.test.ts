@@ -25,6 +25,42 @@ function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
   };
 }
 
+function primeKalshiFeed(feed: any, slot: MarketSlot, now: number) {
+  feed.slotKey = slot.key;
+  feed.series = {
+    ticker: MARKET_CATALOG[slot.asset].kalshiSeriesTicker,
+    fee_multiplier: 1,
+    fee_type: "quadratic",
+    title: `${slot.asset.toUpperCase()} 15m`,
+  };
+  feed.market = {
+    ticker: `${MARKET_CATALOG[slot.asset].kalshiSeriesTicker}-CURRENT`,
+    event_ticker: `${MARKET_CATALOG[slot.asset].kalshiSeriesTicker}-CURRENT`,
+    title: "Current slot",
+    floor_strike: "101234.56",
+    open_time: slot.startIso,
+    close_time: slot.endIso,
+    status: "active",
+    yes_bid_dollars: "0.40",
+    yes_ask_dollars: "0.41",
+    no_bid_dollars: "0.58",
+    no_ask_dollars: "0.59",
+    last_price_dollars: "0.40",
+    yes_bid_size_fp: "10",
+    yes_ask_size_fp: "10",
+    no_bid_size_fp: "10",
+    no_ask_size_fp: "10",
+  };
+  feed.orderbook = {
+    yes: new Map([["0.40", 10]]),
+    no: new Map([["0.58", 10]]),
+    seq: 1,
+    lastUpdatedAt: now,
+  };
+  feed.orderbookInSync = true;
+  feed.lastRestSyncAt = now;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
@@ -151,6 +187,64 @@ describe("market data helpers", () => {
 
     await expect(feed.ensureSlot(slot, 11_001)).rejects.toThrow(/HTTP 429/);
     expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("marks Kalshi source as websocket after ticker or orderbook data payloads", () => {
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const tickerFeed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(tickerFeed, slot, slot.startTs + 1_000);
+
+    tickerFeed.applyWsPayload(
+      {
+        type: "ticker",
+        msg: {
+          yes_bid_dollars: "0.42",
+          yes_ask_dollars: "0.43",
+          yes_bid_size_fp: "11",
+          yes_ask_size_fp: "12",
+        },
+      },
+      slot.startTs + 2_000,
+    );
+
+    expect(tickerFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("ws");
+
+    const snapshotFeed = new MarketDataSupervisor() as any;
+    const orderbookFeed = snapshotFeed.feeds.btc.kalshi as any;
+    primeKalshiFeed(orderbookFeed, slot, slot.startTs + 1_000);
+    orderbookFeed.applyWsPayload(
+      {
+        type: "orderbook_snapshot",
+        msg: {
+          yes_dollars: [["0.44", "15"]],
+          no_dollars: [["0.55", "16"]],
+          seq: 12,
+        },
+      },
+      slot.startTs + 2_000,
+    );
+
+    expect(orderbookFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("ws");
+  });
+
+  it("falls Kalshi source back to REST and then blocks after websocket and REST go stale", () => {
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 11_000);
+    feed.lastWsMessageAt = slot.startTs + 1_000;
+    feed.subscriptions[0].lastMessageAt = slot.startTs + 1_000;
+    feed.subscriptions[0].status = "subscribed";
+    feed.subscriptions[0].source = "ws";
+
+    const fallbackState = feed.buildState(slot, slot.startTs + 12_000);
+    expect(fallbackState.quote.feedHealth.source).toBe("rest-fallback");
+    expect(fallbackState.quote.feedHealth.feedStatus).toBe("ready");
+
+    const blockedState = feed.buildState(slot, slot.startTs + 22_500);
+    expect(blockedState.quote.feedHealth.source).toBe("unavailable");
+    expect(blockedState.quote.feedHealth.feedStatus).toBe("blocked");
   });
 
   it("keeps separate feed instances per asset across all markets", async () => {

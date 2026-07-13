@@ -1,9 +1,9 @@
 import type { StrategyConfigMap } from "@/lib/types";
 
 export const FIFTEEN_MINUTES_MS = 15 * 60 * 1000;
-export const KALSHI_PROD_BASE = "https://api.elections.kalshi.com/trade-api/v2";
+export const KALSHI_PROD_BASE = "https://external-api.kalshi.com/trade-api/v2";
 export const KALSHI_DEMO_BASE = "https://demo-api.kalshi.co/trade-api/v2";
-export const KALSHI_WS_PROD_BASE = "wss://api.elections.kalshi.com/trade-api/ws/v2";
+export const KALSHI_WS_PROD_BASE = "wss://external-api-ws.kalshi.com/trade-api/ws/v2";
 export const KALSHI_WS_DEMO_BASE = "wss://demo-api.kalshi.co/trade-api/ws/v2";
 export const POLY_GAMMA_BASE = "https://gamma-api.polymarket.com";
 export const POLY_CLOB_BASE = "https://clob.polymarket.com";

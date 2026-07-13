@@ -5,6 +5,7 @@ import {
   deriveKalshiOutcomeQuotesFromMarket,
   fetchKalshiResolution,
   fetchKalshiMarkets,
+  fetchKalshiMarketsForSlot,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
   mapKalshiFillToLiveFill,
@@ -262,6 +263,57 @@ describe("Kalshi quote derivation", () => {
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=next-page");
   });
 
+  it("queries the current Kalshi slot with close timestamp filters before broad pagination", async () => {
+    const slot: MarketSlot = {
+      asset: "btc",
+      key: "btc:1774900800000",
+      startTs: 1774900800000,
+      endTs: 1774901700000,
+      startIso: "2026-03-30T20:00:00.000Z",
+      endIso: "2026-03-30T20:15:00.000Z",
+      label: "Mar 30, 4:00 PM - Mar 30, 4:15 PM",
+      polymarketSlug: "btc-updown-15m-1774900800",
+      secondsRemaining: 600,
+    };
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        markets: [
+          {
+            ticker: "KXBTC15M-CURRENT",
+            event_ticker: "KXBTC15M-CURRENT",
+            title: "Current slot",
+            open_time: "2026-03-30T20:00:00.000Z",
+            close_time: "2026-03-30T20:15:00.000Z",
+            status: "active",
+            yes_bid_dollars: "0.40",
+            yes_ask_dollars: "0.41",
+            no_bid_dollars: "0.58",
+            no_ask_dollars: "0.59",
+            yes_bid_size_fp: "10",
+            yes_ask_size_fp: "10",
+            no_bid_size_fp: "10",
+            no_ask_size_fp: "10",
+          },
+        ],
+        cursor: "ignored-for-targeted-query",
+      }),
+    });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    const response = await fetchKalshiMarketsForSlot(slot);
+    const requestUrl = String(fetchMock.mock.calls[0]?.[0]);
+
+    expect(response.markets.map((market) => market.ticker)).toEqual(["KXBTC15M-CURRENT"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(requestUrl).toContain("series_ticker=KXBTC15M");
+    expect(requestUrl).toContain("min_close_ts=1774901640");
+    expect(requestUrl).toContain("max_close_ts=1774902660");
+    expect(requestUrl).toContain("limit=100");
+    expect(requestUrl).not.toContain("cursor=");
+  });
+
   it("queries the ETH series when fetching ETH Kalshi markets", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -363,7 +415,7 @@ describe("Kalshi quote derivation", () => {
   it("signs Kalshi authenticated requests with the full trade-api path", () => {
     expect(
       buildKalshiSigningPath(
-        "https://api.elections.kalshi.com/trade-api/v2",
+        "https://external-api.kalshi.com/trade-api/v2",
         "/portfolio/balance",
       ),
     ).toBe("/trade-api/v2/portfolio/balance");
