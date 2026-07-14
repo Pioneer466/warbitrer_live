@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import WebSocket from "ws";
 
 import {
@@ -1342,7 +1343,21 @@ class KalshiRealtimeFeed {
       headers = buildKalshiWsHeaders();
     } catch (error) {
       const details = error instanceof Error ? error.message : "Kalshi WS credentials unreadable";
-      this.markWsFailure(`Kalshi WS handshake preparation failed: ${details}`);
+      const failure = `Kalshi WS handshake preparation failed: ${details}`;
+      this.markWsFailure(failure);
+      console.warn("[kalshi-ws] handshake-preparation-failed", {
+        endpoint,
+        marketTicker,
+        slotKey: this.slotKey,
+        details,
+      });
+      const delay = nextReconnectDelay(this.reconnectAttempt++);
+      this.wsReconnectTimer = setTimeout(() => {
+        this.wsReconnectTimer = null;
+        if (this.slotKey) {
+          this.ensureWs();
+        }
+      }, delay);
       return;
     }
 
@@ -2161,7 +2176,6 @@ function buildKalshiWsHeaders() {
 
 function signKalshiWsRequest(privateKeyPem: string, timestamp: string) {
   const message = `${timestamp}GET/trade-api/ws/v2`;
-  const crypto = require("node:crypto") as typeof import("node:crypto");
   const signer = crypto.createSign("RSA-SHA256");
   signer.update(message);
   signer.end();
