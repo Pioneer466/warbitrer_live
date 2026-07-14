@@ -19,8 +19,20 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
   useEffect(() => {
     mountedRef.current = true;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let requestInFlight = false;
+
+    const scheduleNextLoad = () => {
+      if (!mountedRef.current || document.visibilityState === "hidden") {
+        return;
+      }
+      timeoutId = setTimeout(load, intervalMs);
+    };
 
     const load = async () => {
+      if (requestInFlight || document.visibilityState === "hidden") {
+        return;
+      }
+      requestInFlight = true;
       try {
         const response = await fetch(url, {
           cache: "no-store",
@@ -51,16 +63,33 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
           }));
         });
       } finally {
-        if (mountedRef.current) {
-          timeoutId = setTimeout(load, intervalMs);
-        }
+        requestInFlight = false;
+        scheduleNextLoad();
       }
     };
 
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        return;
+      }
+
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      void load();
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     void load();
 
     return () => {
       mountedRef.current = false;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (timeoutId) {
         clearTimeout(timeoutId);
       }

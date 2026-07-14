@@ -21,7 +21,22 @@ export function deriveNextScanIntervalMs(now: number, hotUntil: number) {
   return now <= hotUntil ? HOT_SCAN_INTERVAL_MS : COLD_SCAN_INTERVAL_MS;
 }
 
-export function isHotOpportunitySnapshot(snapshot: Pick<OpportunitySnapshot, "opportunities">) {
+export function isHotOpportunitySnapshot(
+  snapshot: Pick<OpportunitySnapshot, "opportunities"> & Partial<Pick<OpportunitySnapshot, "kalshi" | "polymarket">>,
+) {
+  if (
+    snapshot.kalshi?.feedHealth.feedStatus !== undefined &&
+    snapshot.kalshi.feedHealth.feedStatus !== "ready"
+  ) {
+    return false;
+  }
+  if (
+    snapshot.polymarket?.feedHealth.feedStatus !== undefined &&
+    snapshot.polymarket.feedHealth.feedStatus !== "ready"
+  ) {
+    return false;
+  }
+
   return snapshot.opportunities.some(
     (opportunity) =>
       opportunity.grossCost !== null &&

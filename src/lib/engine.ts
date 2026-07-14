@@ -149,6 +149,8 @@ const EXECUTOR_STALE_SIGNAL_LOG_INTERVAL_MS = 5_000;
 const EXECUTION_CANDIDATE_WRITE_THROTTLE_MS = 1_000;
 const EXECUTION_CANDIDATE_LOG_INTERVAL_MS = 2_000;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
+const IDLE_EXECUTION_REFRESH_INTERVAL_MS = 1_000;
+const FEED_BREAKER_SYNC_INTERVAL_MS = 5_000;
 const SETTINGS_CACHE_TTL_MS = 1_000;
 const VENUE_BALANCES_CACHE_TTL_MS = 750;
 const OPEN_INTENTS_CACHE_TTL_MS = 750;
@@ -189,6 +191,8 @@ const lastPersistedScanSnapshotAtByAsset: Partial<Record<MarketAsset, number>> =
 const lastExecutionCandidateWriteByAsset = new Map<MarketAsset, { signature: string; writtenAt: number }>();
 const lastExecutionCandidateLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastPersistedWorkerStateAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastIdleExecutionRefreshAtByAsset: Partial<Record<MarketAsset, number>> = {};
+const lastFeedBreakerSyncByAsset: Partial<Record<MarketAsset, { signature: string; syncedAt: number }>> = {};
 const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastExecutionLockBusyLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
@@ -207,6 +211,7 @@ type RealtimeScanState = {
   snapshot: OpportunitySnapshot;
   capturedAt: number;
   scanDurationMs: number;
+  hasOpenIntent: boolean;
 };
 
 type ReconcileCadenceKey = "settlements" | "pnl" | "database_maintenance";
@@ -416,6 +421,7 @@ async function scanAsset(
     snapshot,
     capturedAt: snapshot.capturedAt,
     scanDurationMs: Date.now() - assetScanStartedAt,
+    hasOpenIntent: Boolean(sharedContext.openIntents?.some((intent) => intent.asset === asset)),
   };
   latestScanByAsset.set(asset, scanState);
 
@@ -560,8 +566,32 @@ export async function processAssetExecutionTick(asset: MarketAsset, now = new Da
 async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
   const executeStartedAt = Date.now();
   const created: OrderIntent[] = [];
-  const settings = await readCachedSettings(scanState.asset, nowTs);
+  const settings = scanState.settings;
   const candidate = buildExecutionCandidate({ ...scanState, settings }, nowTs);
+  if ((!settings.enableTrading || !candidate) && !scanState.hasOpenIntent) {
+    const lastRefreshAt = lastIdleExecutionRefreshAtByAsset[scanState.asset] ?? null;
+    if (!shouldRefreshIdleExecution(lastRefreshAt, nowTs)) {
+      return created;
+    }
+    lastIdleExecutionRefreshAtByAsset[scanState.asset] = nowTs;
+
+    const readiness = await computeReadiness(scanState.snapshot, scanState.asset, nowTs);
+    const loopHealth = updateLoopHealth(scanState.asset, {
+      lastExecutionDurationMs: Date.now() - executeStartedAt,
+      lastScanAgeMs: Math.max(0, Date.now() - scanState.capturedAt),
+    }, nowTs);
+    await writeAssetWorkerState(scanState.asset, {
+      phase: "execute",
+      currentSlotKey: scanState.slot.key,
+      lastExecuteAt: nowTs,
+      lastError: null,
+      readinessStatus: readiness.state.readinessStatus,
+      readiness: readiness.state.readiness,
+      loopHealth,
+    }, nowTs, true);
+    return created;
+  }
+
   if (candidate) {
     const candidates = await readExecutionCandidates(nowTs);
     const winner = selectWinningExecutionCandidate(candidates, nowTs);
@@ -588,6 +618,14 @@ async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
     loopHealth,
   }, nowTs, true);
   return created;
+}
+
+export function shouldRefreshIdleExecution(
+  lastRefreshAt: number | null,
+  now: number,
+  intervalMs = IDLE_EXECUTION_REFRESH_INTERVAL_MS,
+) {
+  return lastRefreshAt === null || now - lastRefreshAt >= intervalMs;
 }
 
 export async function processReconcileTick(now = new Date()) {
@@ -1542,6 +1580,47 @@ async function computeReadiness(
 }
 
 async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
+  const signature = buildFeedBreakerSignature(slot, feedHealth);
+  const previous = lastFeedBreakerSyncByAsset[slot.asset] ?? null;
+  if (!shouldSyncFeedCircuitBreaker(previous, signature, now)) {
+    return;
+  }
+
+  await persistFeedCircuitBreaker(slot, feedHealth, now);
+  lastFeedBreakerSyncByAsset[slot.asset] = { signature, syncedAt: now };
+}
+
+export function shouldSyncFeedCircuitBreaker(
+  previous: { signature: string; syncedAt: number } | null,
+  signature: string,
+  now: number,
+  intervalMs = FEED_BREAKER_SYNC_INTERVAL_MS,
+) {
+  return previous === null || previous.signature !== signature || now - previous.syncedAt >= intervalMs;
+}
+
+function buildFeedBreakerSignature(slot: MarketSlot, feedHealth: VenueFeedHealth[]) {
+  const blocked = feedHealth
+    .filter((feed) => feed.feedStatus === "blocked")
+    .map((feed) => `${feed.venue}:${feed.source}`)
+    .sort()
+    .join(",");
+  return `${slot.key}:${blocked || "ready"}`;
+}
+
+function buildPersistedFeedBreakerSignature(slot: MarketSlot, breaker: CircuitBreaker) {
+  if (!isFeedHealthBreaker(breaker)) {
+    return null;
+  }
+  const payload = breaker.payload as { feeds: Array<{ venue?: unknown; source?: unknown }> };
+  const blocked = payload.feeds
+    .map((feed) => `${String(feed.venue ?? "unknown")}:${String(feed.source ?? "unknown")}`)
+    .sort()
+    .join(",");
+  return `${slot.key}:${blocked || "ready"}`;
+}
+
+async function persistFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
   const key = buildSlotBreakerKey(slot.key);
   const breakers = await readCircuitBreakers();
   const currentBreaker = breakers.find((breaker) => breaker.key === key) ?? null;
@@ -1567,6 +1646,9 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
   const blockedFeeds = feedHealth.filter((feed) => feed.feedStatus === "blocked");
 
   if (blockedFeeds.length === 0) {
+    if (!currentBreaker?.active) {
+      return;
+    }
     if (!shouldManageFeedHealthBreaker(currentBreaker)) {
       return;
     }
@@ -1581,6 +1663,13 @@ async function syncFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHea
   }
 
   if (!shouldManageFeedHealthBreaker(currentBreaker)) {
+    return;
+  }
+
+  if (
+    currentBreaker?.active &&
+    buildPersistedFeedBreakerSignature(slot, currentBreaker) === buildFeedBreakerSignature(slot, feedHealth)
+  ) {
     return;
   }
 

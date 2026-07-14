@@ -38,6 +38,16 @@ describe("hot/cold scan cadence", () => {
     expect(isHotOpportunitySnapshot(snapshot)).toBe(false);
   });
 
+  it("keeps cold cadence while either market-data feed is not ready", () => {
+    const snapshot = {
+      opportunities: [{ grossCost: 0.94, threshold: 0.93 }],
+      kalshi: { feedHealth: { feedStatus: "blocked" } },
+      polymarket: { feedHealth: { feedStatus: "ready" } },
+    } as unknown as OpportunitySnapshot;
+
+    expect(isHotOpportunitySnapshot(snapshot)).toBe(false);
+  });
+
   it("reads configurable hot/cold intervals from env-like input", () => {
     expect(
       resolveHotColdConfig({

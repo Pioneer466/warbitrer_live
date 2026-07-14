@@ -31,6 +31,7 @@ import {
   shouldHoldPolymarketHedgeFailurePendingTruth,
   shouldKeepSlotExecutionBreakerActive,
   shouldPauseExecutionForBreaker,
+  shouldRefreshIdleExecution,
   shouldTreatPrimaryExecutionAsFilled,
   shouldTreatHedgeOrderAsComplete,
   shouldRetryTerminalZeroFillHedge,
@@ -38,6 +39,7 @@ import {
   shouldTreatPrimaryUnwindOrderAsComplete,
   shouldDeferPolymarketUnwindToSettlement,
   shouldUseFastKalshiPrimaryPreparation,
+  shouldSyncFeedCircuitBreaker,
   selectWinningExecutionCandidate,
   sumPolymarketAskDepthWithinLimit,
   quotePolymarketBuyFromAsks,
@@ -296,6 +298,22 @@ describe("opportunity snapshot freshness", () => {
 
   it("clamps negative ages when clocks are equalized by fresh process time", () => {
     expect(getOpportunitySnapshotAgeMs({ capturedAt: 2_000 }, 1_900)).toBe(0);
+  });
+});
+
+describe("worker hot path throttles", () => {
+  it("refreshes idle execution readiness at one hertz", () => {
+    expect(shouldRefreshIdleExecution(null, 1_000)).toBe(true);
+    expect(shouldRefreshIdleExecution(1_000, 1_999)).toBe(false);
+    expect(shouldRefreshIdleExecution(1_000, 2_000)).toBe(true);
+  });
+
+  it("syncs feed breakers immediately on transition and periodically while stable", () => {
+    const previous = { signature: "btc:slot:ready", syncedAt: 1_000 };
+
+    expect(shouldSyncFeedCircuitBreaker(previous, "btc:slot:ready", 5_999)).toBe(false);
+    expect(shouldSyncFeedCircuitBreaker(previous, "btc:slot:ready", 6_000)).toBe(true);
+    expect(shouldSyncFeedCircuitBreaker(previous, "btc:slot:kalshi:unavailable", 1_001)).toBe(true);
   });
 });
 
