@@ -189,7 +189,8 @@ describe("market data helpers", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
-  it("marks Kalshi source as websocket after ticker or orderbook data payloads", () => {
+  it("requires a Kalshi orderbook snapshot before marking the quote source as websocket", () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
     const slot = buildSlot();
     const supervisor = new MarketDataSupervisor() as any;
     const tickerFeed = supervisor.feeds.btc.kalshi as any;
@@ -208,7 +209,7 @@ describe("market data helpers", () => {
       slot.startTs + 2_000,
     );
 
-    expect(tickerFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("ws");
+    expect(tickerFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("rest-bootstrap");
 
     const snapshotFeed = new MarketDataSupervisor() as any;
     const orderbookFeed = snapshotFeed.feeds.btc.kalshi as any;
@@ -216,16 +217,51 @@ describe("market data helpers", () => {
     orderbookFeed.applyWsPayload(
       {
         type: "orderbook_snapshot",
+        seq: 12,
         msg: {
-          yes_dollars: [["0.44", "15"]],
-          no_dollars: [["0.55", "16"]],
-          seq: 12,
+          market_ticker: "KXBTC15M-CURRENT",
+          yes_dollars_fp: [["0.44", "15"]],
+          no_dollars_fp: [["0.55", "16"]],
         },
       },
       slot.startTs + 2_000,
     );
 
     expect(orderbookFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("ws");
+    expect(orderbookFeed.orderbook.seq).toBe(12);
+  });
+
+  it("closes a Kalshi websocket session after a protocol error instead of staying on REST bootstrap", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    const ws = {
+      readyState: 1,
+      close: vi.fn(),
+    };
+    feed.ws = ws;
+
+    feed.applyWsPayload(
+      {
+        id: 3,
+        type: "error",
+        msg: {
+          code: 16,
+          msg: "Market not found",
+        },
+      },
+      slot.startTs + 2_000,
+    );
+
+    expect(feed.lastError).toContain("protocol error 16 on command 3: Market not found");
+    expect(feed.subscriptions.every((subscription: any) => subscription.status === "error")).toBe(true);
+    expect(ws.close).toHaveBeenCalledWith(1011, "Kalshi WS session failed");
+    expect(warn).toHaveBeenCalledWith(
+      "[kalshi-ws] session-failed",
+      expect.objectContaining({ details: expect.stringContaining("protocol error 16") }),
+    );
   });
 
   it("falls Kalshi source back to REST and then blocks after websocket and REST go stale", () => {
@@ -782,12 +818,17 @@ describe("market data helpers", () => {
     feed.lastRestSyncAt = slot.startTs + 5_000;
     feed.resync = vi.fn(() => new Promise(() => {}));
 
-    feed.applyKalshiDelta(
+    feed.wsOrderbookReady = true;
+    feed.applyWsPayload(
       {
+        type: "orderbook_delta",
         seq: 3,
-        side: "yes",
-        price_dollars: "0.40",
-        delta_fp: "1",
+        msg: {
+          market_ticker: "KXBTC15M-CURRENT",
+          side: "yes",
+          price_dollars: "0.40",
+          delta_fp: "1",
+        },
       },
       slot.startTs + 6_000,
     );

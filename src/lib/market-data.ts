@@ -17,7 +17,7 @@ import {
   fetchKalshiOrderbook,
   fetchKalshiSeries,
   fetchKalshiTrades,
-  getKalshiWsUrl,
+  getKalshiWsUrls,
   normalizeKalshiNumericOrderbookLevels,
   resolveKalshiMarketForSlot,
   type KalshiMarketSummary,
@@ -54,6 +54,9 @@ const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
 const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const POLYMARKET_RTDS_HEARTBEAT_MS = 5_000;
+const KALSHI_WS_HEARTBEAT_MS = 5_000;
+const KALSHI_WS_HEARTBEAT_TIMEOUT_MS = 20_000;
+const KALSHI_WS_BOOTSTRAP_TIMEOUT_MS = 5_000;
 const KALSHI_REST_BACKOFF_INITIAL_MS = 10_000;
 const KALSHI_REST_BACKOFF_MAX_MS = 60_000;
 // Capture the best slot-open proxy during the first 30s, then wait longer before entry
@@ -1033,6 +1036,12 @@ class KalshiRealtimeFeed {
   private orderbookInSync = true;
   private trades: KalshiTrade[] = [];
   private ws: WebSocket | null = null;
+  private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private wsBootstrapTimer: ReturnType<typeof setTimeout> | null = null;
+  private wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private wsOrderbookReady = false;
+  private wsEndpointIndex = 0;
+  private wsEndpointUrl: string | null = null;
   private bootstrapPromise: Promise<void> | null = null;
   private resyncPromise: Promise<void> | null = null;
   private lastRestSyncAt: number | null = null;
@@ -1303,31 +1312,54 @@ class KalshiRealtimeFeed {
 
   private ensureWs() {
     const hasCredentials = hasKalshiCredentialsSafe();
-    if (!this.market || this.ws || !hasCredentials) {
+    if (!this.market || this.ws || this.wsReconnectTimer || !hasCredentials) {
       if (!hasCredentials) {
+        const source = this.restFallbackSource();
         this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
           status: "idle",
-          source: "rest-fallback",
+          source,
           details: "ticker websocket non actif sans credentials Kalshi",
         });
         this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
           status: "idle",
-          source: "rest-fallback",
+          source,
           details: "orderbook via REST fallback",
         });
         this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
           status: "idle",
-          source: "rest-fallback",
+          source,
           details: "trade tape via REST fallback",
         });
       }
       return;
     }
 
-    const ws = new WebSocket(getKalshiWsUrl(), {
-      headers: buildKalshiWsHeaders(),
-    });
+    const endpoints = getKalshiWsUrls();
+    const endpoint = endpoints[this.wsEndpointIndex % endpoints.length];
+    const marketTicker = this.market.ticker;
+    let headers: ReturnType<typeof buildKalshiWsHeaders>;
+    try {
+      headers = buildKalshiWsHeaders();
+    } catch (error) {
+      const details = error instanceof Error ? error.message : "Kalshi WS credentials unreadable";
+      this.markWsFailure(`Kalshi WS handshake preparation failed: ${details}`);
+      return;
+    }
+
+    const ws = new WebSocket(endpoint, { headers });
     this.ws = ws;
+    this.wsEndpointUrl = endpoint;
+    this.wsOrderbookReady = false;
+    let endpointRotated = false;
+    let sessionReady = false;
+    const rotateEndpoint = () => {
+      if (endpointRotated || endpoints.length < 2) {
+        return;
+      }
+      endpointRotated = true;
+      this.wsEndpointIndex = (this.wsEndpointIndex + 1) % endpoints.length;
+    };
+
     for (let index = 0; index < this.subscriptions.length; index += 1) {
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
         status: "connecting",
@@ -1337,52 +1369,143 @@ class KalshiRealtimeFeed {
     }
 
     ws.on("open", () => {
-      if (!this.market) {
+      if (this.ws !== ws || !this.market || this.market.ticker !== marketTicker) {
+        ws.close();
         return;
       }
 
-      this.reconnectAttempt = 0;
-      this.subscribe(ws, "ticker", this.market.ticker);
-      this.subscribe(ws, "trade", this.market.ticker);
-      this.subscribe(ws, "orderbook_delta", this.market.ticker);
+      console.info("[kalshi-ws] open", {
+        endpoint,
+        marketTicker,
+        slotKey: this.slotKey,
+      });
+      this.subscribe(ws, "ticker", marketTicker);
+      this.subscribe(ws, "trade", marketTicker);
+      this.subscribe(ws, "orderbook_delta", marketTicker);
+
+      this.clearWsSessionTimers();
+      this.wsHeartbeat = setInterval(() => {
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+          const now = Date.now();
+          if (
+            sessionReady &&
+            this.lastWsMessageAt !== null &&
+            now - this.lastWsMessageAt > KALSHI_WS_HEARTBEAT_TIMEOUT_MS
+          ) {
+            rotateEndpoint();
+            this.failWsSession(
+              ws,
+              `Kalshi WS heartbeat timeout after ${now - this.lastWsMessageAt}ms`,
+            );
+            return;
+          }
+          ws.ping("warbitrer");
+        }
+      }, KALSHI_WS_HEARTBEAT_MS);
+      this.wsBootstrapTimer = setTimeout(() => {
+        if (this.ws !== ws || sessionReady) {
+          return;
+        }
+        rotateEndpoint();
+        this.failWsSession(
+          ws,
+          `Kalshi WS bootstrap timeout after ${KALSHI_WS_BOOTSTRAP_TIMEOUT_MS}ms without orderbook snapshot`,
+        );
+      }, KALSHI_WS_BOOTSTRAP_TIMEOUT_MS);
     });
 
     ws.on("message", (buffer: Buffer) => {
+      if (this.ws !== ws) {
+        return;
+      }
       const payload = safeJsonParse(buffer.toString());
       if (!payload) {
         return;
       }
 
       const nowTs = Date.now();
-      this.applyWsPayload(payload, nowTs);
+      if (String(payload.type ?? "") === "error") {
+        rotateEndpoint();
+      }
+      const accepted = this.applyWsPayload(payload, nowTs);
+      if (accepted && this.wsOrderbookReady) {
+        sessionReady = true;
+        this.reconnectAttempt = 0;
+        if (this.wsBootstrapTimer) {
+          clearTimeout(this.wsBootstrapTimer);
+          this.wsBootstrapTimer = null;
+        }
+      }
     });
 
     ws.on("error", (error: unknown) => {
-      this.lastError = error instanceof Error ? error.message : "Kalshi WS error";
-      for (let index = 0; index < this.subscriptions.length; index += 1) {
-        this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
-          status: "error",
-          source: this.lastRestSyncAt === null ? "unavailable" : "rest-fallback",
-          details: this.lastError,
-        });
+      if (this.ws !== ws) {
+        return;
+      }
+      rotateEndpoint();
+      const details = error instanceof Error ? error.message : "Kalshi WS transport error";
+      console.warn("[kalshi-ws] error", {
+        endpoint,
+        marketTicker,
+        slotKey: this.slotKey,
+        details,
+      });
+      this.failWsSession(ws, `Kalshi WS transport error: ${details}`);
+    });
+
+    ws.on("ping", () => {
+      if (this.ws === ws && this.wsOrderbookReady) {
+        this.lastWsMessageAt = Date.now();
       }
     });
 
-    ws.on("close", () => {
+    ws.on("pong", () => {
+      if (this.ws === ws && this.wsOrderbookReady) {
+        this.lastWsMessageAt = Date.now();
+      }
+    });
+
+    ws.on("close", (code: number, reason: Buffer) => {
+      if (this.ws !== ws) {
+        return;
+      }
+      if (!sessionReady) {
+        rotateEndpoint();
+      }
+      this.clearWsSessionTimers();
       this.ws = null;
+      this.wsEndpointUrl = null;
+      this.wsOrderbookReady = false;
+      if (this.lastWsMessageAt !== null) {
+        this.lastWsMessageAt = Math.min(
+          this.lastWsMessageAt,
+          Date.now() - FEED_BLOCKED_MS - 1,
+        );
+      }
       this.nextSubscriptionId = 1;
+      const source = this.restFallbackSource();
+      const closeReason = reason.toString() || "no reason";
       for (let index = 0; index < this.subscriptions.length; index += 1) {
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
           status: "closed",
-          source: this.lastRestSyncAt === null ? "unavailable" : "rest-fallback",
+          source,
           details:
             this.lastRestSyncAt === null
-              ? "connexion fermee"
-              : "connexion fermee, REST fallback conserve",
+              ? `connexion fermee (${code}: ${closeReason})`
+              : `connexion fermee (${code}: ${closeReason}), REST fallback conserve`,
         });
       }
+      console.warn("[kalshi-ws] close", {
+        endpoint,
+        marketTicker,
+        slotKey: this.slotKey,
+        code,
+        reason: closeReason,
+        hadOrderbookSnapshot: sessionReady,
+      });
       const delay = nextReconnectDelay(this.reconnectAttempt++);
-      setTimeout(() => {
+      this.wsReconnectTimer = setTimeout(() => {
+        this.wsReconnectTimer = null;
         if (this.slotKey) {
           this.ensureWs();
         }
@@ -1395,8 +1518,15 @@ class KalshiRealtimeFeed {
     const message = payload.msg ?? payload.message ?? payload.data ?? payload;
 
     if (type === "error") {
+      const code = message?.code ?? "unknown";
       const details = typeof message?.msg === "string" ? message.msg : JSON.stringify(message);
-      this.lastError = `Kalshi WS error: ${details}`;
+      const command = payload.id === undefined ? "unknown" : String(payload.id);
+      const failure = `Kalshi WS protocol error ${code} on command ${command}: ${details}`;
+      if (this.ws) {
+        this.failWsSession(this.ws, failure);
+      } else {
+        this.markWsFailure(failure);
+      }
       return false;
     }
 
@@ -1411,6 +1541,18 @@ class KalshiRealtimeFeed {
           details: `sid ${message.sid ?? "?"}`,
         });
       }
+      console.info("[kalshi-ws] subscribed", {
+        endpoint: this.wsEndpointUrl,
+        marketTicker: this.market?.ticker ?? null,
+        slotKey: this.slotKey,
+        commandId: payload.id ?? null,
+        channel,
+        sid: message.sid ?? null,
+      });
+      return false;
+    }
+
+    if (!this.isCurrentKalshiMarketMessage(message)) {
       return false;
     }
 
@@ -1458,32 +1600,54 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "ticker live",
       });
-      this.lastWsMessageAt = now;
-      this.lastError = null;
+      if (this.wsOrderbookReady) {
+        this.lastWsMessageAt = now;
+      }
       return true;
     }
 
     if (type === "orderbook_snapshot") {
-      const orderbook = normalizeKalshiWsOrderbook(message);
-      if (orderbook) {
-        this.orderbook = createKalshiBookState(orderbook, now);
-        this.orderbookInSync = true;
+      const orderbook = normalizeKalshiWsOrderbook({
+        ...message,
+        seq: payload.seq ?? message.seq,
+      });
+      if (!orderbook) {
+        if (this.ws) {
+          this.failWsSession(this.ws, "Kalshi WS orderbook snapshot malformed");
+        }
+        return false;
       }
+      this.orderbook = createKalshiBookState(orderbook, now);
+      this.orderbookInSync = true;
+      this.wsOrderbookReady = true;
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
         source: "ws",
         lastMessageAt: now,
         details: "orderbook snapshot live",
       });
-      if (orderbook) {
-        this.lastWsMessageAt = now;
-      }
+      this.lastWsMessageAt = now;
       this.lastError = null;
-      return orderbook !== null;
+      console.info("[kalshi-ws] orderbook-ready", {
+        endpoint: this.wsEndpointUrl,
+        marketTicker: this.market?.ticker ?? null,
+        slotKey: this.slotKey,
+        seq: this.orderbook.seq,
+      });
+      return true;
     }
 
     if (type === "orderbook_delta") {
-      this.applyKalshiDelta(message, now);
+      const applied = this.applyKalshiDelta(
+        {
+          ...message,
+          seq: payload.seq ?? message.seq,
+        },
+        now,
+      );
+      if (!applied) {
+        return false;
+      }
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
         source: "ws",
@@ -1502,8 +1666,9 @@ class KalshiRealtimeFeed {
         lastMessageAt: now,
         details: "trade live",
       });
-      this.lastWsMessageAt = now;
-      this.lastError = null;
+      if (this.wsOrderbookReady) {
+        this.lastWsMessageAt = now;
+      }
       return true;
     }
 
@@ -1511,25 +1676,39 @@ class KalshiRealtimeFeed {
   }
 
   private applyKalshiDelta(message: any, now: number) {
-    if (!this.orderbook) {
-      const snapshot = normalizeKalshiWsOrderbook(message);
-      if (snapshot) {
-        this.orderbook = createKalshiBookState(snapshot, now);
+    if (!this.orderbook || !this.wsOrderbookReady) {
+      this.orderbookInSync = false;
+      this.lastError = "Kalshi WS delta received before orderbook snapshot";
+      if (this.ws) {
+        this.failWsSession(this.ws, this.lastError);
       }
-      return;
+      void this.resync(now);
+      return false;
     }
 
     const nextSeq = parseNumeric(message.seq);
     if (nextSeq !== null && this.orderbook.seq !== null && nextSeq !== this.orderbook.seq + 1) {
       this.lastError = `Gap sequence Kalshi detecte: attendu ${this.orderbook.seq + 1}, recu ${nextSeq}`;
       this.orderbookInSync = false;
+      if (this.ws) {
+        this.failWsSession(this.ws, this.lastError);
+      }
       void this.resync(now);
-      return;
+      return false;
     }
 
     const side = String(message.side ?? message.book_side ?? "").toLowerCase();
     const price = message.price_dollars ?? message.price ?? message.level;
-    const delta = parseNumeric(message.delta_fp ?? message.delta ?? message.size ?? message.count ?? message.quantity ?? message.remaining ?? 0) ?? 0;
+    const delta = parseNumeric(message.delta_fp ?? message.delta ?? message.size ?? message.count ?? message.quantity ?? message.remaining);
+    if ((side !== "yes" && side !== "no") || parseNumeric(price) === null || delta === null) {
+      this.orderbookInSync = false;
+      this.lastError = "Kalshi WS orderbook delta malformed";
+      if (this.ws) {
+        this.failWsSession(this.ws, this.lastError);
+      }
+      void this.resync(now);
+      return false;
+    }
     if (side === "yes") {
       applyKalshiDeltaLevel(this.orderbook.yes, price, delta);
     } else if (side === "no") {
@@ -1539,6 +1718,7 @@ class KalshiRealtimeFeed {
     this.orderbook.seq = nextSeq ?? this.orderbook.seq;
     this.orderbook.lastUpdatedAt = now;
     this.orderbookInSync = true;
+    return true;
   }
 
   private subscribe(ws: WebSocket, channel: string, marketTicker: string) {
@@ -1553,18 +1733,85 @@ class KalshiRealtimeFeed {
             market_tickers: [marketTicker],
           };
 
+    const commandId = this.nextSubscriptionId++;
     ws.send(
       JSON.stringify({
-        id: this.nextSubscriptionId++,
+        id: commandId,
         cmd: "subscribe",
         params,
       }),
     );
+    console.info("[kalshi-ws] subscribe-sent", {
+      endpoint: this.wsEndpointUrl,
+      marketTicker,
+      slotKey: this.slotKey,
+      commandId,
+      channel,
+    });
+  }
+
+  private isCurrentKalshiMarketMessage(message: any) {
+    const marketTicker = message?.market_ticker;
+    return !marketTicker || !this.market || marketTicker === this.market.ticker;
+  }
+
+  private restFallbackSource(): FeedSource {
+    if (this.lastRestSyncAt === null) {
+      return "unavailable";
+    }
+    return this.lastWsMessageAt === null ? "rest-bootstrap" : "rest-fallback";
+  }
+
+  private markWsFailure(details: string) {
+    this.lastError = details;
+    const source = this.restFallbackSource();
+    for (let index = 0; index < this.subscriptions.length; index += 1) {
+      this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+        status: "error",
+        source,
+        details,
+      });
+    }
+  }
+
+  private failWsSession(ws: WebSocket, details: string) {
+    if (this.ws !== ws) {
+      return;
+    }
+    this.markWsFailure(details);
+    console.warn("[kalshi-ws] session-failed", {
+      endpoint: this.wsEndpointUrl,
+      marketTicker: this.market?.ticker ?? null,
+      slotKey: this.slotKey,
+      details,
+    });
+    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+      ws.close(1011, "Kalshi WS session failed");
+    }
+  }
+
+  private clearWsSessionTimers() {
+    if (this.wsHeartbeat) {
+      clearInterval(this.wsHeartbeat);
+      this.wsHeartbeat = null;
+    }
+    if (this.wsBootstrapTimer) {
+      clearTimeout(this.wsBootstrapTimer);
+      this.wsBootstrapTimer = null;
+    }
   }
 
   private async reset() {
-    this.ws?.close();
+    this.clearWsSessionTimers();
+    if (this.wsReconnectTimer) {
+      clearTimeout(this.wsReconnectTimer);
+      this.wsReconnectTimer = null;
+    }
+    const ws = this.ws;
     this.ws = null;
+    this.wsEndpointUrl = null;
+    this.wsOrderbookReady = false;
+    ws?.close();
     this.series = null;
     this.market = null;
     this.orderbook = null;
@@ -1574,21 +1821,23 @@ class KalshiRealtimeFeed {
     this.lastWsMessageAt = null;
     this.lastError = null;
     this.reconnectAttempt = 0;
+    this.wsEndpointIndex = 0;
     this.nextSubscriptionId = 1;
     this.subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
   }
 
   private isLiveOrderbook(now: number) {
-    if (!this.orderbook || !this.orderbookInSync) {
+    if (
+      !this.orderbook ||
+      !this.orderbookInSync ||
+      !this.wsOrderbookReady ||
+      !this.ws ||
+      this.ws.readyState !== WebSocket.OPEN ||
+      this.lastWsMessageAt === null
+    ) {
       return false;
     }
-
-    const subscription = this.subscriptions[1];
-    if (subscription.status !== "subscribed" || subscription.lastMessageAt === null) {
-      return false;
-    }
-
-    return now - subscription.lastMessageAt <= FEED_BLOCKED_MS;
+    return now - this.lastWsMessageAt <= FEED_BLOCKED_MS;
   }
 
   private hasFreshOrderbook(now: number) {
@@ -1616,8 +1865,8 @@ class KalshiRealtimeFeed {
       details.push("Kalshi REST bootstrap en attente du ticker courant");
     } else if (!hasKalshiCredentialsSafe()) {
       details.push("Kalshi WS inactif sans credentials; REST fallback uniquement");
-    } else if (this.ws && this.lastWsMessageAt === null) {
-      details.push("Kalshi WS connecte, en attente du premier payload de donnees");
+    } else if (this.ws && !this.wsOrderbookReady) {
+      details.push("Kalshi WS connecte, en attente du snapshot orderbook");
     } else if (this.lastWsMessageAt === null) {
       details.push("Kalshi WS pas encore actif; REST bootstrap utilise");
     } else if (!this.orderbookInSync) {

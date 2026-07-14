@@ -6,6 +6,7 @@
 
 - Production REST: `https://external-api.kalshi.com/trade-api/v2`
 - Production WS: `wss://external-api-ws.kalshi.com/trade-api/ws/v2`
+- Production WS fallback: `wss://api.elections.kalshi.com/trade-api/ws/v2`
 - Channels: `ticker`, `orderbook_delta`, `trade`
 - Handshake: Kalshi API key ID plus RSA-PSS signature over `timestamp + GET + /trade-api/ws/v2`
 - REST: market discovery, bootstrap, resync, and fallback
@@ -28,14 +29,22 @@ A `subscribed` acknowledgement alone must not make the aggregate feed fresh.
 
 ## Current Kalshi incident
 
-The last VPS discussion reports Kalshi staying on REST bootstrap/fallback, originally with HTTP 429 during broad market discovery. Commit `01b3ae0` introduced targeted discovery and the dedicated production hosts, but the reported WS problem persisted.
+The last VPS discussion reports Kalshi staying on REST bootstrap/fallback, originally with HTTP 429 during broad market discovery. Commit `01b3ae0` introduced targeted discovery and honest source selection, but the reported WS problem persisted.
 
 The exact final VPS diagnostic attachment is not stored in this repository. Do not claim a confirmed auth root cause without the sanitized payload/log.
 
-Known code concerns:
+Implemented locally on 2026-07-14, pending VPS verification:
 
-- WS `error` payloads update `lastError` but do not persist a run event or reliably mark the relevant subscription errored.
-- The Kalshi delta sequence is on the outer WS envelope, while the current delta handler receives only `payload.msg`; gap detection therefore cannot use the real envelope sequence.
+- `source=ws` now requires a valid orderbook snapshot; ACK/ticker-only sessions remain `rest-bootstrap`.
+- Protocol errors, missing snapshots, heartbeat timeouts, and transport failures close the session and reconnect with backoff.
+- Initialization failures alternate between the dedicated and shared supported Kalshi WS hosts.
+- Lifecycle events are emitted to `journalctl` with sanitized endpoint/ticker/command/close context.
+- Orderbook snapshot and delta sequence numbers are read from the outer WS envelope.
+- A sequence gap invalidates the book, closes the session, and requires a fresh snapshot.
+
+Remaining concerns:
+
+- The fix has unit/build coverage but has not yet completed a live authenticated VPS WS handshake.
 - Multiple asset workers independently bootstrap their own series/market and can still create synchronized REST pressure at rollover.
 - A targeted market query that misses falls back to broad pagination.
 
@@ -45,7 +54,7 @@ Known code concerns:
 2. Confirm the worker service is the split `warbitrer-asset@<asset>` service.
 3. Confirm `KALSHI_ENV` and credential/key readability without printing values.
 4. Confirm REST authentication separately from WS behavior.
-5. Capture WS open, subscription command IDs, acknowledgements, error payloads, and close code/reason.
+5. Capture `[kalshi-ws]` open, subscription command IDs, acknowledgements, `orderbook-ready`, error payloads, and close code/reason.
 6. Confirm the discovered market ticker belongs to the current slot/environment.
 7. Confirm receipt of an actual `ticker`, `orderbook_snapshot`, `orderbook_delta`, or `trade` payload.
 8. Confirm source/freshness in `/api/health` and the persisted snapshot.
@@ -83,6 +92,14 @@ Useful evidence includes:
 - current market ticker and slot key
 - message type and outer sequence
 - last payload age and REST sync age
+
+Expected successful lifecycle:
+
+```text
+open -> subscribe-sent -> subscribed -> orderbook-ready
+```
+
+If `orderbook-ready` is absent, the following `session-failed` or `close` entry is the primary diagnosis. Do not infer success from `subscribed` alone.
 
 ## Sequence rules
 

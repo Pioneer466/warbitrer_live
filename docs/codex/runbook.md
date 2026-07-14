@@ -133,7 +133,26 @@ The worker did not receive `.env.local`. Start it with `node --env-file=.env.loc
 
 ### Kalshi shows `rest-bootstrap`
 
-This means the current slot has REST data but no accepted fresh WS data payload. Check credentials, environment, deployed build, subscription acknowledgements/errors, and service logs. Do not compensate by aggressively polling REST.
+This means the current slot has REST data but no accepted WS orderbook snapshot. A ticker update or subscription acknowledgement alone is intentionally insufficient.
+
+Keep trading disabled and inspect the sanitized lifecycle logs:
+
+```bash
+sudo journalctl -u warbitrer-asset@btc -n 300 --no-pager | grep '\[kalshi-ws\]'
+```
+
+A healthy bootstrap contains, in order:
+
+```text
+[kalshi-ws] open
+[kalshi-ws] subscribe-sent            # ticker, trade, orderbook_delta
+[kalshi-ws] subscribed                # acknowledgement for each accepted channel
+[kalshi-ws] orderbook-ready           # required before source=ws
+```
+
+`protocol error`, `bootstrap timeout`, `heartbeat timeout`, transport `error`, and `close` now fail the session and trigger an exponential reconnect. Failed initialization alternates between Kalshi's dedicated and officially supported shared WebSocket hosts. Logs include endpoint, slot, market ticker, command/channel, close code, and reason, but no credentials or signatures.
+
+Do not compensate by polling REST faster. The 4 second REST fallback explains roughly 3 second observed latency and is only a safety fallback, not an HFT data path.
 
 ### API returns 401
 

@@ -8,6 +8,7 @@ import {
   fetchKalshiMarketsForSlot,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
+  getKalshiWsUrls,
   mapKalshiFillToLiveFill,
   getKalshiOrderPriceUsd,
   getKalshiSoftNoFillMessage,
@@ -67,6 +68,19 @@ describe("Kalshi quote derivation", () => {
   afterEach(() => {
     process.env = originalEnv;
     vi.restoreAllMocks();
+  });
+
+  it("prefers the dedicated Kalshi websocket host and keeps the supported shared host as fallback", () => {
+    expect(getKalshiWsUrls()).toEqual([
+      "wss://external-api-ws.kalshi.com/trade-api/ws/v2",
+      "wss://api.elections.kalshi.com/trade-api/ws/v2",
+    ]);
+
+    process.env.KALSHI_ENV = "demo";
+    expect(getKalshiWsUrls()).toEqual([
+      "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2",
+      "wss://demo-api.kalshi.co/trade-api/ws/v2",
+    ]);
   });
 
   it("builds yes/no asks from the reciprocal bid-only orderbook", () => {

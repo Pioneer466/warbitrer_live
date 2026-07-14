@@ -4,7 +4,9 @@ import {
   KALSHI_DEMO_BASE,
   KALSHI_PROD_BASE,
   KALSHI_WS_DEMO_BASE,
+  KALSHI_WS_DEMO_FALLBACK_BASE,
   KALSHI_WS_PROD_BASE,
+  KALSHI_WS_PROD_FALLBACK_BASE,
 } from "@/lib/constants";
 import { hasKalshiCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
@@ -167,8 +169,14 @@ export function getKalshiMarketDataBaseUrl() {
 }
 
 export function getKalshiWsUrl() {
+  return getKalshiWsUrls()[0];
+}
+
+export function getKalshiWsUrls() {
   const env = readEnv();
-  return env.KALSHI_ENV === "demo" ? KALSHI_WS_DEMO_BASE : KALSHI_WS_PROD_BASE;
+  return env.KALSHI_ENV === "demo"
+    ? [KALSHI_WS_DEMO_BASE, KALSHI_WS_DEMO_FALLBACK_BASE]
+    : [KALSHI_WS_PROD_BASE, KALSHI_WS_PROD_FALLBACK_BASE];
 }
 
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {

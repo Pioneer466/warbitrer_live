@@ -2,18 +2,19 @@
 
 ## Date
 
-2026-07-13 (Europe/Paris)
+2026-07-14 (Europe/Paris)
 
 ## Current objective
 
-Stabilize Kalshi WebSocket market data on the VPS. Kalshi should use authenticated WS data as the primary source, with REST limited to discovery, bootstrap, resync, and cautious fallback.
+Deploy and verify the implemented Kalshi WebSocket recovery fix on the VPS. Kalshi should use an authenticated WS orderbook as the primary quote source, with REST limited to discovery, bootstrap, resync, and cautious fallback.
 
 Keep live trading disabled until this is verified.
 
 ## Repository state
 
 - Branch: `main`
-- HEAD: `01b3ae0` (`upgraded kalshi rest-bootstrap and websocket dynamic to focus on ws`)
+- HEAD: `53887fd` (`Document repository context and modernize TS paths`)
+- Working tree: Kalshi WS fix implemented but not committed or deployed
 - Remote tracking: `origin/main`
 - Runtime: Node 22, Next.js 15, React 19, TypeScript 5.8, Postgres
 - Active workers: BTC, ETH, SOL, XRP, DOGE
@@ -31,24 +32,44 @@ This publication adds the repository-specific context files (`AGENTS.md`, `READM
 5. Kalshi still reportedly remained on REST bootstrap/fallback after deployment.
 6. The final pasted VPS diagnostic was referenced by the old transcript but its content is not present in this repository.
 
-## Current findings
+## 2026-07-14 Kalshi assessment
 
-- Official endpoint/auth/subscription forms used by the current code are broadly valid.
-- Kalshi WS protocol errors are not durable enough for production diagnosis.
-- Kalshi outer-envelope sequence numbers are not passed to the delta gap detector.
+- Kalshi's official endpoint, RSA-PSS signing path, subscription form, fixed-point payload fields, and ping/pong protocol match the integration.
+- Historical code marked every WS message, including ACK/error, as realtime. That could report `ws` without receiving quote data.
+- Commit `cd2d44e` changed unhealthy Kalshi REST resync from roughly 1 second to 4 seconds. This matches the observed approximately 3 second fallback latency but did not itself prove a WS protocol break.
+- The current persistent failure mechanism was definite: protocol errors or an ACK-only socket could remain open forever, preventing `ensureWs()` from creating a new session.
+- The recent source-selection correction exposed that state as `rest-bootstrap` instead of masking it as `ws`.
+
+## Implemented fix
+
+- Require a valid `orderbook_snapshot` before aggregate Kalshi source becomes `ws`.
+- Close and reconnect on protocol error, malformed/missing snapshot, transport failure, heartbeat timeout, or orderbook sequence gap.
+- Respect reconnect backoff even while the asset scan loop continues.
+- Read snapshot/delta sequence from the official outer envelope.
+- Keep the book live through ping/pong transport health after the initial snapshot.
+- Alternate between the dedicated and officially supported shared WS hosts when initialization fails.
+- Log sanitized `open`, `subscribe-sent`, `subscribed`, `orderbook-ready`, `session-failed`, `error`, and `close` lifecycle events.
+
+## Remaining repository findings
+
 - `deploy/vps/deploy.sh` is stale: it omits `build:worker` and restarts the legacy service.
 - `.env.local` is loaded by Next.js but not automatically by the standalone worker.
 - Live activation has no independent environment-level gate and application Basic Auth is optional.
 - Codex docs were generic templates and have now been replaced with repository-specific context.
 - Cursor's TypeScript 6 warning was caused by the now-deprecated `baseUrl` option. The line dated from the initial commit, not the current session. It was removed because `paths` already uses the explicit `./src/*` target.
 
-## Files modified in this documentation pass
+## Files modified in the Kalshi fix
 
-- `AGENTS.md`
-- `README-CODEX-CONTEXT.md`
-- all Markdown files under `docs/codex/`
+- `src/lib/constants.ts`
+- `src/lib/kalshi.ts`
+- `src/lib/market-data.ts`
+- `tests/kalshi.test.ts`
+- `tests/market-data.test.ts`
+- `docs/codex/runbook.md`
+- `docs/codex/websocket-debugging.md`
+- `docs/codex/session-handoff.md`
 
-No application source or deployment script was modified. `tsconfig.json` only had obsolete `baseUrl` removed; the `@/* -> ./src/*` mapping is unchanged.
+No execution/order logic, trading setting, deployment script, or secret was changed.
 
 ## Commands and checks
 
@@ -62,11 +83,11 @@ npm run build
 npm run build:worker
 ```
 
-Results from the repository audit:
+Results after the Kalshi fix:
 
 - TypeScript 5.8.3 configuration parsed successfully.
 - Typecheck passed.
-- 23 test files passed, 257 tests total.
+- 23 test files passed, 259 tests total.
 - Next.js production build passed.
 - Worker bundle build passed.
 
@@ -74,20 +95,18 @@ No live API or real Postgres integration test was run.
 
 ## Blockers
 
-- Missing sanitized final VPS Kalshi WS logs/error payload and close code.
-- Unknown whether the worker bundle currently running on the VPS exactly matches `01b3ae0`.
-- No durable WS protocol-error events in the current implementation.
+- The new worker bundle has not yet been deployed and observed against authenticated Kalshi production WS.
+- Missing post-deploy sanitized `[kalshi-ws]` lifecycle logs from each asset worker.
 - Live safety gate and deployment script still need correction before live use.
 
 ## Safest next steps
 
 1. Keep `enableTrading=false` and preserve a global breaker during diagnosis.
-2. Collect sanitized VPS service/build/feed evidence.
-3. Add durable Kalshi WS open/ack/error/close observability.
-4. Pass outer envelope sequence into orderbook delta handling and add full-envelope fixtures.
-5. Run targeted tests, full suite, typecheck, and both builds.
-6. Correct the VPS deploy script and environment loading.
-7. Add a server-side live authorization gate before considering real trading.
+2. Commit/push, pull on the VPS, run `npm ci`, `npm run build`, and `npm run build:worker`, then restart the split services.
+3. Confirm each asset logs `open -> subscribe-sent -> subscribed -> orderbook-ready` and `/api/health` reports Kalshi source `ws`.
+4. If initialization fails, use the first `protocol error`, `session-failed`, or `close` record as the root-cause evidence; do not increase REST polling.
+5. Keep trading disabled through several slot rollovers and verify no recurring REST fallback or sequence gaps.
+6. Correct the stale VPS deploy script and add a server-side live authorization gate before considering real trading.
 
 ## Resume prompt
 
