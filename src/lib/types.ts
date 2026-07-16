@@ -336,6 +336,7 @@ export type LiveOpportunity = {
   fatalMismatchPnlUsd?: number | null;
   conservativeExpectedPnlUsd?: number | null;
   mismatchRiskEstimate?: MismatchRiskEstimate | null;
+  mismatchRiskAudit?: MismatchRiskAudit | null;
   eligible: boolean;
   primaryVenue: Venue | null;
   primarySelection: PrimarySelectionAudit | null;
@@ -360,6 +361,45 @@ export type LiveOpportunity = {
   kalshiTargetPriceUsd: number | null;
 };
 
+export type MismatchEconomicsBasis = "executable" | "reference" | "unavailable";
+
+export type MismatchRiskCounterfactualDecision =
+  | "would_allow"
+  | "would_block"
+  | "would_allow_fail_open"
+  | "reference_allow"
+  | "reference_block"
+  | "unavailable";
+
+export type MismatchRiskAudit = {
+  evaluatedAt: number;
+  policyMode: "block_only";
+  decision: MismatchRiskCounterfactualDecision;
+  source: "scan" | "execution" | "reconstructed";
+  baseEligible: boolean;
+  baseReasons: string[];
+  blockingReasonCodes: string[];
+  blockingReasons: string[];
+  diagnosticReasonCodes: string[];
+  economicsBasis: MismatchEconomicsBasis;
+  pairSize: number | null;
+  totalCostUsd: number | null;
+  breakEvenFatalProbability: number | null;
+  maximumAllowedFatalProbability: number | null;
+  pFatal: number | null;
+  pFatalUpper95: number | null;
+  conservativePnlUsd: number | null;
+  fatalPnlUsd: number | null;
+  estimateAvailable: boolean;
+  executionUsable: boolean;
+  executionReason: string | null;
+  modelVersion: string;
+  enforceReady: boolean;
+  enforceReasons: string[];
+  legacyGuardAction: "allow" | "reduce_size" | "block";
+  legacySizeMultiplier: number;
+};
+
 export type MismatchRiskEstimate = {
   available: boolean;
   executionUsable?: boolean;
@@ -379,6 +419,9 @@ export type MismatchRiskEstimate = {
   cfAgeMs: number | null;
   sourceTimestampSkewMs?: number | null;
   observationCount: number;
+  economicsBasis?: MismatchEconomicsBasis;
+  economicsPairSize?: number | null;
+  economicsTotalCostUsd?: number | null;
 };
 
 export type PrimarySelectionAudit = {
@@ -459,6 +502,7 @@ export type OrderIntent = {
   fatalMismatchPnlUsd?: number | null;
   conservativeExpectedPnlUsd?: number | null;
   fatalLossExposureUsd?: number | null;
+  mismatchRiskAudit?: MismatchRiskAudit | null;
   realizedPnlUsd: number | null;
   roi: number | null;
   polyResolution: "UP" | "DOWN" | null;

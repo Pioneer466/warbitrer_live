@@ -255,12 +255,14 @@ describe("postgres mismatch-risk persistence", () => {
     await upsertOrderIntent(pool, intent);
 
     const [sql, params] = query.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain("$30");
+    expect(sql).toContain("$31::jsonb");
     expect(sql).toContain("gross_cost = EXCLUDED.gross_cost");
     expect(sql).toContain("target_notional_usd = EXCLUDED.target_notional_usd");
     expect(sql).toContain("max_slippage_bps = EXCLUDED.max_slippage_bps");
-    expect(params).toHaveLength(30);
-    expect(params.slice(24)).toEqual([0.02, 0.04, "mismatch-v1", -9, 1.5, 12]);
+    expect(sql).toContain("mismatch_risk_audit_json = EXCLUDED.mismatch_risk_audit_json");
+    expect(params).toHaveLength(31);
+    expect(params.slice(24, 30)).toEqual([0.02, 0.04, "mismatch-v1", -9, 1.5, 12]);
+    expect(JSON.parse(params[30] as string)).toEqual(intent.mismatchRiskAudit);
 
     query.mockResolvedValueOnce({
       rows: [
@@ -290,6 +292,7 @@ describe("postgres mismatch-risk persistence", () => {
           fatal_mismatch_pnl_usd: intent.fatalMismatchPnlUsd,
           conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd,
           fatal_loss_exposure_usd: intent.fatalLossExposureUsd,
+          mismatch_risk_audit_json: intent.mismatchRiskAudit,
           realized_pnl_usd: intent.realizedPnlUsd,
           roi: intent.roi,
           poly_resolution: intent.polyResolution,
@@ -308,6 +311,7 @@ describe("postgres mismatch-risk persistence", () => {
       fatalMismatchPnlUsd: -9,
       conservativeExpectedPnlUsd: 1.5,
       fatalLossExposureUsd: 12,
+      mismatchRiskAudit: intent.mismatchRiskAudit,
       legs: [
         expect.objectContaining({
           worstFillCostUsd: 4.7,
@@ -321,6 +325,48 @@ describe("postgres mismatch-risk persistence", () => {
         }),
       ],
     });
+
+    query.mockResolvedValueOnce({
+      rows: [
+        {
+          id: intent.id,
+          asset: intent.asset,
+          shadow: intent.shadow,
+          slot_key: intent.slotKey,
+          slot_start_ts: intent.slotStartTs,
+          slot_end_ts: intent.slotEndTs,
+          combination: intent.combination,
+          status: intent.status,
+          created_at: intent.createdAt,
+          updated_at: intent.updatedAt,
+          resolved_at: intent.resolvedAt,
+          primary_venue: intent.primaryVenue,
+          hedge_venue: intent.hedgeVenue,
+          gross_cost: intent.grossCost,
+          target_notional_usd: intent.targetNotionalUsd,
+          entry_sizing_reason: intent.entrySizingReason,
+          max_slippage_bps: intent.maxSlippageBps,
+          failure_reason: intent.failureReason,
+          projected_net_profit_usd: intent.projectedNetProfitUsd,
+          mismatch_p_fatal: intent.mismatchPFatal,
+          mismatch_p_fatal_upper: intent.mismatchPFatalUpper,
+          mismatch_model_version: intent.mismatchModelVersion,
+          fatal_mismatch_pnl_usd: intent.fatalMismatchPnlUsd,
+          conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd,
+          fatal_loss_exposure_usd: intent.fatalLossExposureUsd,
+          mismatch_risk_audit_json: null,
+          realized_pnl_usd: intent.realizedPnlUsd,
+          roi: intent.roi,
+          poly_resolution: intent.polyResolution,
+          kalshi_resolution: intent.kalshiResolution,
+          legs_json: intent.legs,
+        },
+      ],
+      rowCount: 1,
+    });
+
+    const [historical] = await listRecentOrderIntents(pool, 1);
+    expect(historical.mismatchRiskAudit).toBeNull();
   });
 
   it("looks up and maps a single order attempt directly", async () => {
@@ -421,6 +467,34 @@ function buildOrderIntent(): OrderIntent {
     fatalMismatchPnlUsd: -9,
     conservativeExpectedPnlUsd: 1.5,
     fatalLossExposureUsd: 12,
+    mismatchRiskAudit: {
+      evaluatedAt: 123_100,
+      policyMode: "block_only",
+      decision: "would_allow",
+      source: "execution",
+      baseEligible: true,
+      baseReasons: [],
+      blockingReasonCodes: [],
+      blockingReasons: [],
+      diagnosticReasonCodes: [],
+      economicsBasis: "executable",
+      pairSize: 10,
+      totalCostUsd: 9,
+      breakEvenFatalProbability: 0.1,
+      maximumAllowedFatalProbability: 0.05,
+      pFatal: 0.02,
+      pFatalUpper95: 0.04,
+      conservativePnlUsd: 1.5,
+      fatalPnlUsd: -9,
+      estimateAvailable: true,
+      executionUsable: true,
+      executionReason: null,
+      modelVersion: "mismatch-v1",
+      enforceReady: true,
+      enforceReasons: [],
+      legacyGuardAction: "allow",
+      legacySizeMultiplier: 1,
+    },
     realizedPnlUsd: null,
     roi: null,
     polyResolution: null,

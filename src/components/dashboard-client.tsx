@@ -55,6 +55,11 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const drawdownUsd = pnl?.drawdownUsd ?? null;
   const openIntentNotionalUsd = openIntents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
+  const mismatchAuditCount = new Set(
+    opportunities
+      .filter((opportunity) => opportunity.mismatchRiskAudit)
+      .map((opportunity) => opportunity.combination),
+  ).size;
 
   return (
     <div className="flex flex-col gap-7">
@@ -132,7 +137,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
       </section>
 
       <section>
-        <SectionLabel right={`mode ${config.mismatchRiskMode}`}>Risque Mismatch</SectionLabel>
+        <SectionLabel right={`mode ${config.mismatchRiskMode}${mismatchAuditCount > 0 ? ` · audit block_only ${mismatchAuditCount}/2` : ""}`}>Risque Mismatch</SectionLabel>
         <AssetMismatchRiskOverview
           mode={config.mismatchRiskMode}
           opportunities={opportunities}

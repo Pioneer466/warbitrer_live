@@ -77,11 +77,16 @@ import {
   calculateMismatchAdjustedPnl,
   evaluateEconomicMismatchGate,
 } from "@/lib/mismatch-risk";
+import { deriveMismatchEstimateEconomics } from "@/lib/mismatch-reference-economics";
 import {
   MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
   MismatchRiskRuntime,
 } from "@/lib/mismatch-risk-runtime";
-import { applyMismatchRiskPolicy } from "@/lib/mismatch-risk-policy";
+import { buildMismatchRiskAudit } from "@/lib/mismatch-risk-audit";
+import {
+  applyMismatchRiskPolicy,
+  recheckMismatchRiskCandidate,
+} from "@/lib/mismatch-risk-policy";
 import {
   DEFAULT_GLOBAL_RISK_CONFIG,
   type GlobalRiskConfig,
@@ -844,6 +849,7 @@ function estimateMismatchRiskByCombination(input: {
   kalshi: OpportunitySnapshot["kalshi"];
   opportunities: LiveOpportunity[];
   oracleMaxAgeMs: number;
+  settings: StrategyConfig;
 }): Partial<Record<PairCombination, MismatchRiskEstimate>> {
   const estimates: Partial<Record<PairCombination, MismatchRiskEstimate>> = {};
   const diagnosticMaxSourceAgeMs = Math.max(
@@ -851,16 +857,13 @@ function estimateMismatchRiskByCombination(input: {
     MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
   );
   for (const opportunity of input.opportunities) {
-    const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
-    const totalCostUsd = Math.max(
-      0,
-      -(opportunity.fatalMismatchPnlUsd ?? 0) ||
-        opportunity.legs.reduce(
-          (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
-          0,
-        ),
-    );
-    estimates[opportunity.combination] = mismatchRiskRuntime.estimate({
+    const economics = deriveMismatchEstimateEconomics({
+      opportunity,
+      polymarket: input.polymarket,
+      kalshi: input.kalshi,
+      settings: input.settings,
+    });
+    const estimate = mismatchRiskRuntime.estimate({
       asset: input.asset,
       polymarket: input.polymarket,
       kalshi: input.kalshi,
@@ -872,9 +875,20 @@ function estimateMismatchRiskByCombination(input: {
       combination: opportunity.combination,
       slotStartTs: input.slotStartTs,
       slotEndTs: input.slotEndTs,
-      pairSize,
-      totalCostUsd,
+      pairSize: economics.pairSize ?? 0,
+      totalCostUsd: economics.totalCostUsd ?? 0,
     });
+    estimates[opportunity.combination] = {
+      ...estimate,
+      reason:
+        economics.basis === "unavailable" &&
+        estimate.reason === "economics_unavailable"
+          ? "reference_economics_unavailable"
+          : estimate.reason,
+      economicsBasis: economics.basis,
+      economicsPairSize: economics.pairSize,
+      economicsTotalCostUsd: economics.totalCostUsd,
+    };
   }
   return estimates;
 }
@@ -1005,6 +1019,9 @@ function rescaleMismatchEstimate(
     fatalPnlUsd: pnl.fatalPnlUsd,
     breakEvenFatalProbability: gate.pBreakEven,
     maximumAllowedFatalProbability: gate.maximumAllowedFatalProbability,
+    economicsBasis: "executable",
+    economicsPairSize: pairSize,
+    economicsTotalCostUsd: totalCostUsd,
   };
 }
 
@@ -1018,7 +1035,12 @@ async function recheckMismatchRiskForExecution(input: {
   now: number;
 }): Promise<
   | { allowed: true; opportunity: LiveOpportunity }
-  | { allowed: false; reason: string; estimate: MismatchRiskEstimate | null }
+  | {
+      allowed: false;
+      reason: string;
+      estimate: MismatchRiskEstimate | null;
+      opportunity?: LiveOpportunity;
+    }
 > {
   let config: GlobalRiskConfig;
   try {
@@ -1072,16 +1094,6 @@ async function recheckMismatchRiskForExecution(input: {
       };
     }
   }
-  if (input.settings.mismatchRiskMode === "shadow") {
-    return {
-      allowed: true,
-      opportunity: applyHedgeRecoveryReserveToOpportunity(
-        candidateOpportunity,
-        input.intent ?? null,
-        input.settings,
-      ),
-    };
-  }
   const riskBoundedOpportunity = applyHedgeRecoveryReserveToOpportunity(
     candidateOpportunity,
     input.intent ?? null,
@@ -1092,7 +1104,7 @@ async function recheckMismatchRiskForExecution(input: {
     (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
     0,
   );
-  const estimate = mismatchRiskRuntime.estimate({
+  const rawEstimate = mismatchRiskRuntime.estimate({
     asset: input.slot.asset,
     polymarket: polymarket.quote,
     kalshi: kalshi.quote,
@@ -1113,28 +1125,55 @@ async function recheckMismatchRiskForExecution(input: {
     pairSize,
     totalCostUsd,
   });
+  const estimate: MismatchRiskEstimate = {
+    ...rawEstimate,
+    economicsBasis: pairSize > 0 && totalCostUsd > 0 ? "executable" : "unavailable",
+    economicsPairSize: pairSize > 0 ? pairSize : null,
+    economicsTotalCostUsd: totalCostUsd > 0 ? totalCostUsd : null,
+  };
 
-  const policy = applyMismatchRiskPolicy({
+  const policyInput = {
     opportunity: riskBoundedOpportunity,
     estimate,
-    mode: input.settings.mismatchRiskMode,
     slotEndTs: input.slot.endTs,
     openIntents: input.openIntents,
     capitalUsd: deriveRiskCapitalUsd(balances, input.now, config),
     globalRiskConfig: config,
     candidateIntentId: input.intent?.id ?? null,
+  };
+  const blockOnlyPolicy = recheckMismatchRiskCandidate({
+    ...policyInput,
+    mode: "block_only",
+  });
+  const mismatchRiskAudit = buildMismatchRiskAudit({
+    opportunity: riskBoundedOpportunity,
+    estimate,
+    policy: blockOnlyPolicy,
+    evaluatedAt: input.now,
+    source: "execution",
+  });
+  const policy = applyMismatchRiskPolicy({
+    ...policyInput,
+    mode: input.settings.mismatchRiskMode,
   });
   if (!policy.allowed) {
     return {
       allowed: false,
       reason: policy.blockingReasons.map((reason) => reason.message).join(" | "),
       estimate,
+      opportunity: {
+        ...policy.opportunity,
+        mismatchRiskAudit,
+      },
     };
   }
 
   return {
     allowed: true,
-    opportunity: policy.opportunity,
+    opportunity: {
+      ...policy.opportunity,
+      mismatchRiskAudit,
+    },
   };
 }
 
@@ -1562,6 +1601,7 @@ function applyRiskCheckedOpportunityToIntent(
     mismatchPFatal: estimate ? estimate.pFatal : intent.mismatchPFatal ?? null,
     mismatchPFatalUpper: estimate ? estimate.pFatalUpper95 : intent.mismatchPFatalUpper ?? null,
     mismatchModelVersion: estimate ? estimate.modelVersion : intent.mismatchModelVersion ?? null,
+    mismatchRiskAudit: opportunity.mismatchRiskAudit ?? intent.mismatchRiskAudit ?? null,
     fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
     conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
     fatalLossExposureUsd: opportunity.fatalMismatchPnlUsd === null || opportunity.fatalMismatchPnlUsd === undefined
@@ -1603,6 +1643,7 @@ function buildRiskOpportunityTemplateFromIntent(
     fatalMismatchPnlUsd: intent.fatalMismatchPnlUsd ?? null,
     conservativeExpectedPnlUsd: intent.conservativeExpectedPnlUsd ?? null,
     mismatchRiskEstimate: null,
+    mismatchRiskAudit: intent.mismatchRiskAudit ?? null,
     eligible: true,
     primaryVenue: intent.primaryVenue,
     primarySelection: null,
@@ -1669,6 +1710,7 @@ export function createExecutionCoordinator(
         kalshi,
         opportunities: baseOpportunities,
         oracleMaxAgeMs: globalRiskConfig.oracleMaxAgeMs,
+        settings,
       });
       const clusterBudget = settings.mismatchRiskMode === "enforce"
         ? buildMismatchClusterBudget({
@@ -1697,15 +1739,33 @@ export function createExecutionCoordinator(
         if (!estimate) {
           return opportunity;
         }
-        return applyMismatchRiskPolicy({
+        const policyInput = {
           opportunity,
           estimate,
-          mode: settings.mismatchRiskMode,
           slotEndTs: slot.endTs,
           openIntents,
           capitalUsd: deriveRiskCapitalUsd(balances, now, globalRiskConfig),
           globalRiskConfig,
-        }).opportunity;
+        };
+        const blockOnlyPolicy = recheckMismatchRiskCandidate({
+          ...policyInput,
+          mode: "block_only",
+        });
+        const mismatchRiskAudit = buildMismatchRiskAudit({
+          opportunity,
+          estimate,
+          policy: blockOnlyPolicy,
+          evaluatedAt: now,
+          source: "scan",
+        });
+        const configuredPolicy = applyMismatchRiskPolicy({
+          ...policyInput,
+          mode: settings.mismatchRiskMode,
+        });
+        return {
+          ...configuredPolicy.opportunity,
+          mismatchRiskAudit,
+        };
       });
 
       if (options.persistSnapshot !== false) {
@@ -1892,6 +1952,8 @@ export function createExecutionCoordinator(
                 combination: opportunity.combination,
                 reason: mismatchRecheck.reason,
                 estimate: mismatchRecheck.estimate,
+                mismatchRiskAudit:
+                  mismatchRecheck.opportunity?.mismatchRiskAudit ?? null,
               },
               createdAt: mismatchRecheckAt,
             });
@@ -1929,6 +1991,7 @@ export function createExecutionCoordinator(
               slotKey: intent.slotKey,
               primaryVenue: intent.primaryVenue,
               primarySelection: executionOpportunity.primarySelection ?? null,
+              mismatchRiskAudit: intent.mismatchRiskAudit ?? null,
             },
             createdAt: now,
           });
@@ -2840,6 +2903,13 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     now: finalRiskCheckAt,
   });
   if (!finalRiskCheck.allowed) {
+    if (finalRiskCheck.opportunity) {
+      currentIntent = applyRiskCheckedOpportunityToIntent(
+        currentIntent,
+        finalRiskCheck.opportunity,
+        finalRiskCheckAt,
+      );
+    }
     currentIntent = markIntentStatus(
       currentIntent,
       "skipped",
@@ -2858,6 +2928,8 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
         combination: currentIntent.combination,
         reason: finalRiskCheck.reason,
         estimate: finalRiskCheck.estimate,
+        mismatchRiskAudit:
+          finalRiskCheck.opportunity?.mismatchRiskAudit ?? null,
       },
       createdAt: finalRiskCheckAt,
     });
@@ -5461,6 +5533,7 @@ async function retryLegWithinExecutionBuffer(
           intentId: intent.id,
           reason: riskCheck.reason,
           estimate: riskCheck.estimate,
+          mismatchRiskAudit: riskCheck.opportunity?.mismatchRiskAudit ?? null,
           retryAttempt,
         },
         createdAt: riskCheckAt,

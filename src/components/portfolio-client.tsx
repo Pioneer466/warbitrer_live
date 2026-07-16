@@ -19,11 +19,14 @@ import {
   type V2Tone,
 } from "@/components/v2-ui";
 import {
+  formatMismatchAuditDecision,
+  formatMismatchEconomicsBasis,
   formatRiskProbability,
   getMismatchModelDisplayState,
+  isMismatchBlockingDecision,
 } from "@/lib/mismatch-risk-display";
 import type { GlobalRiskConfig } from "@/lib/risk-settings";
-import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MarketAsset, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MarketAsset, MismatchRiskCounterfactualDecision, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
@@ -427,6 +430,7 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
   const modeTone: V2Tone = mode === "live" ? "gold" : mode === "shadow" ? "indigo" : "amber";
   const readinessTone = getReadinessTone(asset.workerState.readinessStatus);
   const best = asset.bestOpportunity;
+  const bestAudit = best?.mismatchRiskAudit ?? null;
   const feedReadyCount = asset.feedHealth.filter((feed) => feed.feedStatus === "ready").length;
 
   return (
@@ -456,16 +460,28 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
         <MiniStat label="Seuil" value={asset.config.grossEntryThreshold.toFixed(3)} />
         <MiniStat
           label="P fatal 95%"
-          value={formatRiskProbability(best?.mismatchRiskEstimate?.pFatalUpper95)}
+          value={formatRiskProbability(bestAudit ? bestAudit.pFatalUpper95 : best?.mismatchRiskEstimate?.pFatalUpper95)}
           tone={getAssetMismatchTone(best)}
         />
         <MiniStat label="Breakers" value={String(asset.activeBreakers.length)} tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"} />
       </div>
       <div className="mt-4 border-t border-[var(--wa-gold-border)] pt-4 text-sm text-[var(--wa-mist)]">
         {best ? (
-          <div className="flex items-center justify-between gap-3">
-            <span>brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire {best.primaryVenue ?? "--"}</span>
-            <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-3">
+              <span>brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire {best.primaryVenue ?? "--"}</span>
+              <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
+            </div>
+            {bestAudit ? (
+              <div className="flex flex-wrap gap-2">
+                <Chip tone={getAuditDecisionTone(bestAudit.decision)}>
+                  block_only · {formatMismatchAuditDecision(bestAudit.decision)}
+                </Chip>
+                <Chip tone={bestAudit.economicsBasis === "executable" ? "emerald" : bestAudit.economicsBasis === "reference" ? "amber" : "mist"}>
+                  {formatMismatchEconomicsBasis(bestAudit.economicsBasis)}
+                </Chip>
+              </div>
+            ) : null}
           </div>
         ) : (
           "Aucune opportunité calculée pour ce créneau."
@@ -613,6 +629,19 @@ function getAssetMismatchTone(opportunity: LiveOpportunity | null): V2Tone {
     return "rose";
   }
   return "emerald";
+}
+
+function getAuditDecisionTone(decision: MismatchRiskCounterfactualDecision): V2Tone {
+  if (isMismatchBlockingDecision(decision)) {
+    return "rose";
+  }
+  if (decision === "would_allow") {
+    return "emerald";
+  }
+  if (decision === "would_allow_fail_open" || decision === "reference_allow") {
+    return "amber";
+  }
+  return "mist";
 }
 
 function findBreakerForIntent(breakers: CircuitBreaker[], intent: OrderIntent) {

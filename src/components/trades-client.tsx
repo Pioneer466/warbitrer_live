@@ -17,6 +17,13 @@ import {
 } from "@/components/v2-ui";
 import { formatDateTime, formatPrice } from "@/lib/format";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
+import {
+  classifySettledIntentMismatch,
+  formatMismatchSettlementClassification,
+  summarizeMismatchRiskAudits,
+  type MismatchAuditSummary,
+  type MismatchSettlementClassification,
+} from "@/lib/mismatch-risk-display";
 import type { LiveFill, LiveOrder, MarketAsset, OrderIntent, TradesResponse } from "@/lib/types";
 
 const TRADE_FILTERS: Array<MarketAsset | "all"> = ["all", ...ACTIVE_MARKET_ASSETS];
@@ -50,6 +57,7 @@ export function TradesClient() {
   const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
   const visibleFills = showAllFills ? fills : fills.slice(0, 8);
   const orderGroups = groupOrdersByPair(orders, intentMap);
+  const mismatchAuditSummary = summarizeMismatchRiskAudits(intents);
 
   return (
     <div className="flex flex-col gap-7">
@@ -61,6 +69,7 @@ export function TradesClient() {
             <MetricCell label="Trades réalisés" value={String(successIntents.filter((intent) => intent.status === "settled").length)} tone="emerald" />
             <MetricCell label="Frais payés" value={formatV2Usd(totalFees)} tone="rose" meta="fills enregistrés" />
           </div>
+          <MismatchAuditSummaryStrip summary={mismatchAuditSummary} />
           <div className="flex flex-wrap gap-1 border-t border-[var(--wa-gold-border)] px-4 py-3">
             {TRADE_FILTERS.map((value) => (
               <button
@@ -156,6 +165,43 @@ function IntentColumn({ title, subtitle, intents, emptyMessage, tone }: { title:
   );
 }
 
+function MismatchAuditSummaryStrip({ summary }: { summary: MismatchAuditSummary }) {
+  if (summary.auditedCount === 0 && summary.classifiedSettlementCount === 0) {
+    return null;
+  }
+
+  return (
+    <div className="border-t border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <span className="text-[9px] uppercase tracking-[0.20em] text-[rgba(201,168,100,0.45)]">
+          Audit mismatch · intents chargés
+        </span>
+        {summary.auditedCount > 0 ? <Chip tone="amber">block_only · {summary.auditedCount} audités</Chip> : null}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {summary.auditedCount > 0 ? (
+          <>
+            <Chip tone="rose">{summary.blockCount} auraient bloqué</Chip>
+            <Chip tone="emerald">{summary.allowCount} auraient autorisé</Chip>
+            {summary.failOpenCount > 0 ? <Chip tone="amber">{summary.failOpenCount} fail-open</Chip> : null}
+            {summary.unavailableCount > 0 ? <Chip tone="mist">{summary.unavailableCount} sans verdict</Chip> : null}
+            <Chip tone={summary.enforceNotReadyCount > 0 ? "amber" : "emerald"}>
+              risk enforce prêt {summary.enforceReadyCount}/{summary.auditedCount}
+            </Chip>
+          </>
+        ) : null}
+        {summary.classifiedSettlementCount > 0 ? (
+          <>
+            <Chip tone="rose">{summary.fatalMismatchCount} mismatch fatal</Chip>
+            <Chip tone="gold">{summary.doublePayoutCount} double payout</Chip>
+            <Chip tone="emerald">{summary.alignedSettlementCount} alignés</Chip>
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
   const settlement = deriveSettlementSummary(intent);
 
@@ -170,9 +216,15 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       </div>
       {settlement ? (
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          <Chip tone={settlement.aligned === null ? "mist" : settlement.aligned ? "emerald" : "rose"}>
-            {settlement.aligned === null ? "venues --" : settlement.aligned ? "venues alignées" : "venues non alignées"}
-          </Chip>
+          {settlement.classification ? (
+            <Chip tone={getSettlementClassificationTone(settlement.classification)}>
+              {formatMismatchSettlementClassification(settlement.classification)}
+            </Chip>
+          ) : (
+            <Chip tone={settlement.aligned === null ? "mist" : settlement.aligned ? "emerald" : "rose"}>
+              {settlement.aligned === null ? "venues --" : settlement.aligned ? "venues alignées" : "venues non alignées"}
+            </Chip>
+          )}
           <span className={`font-mono text-[11px] ${settlement.pnlTone === "emerald" ? "text-[var(--wa-emerald)]" : settlement.pnlTone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
             P&amp;L {formatSignedUsd(intent.realizedPnlUsd)}
             {intent.roi !== null ? ` · ROI ${(intent.roi * 100).toFixed(2)}%` : ""}
@@ -306,9 +358,20 @@ function deriveSettlementSummary(intent: OrderIntent) {
 
   const kalshiDirection = intent.kalshiResolution === "YES" ? "UP" : intent.kalshiResolution === "NO" ? "DOWN" : null;
   const aligned = intent.polyResolution !== null && kalshiDirection !== null ? intent.polyResolution === kalshiDirection : null;
+  const classification = classifySettledIntentMismatch(intent);
   const pnlTone: V2Tone = intent.realizedPnlUsd === null ? "mist" : intent.realizedPnlUsd >= 0 ? "emerald" : "rose";
 
-  return { aligned, pnlTone };
+  return { aligned, classification, pnlTone };
+}
+
+function getSettlementClassificationTone(
+  classification: MismatchSettlementClassification,
+): V2Tone {
+  return classification === "fatal_mismatch"
+    ? "rose"
+    : classification === "double_payout"
+      ? "gold"
+      : "emerald";
 }
 
 function deriveIntentCapitalUsd(intent: OrderIntent) {

@@ -231,7 +231,8 @@ async function bootstrapDatabase(pool: Pool) {
       roi DOUBLE PRECISION,
       poly_resolution TEXT,
       kalshi_resolution TEXT,
-      legs_json JSONB NOT NULL
+      legs_json JSONB NOT NULL,
+      mismatch_risk_audit_json JSONB
     );
     CREATE INDEX IF NOT EXISTS order_intents_slot_idx ON order_intents(slot_key, created_at DESC);
     CREATE INDEX IF NOT EXISTS order_intents_created_idx ON order_intents(created_at DESC);
@@ -696,7 +697,8 @@ async function bootstrapDatabase(pool: Pool) {
       ADD COLUMN IF NOT EXISTS mismatch_model_version TEXT,
       ADD COLUMN IF NOT EXISTS fatal_mismatch_pnl_usd DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS conservative_expected_pnl_usd DOUBLE PRECISION,
-      ADD COLUMN IF NOT EXISTS fatal_loss_exposure_usd DOUBLE PRECISION
+      ADD COLUMN IF NOT EXISTS fatal_loss_exposure_usd DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS mismatch_risk_audit_json JSONB
   `);
 
     await pool.query(`
@@ -1449,14 +1451,15 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         resolved_at, primary_venue, hedge_venue, gross_cost, target_notional_usd, max_slippage_bps,
         entry_sizing_reason, failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
         kalshi_resolution, legs_json, mismatch_p_fatal, mismatch_p_fatal_upper, mismatch_model_version,
-        fatal_mismatch_pnl_usd, conservative_expected_pnl_usd, fatal_loss_exposure_usd
+        fatal_mismatch_pnl_usd, conservative_expected_pnl_usd, fatal_loss_exposure_usd,
+        mismatch_risk_audit_json
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22,
         $23, $24::jsonb, $25, $26, $27,
-        $28, $29, $30
+        $28, $29, $30, $31::jsonb
       )
       ON CONFLICT (id) DO UPDATE SET
         asset = EXCLUDED.asset,
@@ -1479,7 +1482,8 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         mismatch_model_version = EXCLUDED.mismatch_model_version,
         fatal_mismatch_pnl_usd = EXCLUDED.fatal_mismatch_pnl_usd,
         conservative_expected_pnl_usd = EXCLUDED.conservative_expected_pnl_usd,
-        fatal_loss_exposure_usd = EXCLUDED.fatal_loss_exposure_usd
+        fatal_loss_exposure_usd = EXCLUDED.fatal_loss_exposure_usd,
+        mismatch_risk_audit_json = EXCLUDED.mismatch_risk_audit_json
     `,
     [
       intent.id,
@@ -1512,6 +1516,9 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
       intent.fatalMismatchPnlUsd ?? null,
       intent.conservativeExpectedPnlUsd ?? null,
       intent.fatalLossExposureUsd ?? null,
+      intent.mismatchRiskAudit === null || intent.mismatchRiskAudit === undefined
+        ? null
+        : JSON.stringify(intent.mismatchRiskAudit),
     ],
   );
 }
@@ -3125,6 +3132,7 @@ function mapOrderIntentRow(row: any): OrderIntent {
     fatalMismatchPnlUsd: row.fatal_mismatch_pnl_usd ?? null,
     conservativeExpectedPnlUsd: row.conservative_expected_pnl_usd ?? null,
     fatalLossExposureUsd: row.fatal_loss_exposure_usd ?? null,
+    mismatchRiskAudit: row.mismatch_risk_audit_json ?? null,
     realizedPnlUsd: row.realized_pnl_usd,
     roi: row.roi,
     polyResolution: row.poly_resolution,

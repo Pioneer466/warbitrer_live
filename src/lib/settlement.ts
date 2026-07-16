@@ -55,6 +55,7 @@ export function createIntentFromOpportunity({
     mismatchPFatal: opportunity.mismatchRiskEstimate?.pFatal ?? null,
     mismatchPFatalUpper: opportunity.mismatchRiskEstimate?.pFatalUpper95 ?? null,
     mismatchModelVersion: opportunity.mismatchRiskEstimate?.modelVersion ?? null,
+    mismatchRiskAudit: opportunity.mismatchRiskAudit ?? null,
     fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
     conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
     fatalLossExposureUsd: opportunity.fatalMismatchPnlUsd == null
