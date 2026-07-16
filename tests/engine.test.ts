@@ -16,19 +16,28 @@ import {
   estimateRescueHedgeLossUsd,
   estimatePrimaryUnwindLossUsd,
   getOpportunitySnapshotAgeMs,
+  getMismatchEstimationSettings,
   getPolymarketHedgeMinNotionalViolation,
+  getPolymarketHedgeSubmissionBlock,
   hasKalshiHedgeRetryCapacity,
   isFeedHealthBreaker,
+  isHedgedPairEconomicsWithinLossCap,
   isBreakerRelevantToSlot,
   isOpportunitySnapshotFresh,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  immediatePartialOrderType,
+  isPrimaryFillSizeHedgable,
+  primaryImmediateOrderType,
+  mergeObservedSlotResolutionOutcomes,
   resolvePrimaryRetryPlan,
   resolveKalshiPrimaryMultiClipRetryPlan,
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
+  shouldHoldHedgeRescueOrderPendingTruth,
   shouldHoldPolymarketHedgeFailurePendingTruth,
+  shouldFailClosedOnSubmissionError,
   shouldKeepSlotExecutionBreakerActive,
   shouldPauseExecutionForBreaker,
   shouldRefreshIdleExecution,
@@ -45,8 +54,13 @@ import {
   quotePolymarketBuyFromAsks,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
+  validateWorstFillExecutionCaps,
+  validateFinalWsEntryDepthCoverage,
+  validateFinalWsEntrySnapshot,
 } from "@/lib/engine";
-import type { CircuitBreaker, ExecutionCandidate, LiveFill, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
+import type { CircuitBreaker, ExecutionCandidate, LiveFill, LiveOpportunity, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
+import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { deriveHedgedPairEconomics } from "@/lib/settlement";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   const base: OrderIntent = {
@@ -119,6 +133,34 @@ function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
     asset: overrides.asset ?? base.asset,
   };
 }
+
+describe("mismatch estimation bootstrap", () => {
+  it("builds nominal economics before applying enforce sizing", () => {
+    const enforceSettings = {
+      ...DEFAULT_STRATEGY_CONFIG,
+      mismatchRiskMode: "enforce" as const,
+    };
+
+    expect(getMismatchEstimationSettings(enforceSettings).mismatchRiskMode).toBe("shadow");
+    expect(enforceSettings.mismatchRiskMode).toBe("enforce");
+  });
+
+  it("leaves non-enforce modes unchanged", () => {
+    const blockOnlySettings = {
+      ...DEFAULT_STRATEGY_CONFIG,
+      mismatchRiskMode: "block_only" as const,
+    };
+
+    expect(getMismatchEstimationSettings(blockOnlySettings)).toBe(blockOnlySettings);
+  });
+});
+
+describe("ambiguous submission safety", () => {
+  it("fails closed for Polymarket transport errors without doing so for recoverable Kalshi ids", () => {
+    expect(shouldFailClosedOnSubmissionError({ venue: "polymarket" })).toBe(true);
+    expect(shouldFailClosedOnSubmissionError({ venue: "kalshi" })).toBe(false);
+  });
+});
 
 function buildKalshiPrimaryPolymarketHedgeIntent(
   overrides: {
@@ -222,6 +264,280 @@ function buildVenueBalance(overrides: Partial<VenueBalance> = {}): VenueBalance 
     ...overrides,
   };
 }
+
+function buildWorstFillOpportunity(overrides: Partial<LiveOpportunity> = {}): LiveOpportunity {
+  return {
+    asset: "btc",
+    id: "candidate",
+    slotKey: "btc:slot-1",
+    capturedAt: 1_000,
+    combination: "POLY_DOWN_KALSHI_YES",
+    label: "Poly Down + Kalshi Yes",
+    grossCost: 0.92,
+    threshold: 0.93,
+    thresholdMet: true,
+    worstCaseProfitUsd: 0.8,
+    fatalMismatchPnlUsd: -9.2,
+    conservativeExpectedPnlUsd: 0.8,
+    mismatchRiskEstimate: null,
+    eligible: true,
+    primaryVenue: "polymarket",
+    primarySelection: null,
+    improvementFromLastEntry: null,
+    estimatedFeesUsd: 0.2,
+    projectedNetProfitUsd: 0.8,
+    projectedNetReturn: 0.087,
+    reasons: [],
+    legs: [
+      {
+        venue: "polymarket",
+        outcome: "DOWN",
+        marketRef: "poly-market",
+        tokenId: "token-1",
+        price: 0.46,
+        depth: 100,
+        targetNotionalUsd: 4.5,
+        size: 10,
+        tickSize: 0.001,
+        minOrderSize: 5,
+        feeEstimateUsd: 0.1,
+      },
+      {
+        venue: "kalshi",
+        outcome: "YES",
+        marketRef: "kalshi-market",
+        price: 0.46,
+        depth: 100,
+        targetNotionalUsd: 4.5,
+        size: 10,
+        tickSize: 0.01,
+        minOrderSize: 1,
+        feeEstimateUsd: 0.1,
+      },
+    ],
+    mismatchGuardAction: "allow",
+    mismatchSizeMultiplier: 1,
+    referencePayoutCount: 1,
+    deadZoneDistanceBps: null,
+    deadZoneWidthBps: null,
+    mismatchRisk: null,
+    venueDisagreementPct: null,
+    secondsElapsedInSlot: null,
+    chainlinkMoveBps: null,
+    openDriftBps: null,
+    chainlinkLivePriceUsd: null,
+    observedSlotOpenPriceUsd: null,
+    kalshiTargetPriceUsd: null,
+    ...overrides,
+  };
+}
+
+describe("worst-fill execution caps", () => {
+  const readyBalances = [
+    buildVenueBalance({ venue: "polymarket", capturedAt: 1_000 }),
+    buildVenueBalance({
+      venue: "kalshi",
+      capturedAt: 1_000,
+      currency: "USD",
+    }),
+  ];
+  const validate = (overrides: Partial<Parameters<typeof validateWorstFillExecutionCaps>[0]> = {}) =>
+    validateWorstFillExecutionCaps({
+      opportunity: buildWorstFillOpportunity(),
+      intent: buildIntent({ status: "pending", failureReason: null }),
+      settings: { ...DEFAULT_STRATEGY_CONFIG },
+      balances: readyBalances,
+      openIntents: [],
+      venueExposureUsd: { polymarket: 0, kalshi: 0 },
+      balanceMaxAgeMs: 10_000,
+      now: 1_000,
+      ...overrides,
+    });
+
+  it("accepts worst-fill economics that fit every deterministic cap", () => {
+    expect(validate()).toBeNull();
+  });
+
+  it("blocks an actual order limit above the configured leg-price cap", () => {
+    const opportunity = buildWorstFillOpportunity();
+    opportunity.legs[0] = { ...opportunity.legs[0], price: 0.5 };
+
+    expect(validate({ opportunity })).toContain("exceeds max leg price");
+  });
+
+  it("checks fees against fresh balances after existing reservations", () => {
+    expect(
+      validate({
+        balances: readyBalances.map((balance) =>
+          balance.venue === "kalshi"
+            ? { ...balance, availableBalanceUsd: 4.59 }
+            : balance,
+        ),
+      }),
+    ).toContain("exceeds available balance");
+  });
+
+  it("reserves the full payout-plus-loss rescue bound on a Polymarket hedge", () => {
+    const intent = buildIntent({
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      status: "pending",
+      failureReason: null,
+    });
+    expect(
+      validate({
+        intent,
+        balances: readyBalances.map((balance) =>
+          balance.venue === "polymarket"
+            ? { ...balance, availableBalanceUsd: 6 }
+            : balance,
+        ),
+      }),
+    ).toContain("polymarket requirement");
+  });
+
+  it("applies venue exposure to worst-fill cost including fees", () => {
+    expect(
+      validate({
+        settings: {
+          ...DEFAULT_STRATEGY_CONFIG,
+          maxVenueExposureUsd: 10,
+        },
+        venueExposureUsd: { polymarket: 5.5, kalshi: 0 },
+      }),
+    ).toContain("exceeds venue limit");
+  });
+});
+
+describe("final WS entry snapshot", () => {
+  const slot = {
+    asset: "btc",
+    key: "btc:slot-1",
+    startTs: 0,
+    endTs: 10_000,
+  } as any;
+  const intent = buildIntent({
+    status: "pending",
+    failureReason: null,
+    slotKey: slot.key,
+  });
+  const buildQuote = (venue: "polymarket" | "kalshi") => {
+    const outcome = (name: "UP" | "DOWN" | "YES" | "NO") => ({
+      outcome: name,
+      chart: {
+        source: "ws",
+        lastUpdatedAt: 1_000,
+      },
+    });
+    return {
+      slotAligned: true,
+      ref: { slotKey: slot.key },
+      feedHealth: { feedStatus: "ready" },
+      source: "ws",
+      stalenessMs: 0,
+      orderbookLevels: venue === "polymarket"
+        ? { upBids: [], upAsks: [], downBids: [], downAsks: [] }
+        : { yesBids: [], noBids: [] },
+      outcomes: venue === "polymarket"
+        ? { up: outcome("UP"), down: outcome("DOWN") }
+        : { yes: outcome("YES"), no: outcome("NO") },
+    } as any;
+  };
+
+  it("accepts only a fresh aligned WS snapshot", () => {
+    const polymarket = buildQuote("polymarket");
+    const kalshi = buildQuote("kalshi");
+    expect(
+      validateFinalWsEntrySnapshot(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        1_000,
+      ),
+    ).toBeNull();
+
+    polymarket.source = "rest-fallback";
+    expect(
+      validateFinalWsEntrySnapshot(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        1_000,
+      ),
+    ).toContain("non-WS source");
+  });
+
+  it("rejects stale books and slot changes", () => {
+    const polymarket = buildQuote("polymarket");
+    const kalshi = buildQuote("kalshi");
+    polymarket.outcomes.down.chart.lastUpdatedAt = 0;
+    expect(
+      validateFinalWsEntrySnapshot(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        2_000,
+      ),
+    ).toContain("stale or not WS");
+
+    polymarket.outcomes.down.chart.lastUpdatedAt = 2_000;
+    kalshi.ref.slotKey = "btc:other-slot";
+    expect(
+      validateFinalWsEntrySnapshot(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        2_000,
+      ),
+    ).toContain("slot alignment changed");
+  });
+
+  it("requires executable depth on both legs at the final submission boundary", () => {
+    const polymarket = buildQuote("polymarket");
+    const kalshi = buildQuote("kalshi");
+    polymarket.orderbookLevels.downAsks = [[0.45, 100]];
+    kalshi.orderbookLevels.noBids = [[0.55, 100]];
+
+    expect(
+      validateFinalWsEntryDepthCoverage(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        1_000,
+      ),
+    ).toBeNull();
+
+    // This would pass the configurable 50% scan threshold after safety factors,
+    // but the final no-resize boundary must require the whole hedge.
+    kalshi.orderbookLevels.noBids = [[0.55, 10]];
+    expect(
+      validateFinalWsEntryDepthCoverage(
+        slot,
+        intent.legs[0],
+        intent.legs[1],
+        polymarket,
+        kalshi,
+        DEFAULT_STRATEGY_CONFIG,
+        1_000,
+      ),
+    ).toContain("executable depth coverage");
+  });
+});
 
 function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnapshot {
   const base: PositionSnapshot = {
@@ -383,6 +699,36 @@ describe("settlement venue resolutions", () => {
         kalshiResolution: null,
       }),
     ).toBeNull();
+  });
+
+  it("accumulates official venue outcomes observed on different reconciliation polls", () => {
+    expect(
+      mergeObservedSlotResolutionOutcomes({
+        storedSource: "official-venue-resolution",
+        storedPolymarketResolution: "UP",
+        storedKalshiResolution: null,
+        fetchedPolymarketResolution: null,
+        fetchedKalshiResolution: "NO",
+      }),
+    ).toEqual({
+      polymarketResolution: "UP",
+      kalshiResolution: "NO",
+    });
+  });
+
+  it("does not promote snapshot outcomes to official truth when venue fetches are empty", () => {
+    expect(
+      mergeObservedSlotResolutionOutcomes({
+        storedSource: "market-data-observation",
+        storedPolymarketResolution: "UP",
+        storedKalshiResolution: "NO",
+        fetchedPolymarketResolution: null,
+        fetchedKalshiResolution: null,
+      }),
+    ).toEqual({
+      polymarketResolution: null,
+      kalshiResolution: null,
+    });
   });
 });
 
@@ -708,6 +1054,13 @@ describe("kalshi hedge safety guards", () => {
 });
 
 describe("venue order request sizing", () => {
+  it("keeps Polymarket primary atomic while allowing partial immediate hedges", () => {
+    expect(primaryImmediateOrderType("polymarket")).toBe("FOK");
+    expect(primaryImmediateOrderType("kalshi")).toBe("IOC");
+    expect(immediatePartialOrderType("polymarket")).toBe("FAK");
+    expect(immediatePartialOrderType("kalshi")).toBe("IOC");
+  });
+
   it("uses exact-share mode for Polymarket BUY hedges by default", () => {
     const polymarketLeg = {
       ...buildIntent().legs[0],
@@ -773,6 +1126,19 @@ describe("venue order request sizing", () => {
         requestedNotionalUsd: 1,
       }),
     ).toBeNull();
+
+    expect(
+      getPolymarketHedgeSubmissionBlock({
+        venue: "polymarket",
+        side: "BUY",
+        requestedNotionalUsd: 0.65,
+      }),
+    ).toEqual({
+      action: "manual_required",
+      stage: "polymarket_hedge_below_minimum_notional",
+      requestedNotionalUsd: 0.65,
+      minimumNotionalUsd: 1,
+    });
   });
 });
 
@@ -861,6 +1227,8 @@ describe("Kalshi primary IOC handling", () => {
         { primaryVenue: "kalshi" },
         {
           filledSize: 3,
+          orderType: "IOC",
+          requestedSize: 10,
           status: "partially_filled",
         },
       ),
@@ -880,6 +1248,8 @@ describe("Kalshi primary IOC handling", () => {
         },
         {
           filledSize: 3,
+          orderType: "IOC",
+          requestedSize: 10,
           status: "partially_filled",
         },
       ),
@@ -892,10 +1262,69 @@ describe("Kalshi primary IOC handling", () => {
         { primaryVenue: "polymarket" },
         {
           filledSize: 3,
+          orderType: "FOK",
+          requestedSize: 10,
           status: "partially_filled",
         },
       ),
     ).toBe(false);
+  });
+
+  it("hedges a fully matched Polymarket FOK while venue truth is still pending", () => {
+    const pendingFullOrder = {
+      filledSize: 10,
+      orderType: "FOK",
+      requestedSize: 10,
+      status: "pending" as const,
+    };
+
+    expect(
+      shouldTreatPrimaryOrderAsFilled(
+        { primaryVenue: "polymarket" },
+        pendingFullOrder,
+      ),
+    ).toBe(true);
+    expect(
+      shouldTreatPrimaryExecutionAsFilled(
+        { primaryVenue: "polymarket" },
+        {
+          venue: "polymarket",
+          venueOrderId: "poly-1",
+          filledSize: 10,
+          averageFillPrice: 0.48,
+          feeUsd: 0,
+          status: "pending",
+          raw: {
+            orderTruth: {
+              expectedSizeSatisfied: true,
+              hasPendingExposure: true,
+            },
+          },
+        },
+        pendingFullOrder,
+      ),
+    ).toBe(true);
+  });
+
+  it("requires a complete Polymarket primary fill before resume can hedge it", () => {
+    expect(
+      isPrimaryFillSizeHedgable(
+        { primaryVenue: "polymarket" },
+        { filledSize: 9, requestedSize: 10 },
+      ),
+    ).toBe(false);
+    expect(
+      isPrimaryFillSizeHedgable(
+        { primaryVenue: "polymarket" },
+        { filledSize: 10, requestedSize: 10 },
+      ),
+    ).toBe(true);
+    expect(
+      isPrimaryFillSizeHedgable(
+        { primaryVenue: "kalshi" },
+        { filledSize: 1, requestedSize: 10 },
+      ),
+    ).toBe(true);
   });
 
   it("requires a Polymarket hedge to cover the requested size before marking it complete", () => {
@@ -1079,6 +1508,30 @@ describe("Kalshi primary IOC handling", () => {
           },
         },
         now,
+      ),
+    ).toBe(true);
+  });
+
+  it("holds an acknowledged rescue while venue truth is nonterminal", () => {
+    expect(
+      shouldHoldHedgeRescueOrderPendingTruth(
+        {
+          hedgeVenue: "polymarket",
+          status: "rescue_hedge",
+          updatedAt: 1_000,
+        },
+        { venue: "polymarket", side: "BUY" },
+        {
+          status: "live",
+          filledSize: 0,
+          venueOrderId: "rescue-order-1",
+          raw: {
+            orderTruth: {
+              terminalZeroFill: true,
+            },
+          },
+        },
+        2_000,
       ),
     ).toBe(true);
   });
@@ -1400,6 +1853,47 @@ describe("recovery option evaluation", () => {
         size: 10,
       }),
     ).toBe(0.2);
+  });
+
+  it("includes hedge fees when enforcing the rescue loss cap", () => {
+    const lossWithFee = estimateRescueHedgeLossUsd({
+      primaryEntryPrice: 0.53,
+      hedgePrice: 0.49,
+      size: 10,
+      hedgeFeeUsd: 0.01,
+    });
+
+    expect(lossWithFee).toBe(0.21);
+    expect(
+      evaluateExposureRecoveryOptions({
+        rescueHedgeLossUsd: lossWithFee,
+        rescueHedgeSize: 10,
+        unhedgedSize: 10,
+        unwindLossUsd: 0.5,
+        holdExpectedLossUsd: null,
+        holdWorstCaseLossUsd: null,
+        hedgeRescueMaxLossUsd: 0.2,
+        hedgeRescueMinAdvantageUsd: 0.05,
+        secondsToSettlement: 60,
+        holdWindowSeconds: 45,
+        allowPartial: false,
+      }),
+    ).toMatchObject({ decision: "unwind" });
+  });
+
+  it("accepts a fully hedged rescue loss only inside its explicit cap", () => {
+    const rescuedIntent = buildKalshiPrimaryPolymarketHedgeIntent({
+      kalshiPrice: 0.417,
+      kalshiFeeUsd: 0.17,
+      polymarketPrice: 0.586,
+      polymarketFilledSize: 10,
+    });
+    const economics = deriveHedgedPairEconomics(rescuedIntent.legs);
+
+    expect(economics.netWorstCaseUsd).toBe(-0.2);
+    expect(isHedgedPairEconomicsWithinLossCap(economics, 0.2)).toBe(true);
+    expect(isHedgedPairEconomicsWithinLossCap(economics, 0.19)).toBe(false);
+    expect(isHedgedPairEconomicsWithinLossCap(economics)).toBe(false);
   });
 });
 
@@ -1736,6 +2230,7 @@ describe("intent fill summaries", () => {
       averageFillPrice: 0.4547,
       feeUsd: 0.27,
       venueOrderId: "kalshi-clip-2",
+      lastFilledAt: 2,
     });
   });
 

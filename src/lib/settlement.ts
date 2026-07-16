@@ -52,6 +52,14 @@ export function createIntentFromOpportunity({
     maxSlippageBps,
     failureReason: null,
     projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
+    mismatchPFatal: opportunity.mismatchRiskEstimate?.pFatal ?? null,
+    mismatchPFatalUpper: opportunity.mismatchRiskEstimate?.pFatalUpper95 ?? null,
+    mismatchModelVersion: opportunity.mismatchRiskEstimate?.modelVersion ?? null,
+    fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
+    conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
+    fatalLossExposureUsd: opportunity.fatalMismatchPnlUsd == null
+      ? null
+      : Math.max(0, -opportunity.fatalMismatchPnlUsd),
     realizedPnlUsd: null,
     roi: null,
     polyResolution: null,
@@ -215,6 +223,7 @@ export function summarizeVenueFills(
     averageFillPrice: filledSize > 0 ? round4(grossCostUsd / filledSize) : null,
     feeUsd,
     venueOrderId: sorted.at(-1)?.venueOrderId ?? null,
+    lastFilledAt: sorted.at(-1)?.filledAt ?? null,
   };
 }
 

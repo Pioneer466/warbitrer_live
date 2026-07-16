@@ -1,6 +1,8 @@
 import * as postgres from "@/lib/postgres-db";
 import { isMarketAsset } from "@/lib/market-catalog";
 import { queueRunEventNotification } from "@/lib/notifications";
+import type { OracleSlotSample, SlotResolutionRecord } from "@/lib/oracle-history";
+import type { GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   MarketAsset,
   BridgeTransfer,
@@ -50,6 +52,14 @@ export async function writeSettings(asset: MarketAsset, payload: StrategyConfig)
   return postgres.updateStrategyConfig(await db(), asset, payload);
 }
 
+export async function readGlobalRiskConfig(): Promise<GlobalRiskConfig> {
+  return postgres.getGlobalRiskConfig(await db());
+}
+
+export async function writeGlobalRiskConfig(payload: GlobalRiskConfig) {
+  return postgres.updateGlobalRiskConfig(await db(), payload);
+}
+
 export async function readWorkerState(asset: MarketAsset): Promise<WorkerState> {
   return postgres.getWorkerState(await db(), asset);
 }
@@ -73,6 +83,18 @@ export async function writeSnapshot(snapshot: {
   opportunities: any[];
 }) {
   return postgres.insertOpportunitySnapshot(await db(), snapshot);
+}
+
+export async function writeOracleSlotSample(sample: OracleSlotSample) {
+  return postgres.insertOracleSlotSample(await db(), sample);
+}
+
+export async function writeSlotResolution(resolution: SlotResolutionRecord) {
+  return postgres.upsertSlotResolution(await db(), resolution);
+}
+
+export async function readPendingSlotResolutions(now: number, limit?: number) {
+  return postgres.listPendingSlotResolutions(await db(), now, limit);
 }
 
 export async function readLatestSnapshot(asset: MarketAsset, slotKey?: string): Promise<OpportunitySnapshot | null> {
@@ -121,6 +143,10 @@ export async function writeOrderAttempt(attempt: OrderAttempt) {
 
 export async function readRecentOrderAttempts(limit?: number, asset?: MarketAsset) {
   return postgres.listRecentOrderAttempts(await db(), limit, asset);
+}
+
+export async function findOrderAttemptById(attemptId: string) {
+  return postgres.findOrderAttemptById(await db(), attemptId);
 }
 
 export async function writeMarketFillQualityEvent(event: MarketFillQualityEvent) {

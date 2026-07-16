@@ -7,6 +7,7 @@ import {
   DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_MIN_MOVE_BPS,
   DEFAULT_MISMATCH_GUARD_PHASE2_START_SECONDS,
+  DEFAULT_MISMATCH_RISK_MODE,
   DEFAULT_MIN_PROJECTED_NET_PROFIT_USD,
   DEFAULT_MIN_PROJECTED_NET_RETURN,
   DEFAULT_MIN_WORST_CASE_PROFIT_USD,
@@ -214,6 +215,9 @@ export const settingsSchema = z
       .nonnegative()
       .max(0.5)
       .default(DEFAULT_MISMATCH_GUARD_MAX_VENUE_DISAGREEMENT_PCT),
+    mismatchRiskMode: z
+      .enum(["shadow", "block_only", "enforce"])
+      .default(DEFAULT_MISMATCH_RISK_MODE),
   })
   .superRefine((settings, ctx) => {
     if (settings.mismatchGuardPhase2StartSeconds < settings.mismatchGuardMinElapsedSeconds) {

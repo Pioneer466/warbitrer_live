@@ -1,11 +1,13 @@
 import {
   applyKalshiPrimaryDepthSafetyFactor,
   deriveBalancedPayoutPairSize,
+  deriveMultiLevelPairedQuote,
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
 } from "@/lib/fees";
 import {
   computeKalshiBuyDepthWithinPriceRange,
+  deriveKalshiBuyPriceLevels,
   KALSHI_ORDER_PRICE_STEP_USD,
   normalizeKalshiOrderPrice,
 } from "@/lib/kalshi";
@@ -17,6 +19,7 @@ import type {
   OutcomeQuote,
   PairCombination,
   PolymarketQuote,
+  MismatchRiskEstimate,
   StrategyConfig,
   Venue,
   VenueBalance,
@@ -32,6 +35,11 @@ type SignalContext = {
   balances: VenueBalance[];
   lastEntryCosts: Partial<Record<PairCombination, number>>;
   secondsRemaining?: number;
+  mismatchRiskEstimates?: Partial<Record<PairCombination, MismatchRiskEstimate>>;
+  riskBudget?: {
+    remainingExpectedFatalLossUsd: number;
+    remainingAbsoluteFatalLossUsd: number;
+  } | null;
 };
 
 type MismatchGuardMetrics = {
@@ -84,6 +92,8 @@ export function buildSignals({
   balances,
   lastEntryCosts,
   secondsRemaining,
+  mismatchRiskEstimates,
+  riskBudget,
 }: SignalContext): LiveOpportunity[] {
   const marketAlignmentReason =
     getTerminalMarketReason(polymarket, kalshi) ??
@@ -111,6 +121,8 @@ export function buildSignals({
       polyOutcome: "UP",
       polyMinOrderSize: polymarket.outcomes.up.minOrderSize,
       polyFeeRateBps: polymarket.outcomes.up.feeRateBps ?? polymarket.feeRateBps,
+      polyFeeRate: polymarket.feeRate,
+      polyFeeExponent: polymarket.feeExponent,
       polyTokenId: polymarket.tokenIds.up,
       kalshiPrice: kalshi.outcomes.no.buyPrice,
       kalshiDepth: kalshi.outcomes.no.depth,
@@ -123,6 +135,8 @@ export function buildSignals({
       lastEntryCosts,
       marketAlignmentReason,
       mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_UP_KALSHI_NO", settings),
+      mismatchRiskEstimate: mismatchRiskEstimates?.POLY_UP_KALSHI_NO ?? null,
+      riskBudget,
     }),
     buildSignal({
       slotKey,
@@ -134,6 +148,8 @@ export function buildSignals({
       polyOutcome: "DOWN",
       polyMinOrderSize: polymarket.outcomes.down.minOrderSize,
       polyFeeRateBps: polymarket.outcomes.down.feeRateBps ?? polymarket.feeRateBps,
+      polyFeeRate: polymarket.feeRate,
+      polyFeeExponent: polymarket.feeExponent,
       polyTokenId: polymarket.tokenIds.down,
       kalshiPrice: kalshi.outcomes.yes.buyPrice,
       kalshiDepth: kalshi.outcomes.yes.depth,
@@ -146,6 +162,8 @@ export function buildSignals({
       lastEntryCosts,
       marketAlignmentReason,
       mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_DOWN_KALSHI_YES", settings),
+      mismatchRiskEstimate: mismatchRiskEstimates?.POLY_DOWN_KALSHI_YES ?? null,
+      riskBudget,
     }),
   ];
 }
@@ -160,6 +178,8 @@ function buildSignal({
   polyOutcome,
   polyMinOrderSize,
   polyFeeRateBps,
+  polyFeeRate,
+  polyFeeExponent,
   polyTokenId,
   kalshiPrice,
   kalshiDepth,
@@ -172,6 +192,8 @@ function buildSignal({
   lastEntryCosts,
   marketAlignmentReason,
   mismatchGuard,
+  mismatchRiskEstimate,
+  riskBudget,
 }: {
   slotKey: string;
   now: number;
@@ -182,6 +204,8 @@ function buildSignal({
   polyOutcome: "UP" | "DOWN";
   polyMinOrderSize: number | null;
   polyFeeRateBps: number;
+  polyFeeRate?: number | null;
+  polyFeeExponent?: number | null;
   polyTokenId: string;
   kalshiPrice: number | null;
   kalshiDepth: number | null;
@@ -194,6 +218,8 @@ function buildSignal({
   lastEntryCosts: Partial<Record<PairCombination, number>>;
   marketAlignmentReason: string | null;
   mismatchGuard: MismatchGuardMetrics;
+  mismatchRiskEstimate: MismatchRiskEstimate | null;
+  riskBudget: SignalContext["riskBudget"];
 }): LiveOpportunity {
   const targetPairBudgetUsd = settings.maxPairNotionalUsd * mismatchGuard.mismatchSizeMultiplier;
   const reasons: string[] = [];
@@ -231,17 +257,77 @@ function buildSignal({
     safetyAdjustedKalshiDepth,
     settings.kalshiDepthHeadroomContracts,
   );
-  const grossCost = polyPrice !== null && kalshiPrice !== null ? round4(polyPrice + kalshiPrice) : null;
+  const pairSizeCap = getKalshiPrimaryMultiClipCapacity(
+    settings.kalshiPrimaryMaxClipContracts,
+    settings.kalshiPrimaryMaxClips,
+  );
+  const polyBalance = balances.find((balance) => balance.venue === "polymarket");
+  const kalshiBalance = balances.find((balance) => balance.venue === "kalshi");
+  const polyAskLevels = (
+    polyOutcome === "UP"
+      ? polymarket.orderbookLevels?.upAsks
+      : polymarket.orderbookLevels?.downAsks
+  )?.map(([price, size]) => ({ price, size })) ?? [];
+  const kalshiBuyLevels = deriveKalshiBuyPriceLevels(
+    kalshi.orderbookLevels,
+    kalshiOutcome,
+  ).map(([price, size]) => ({ price, size }));
+  const useMultiLevelSizing = polyAskLevels.length > 0 && kalshiBuyLevels.length > 0;
+  const enforceMismatchRisk = settings.mismatchRiskMode === "enforce";
+  const usableMismatchRisk =
+    mismatchRiskEstimate?.available === true &&
+    mismatchRiskEstimate.pFatalUpper95 !== null;
+  const enforceUsableMismatchRisk =
+    usableMismatchRisk &&
+    !mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated");
+  const sizingFatalProbability = enforceMismatchRisk
+    ? enforceUsableMismatchRisk
+      ? mismatchRiskEstimate.pFatalUpper95 ?? 1
+      : 1
+    : 0;
+  const multiLevelSizing = useMultiLevelSizing
+    ? deriveMultiLevelPairedQuote({
+        targetPairBudgetUsd,
+        maxLegCapitalShare: settings.maxLegCapitalShare,
+        pairSizeCap,
+        minPairSize: Math.max(settings.minOrderSize, polyMinOrderSize ?? 0, kalshiMinOrderSize ?? 1),
+        minProjectedNetProfitUsd: settings.minProjectedNetProfitUsd,
+        minProjectedNetReturn: settings.minProjectedNetReturn,
+        minConservativeNetProfitUsd: settings.minWorstCaseProfitUsd,
+        fatalMismatchProbabilityUpper: sizingFatalProbability,
+        maxFatalProbabilityShareOfBreakEven: 0.5,
+        maxProbabilityWeightedFatalLossUsd: enforceMismatchRisk
+          ? riskBudget?.remainingExpectedFatalLossUsd ?? 0
+          : null,
+        maxAbsoluteFatalLossUsd: enforceMismatchRisk
+          ? riskBudget?.remainingAbsoluteFatalLossUsd ?? 0
+          : null,
+        polymarket: {
+          levels: polyAskLevels,
+          maxPrice: settings.maxLegPrice,
+          depthSafetyFactor: settings.polymarketHedgeDepthSafetyFactor,
+          balanceUsd: polyBalance?.availableBalanceUsd ?? 0,
+          feeRateBps: polyFeeRateBps,
+          feeRate: polyFeeRate ?? undefined,
+          feeExponent: polyFeeExponent ?? undefined,
+        },
+        kalshi: {
+          levels: kalshiBuyLevels,
+          maxPrice: settings.maxLegPrice,
+          depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+          depthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
+          balanceUsd: kalshiBalance?.availableBalanceUsd ?? 0,
+          feeMultiplier: kalshi.feeMultiplier,
+        },
+      })
+    : null;
   const balancedSizing = deriveBalancedPayoutPairSize({
     targetPairBudgetUsd,
     maxLegCapitalShare: settings.maxLegCapitalShare,
-    pairSizeCap: getKalshiPrimaryMultiClipCapacity(
-      settings.kalshiPrimaryMaxClipContracts,
-      settings.kalshiPrimaryMaxClips,
-    ),
+    pairSizeCap,
     polymarket: {
-      price: polyPrice,
-      depth: polyDepth,
+      price: multiLevelSizing?.polymarket.limitPrice ?? polyPrice,
+      depth: multiLevelSizing?.polymarket.executableDepth ?? polyDepth,
       minOrderSize: polyMinOrderSize,
       fallbackMinOrderSize: settings.minOrderSize,
       feeRateBps: polyFeeRateBps,
@@ -255,14 +341,37 @@ function buildSignal({
     },
     kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   });
-  const polyUnits = balancedSizing.polySize;
-  const kalshiUnits = balancedSizing.kalshiSize;
-  const polyTargetNotionalUsd = balancedSizing.polyNotionalUsd;
-  const kalshiTargetNotionalUsd = balancedSizing.kalshiNotionalUsd;
-  const estimatedFees = balancedSizing.polyFeeUsd + balancedSizing.kalshiFeeUsd;
-  const projectedNetProfitUsd = grossCost === null ? null : balancedSizing.projectedNetProfitUsd;
-  const projectedNetReturn = grossCost === null ? null : balancedSizing.projectedNetReturn;
-  const worstCaseProfitUsd = projectedNetProfitUsd;
+  const polyUnits = multiLevelSizing?.commonSize ?? balancedSizing.polySize;
+  const kalshiUnits = multiLevelSizing?.commonSize ?? balancedSizing.kalshiSize;
+  const polyTargetNotionalUsd = multiLevelSizing?.polymarket.notionalUsd ?? balancedSizing.polyNotionalUsd;
+  const kalshiTargetNotionalUsd = multiLevelSizing?.kalshi.notionalUsd ?? balancedSizing.kalshiNotionalUsd;
+  const polyCostUsd = multiLevelSizing?.polymarket.worstFillCostUsd ?? balancedSizing.polyCostUsd;
+  const kalshiCostUsd = multiLevelSizing?.kalshi.worstFillCostUsd ?? balancedSizing.kalshiCostUsd;
+  const estimatedFees = multiLevelSizing
+    ? multiLevelSizing.polymarket.feeUsd + multiLevelSizing.kalshi.feeUsd
+    : balancedSizing.polyFeeUsd + balancedSizing.kalshiFeeUsd;
+  const grossCost = multiLevelSizing && multiLevelSizing.commonSize > 0
+    ? round4((multiLevelSizing.polymarket.notionalUsd + multiLevelSizing.kalshi.notionalUsd) / multiLevelSizing.commonSize)
+    : polyPrice !== null && kalshiPrice !== null
+      ? round4(polyPrice + kalshiPrice)
+      : null;
+  const projectedNetProfitUsd = grossCost === null
+    ? null
+    : multiLevelSizing?.projectedNetProfitUsd ?? balancedSizing.projectedNetProfitUsd;
+  const projectedNetReturn = grossCost === null
+    ? null
+    : multiLevelSizing?.projectedNetReturn ?? balancedSizing.projectedNetReturn;
+  const totalCostUsd = multiLevelSizing?.totalCostUsd ?? balancedSizing.totalCostUsd;
+  const worstFillCostUsd = multiLevelSizing?.worstFillCostUsd ?? totalCostUsd;
+  const fatalMismatchPnlUsd = Math.min(polyUnits, kalshiUnits) > 0 ? round4(-worstFillCostUsd) : null;
+  const conservativeExpectedPnlUsd = enforceMismatchRisk
+    ? multiLevelSizing?.conservativeNetProfitUsd ?? mismatchRiskEstimate?.conservativePnlUsd ?? null
+    : mismatchRiskEstimate?.available
+      ? mismatchRiskEstimate.conservativePnlUsd
+      : projectedNetProfitUsd;
+  const worstCaseProfitUsd = Math.min(polyUnits, kalshiUnits) > 0
+    ? round4(Math.min(polyUnits, kalshiUnits) - worstFillCostUsd)
+    : projectedNetProfitUsd;
 
   if (grossCost !== null && grossCost > settings.grossEntryThreshold) {
     reasons.push("Seuil brut non atteint");
@@ -286,15 +395,17 @@ function buildSignal({
     reasons.push(`Profit worst-case trop faible (${worstCaseProfitUsd.toFixed(2)} < ${settings.minWorstCaseProfitUsd.toFixed(2)})`);
   }
   if (
-    balancedSizing.commonSize > 0 &&
+    Math.min(polyUnits, kalshiUnits) > 0 &&
     polyTargetNotionalUsd + ORDER_SIZE_TOLERANCE < POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD
   ) {
     reasons.push(`Hedge Polymarket sous minimum $${POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD.toFixed(2)}`);
   }
-  if (balancedSizing.polyMaxSize <= 0 && polyDepth !== null) {
+  const polyMaxSize = multiLevelSizing?.polymarket.executableDepth ?? balancedSizing.polyMaxSize;
+  const kalshiMaxSize = multiLevelSizing?.kalshi.executableDepth ?? balancedSizing.kalshiMaxSize;
+  if (polyMaxSize <= 0 && polyDepth !== null) {
     reasons.push("Liquidité Polymarket insuffisante");
   }
-  if (balancedSizing.kalshiMaxSize <= 0 && (effectiveKalshiDepth !== null || cumulativeKalshiDepth !== null)) {
+  if (kalshiMaxSize <= 0 && (effectiveKalshiDepth !== null || cumulativeKalshiDepth !== null)) {
     reasons.push(
       settings.kalshiDepthHeadroomContracts > 0
         ? `Liquidité Kalshi insuffisante après headroom (${settings.kalshiDepthHeadroomContracts} contrats)`
@@ -306,19 +417,21 @@ function buildSignal({
     kalshiPrice !== null &&
     polyDepth !== null &&
     kalshiDepth !== null &&
-    balancedSizing.polyMaxSize > 0 &&
-    balancedSizing.kalshiMaxSize > 0 &&
-    balancedSizing.commonSize <= 0
+    polyMaxSize > 0 &&
+    kalshiMaxSize > 0 &&
+    Math.min(polyUnits, kalshiUnits) <= 0
   ) {
-    reasons.push("Budget/profit insuffisant frais inclus");
+    reasons.push(
+      multiLevelSizing?.limitingReason
+        ? `Sizing multi-niveaux bloqué (${multiLevelSizing.limitingReason})`
+        : "Budget/profit insuffisant frais inclus",
+    );
   }
 
-  const polyBalance = balances.find((balance) => balance.venue === "polymarket");
-  const kalshiBalance = balances.find((balance) => balance.venue === "kalshi");
-  if (!polyBalance || polyBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < balancedSizing.polyCostUsd) {
+  if (!polyBalance || polyBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < polyCostUsd) {
     reasons.push("Solde Polymarket insuffisant");
   }
-  if (!kalshiBalance || kalshiBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < balancedSizing.kalshiCostUsd) {
+  if (!kalshiBalance || kalshiBalance.availableBalanceUsd + ORDER_SIZE_TOLERANCE < kalshiCostUsd) {
     reasons.push("Solde Kalshi insuffisant");
   }
   if (polyBalance?.status === "blocked" || kalshiBalance?.status === "blocked") {
@@ -329,6 +442,32 @@ function buildSignal({
   }
   if (kalshi.feedHealth.feedStatus !== "ready") {
     reasons.push("Feed Kalshi stale");
+  }
+
+  if (settings.mismatchRiskMode === "enforce" && !enforceUsableMismatchRisk) {
+    reasons.push(
+      `Modèle mismatch indisponible (${mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated") ? "non calibré" : mismatchRiskEstimate?.reason ?? "non initialisé"})`,
+    );
+  }
+  if (
+    settings.mismatchRiskMode !== "shadow" &&
+    usableMismatchRisk &&
+    mismatchRiskEstimate.maximumAllowedFatalProbability !== null &&
+    (mismatchRiskEstimate.pFatalUpper95 ?? 1) >
+      mismatchRiskEstimate.maximumAllowedFatalProbability + ORDER_SIZE_TOLERANCE
+  ) {
+    reasons.push(
+      `Risque mismatch non économique (${((mismatchRiskEstimate.pFatalUpper95 ?? 0) * 100).toFixed(2)}% > ${(mismatchRiskEstimate.maximumAllowedFatalProbability * 100).toFixed(2)}%)`,
+    );
+  }
+  if (
+    settings.mismatchRiskMode === "enforce" &&
+    useMultiLevelSizing &&
+    multiLevelSizing?.commonSize === 0 &&
+    (multiLevelSizing.limitingReason === "absolute_fatal_loss" ||
+      multiLevelSizing.limitingReason === "probability_weighted_fatal_loss")
+  ) {
+    reasons.push(`Budget mismatch cluster épuisé (${multiLevelSizing.limitingReason})`);
   }
 
   const previousCost = lastEntryCosts[combination];
@@ -353,25 +492,25 @@ function buildSignal({
       outcome: polyOutcome,
       marketRef: polymarket.ref.conditionId ?? polymarket.ref.id,
       tokenId: polyTokenId,
-      price: polyPrice,
-      depth: polyDepth,
+      price: multiLevelSizing?.polymarket.limitPrice ?? polyPrice,
+      depth: multiLevelSizing?.polymarket.executableDepth ?? polyDepth,
       targetNotionalUsd: polyTargetNotionalUsd,
       size: polyUnits,
       tickSize: polymarket.outcomes[polyOutcome === "UP" ? "up" : "down"].tickSize,
       minOrderSize: polyMinOrderSize,
-      feeEstimateUsd: balancedSizing.polyFeeUsd,
+      feeEstimateUsd: multiLevelSizing?.polymarket.feeUsd ?? balancedSizing.polyFeeUsd,
     },
     {
       venue: "kalshi",
       outcome: kalshiOutcome,
       marketRef: kalshi.ref.id,
-      price: kalshiPrice,
-      depth: sizingKalshiDepth,
+      price: multiLevelSizing?.kalshi.limitPrice ?? kalshiPrice,
+      depth: multiLevelSizing?.kalshi.executableDepth ?? sizingKalshiDepth,
       targetNotionalUsd: kalshiTargetNotionalUsd,
       size: kalshiUnits,
       tickSize: kalshi.outcomes[kalshiOutcome === "YES" ? "yes" : "no"].tickSize,
       minOrderSize: kalshiMinOrderSize,
-      feeEstimateUsd: balancedSizing.kalshiFeeUsd,
+      feeEstimateUsd: multiLevelSizing?.kalshi.feeUsd ?? balancedSizing.kalshiFeeUsd,
     },
   ];
   const primarySelection =
@@ -390,6 +529,9 @@ function buildSignal({
     threshold: settings.grossEntryThreshold,
     thresholdMet: grossCost !== null ? grossCost <= settings.grossEntryThreshold : false,
     worstCaseProfitUsd,
+    fatalMismatchPnlUsd,
+    conservativeExpectedPnlUsd,
+    mismatchRiskEstimate,
     eligible: reasons.length === 0,
     primaryVenue: primarySelection.primaryVenue,
     primarySelection: primarySelection.audit,

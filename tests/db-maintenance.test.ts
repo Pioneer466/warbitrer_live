@@ -2,6 +2,10 @@ import {
   DEFAULT_DATABASE_MAINTENANCE_CONFIG,
   readDatabaseMaintenanceConfig,
 } from "@/lib/db-maintenance";
+import {
+  ORACLE_SAMPLE_RETENTION_MS,
+  SLOT_RESOLUTION_RETENTION_MS,
+} from "@/lib/oracle-history";
 
 describe("database maintenance config", () => {
   const originalEnv = process.env;
@@ -19,6 +23,8 @@ describe("database maintenance config", () => {
 
   it("uses sane defaults when retention env vars are absent", () => {
     expect(readDatabaseMaintenanceConfig()).toEqual(DEFAULT_DATABASE_MAINTENANCE_CONFIG);
+    expect(DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.oracleSamplesMs).toBe(ORACLE_SAMPLE_RETENTION_MS);
+    expect(DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.slotResolutionsMs).toBe(SLOT_RESOLUTION_RETENTION_MS);
   });
 
   it("allows disabling specific retention windows with zero", () => {

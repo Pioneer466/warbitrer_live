@@ -5,7 +5,11 @@ import {
   applyLevelDelta,
   chooseFeedSource,
   computeFeedStatus,
+  KALSHI_CF_BENCHMARK_INDEX_BY_ASSET,
   MarketDataSupervisor,
+  parseKalshiCfBenchmarksValue,
+  parseKalshiPrivateFill,
+  parsePolymarketUserFills,
   shouldRestResync,
 } from "@/lib/market-data";
 import type { MarketAsset, MarketSlot } from "@/lib/types";
@@ -62,6 +66,7 @@ function primeKalshiFeed(feed: any, slot: MarketSlot, now: number) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -261,6 +266,512 @@ describe("market data helpers", () => {
     expect(warn).toHaveBeenCalledWith(
       "[kalshi-ws] session-failed",
       expect.objectContaining({ details: expect.stringContaining("protocol error 16") }),
+    );
+  });
+
+  it("maps every active crypto asset to its Kalshi CF Benchmarks index", () => {
+    expect(KALSHI_CF_BENCHMARK_INDEX_BY_ASSET).toEqual({
+      btc: "BRTI",
+      eth: "ETHUSD_RTI",
+      sol: "SOLUSD_RTI",
+      xrp: "XRPUSD_RTI",
+      doge: "DOGEUSD_RTI",
+    });
+  });
+
+  it("subscribes to the mapped CF Benchmarks index without a market ticker", () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const slot = buildSlot("eth");
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.eth.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    feed.asset = "eth";
+    const ws = { send: vi.fn() };
+
+    feed.subscribe(ws, "cfbenchmarks_value", feed.market.ticker, "ETHUSD_RTI");
+
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({
+      id: 1,
+      cmd: "subscribe",
+      params: {
+        channels: ["cfbenchmarks_value"],
+        index_ids: ["ETHUSD_RTI"],
+      },
+    });
+    expect(feed.subscriptionCommands.get(1)).toBe("cfbenchmarks_value");
+  });
+
+  it("subscribes to authenticated Kalshi fills for the current market", () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    const ws = { send: vi.fn() };
+
+    feed.subscribe(ws, "fill", feed.market.ticker);
+
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({
+      id: 1,
+      cmd: "subscribe",
+      params: {
+        channels: ["fill"],
+        market_tickers: ["KXBTC15M-CURRENT"],
+      },
+    });
+    expect(feed.subscriptionCommands.get(1)).toBe("fill");
+  });
+
+  it("parses and exposes Kalshi CF live, trailing, and final-minute averages", () => {
+    const now = 1_710_000_000_456;
+    const message = {
+      index_id: "BRTI",
+      received_at: 1_710_000_000_123,
+      data: JSON.stringify({
+        type: "value",
+        id: "BRTI",
+        time: 1_710_000_000_100,
+        value: "68000.12",
+      }),
+      avg_60s_data: {
+        value: "67998.12000000",
+        window_size: 59,
+        window_start_ts_ms: 1_709_999_940_100,
+        window_end_ts_exclusive: 1_710_000_000_100,
+      },
+      last_60s_windowed_average_15min: {
+        value: "68000.23000000",
+        window_size: 14,
+        window_start_ts_ms: 1_709_999_980_000,
+        window_end_ts_exclusive: 1_710_000_000_100,
+      },
+    };
+
+    expect(parseKalshiCfBenchmarksValue(message, now)).toEqual({
+      indexId: "BRTI",
+      liveValueUsd: 68000.12,
+      sourceTimestampMs: 1_710_000_000_100,
+      receivedAtMs: 1_710_000_000_123,
+      capturedAt: now,
+      trailing60s: {
+        valueUsd: 67998.12,
+        windowSize: 59,
+        windowStartTsMs: 1_709_999_940_100,
+        windowEndTsExclusive: 1_710_000_000_100,
+      },
+      finalMinuteAverage15m: {
+        valueUsd: 68000.23,
+        windowSize: 14,
+        windowStartTsMs: 1_709_999_980_000,
+        windowEndTsExclusive: 1_710_000_000_100,
+      },
+    });
+
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    feed.asset = "btc";
+
+    expect(feed.applyWsPayload({ type: "cfbenchmarks_value", msg: message }, now)).toBe(true);
+
+    const state = feed.buildState(slot, now);
+    expect(state.quote.cfBenchmarks?.indexId).toBe("BRTI");
+    expect(state.quote.cfBenchmarks?.finalMinuteAverage15m?.windowSize).toBe(14);
+    expect(feed.subscriptions[3]).toEqual(
+      expect.objectContaining({
+        channel: "cfbenchmarks_value",
+        status: "subscribed",
+        source: "ws",
+        lastMessageAt: now,
+      }),
+    );
+    expect(feed.lastWsMessageAt).toBeNull();
+  });
+
+  it("isolates a denied CF subscription without closing the Kalshi market-data session", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    const ws = {
+      readyState: 1,
+      close: vi.fn(),
+    };
+    feed.ws = ws;
+    feed.subscriptionCommands.set(4, "cfbenchmarks_value");
+    for (const subscription of feed.subscriptions.slice(0, 3)) {
+      subscription.status = "subscribed";
+      subscription.source = "ws";
+    }
+
+    feed.applyWsPayload(
+      {
+        id: 4,
+        type: "error",
+        msg: {
+          code: 9,
+          msg: "Not authorized for CF Benchmarks value feed",
+        },
+      },
+      slot.startTs + 2_000,
+    );
+
+    expect(feed.lastError).toBeNull();
+    expect(feed.subscriptions.slice(0, 3).every((subscription: any) => subscription.status === "subscribed")).toBe(true);
+    expect(feed.subscriptions[3]).toEqual(
+      expect.objectContaining({
+        status: "error",
+        source: "unavailable",
+        details: expect.stringContaining("Not authorized"),
+      }),
+    );
+    expect(ws.close).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[kalshi-ws] optional-subscription-failed",
+      expect.objectContaining({ channel: "cfbenchmarks_value", commandId: 4 }),
+    );
+
+    feed.applyWsPayload(
+      {
+        type: "orderbook_snapshot",
+        seq: 12,
+        msg: {
+          market_ticker: "KXBTC15M-CURRENT",
+          yes_dollars_fp: [["0.44", "15"]],
+          no_dollars_fp: [["0.55", "16"]],
+        },
+      },
+      slot.startTs + 2_100,
+    );
+    expect(feed.buildState(slot, slot.startTs + 2_200).quote.feedHealth.source).toBe("ws");
+  });
+
+  it("parses Kalshi private fills with fixed-point size, price, and matching-engine timestamp", () => {
+    const capturedAt = 1_771_234_568_000;
+
+    expect(
+      parseKalshiPrivateFill(
+        {
+          type: "fill",
+          sid: 13,
+          msg: {
+            trade_id: "trade-kalshi-1",
+            order_id: "order-kalshi-1",
+            market_ticker: "KXBTC15M-CURRENT",
+            is_taker: true,
+            side: "no",
+            yes_price_dollars: "0.4200",
+            count_fp: "12.50",
+            action: "buy",
+            ts: 1_771_234_567,
+          },
+        },
+        capturedAt,
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        venue: "kalshi",
+        venueOrderId: "order-kalshi-1",
+        tradeId: "trade-kalshi-1",
+        marketRef: "KXBTC15M-CURRENT",
+        side: "BUY",
+        outcome: "NO",
+        price: 0.58,
+        size: 12.5,
+        liquidity: "TAKER",
+        filledAt: 1_771_234_567_000,
+        capturedAt,
+      }),
+    );
+  });
+
+  it("parses Polymarket taker and maker trade messages tolerantly", () => {
+    const capturedAt = 1_771_234_568_000;
+    const [takerFill] = parsePolymarketUserFills(
+      {
+        type: "user",
+        data: {
+          event_type: "trade",
+          id: "trade-poly-taker",
+          taker_order_id: "order-poly-taker",
+          market: "condition-1",
+          asset_id: "asset-up",
+          side: "BUY",
+          size: "10.25",
+          price: "0.57",
+          status: "MATCHED",
+          outcome: "Up",
+          trader_side: "TAKER",
+          timestamp: "1771234567",
+          maker_orders: [],
+        },
+      },
+      capturedAt,
+    );
+    const [makerFill] = parsePolymarketUserFills(
+      {
+        event_type: "trade",
+        id: "trade-poly-maker",
+        taker_order_id: "counterparty-order",
+        market: "condition-1",
+        asset_id: "asset-down",
+        side: "BUY",
+        size: "8",
+        price: "0.44",
+        status: "CONFIRMED",
+        outcome: "Down",
+        trader_side: "MAKER",
+        timestamp: 1_771_234_567,
+        maker_orders: [
+          {
+            order_id: "order-poly-maker",
+            matched_amount: "3.5",
+            price: "0.56",
+            asset_id: "asset-down",
+            outcome: "Down",
+            side: "SELL",
+          },
+        ],
+      },
+      capturedAt,
+    );
+
+    expect(takerFill).toEqual(
+      expect.objectContaining({
+        venue: "polymarket",
+        venueOrderId: "order-poly-taker",
+        tradeId: "trade-poly-taker",
+        side: "BUY",
+        outcome: "UP",
+        price: 0.57,
+        size: 10.25,
+        liquidity: "TAKER",
+        filledAt: 1_771_234_567_000,
+      }),
+    );
+    expect(makerFill).toEqual(
+      expect.objectContaining({
+        venueOrderId: "order-poly-maker",
+        side: "SELL",
+        outcome: "DOWN",
+        price: 0.56,
+        size: 3.5,
+        liquidity: "MAKER",
+      }),
+    );
+  });
+
+  it("keeps only authenticated-owner maker fills when owner metadata is present", () => {
+    const fills = parsePolymarketUserFills(
+      {
+        event_type: "trade",
+        id: "trade-poly-multi-maker",
+        owner: "owner-authenticated",
+        trade_owner: "owner-authenticated",
+        market: "condition-1",
+        status: "MATCHED",
+        trader_side: "MAKER",
+        timestamp: 1_771_234_567,
+        maker_orders: [
+          {
+            order_id: "order-owned",
+            owner: "OWNER-AUTHENTICATED",
+            matched_amount: "2.5",
+            price: "0.53",
+            asset_id: "asset-up",
+            outcome: "Up",
+            side: "SELL",
+          },
+          {
+            order_id: "order-counterparty",
+            owner: "owner-counterparty",
+            matched_amount: "4",
+            price: "0.53",
+            asset_id: "asset-up",
+            outcome: "Up",
+            side: "SELL",
+          },
+          {
+            order_id: "order-unattributed",
+            matched_amount: "1",
+            price: "0.53",
+            asset_id: "asset-up",
+            outcome: "Up",
+            side: "SELL",
+          },
+        ],
+      },
+      1_771_234_568_000,
+    );
+
+    expect(fills).toHaveLength(1);
+    expect(fills[0]).toEqual(
+      expect.objectContaining({
+        venueOrderId: "order-owned",
+        size: 2.5,
+        liquidity: "MAKER",
+      }),
+    );
+  });
+
+  it("wakes a Kalshi fill waiter immediately, deduplicates replays, and preserves orderbook freshness", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const now = Date.now();
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, now - 1_000);
+
+    const waiting = supervisor.waitForOrderFill({
+      venue: "kalshi",
+      venueOrderId: "order-kalshi-live",
+      marketRef: "KXBTC15M-CURRENT",
+      afterCapturedAt: now - 1,
+      timeoutMs: 5_000,
+    });
+    const event = {
+      type: "fill",
+      msg: {
+        trade_id: "trade-kalshi-live",
+        order_id: "order-kalshi-live",
+        market_ticker: "KXBTC15M-CURRENT",
+        side: "yes",
+        action: "buy",
+        yes_price_dollars: "0.4100",
+        count_fp: "4.00",
+        is_taker: true,
+        ts_ms: now,
+      },
+    };
+
+    expect(feed.applyWsPayload(event, now)).toBe(false);
+    await expect(waiting).resolves.toEqual(
+      expect.objectContaining({ venueOrderId: "order-kalshi-live", size: 4 }),
+    );
+    feed.applyWsPayload(event, now + 1);
+
+    expect(supervisor.readRecentOrderFills({ venue: "kalshi" })).toHaveLength(1);
+    expect(feed.subscriptions[4]).toEqual(
+      expect.objectContaining({ channel: "fill", status: "subscribed", lastMessageAt: now + 1 }),
+    );
+    expect(feed.lastWsMessageAt).toBeNull();
+
+    feed.applyWsPayload(
+      {
+        type: "orderbook_snapshot",
+        seq: 12,
+        msg: {
+          market_ticker: "KXBTC15M-CURRENT",
+          yes_dollars_fp: [["0.44", "15"]],
+          no_dollars_fp: [["0.55", "16"]],
+        },
+      },
+      now + 2,
+    );
+    expect(feed.buildState(slot, now + 3).quote.feedHealth.source).toBe("ws");
+  });
+
+  it("wakes a Polymarket waiter from the authenticated user channel", async () => {
+    const now = Date.now();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+    const waiting = supervisor.waitForOrderFill({
+      venue: "polymarket",
+      venueOrderId: "order-poly-live",
+      marketRef: "condition-1",
+      timeoutMs: 5_000,
+    });
+
+    feed.applyUserEvent(
+      {
+        event_type: "trade",
+        id: "trade-poly-live",
+        taker_order_id: "order-poly-live",
+        market: "condition-1",
+        asset_id: "asset-up",
+        side: "BUY",
+        size: "6",
+        price: "0.49",
+        status: "MATCHED",
+        outcome: "Up",
+        trader_side: "TAKER",
+        timestamp: now,
+        maker_orders: [],
+      },
+      now,
+    );
+
+    await expect(waiting).resolves.toEqual(
+      expect.objectContaining({
+        venue: "polymarket",
+        venueOrderId: "order-poly-live",
+        status: "MATCHED",
+        size: 6,
+      }),
+    );
+  });
+
+  it("bounds fill waits and clears them on timeout or private-feed reconnect", async () => {
+    vi.useFakeTimers();
+    const supervisor = new MarketDataSupervisor() as any;
+    const timedOut = supervisor.waitForOrderFill({
+      venue: "kalshi",
+      venueOrderId: "missing-order",
+      timeoutMs: 60_000,
+    });
+
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(supervisor.fillTracker.waiters.size).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(timedOut).resolves.toBeNull();
+    expect(supervisor.fillTracker.waiters.size).toBe(0);
+
+    const disconnected = supervisor.waitForOrderFill({
+      venue: "polymarket",
+      venueOrderId: "pending-order",
+      marketRef: "condition-1",
+      timeoutMs: 5_000,
+    });
+    supervisor.feeds.btc.polymarket.onPrivateFeedReset("polymarket", "condition-1");
+
+    await expect(disconnected).resolves.toBeNull();
+    expect(supervisor.fillTracker.waiters.size).toBe(0);
+  });
+
+  it("isolates a denied Kalshi fill subscription from CF and orderbook channels", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const slot = buildSlot();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.kalshi as any;
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    const ws = { readyState: 1, close: vi.fn() };
+    feed.ws = ws;
+    feed.subscriptionCommands.set(5, "fill");
+    feed.subscriptions[3].status = "subscribed";
+    feed.subscriptions[3].source = "ws";
+
+    feed.applyWsPayload(
+      {
+        id: 5,
+        type: "error",
+        msg: { code: 9, msg: "Not authorized for private fills" },
+      },
+      slot.startTs + 2_000,
+    );
+
+    expect(feed.subscriptions[3]).toEqual(
+      expect.objectContaining({ channel: "cfbenchmarks_value", status: "subscribed" }),
+    );
+    expect(feed.subscriptions[4]).toEqual(
+      expect.objectContaining({ channel: "fill", status: "error", source: "unavailable" }),
+    );
+    expect(ws.close).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[kalshi-ws] optional-subscription-failed",
+      expect.objectContaining({ channel: "fill", commandId: 5 }),
     );
   });
 

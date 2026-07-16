@@ -37,15 +37,23 @@ import {
 } from "@/lib/polymarket";
 import type {
   FeedSource,
+  KalshiCfBenchmarkIndexId,
+  KalshiCfBenchmarkState,
+  KalshiCfBenchmarkWindow,
   KalshiQuote,
   LiveMarketState,
   MarketAsset,
   MarketSlot,
+  OrderSide,
   PolymarketQuote,
+  ReadRecentOrderFillsRequest,
   ReadinessStatus,
+  RealtimeOrderFill,
+  Resolution,
   SubscriptionStatus,
   VenueFeedHealth,
   VenueSubscriptionState,
+  WaitForOrderFillRequest,
 } from "@/lib/types";
 
 const FEED_READY_MS = 4_000;
@@ -65,6 +73,29 @@ const KALSHI_REST_BACKOFF_MAX_MS = 60_000;
 const SLOT_OPEN_CAPTURE_WINDOW_MS = 30_000;
 const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 10_000;
+const KALSHI_CF_BENCHMARK_CHANNEL = "cfbenchmarks_value";
+const KALSHI_FILL_CHANNEL = "fill";
+const KALSHI_WS_CHANNELS = [
+  "ticker",
+  "orderbook_delta",
+  "trade",
+  KALSHI_CF_BENCHMARK_CHANNEL,
+  KALSHI_FILL_CHANNEL,
+];
+const PRIVATE_FILL_BUFFER_LIMIT = 512;
+const PRIVATE_FILL_WAITER_LIMIT = 256;
+const PRIVATE_FILL_MAX_WAIT_MS = 30_000;
+const PRIVATE_FILL_RETENTION_MS = 5 * 60_000;
+
+export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Partial<
+  Record<MarketAsset, KalshiCfBenchmarkIndexId>
+> = {
+  btc: "BRTI",
+  eth: "ETHUSD_RTI",
+  sol: "SOLUSD_RTI",
+  xrp: "XRPUSD_RTI",
+  doge: "DOGEUSD_RTI",
+};
 
 type LevelMap = Map<string, number>;
 
@@ -231,6 +262,354 @@ function parseTimestamp(value: unknown) {
   return null;
 }
 
+function parseCfTimestamp(value: unknown) {
+  const numeric = parseNumeric(value);
+  if (numeric !== null) {
+    return numeric > 10_000_000_000 ? numeric : numeric * 1_000;
+  }
+  return parseTimestamp(value);
+}
+
+function parseKalshiCfBenchmarkWindow(value: unknown): KalshiCfBenchmarkWindow | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const window = value as Record<string, unknown>;
+  const valueUsd = parseNumeric(window.value);
+  const windowSize = parseNumeric(window.window_size);
+  const windowStartTsMs = parseCfTimestamp(window.window_start_ts_ms);
+  const windowEndTsExclusive = parseCfTimestamp(window.window_end_ts_exclusive);
+  if (
+    valueUsd === null ||
+    windowSize === null ||
+    !Number.isInteger(windowSize) ||
+    windowSize < 0 ||
+    windowStartTsMs === null ||
+    windowEndTsExclusive === null
+  ) {
+    return null;
+  }
+
+  return {
+    valueUsd,
+    windowSize,
+    windowStartTsMs,
+    windowEndTsExclusive,
+  };
+}
+
+export function parseKalshiCfBenchmarksValue(
+  value: unknown,
+  capturedAt: number,
+): KalshiCfBenchmarkState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const message = value as Record<string, unknown>;
+  const rawData =
+    typeof message.data === "string"
+      ? safeJsonParse(message.data)
+      : message.data && typeof message.data === "object"
+        ? message.data
+        : null;
+  if (!rawData || typeof rawData !== "object") {
+    return null;
+  }
+
+  const rawFrame = rawData as Record<string, unknown>;
+  const indexId = String(message.index_id ?? rawFrame.id ?? "") as KalshiCfBenchmarkIndexId;
+  if (!Object.values(KALSHI_CF_BENCHMARK_INDEX_BY_ASSET).includes(indexId)) {
+    return null;
+  }
+
+  const liveValueUsd = parseNumeric(rawFrame.value);
+  const sourceTimestampMs = parseCfTimestamp(rawFrame.time);
+  const receivedAtMs = parseCfTimestamp(message.received_at);
+  const trailing60s = parseKalshiCfBenchmarkWindow(message.avg_60s_data);
+  if (liveValueUsd === null || sourceTimestampMs === null || receivedAtMs === null || !trailing60s) {
+    return null;
+  }
+
+  const finalMinuteValue = message.last_60s_windowed_average_15min;
+  const finalMinuteAverage15m =
+    finalMinuteValue === undefined || finalMinuteValue === null
+      ? null
+      : parseKalshiCfBenchmarkWindow(finalMinuteValue);
+  if (finalMinuteValue !== undefined && finalMinuteValue !== null && !finalMinuteAverage15m) {
+    return null;
+  }
+
+  return {
+    indexId,
+    liveValueUsd,
+    sourceTimestampMs,
+    receivedAtMs,
+    capturedAt,
+    trailing60s,
+    finalMinuteAverage15m,
+  };
+}
+
+function asNonEmptyString(value: unknown) {
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function parseFillTimestamp(value: unknown) {
+  const numeric = parseNumeric(value);
+  if (numeric !== null) {
+    return numeric > 10_000_000_000 ? numeric : numeric * 1_000;
+  }
+  return parseTimestamp(value);
+}
+
+function parseOrderSide(value: unknown): OrderSide | null {
+  const normalized = String(value ?? "").toUpperCase();
+  return normalized === "BUY" || normalized === "SELL" ? normalized : null;
+}
+
+function parseResolution(value: unknown): Resolution | null {
+  const normalized = String(value ?? "").toUpperCase();
+  return normalized === "UP" || normalized === "DOWN" || normalized === "YES" || normalized === "NO"
+    ? normalized
+    : null;
+}
+
+function parseKalshiFillPrice(message: Record<string, unknown>, outcome: Resolution | null) {
+  const yesPrice = parseNumeric(message.yes_price_dollars);
+  const noPrice = parseNumeric(message.no_price_dollars);
+  const genericPrice = parseNumeric(message.price_dollars ?? message.price);
+  const legacyYesPrice = parseNumeric(message.yes_price);
+  const legacyNoPrice = parseNumeric(message.no_price);
+
+  if (outcome === "NO") {
+    if (noPrice !== null) {
+      return noPrice;
+    }
+    if (yesPrice !== null) {
+      return round4(1 - yesPrice);
+    }
+    if (legacyNoPrice !== null) {
+      return legacyNoPrice / 100;
+    }
+    if (legacyYesPrice !== null) {
+      return round4(1 - legacyYesPrice / 100);
+    }
+  } else {
+    if (yesPrice !== null) {
+      return yesPrice;
+    }
+    if (noPrice !== null) {
+      return round4(1 - noPrice);
+    }
+    if (legacyYesPrice !== null) {
+      return legacyYesPrice / 100;
+    }
+    if (legacyNoPrice !== null) {
+      return round4(1 - legacyNoPrice / 100);
+    }
+  }
+
+  return genericPrice;
+}
+
+export function parseKalshiPrivateFill(value: unknown, capturedAt: number): RealtimeOrderFill | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const envelope = value as Record<string, unknown>;
+  const type = String(envelope.type ?? envelope.event_type ?? "").toLowerCase();
+  if (type && type !== KALSHI_FILL_CHANNEL) {
+    return null;
+  }
+  const nested = envelope.msg ?? envelope.message ?? envelope.data ?? envelope;
+  if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+    return null;
+  }
+
+  const message = nested as Record<string, unknown>;
+  const venueOrderId = asNonEmptyString(message.order_id ?? message.orderId);
+  const tradeId = asNonEmptyString(message.trade_id ?? message.tradeId ?? message.fill_id);
+  const size = parseNumeric(message.count_fp ?? message.count ?? message.size);
+  const outcome = parseResolution(message.side ?? message.purchased_side ?? message.outcome_side);
+  const price = parseKalshiFillPrice(message, outcome);
+  const filledAt =
+    parseFillTimestamp(message.ts_ms) ??
+    parseFillTimestamp(message.ts) ??
+    parseFillTimestamp(message.created_time) ??
+    capturedAt;
+  if (
+    !venueOrderId ||
+    !tradeId ||
+    size === null ||
+    size <= 0 ||
+    price === null ||
+    price < 0 ||
+    price > 1
+  ) {
+    return null;
+  }
+
+  return {
+    venue: "kalshi",
+    venueOrderId,
+    clientOrderId: asNonEmptyString(message.client_order_id ?? message.clientOrderId),
+    tradeId,
+    marketRef: asNonEmptyString(message.market_ticker ?? message.ticker),
+    tokenId: null,
+    side: parseOrderSide(message.action),
+    outcome,
+    price,
+    size,
+    liquidity:
+      typeof message.is_taker === "boolean" ? (message.is_taker ? "TAKER" : "MAKER") : null,
+    status: asNonEmptyString(message.status),
+    filledAt,
+    capturedAt,
+    raw: message,
+  };
+}
+
+function parsePolymarketTradeEvent(event: Record<string, unknown>, capturedAt: number) {
+  const eventType = String(event.event_type ?? event.type ?? "").toLowerCase();
+  if (eventType !== "trade") {
+    return [];
+  }
+
+  const status = String(event.status ?? "").toUpperCase();
+  if (status === "FAILED") {
+    return [];
+  }
+  if (status && !["MATCHED", "MINED", "CONFIRMED", "RETRYING"].includes(status)) {
+    return [];
+  }
+
+  const tradeId = asNonEmptyString(event.id ?? event.trade_id);
+  if (!tradeId) {
+    return [];
+  }
+  const filledAt =
+    parseFillTimestamp(event.matchtime ?? event.match_time) ??
+    parseFillTimestamp(event.last_update) ??
+    parseFillTimestamp(event.timestamp) ??
+    capturedAt;
+  const marketRef = asNonEmptyString(event.market ?? event.condition_id);
+  const traderSide = String(event.trader_side ?? "").toUpperCase();
+  const authenticatedOwnerIds = new Set(
+    [event.owner, event.trade_owner]
+      .map(normalizeIdentifier)
+      .filter((ownerId): ownerId is string => ownerId !== null),
+  );
+  const fills: RealtimeOrderFill[] = [];
+
+  const pushFill = (input: {
+    orderId: unknown;
+    clientOrderId?: unknown;
+    size: unknown;
+    price: unknown;
+    side: unknown;
+    outcome: unknown;
+    tokenId: unknown;
+    liquidity: "TAKER" | "MAKER";
+    raw: Record<string, unknown>;
+  }) => {
+    const venueOrderId = asNonEmptyString(input.orderId);
+    const size = parseNumeric(input.size);
+    const price = parseNumeric(input.price);
+    if (
+      !venueOrderId ||
+      size === null ||
+      size <= 0 ||
+      price === null ||
+      price < 0 ||
+      price > 1
+    ) {
+      return;
+    }
+    fills.push({
+      venue: "polymarket",
+      venueOrderId,
+      clientOrderId: asNonEmptyString(input.clientOrderId),
+      tradeId,
+      marketRef,
+      tokenId: asNonEmptyString(input.tokenId),
+      side: parseOrderSide(input.side),
+      outcome: parseResolution(input.outcome),
+      price,
+      size,
+      liquidity: input.liquidity,
+      status: status || null,
+      filledAt,
+      capturedAt,
+      raw: input.raw,
+    });
+  };
+
+  if (traderSide !== "MAKER") {
+    pushFill({
+      orderId: event.taker_order_id,
+      clientOrderId: event.client_order_id,
+      size: event.size,
+      price: event.price,
+      side: event.side,
+      outcome: event.outcome,
+      tokenId: event.asset_id,
+      liquidity: "TAKER",
+      raw: event,
+    });
+  }
+
+  if (traderSide !== "TAKER") {
+    const makerOrders = Array.isArray(event.maker_orders) ? event.maker_orders : [];
+    for (const makerValue of makerOrders) {
+      if (!makerValue || typeof makerValue !== "object" || Array.isArray(makerValue)) {
+        continue;
+      }
+      const makerOrder = makerValue as Record<string, unknown>;
+      const makerOwnerId = normalizeIdentifier(makerOrder.owner);
+      if (
+        authenticatedOwnerIds.size > 0 &&
+        (!makerOwnerId || !authenticatedOwnerIds.has(makerOwnerId))
+      ) {
+        continue;
+      }
+      pushFill({
+        orderId: makerOrder.order_id,
+        clientOrderId: makerOrder.client_order_id,
+        size: makerOrder.matched_amount ?? makerOrder.size,
+        price: makerOrder.price ?? event.price,
+        side: makerOrder.side,
+        outcome: makerOrder.outcome ?? event.outcome,
+        tokenId: makerOrder.asset_id ?? event.asset_id,
+        liquidity: "MAKER",
+        raw: { ...event, matched_maker_order: makerOrder },
+      });
+    }
+  }
+
+  return fills;
+}
+
+export function parsePolymarketUserFills(value: unknown, capturedAt: number): RealtimeOrderFill[] {
+  if (Array.isArray(value)) {
+    return value.flatMap((event) => parsePolymarketUserFills(event, capturedAt));
+  }
+  if (!value || typeof value !== "object") {
+    return [];
+  }
+
+  const event = value as Record<string, unknown>;
+  const direct = parsePolymarketTradeEvent(event, capturedAt);
+  const eventType = String(event.event_type ?? event.type ?? "").toLowerCase();
+  if (direct.length > 0 || eventType === "trade" || eventType === "order") {
+    return direct;
+  }
+  const nested = event.msg ?? event.message ?? event.data ?? event.payload;
+  return nested === value ? [] : parsePolymarketUserFills(nested, capturedAt);
+}
+
 function toSubscriptionState(
   previous: VenueSubscriptionState,
   patch: Partial<VenueSubscriptionState>,
@@ -245,6 +624,159 @@ function nextReconnectDelay(attempt: number) {
   return Math.min(WS_RECONNECT_MAX_MS, WS_RECONNECT_BASE_MS * 2 ** attempt);
 }
 
+type PrivateFillListener = (fill: RealtimeOrderFill) => void;
+type PrivateFeedResetListener = (venue: RealtimeOrderFill["venue"], marketRef: string | null) => void;
+
+type PrivateFillWaiter = {
+  id: number;
+  request: WaitForOrderFillRequest;
+  resolve: (fill: RealtimeOrderFill | null) => void;
+  timer: ReturnType<typeof setTimeout>;
+};
+
+class RealtimeOrderFillTracker {
+  private recentFills: RealtimeOrderFill[] = [];
+  private seenFillKeys = new Map<string, number>();
+  private waiters = new Map<number, PrivateFillWaiter>();
+  private nextWaiterId = 1;
+
+  ingest(fill: RealtimeOrderFill) {
+    this.prune(fill.capturedAt);
+    const key = this.fillKey(fill);
+    if (this.seenFillKeys.has(key)) {
+      return false;
+    }
+
+    this.seenFillKeys.set(key, fill.capturedAt);
+    this.recentFills.unshift(fill);
+    while (this.recentFills.length > PRIVATE_FILL_BUFFER_LIMIT) {
+      const removed = this.recentFills.pop();
+      if (removed) {
+        this.seenFillKeys.delete(this.fillKey(removed));
+      }
+    }
+
+    for (const waiter of [...this.waiters.values()]) {
+      if (this.matches(fill, waiter.request)) {
+        this.settleWaiter(waiter, fill);
+      }
+    }
+    return true;
+  }
+
+  read(request: ReadRecentOrderFillsRequest = {}) {
+    this.prune(Date.now());
+    const limit = Math.max(1, Math.min(PRIVATE_FILL_BUFFER_LIMIT, Math.floor(request.limit ?? 50)));
+    return this.recentFills.filter((fill) => this.matches(fill, request)).slice(0, limit);
+  }
+
+  wait(request: WaitForOrderFillRequest) {
+    this.prune(Date.now());
+    const existing = this.recentFills.find((fill) => this.matches(fill, request));
+    if (existing) {
+      return Promise.resolve(existing);
+    }
+
+    const timeoutMs = Number.isFinite(request.timeoutMs)
+      ? Math.max(0, Math.min(PRIVATE_FILL_MAX_WAIT_MS, Math.floor(request.timeoutMs)))
+      : 0;
+    if (timeoutMs === 0) {
+      return Promise.resolve(null);
+    }
+
+    if (this.waiters.size >= PRIVATE_FILL_WAITER_LIMIT) {
+      const oldest = this.waiters.values().next().value as PrivateFillWaiter | undefined;
+      if (oldest) {
+        this.settleWaiter(oldest, null);
+      }
+    }
+
+    return new Promise<RealtimeOrderFill | null>((resolve) => {
+      const id = this.nextWaiterId++;
+      const timer = setTimeout(() => {
+        const waiter = this.waiters.get(id);
+        if (waiter) {
+          this.settleWaiter(waiter, null);
+        }
+      }, timeoutMs);
+      timer.unref?.();
+      this.waiters.set(id, {
+        id,
+        request: { ...request, timeoutMs },
+        resolve,
+        timer,
+      });
+    });
+  }
+
+  clearWaiters(venue: RealtimeOrderFill["venue"], marketRef: string | null) {
+    for (const waiter of [...this.waiters.values()]) {
+      if (waiter.request.venue !== venue) {
+        continue;
+      }
+      const requestedMarket = normalizeIdentifier(waiter.request.marketRef);
+      const disconnectedMarket = normalizeIdentifier(marketRef);
+      if (!requestedMarket || !disconnectedMarket || requestedMarket === disconnectedMarket) {
+        this.settleWaiter(waiter, null);
+      }
+    }
+  }
+
+  private settleWaiter(waiter: PrivateFillWaiter, fill: RealtimeOrderFill | null) {
+    if (!this.waiters.delete(waiter.id)) {
+      return;
+    }
+    clearTimeout(waiter.timer);
+    waiter.resolve(fill);
+  }
+
+  private matches(
+    fill: RealtimeOrderFill,
+    request: ReadRecentOrderFillsRequest | WaitForOrderFillRequest,
+  ) {
+    if (request.venue && fill.venue !== request.venue) {
+      return false;
+    }
+    if (request.afterCapturedAt !== undefined && fill.capturedAt <= request.afterCapturedAt) {
+      return false;
+    }
+    const requestedMarket = normalizeIdentifier(request.marketRef);
+    if (requestedMarket && normalizeIdentifier(fill.marketRef) !== requestedMarket) {
+      return false;
+    }
+
+    const requestedOrder = normalizeIdentifier(request.venueOrderId);
+    const requestedClientOrder = normalizeIdentifier(request.clientOrderId);
+    if (!requestedOrder && !requestedClientOrder) {
+      return true;
+    }
+    return (
+      (requestedOrder !== null && normalizeIdentifier(fill.venueOrderId) === requestedOrder) ||
+      (requestedClientOrder !== null && normalizeIdentifier(fill.clientOrderId) === requestedClientOrder)
+    );
+  }
+
+  private prune(now: number) {
+    const cutoff = now - PRIVATE_FILL_RETENTION_MS;
+    this.recentFills = this.recentFills.filter((fill) => {
+      if (fill.capturedAt >= cutoff) {
+        return true;
+      }
+      this.seenFillKeys.delete(this.fillKey(fill));
+      return false;
+    });
+  }
+
+  private fillKey(fill: RealtimeOrderFill) {
+    return `${fill.venue}:${normalizeIdentifier(fill.venueOrderId)}:${normalizeIdentifier(fill.tradeId)}`;
+  }
+}
+
+function normalizeIdentifier(value: unknown) {
+  const identifier = asNonEmptyString(value);
+  return identifier ? identifier.toLowerCase() : null;
+}
+
 function hasKalshiCredentialsSafe() {
   try {
     return hasKalshiCredentials();
@@ -254,6 +786,11 @@ function hasKalshiCredentialsSafe() {
 }
 
 class PolymarketRealtimeFeed {
+  constructor(
+    private readonly onPrivateFill: PrivateFillListener = () => {},
+    private readonly onPrivateFeedReset: PrivateFeedResetListener = () => {},
+  ) {}
+
   private slotKey: string | null = null;
   private slotStartTs: number | null = null;
   private market: PolymarketMarketRecord | null = null;
@@ -401,6 +938,8 @@ class PolymarketRealtimeFeed {
       observedSlotOpenPriceUsd: this.observedSlotOpenPriceUsd,
       observedSlotOpenCapturedAt: this.observedSlotOpenCapturedAt,
       feeRateBps: Math.max(upOutcome.feeRateBps ?? 0, downOutcome.feeRateBps ?? 0),
+      feeRate: parseNumeric(this.clobMarketInfo?.fd?.r) ?? null,
+      feeExponent: parseNumeric(this.clobMarketInfo?.fd?.e) ?? 0,
       negRisk: Boolean(this.clobMarketInfo?.nr ?? false),
     };
 
@@ -723,7 +1262,8 @@ class PolymarketRealtimeFeed {
 
     ws.on("message", (buffer: Buffer) => {
       const nowTs = Date.now();
-      if (buffer.toString() === "PONG") {
+      const raw = buffer.toString();
+      if (raw === "PONG") {
         this.lastUserMessageAt = nowTs;
         this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
           status: "subscribed",
@@ -734,6 +1274,10 @@ class PolymarketRealtimeFeed {
         return;
       }
 
+      const payload = safeJsonParse(raw);
+      if (payload) {
+        this.applyUserEvent(payload, nowTs);
+      }
       this.lastUserMessageAt = nowTs;
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "subscribed",
@@ -744,7 +1288,11 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("error", (error: unknown) => {
+      if (this.userWs !== ws) {
+        return;
+      }
       this.stopUserHeartbeat();
+      this.onPrivateFeedReset("polymarket", this.market?.conditionId ?? this.market?.id ?? null);
       const details = error instanceof Error ? error.message : "Polymarket user WS error";
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "error",
@@ -754,8 +1302,12 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("close", () => {
+      if (this.userWs !== ws) {
+        return;
+      }
       this.stopUserHeartbeat();
       this.userWs = null;
+      this.onPrivateFeedReset("polymarket", this.market?.conditionId ?? this.market?.id ?? null);
       this.subscriptions[1] = toSubscriptionState(this.subscriptions[1], {
         status: "closed",
         source: "ws",
@@ -768,6 +1320,12 @@ class PolymarketRealtimeFeed {
         }
       }, delay);
     });
+  }
+
+  private applyUserEvent(value: unknown, now: number) {
+    for (const fill of parsePolymarketUserFills(value, now)) {
+      this.onPrivateFill(fill);
+    }
   }
 
   private startMarketHeartbeat(ws: WebSocket) {
@@ -994,15 +1552,20 @@ class PolymarketRealtimeFeed {
   }
 
   private async reset() {
+    const userWs = this.userWs;
+    const userMarketRef = this.market?.conditionId ?? this.market?.id ?? null;
+    this.userWs = null;
+    if (userWs) {
+      this.onPrivateFeedReset("polymarket", userMarketRef);
+    }
     this.ws?.close();
-    this.userWs?.close();
+    userWs?.close();
     this.priceWs?.close();
     this.stopMarketHeartbeat();
     this.stopUserHeartbeat();
     this.stopPriceHeartbeat();
     this.clearPriceReconnectTimer();
     this.ws = null;
-    this.userWs = null;
     this.priceWs = null;
     this.slotStartTs = null;
     this.market = null;
@@ -1027,6 +1590,12 @@ class PolymarketRealtimeFeed {
 }
 
 class KalshiRealtimeFeed {
+  constructor(
+    private readonly onPrivateFill: PrivateFillListener = () => {},
+    private readonly onPrivateFeedReset: PrivateFeedResetListener = () => {},
+  ) {}
+
+  private asset: MarketAsset | null = null;
   private slotKey: string | null = null;
   private seriesCache: { series: Awaited<ReturnType<typeof fetchKalshiSeries>>["series"]; capturedAt: number } | null =
     null;
@@ -1036,6 +1605,7 @@ class KalshiRealtimeFeed {
   private orderbook: KalshiBookState | null = null;
   private orderbookInSync = true;
   private trades: KalshiTrade[] = [];
+  private cfBenchmarks: KalshiCfBenchmarkState | null = null;
   private ws: WebSocket | null = null;
   private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private wsBootstrapTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1053,12 +1623,14 @@ class KalshiRealtimeFeed {
   private resyncBackoffUntil: number | null = null;
   private resyncBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
   private reconnectAttempt = 0;
-  private subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
+  private subscriptions = emptySubscriptions(KALSHI_WS_CHANNELS, "rest-bootstrap");
+  private subscriptionCommands = new Map<number, string>();
   private nextSubscriptionId = 1;
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     if (this.slotKey !== slot.key) {
       await this.reset();
+      this.asset = slot.asset;
       this.slotKey = slot.key;
     }
 
@@ -1160,6 +1732,7 @@ class KalshiRealtimeFeed {
       feeType: this.series.fee_type,
       lastTradeYesPrice: tradePrices.yes,
       lastTradeNoPrice: tradePrices.no,
+      cfBenchmarks: this.cfBenchmarks,
       orderbookLevels,
       resolution: null,
     };
@@ -1331,6 +1904,16 @@ class KalshiRealtimeFeed {
           source,
           details: "trade tape via REST fallback",
         });
+        this.subscriptions[3] = toSubscriptionState(this.subscriptions[3], {
+          status: "idle",
+          source: "unavailable",
+          details: "reference CF inactive without Kalshi credentials",
+        });
+        this.subscriptions[4] = toSubscriptionState(this.subscriptions[4], {
+          status: "idle",
+          source: "unavailable",
+          details: "private fills inactive without Kalshi credentials",
+        });
       }
       return;
     }
@@ -1338,6 +1921,7 @@ class KalshiRealtimeFeed {
     const endpoints = getKalshiWsUrls();
     const endpoint = endpoints[this.wsEndpointIndex % endpoints.length];
     const marketTicker = this.market.ticker;
+    const cfBenchmarkIndexId = this.asset ? KALSHI_CF_BENCHMARK_INDEX_BY_ASSET[this.asset] : undefined;
     let headers: ReturnType<typeof buildKalshiWsHeaders>;
     try {
       headers = buildKalshiWsHeaders();
@@ -1376,6 +1960,14 @@ class KalshiRealtimeFeed {
     };
 
     for (let index = 0; index < this.subscriptions.length; index += 1) {
+      if (this.subscriptions[index].channel === KALSHI_CF_BENCHMARK_CHANNEL && !cfBenchmarkIndexId) {
+        this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+          status: "idle",
+          source: "unavailable",
+          details: "no CF Benchmarks index mapped for this asset",
+        });
+        continue;
+      }
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
         status: "connecting",
         source: "ws",
@@ -1397,6 +1989,10 @@ class KalshiRealtimeFeed {
       this.subscribe(ws, "ticker", marketTicker);
       this.subscribe(ws, "trade", marketTicker);
       this.subscribe(ws, "orderbook_delta", marketTicker);
+      if (cfBenchmarkIndexId) {
+        this.subscribe(ws, KALSHI_CF_BENCHMARK_CHANNEL, marketTicker, cfBenchmarkIndexId);
+      }
+      this.subscribe(ws, KALSHI_FILL_CHANNEL, marketTicker);
 
       this.clearWsSessionTimers();
       this.wsHeartbeat = setInterval(() => {
@@ -1439,7 +2035,7 @@ class KalshiRealtimeFeed {
       }
 
       const nowTs = Date.now();
-      if (String(payload.type ?? "") === "error") {
+      if (String(payload.type ?? "") === "error" && !this.optionalSubscriptionChannel(payload)) {
         rotateEndpoint();
       }
       const accepted = this.applyWsPayload(payload, nowTs);
@@ -1491,6 +2087,8 @@ class KalshiRealtimeFeed {
       this.ws = null;
       this.wsEndpointUrl = null;
       this.wsOrderbookReady = false;
+      this.cfBenchmarks = null;
+      this.onPrivateFeedReset("kalshi", marketTicker);
       if (this.lastWsMessageAt !== null) {
         this.lastWsMessageAt = Math.min(
           this.lastWsMessageAt,
@@ -1498,12 +2096,16 @@ class KalshiRealtimeFeed {
         );
       }
       this.nextSubscriptionId = 1;
+      this.subscriptionCommands.clear();
       const source = this.restFallbackSource();
       const closeReason = reason.toString() || "no reason";
       for (let index = 0; index < this.subscriptions.length; index += 1) {
+        const subscriptionSource = this.isOptionalSubscriptionChannel(this.subscriptions[index].channel)
+          ? "unavailable"
+          : source;
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
           status: "closed",
-          source,
+          source: subscriptionSource,
           details:
             this.lastRestSyncAt === null
               ? `connexion fermee (${code}: ${closeReason})`
@@ -1537,6 +2139,11 @@ class KalshiRealtimeFeed {
       const details = typeof message?.msg === "string" ? message.msg : JSON.stringify(message);
       const command = payload.id === undefined ? "unknown" : String(payload.id);
       const failure = `Kalshi WS protocol error ${code} on command ${command}: ${details}`;
+      const optionalChannel = this.optionalSubscriptionChannel(payload);
+      if (optionalChannel) {
+        this.markOptionalSubscriptionFailure(payload, optionalChannel, failure);
+        return false;
+      }
       if (this.ws) {
         this.failWsSession(this.ws, failure);
       } else {
@@ -1546,7 +2153,13 @@ class KalshiRealtimeFeed {
     }
 
     if (type === "subscribed") {
-      const channel = String(message.channel ?? "");
+      const commandId = parseNumeric(payload.id);
+      const channel = String(
+        message.channel ?? (commandId === null ? "" : this.subscriptionCommands.get(commandId) ?? ""),
+      );
+      if (commandId !== null) {
+        this.subscriptionCommands.delete(commandId);
+      }
       const index = this.subscriptions.findIndex((subscription) => subscription.channel === channel);
       if (index >= 0) {
         this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
@@ -1564,6 +2177,69 @@ class KalshiRealtimeFeed {
         channel,
         sid: message.sid ?? null,
       });
+      return false;
+    }
+
+    if (type === KALSHI_CF_BENCHMARK_CHANNEL) {
+      const parsed = parseKalshiCfBenchmarksValue(message, now);
+      const expectedIndexId = this.asset ? KALSHI_CF_BENCHMARK_INDEX_BY_ASSET[this.asset] : undefined;
+      if (!parsed || parsed.indexId !== expectedIndexId) {
+        const index = this.subscriptions.findIndex(
+          (subscription) => subscription.channel === KALSHI_CF_BENCHMARK_CHANNEL,
+        );
+        if (index >= 0) {
+          this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+            status: "subscribed",
+            source: "ws",
+            details: parsed
+              ? `ignored unexpected index ${parsed.indexId}`
+              : "malformed CF Benchmarks value ignored",
+          });
+        }
+        return false;
+      }
+
+      this.cfBenchmarks = parsed;
+      const index = this.subscriptions.findIndex(
+        (subscription) => subscription.channel === KALSHI_CF_BENCHMARK_CHANNEL,
+      );
+      if (index >= 0) {
+        this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+          status: "subscribed",
+          source: "ws",
+          lastMessageAt: now,
+          details: `${parsed.indexId} reference live`,
+        });
+      }
+      return true;
+    }
+
+    if (type === KALSHI_FILL_CHANNEL) {
+      const parsed = parseKalshiPrivateFill(payload, now);
+      const currentMarketTicker = this.market?.ticker ?? null;
+      const index = this.subscriptions.findIndex(
+        (subscription) => subscription.channel === KALSHI_FILL_CHANNEL,
+      );
+      if (!parsed || (parsed.marketRef && currentMarketTicker && parsed.marketRef !== currentMarketTicker)) {
+        if (index >= 0) {
+          this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+            status: "subscribed",
+            source: "ws",
+            details: parsed ? `ignored fill for ${parsed.marketRef}` : "malformed private fill ignored",
+          });
+        }
+        return false;
+      }
+
+      this.onPrivateFill(parsed);
+      if (index >= 0) {
+        this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+          status: "subscribed",
+          source: "ws",
+          lastMessageAt: now,
+          details: "private fills live",
+        });
+      }
       return false;
     }
 
@@ -1736,9 +2412,19 @@ class KalshiRealtimeFeed {
     return true;
   }
 
-  private subscribe(ws: WebSocket, channel: string, marketTicker: string) {
+  private subscribe(
+    ws: WebSocket,
+    channel: string,
+    marketTicker: string,
+    cfBenchmarkIndexId?: KalshiCfBenchmarkIndexId,
+  ) {
     const params =
-      channel === "ticker"
+      channel === KALSHI_CF_BENCHMARK_CHANNEL
+        ? {
+            channels: [channel],
+            index_ids: cfBenchmarkIndexId ? [cfBenchmarkIndexId] : [],
+          }
+        : channel === "ticker"
         ? {
             channels: [channel],
             market_ticker: marketTicker,
@@ -1749,6 +2435,7 @@ class KalshiRealtimeFeed {
           };
 
     const commandId = this.nextSubscriptionId++;
+    this.subscriptionCommands.set(commandId, channel);
     ws.send(
       JSON.stringify({
         id: commandId,
@@ -1762,6 +2449,50 @@ class KalshiRealtimeFeed {
       slotKey: this.slotKey,
       commandId,
       channel,
+      indexId: cfBenchmarkIndexId ?? null,
+    });
+  }
+
+  private isOptionalSubscriptionChannel(channel: string) {
+    return channel === KALSHI_CF_BENCHMARK_CHANNEL || channel === KALSHI_FILL_CHANNEL;
+  }
+
+  private optionalSubscriptionChannel(payload: any) {
+    const message = payload?.msg ?? payload?.message ?? payload?.data ?? payload;
+    const commandId = parseNumeric(payload?.id);
+    const channel = String(
+      message?.channel ?? (commandId === null ? "" : this.subscriptionCommands.get(commandId) ?? ""),
+    );
+    return this.isOptionalSubscriptionChannel(channel) ? channel : null;
+  }
+
+  private markOptionalSubscriptionFailure(payload: any, channel: string, details: string) {
+    const commandId = parseNumeric(payload?.id);
+    if (commandId !== null) {
+      this.subscriptionCommands.delete(commandId);
+    }
+    if (channel === KALSHI_CF_BENCHMARK_CHANNEL) {
+      this.cfBenchmarks = null;
+    } else if (channel === KALSHI_FILL_CHANNEL) {
+      this.onPrivateFeedReset("kalshi", this.market?.ticker ?? null);
+    }
+    const index = this.subscriptions.findIndex(
+      (subscription) => subscription.channel === channel,
+    );
+    if (index >= 0) {
+      this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
+        status: "error",
+        source: "unavailable",
+        details,
+      });
+    }
+    console.warn("[kalshi-ws] optional-subscription-failed", {
+      endpoint: this.wsEndpointUrl,
+      marketTicker: this.market?.ticker ?? null,
+      slotKey: this.slotKey,
+      commandId: payload?.id ?? null,
+      channel,
+      details,
     });
   }
 
@@ -1779,11 +2510,15 @@ class KalshiRealtimeFeed {
 
   private markWsFailure(details: string) {
     this.lastError = details;
+    this.cfBenchmarks = null;
     const source = this.restFallbackSource();
     for (let index = 0; index < this.subscriptions.length; index += 1) {
+      const subscriptionSource = this.isOptionalSubscriptionChannel(this.subscriptions[index].channel)
+        ? "unavailable"
+        : source;
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
         status: "error",
-        source,
+        source: subscriptionSource,
         details,
       });
     }
@@ -1794,6 +2529,7 @@ class KalshiRealtimeFeed {
       return;
     }
     this.markWsFailure(details);
+    this.onPrivateFeedReset("kalshi", this.market?.ticker ?? null);
     console.warn("[kalshi-ws] session-failed", {
       endpoint: this.wsEndpointUrl,
       marketTicker: this.market?.ticker ?? null,
@@ -1823,22 +2559,29 @@ class KalshiRealtimeFeed {
       this.wsReconnectTimer = null;
     }
     const ws = this.ws;
+    const marketTicker = this.market?.ticker ?? null;
     this.ws = null;
     this.wsEndpointUrl = null;
     this.wsOrderbookReady = false;
+    if (ws) {
+      this.onPrivateFeedReset("kalshi", marketTicker);
+    }
     ws?.close();
+    this.asset = null;
     this.series = null;
     this.market = null;
     this.orderbook = null;
     this.orderbookInSync = true;
     this.trades = [];
+    this.cfBenchmarks = null;
     this.lastRestSyncAt = null;
     this.lastWsMessageAt = null;
     this.lastError = null;
     this.reconnectAttempt = 0;
     this.wsEndpointIndex = 0;
     this.nextSubscriptionId = 1;
-    this.subscriptions = emptySubscriptions(["ticker", "orderbook_delta", "trade"], "rest-bootstrap");
+    this.subscriptionCommands.clear();
+    this.subscriptions = emptySubscriptions(KALSHI_WS_CHANNELS, "rest-bootstrap");
   }
 
   private isLiveOrderbook(now: number) {
@@ -1902,21 +2645,40 @@ class KalshiRealtimeFeed {
 }
 
 export class MarketDataSupervisor {
+  private fillTracker = new RealtimeOrderFillTracker();
   private feeds: Record<
     MarketAsset,
     {
       polymarket: PolymarketRealtimeFeed;
       kalshi: KalshiRealtimeFeed;
     }
-  > = Object.fromEntries(
-    MARKET_ASSETS.map((asset) => [
-      asset,
-      {
-        polymarket: new PolymarketRealtimeFeed(),
-        kalshi: new KalshiRealtimeFeed(),
-      },
-    ]),
-  ) as Record<MarketAsset, { polymarket: PolymarketRealtimeFeed; kalshi: KalshiRealtimeFeed }>;
+  >;
+
+  constructor() {
+    const recordFill: PrivateFillListener = (fill) => {
+      this.fillTracker.ingest(fill);
+    };
+    const resetPrivateFeed: PrivateFeedResetListener = (venue, marketRef) => {
+      this.fillTracker.clearWaiters(venue, marketRef);
+    };
+    this.feeds = Object.fromEntries(
+      MARKET_ASSETS.map((asset) => [
+        asset,
+        {
+          polymarket: new PolymarketRealtimeFeed(recordFill, resetPrivateFeed),
+          kalshi: new KalshiRealtimeFeed(recordFill, resetPrivateFeed),
+        },
+      ]),
+    ) as Record<MarketAsset, { polymarket: PolymarketRealtimeFeed; kalshi: KalshiRealtimeFeed }>;
+  }
+
+  waitForOrderFill(request: WaitForOrderFillRequest) {
+    return this.fillTracker.wait(request);
+  }
+
+  readRecentOrderFills(request: ReadRecentOrderFillsRequest = {}) {
+    return this.fillTracker.read(request);
+  }
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     const feeds = this.feeds[slot.asset];
@@ -2116,7 +2878,7 @@ function createBlockedKalshiQuote(
     lastRestSyncAt: null,
     dataReady: false,
     details: [reason],
-    subscriptions: emptySubscriptions(["ticker", "orderbook_delta", "trade"], "unavailable"),
+    subscriptions: emptySubscriptions(KALSHI_WS_CHANNELS, "unavailable"),
   });
 
   const outcomes = deriveKalshiOutcomeQuotes(
@@ -2152,6 +2914,7 @@ function createBlockedKalshiQuote(
     feeType: series?.fee_type ?? "unknown",
     lastTradeYesPrice: null,
     lastTradeNoPrice: null,
+    cfBenchmarks: null,
     orderbookLevels: null,
     resolution: null,
   };

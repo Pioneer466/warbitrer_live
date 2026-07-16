@@ -45,6 +45,7 @@ type GammaMarket = {
   bestAsk?: number;
   enableOrderBook: boolean;
   outcomePrices: string;
+  umaResolutionStatus?: string | null;
 };
 
 type GammaMarketResponse = GammaMarket[];
@@ -52,7 +53,17 @@ type GammaEventResponse = Array<{
   id: string;
   slug: string;
   markets?: GammaMarket[];
+  eventMetadata?: {
+    finalPrice?: string | number | null;
+    priceToBeat?: string | number | null;
+  } | null;
 }>;
+
+export type FinalizedPolymarketResolutionObservation = {
+  resolution: "UP" | "DOWN";
+  benchmarkValueUsd: number | null;
+  benchmarkSource: "polymarket-gamma-event-final-price" | null;
+};
 
 type CLOBBook = {
   market?: string;
@@ -192,6 +203,8 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     observedSlotOpenPriceUsd: null,
     observedSlotOpenCapturedAt: null,
     feeRateBps: Math.max(upQuoteWithFee.feeRateBps ?? 0, downQuoteWithFee.feeRateBps ?? 0),
+    feeRate: getNumericCandidate(clobMarketInfo?.fd?.r ?? null),
+    feeExponent: getNumericCandidate(clobMarketInfo?.fd?.e ?? null) ?? 0,
     negRisk: Boolean(clobMarketInfo?.nr ?? false),
   };
 }
@@ -256,6 +269,69 @@ export async function fetchPolymarketResolution(slug: string, conditionId?: stri
   }
 
   return extractPolymarketResolution(market.outcomePrices);
+}
+
+export async function fetchFinalizedPolymarketResolution(slug: string, conditionId?: string) {
+  const market = await fetchPolymarketMarket(slug, conditionId);
+  if (
+    !market ||
+    !market.closed ||
+    market.umaResolutionStatus?.toLowerCase() !== "resolved"
+  ) {
+    return null;
+  }
+
+  return extractPolymarketResolution(market.outcomePrices);
+}
+
+export async function fetchFinalizedPolymarketResolutionObservation(
+  slug: string,
+  conditionId?: string,
+): Promise<FinalizedPolymarketResolutionObservation | null> {
+  const market = await fetchPolymarketMarket(slug, conditionId);
+  if (
+    !market ||
+    !market.closed ||
+    market.umaResolutionStatus?.toLowerCase() !== "resolved"
+  ) {
+    return null;
+  }
+  const resolution = extractPolymarketResolution(market.outcomePrices);
+  if (!resolution) {
+    return null;
+  }
+
+  const events = await fetchJson<GammaEventResponse>(
+    `${POLY_GAMMA_BASE}/events?slug=${slug}`,
+  ).catch(() => []);
+  const event = events.find(
+    (candidate) =>
+      candidate.slug === slug &&
+      (candidate.markets ?? []).some(
+        (candidateMarket) =>
+          (conditionId &&
+            (candidateMarket.conditionId ?? candidateMarket.id) === conditionId) ||
+          (!conditionId && candidateMarket.slug === slug),
+      ),
+  );
+  const finalPrice = readPositiveFiniteNumber(event?.eventMetadata?.finalPrice);
+  const priceToBeat = readPositiveFiniteNumber(event?.eventMetadata?.priceToBeat);
+  const metadataResolution =
+    finalPrice === null || priceToBeat === null
+      ? null
+      : finalPrice >= priceToBeat
+        ? "UP"
+        : "DOWN";
+  const benchmarkValueUsd = metadataResolution === resolution ? finalPrice : null;
+
+  return {
+    resolution,
+    benchmarkValueUsd,
+    benchmarkSource:
+      benchmarkValueUsd === null
+        ? null
+        : "polymarket-gamma-event-final-price",
+  };
 }
 
 export function extractPolymarketResolution(outcomePricesRaw: string) {
@@ -508,13 +584,34 @@ export async function fetchPolymarketOpenOrders() {
   return withPolymarketClientTimeout("getOpenOrders", () => client.getOpenOrders());
 }
 
-export async function fetchPolymarketTrades(after?: string) {
+export async function fetchPolymarketTrades(after?: string, timeoutMs = POLY_CLIENT_TIMEOUT_MS) {
   if (!hasPolymarketCredentials()) {
     return [];
   }
 
   const client = createClobClient();
-  return withPolymarketClientTimeout("getTrades", () => client.getTrades(after ? { after } : undefined));
+  return withPolymarketClientTimeout(
+    "getTrades",
+    () => client.getTrades(after ? { after } : undefined),
+    timeoutMs,
+  );
+}
+
+export function derivePolymarketConfirmationRequestTimeoutMs(
+  deadlineMs: number,
+  nowMs = Date.now(),
+  clientMaxTimeoutMs = POLY_CLIENT_TIMEOUT_MS,
+) {
+  if (
+    !Number.isFinite(deadlineMs) ||
+    !Number.isFinite(nowMs) ||
+    !Number.isFinite(clientMaxTimeoutMs) ||
+    clientMaxTimeoutMs <= 0
+  ) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(clientMaxTimeoutMs, deadlineMs - nowMs));
 }
 
 export async function confirmPolymarketOrderExecution(params: {
@@ -523,15 +620,24 @@ export async function confirmPolymarketOrderExecution(params: {
   expectedSizeIsExact?: boolean;
   orderType?: string | null;
   timeoutMs?: number;
+  pollWakeup?: Promise<unknown>;
 }): Promise<{ result: VenueOrderResult; order: OpenOrder | null; trades: Trade[] }> {
   const deadline = Date.now() + (params.timeoutMs ?? 3_000);
   let latestOrder: OpenOrder | null = null;
   let latestTrades: Trade[] = [];
+  let pollWakeup = params.pollWakeup?.then(
+    () => true,
+    () => true,
+  ) ?? null;
 
   while (Date.now() <= deadline) {
+    const requestTimeoutMs = derivePolymarketConfirmationRequestTimeoutMs(deadline);
+    if (requestTimeoutMs <= 0) {
+      break;
+    }
     const [order, trades] = await Promise.all([
-      safeGetPolymarketOrder(params.orderId),
-      fetchPolymarketTrades().catch(() => []),
+      safeGetPolymarketOrder(params.orderId, requestTimeoutMs),
+      fetchPolymarketTrades(undefined, requestTimeoutMs).catch(() => []),
     ]);
     latestOrder = order;
     latestTrades = extractPolymarketTradesForOrder(trades, params.orderId);
@@ -562,7 +668,17 @@ export async function confirmPolymarketOrderExecution(params: {
       }
     }
 
-    await sleep(200);
+    if (pollWakeup) {
+      const wokeForFill = await Promise.race([
+        sleep(200).then(() => false),
+        pollWakeup,
+      ]);
+      if (wokeForFill) {
+        pollWakeup = null;
+      }
+    } else {
+      await sleep(200);
+    }
   }
 
   const truth = resolvePolymarketOrderTruth({
@@ -811,6 +927,11 @@ function selectGammaMarket(markets: GammaMarket[], slug: string, conditionId?: s
   }
 
   return markets.find((market) => market.slug === slug) ?? null;
+}
+
+function readPositiveFiniteNumber(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 }
 
 export function derivePolymarketOutcomeTokens(market: NonNullable<Awaited<ReturnType<typeof fetchPolymarketMarket>>>) {
@@ -1397,10 +1518,14 @@ export function extractPolymarketTradesForOrder(trades: Trade[], orderId: string
   );
 }
 
-async function safeGetPolymarketOrder(orderId: string) {
+async function safeGetPolymarketOrder(orderId: string, timeoutMs = POLY_CLIENT_TIMEOUT_MS) {
   try {
     const client = createClobClient();
-    return await client.getOrder(orderId);
+    return await withPolymarketClientTimeout(
+      "getOrderConfirmation",
+      () => client.getOrder(orderId),
+      timeoutMs,
+    );
   } catch {
     return null;
   }

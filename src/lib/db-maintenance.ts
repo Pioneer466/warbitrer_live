@@ -1,4 +1,8 @@
 import { readEnv, type LiveEnv } from "@/lib/env";
+import {
+  ORACLE_SAMPLE_RETENTION_MS,
+  SLOT_RESOLUTION_RETENTION_MS,
+} from "@/lib/oracle-history";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
@@ -8,6 +12,8 @@ export type DatabaseMaintenanceConfig = {
   intervalMs: number;
   retention: {
     snapshotsMs: number | null;
+    oracleSamplesMs: number | null;
+    slotResolutionsMs: number | null;
     pnlSnapshotsMs: number | null;
     runEventsMs: number | null;
     fillsMs: number | null;
@@ -22,6 +28,8 @@ export const DEFAULT_DATABASE_MAINTENANCE_CONFIG: DatabaseMaintenanceConfig = {
   intervalMs: 60 * MINUTE_MS,
   retention: {
     snapshotsMs: 72 * HOUR_MS,
+    oracleSamplesMs: ORACLE_SAMPLE_RETENTION_MS,
+    slotResolutionsMs: SLOT_RESOLUTION_RETENTION_MS,
     pnlSnapshotsMs: 30 * DAY_MS,
     runEventsMs: 30 * DAY_MS,
     fillsMs: 180 * DAY_MS,
@@ -48,6 +56,8 @@ export function readDatabaseMaintenanceConfig(env = readEnv()): DatabaseMaintena
         HOUR_MS,
         DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.snapshotsMs,
       ),
+      oracleSamplesMs: DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.oracleSamplesMs,
+      slotResolutionsMs: DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.slotResolutionsMs,
       pnlSnapshotsMs: parseWindowEnv(
         env.DB_RETENTION_PNL_DAYS,
         "DB_RETENTION_PNL_DAYS",

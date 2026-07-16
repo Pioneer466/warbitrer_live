@@ -14,21 +14,18 @@ export type PrimaryCandidateScore = {
 
 export function scorePrimaryCandidate(
   leg: Pick<OpportunityLeg, "venue" | "depth" | "price" | "size">,
-  hedgeLeg: Pick<OpportunityLeg, "depth" | "size">,
+  _hedgeLeg: Pick<OpportunityLeg, "depth" | "size">,
 ): PrimaryCandidateScore {
   const targetSize = Math.max(0, leg.size);
   const visibleDepth = normalizeDepth(leg.depth);
-  const hedgeDepth = normalizeDepth(hedgeLeg.depth);
   const coveredSize = Math.min(targetSize, visibleDepth);
   const coverageRatio = targetSize > 0 ? visibleDepth / targetSize : 0;
-  const hedgeTargetSize = Math.max(0, hedgeLeg.size);
-  const hedgeCoverageRatio = hedgeTargetSize > 0 ? Math.min(1, hedgeDepth / hedgeTargetSize) : 0;
   const slippageBps = 0;
   const slippagePenalty = Math.max(0, 1 - slippageBps / SCORE_SLIPPAGE_PENALTY_BPS);
 
   return {
     venue: leg.venue,
-    score: coverageRatio * hedgeCoverageRatio * slippagePenalty,
+    score: coverageRatio * slippagePenalty,
     coveredSize,
     coverageRatio,
     vwap: leg.price,
@@ -74,7 +71,7 @@ export function choosePrimaryVenueForOpportunity(
 }
 
 function recommendPrimaryVenue(polymarketScore: PrimaryCandidateScore, kalshiScore: PrimaryCandidateScore): Venue {
-  if (kalshiScore.score >= polymarketScore.score / KALSHI_TIE_PREFERENCE_RATIO) {
+  if (kalshiScore.score <= polymarketScore.score * KALSHI_TIE_PREFERENCE_RATIO) {
     return "kalshi";
   }
   return "polymarket";
@@ -86,11 +83,11 @@ function describePrimarySelectionRecommendation(
   recommended: Venue,
 ) {
   if (recommended === "kalshi") {
-    return kalshiScore.score >= polymarketScore.score
-      ? "kalshi_score_higher"
+    return kalshiScore.score <= polymarketScore.score
+      ? "kalshi_scarcer_leg"
       : "kalshi_tie_preference";
   }
-  return "polymarket_score_materially_higher";
+  return "polymarket_scarcer_leg";
 }
 
 function normalizeDepth(depth: number | null) {

@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
+import { GlobalRiskBudgetPanel } from "@/components/mismatch-risk-view";
 import {
   BigMetric,
   Chip,
@@ -17,10 +18,16 @@ import {
   V2_TONE_TEXT,
   type V2Tone,
 } from "@/components/v2-ui";
-import type { CircuitBreaker, CircuitBreakerKey, MarketAsset, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import {
+  formatRiskProbability,
+  getMismatchModelDisplayState,
+} from "@/lib/mismatch-risk-display";
+import type { GlobalRiskConfig } from "@/lib/risk-settings";
+import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MarketAsset, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
+  const globalRisk = usePollingJson<GlobalRiskConfig>("/api/settings/risk", 5_000);
   const [globalBreakerBusy, setGlobalBreakerBusy] = useState(false);
   const [breakerClearBusyKey, setBreakerClearBusyKey] = useState<string | null>(null);
   const [globalBreakerMessage, setGlobalBreakerMessage] = useState<string | null>(null);
@@ -40,6 +47,10 @@ export function PortfolioClient() {
   const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowCount = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
+  const enforceRiskCount = assets.filter((asset) => asset.config.mismatchRiskMode === "enforce").length;
+  const uncalibratedCount = assets.filter(
+    (asset) => getMismatchModelDisplayState(asset.bestOpportunity?.mismatchRiskEstimate) === "uncalibrated",
+  ).length;
   const breakerCount = activeBreakers.length || assets.reduce((sum, asset) => sum + asset.activeBreakers.length, 0);
   const strategyPnlUsd = pnl?.strategyPnlUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
   const accountDeltaUsd = pnl?.accountDeltaUsd ?? strategyPnlUsd ?? null;
@@ -151,6 +162,8 @@ export function PortfolioClient() {
             <Chip tone={breakerCount > 0 ? "rose" : "emerald"}>{readyCount}/{assets.length} ready</Chip>
             <Chip tone={liveCount > 0 ? "gold" : "mist"}>{liveCount} live</Chip>
             <Chip tone={shadowCount > 0 ? "indigo" : "mist"}>{shadowCount} shadow</Chip>
+            <Chip tone={enforceRiskCount > 0 ? "rose" : "indigo"}>{enforceRiskCount} risk enforce</Chip>
+            {uncalibratedCount > 0 ? <Chip tone="amber">{uncalibratedCount} modèles non calibrés</Chip> : null}
             {breakerCount > 0 ? <Chip tone="rose">{breakerCount} breakers</Chip> : null}
           </div>
         </div>
@@ -223,6 +236,15 @@ export function PortfolioClient() {
             <PortfolioVenueRow key={balance.venue} balance={balance} last={index === venueBalances.length - 1} />
           ))}
         </div>
+      </section>
+
+      <section>
+        <SectionLabel right="cluster multi-actifs">Budget de Risque</SectionLabel>
+        <GlobalRiskBudgetPanel
+          config={globalRisk.data}
+          error={globalRisk.error}
+          loading={globalRisk.loading}
+        />
       </section>
 
       <section>
@@ -418,6 +440,9 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
             <span className="font-mono text-xl font-semibold text-[var(--wa-gold)]">{asset.asset.toUpperCase()}</span>
             <Chip tone={modeTone}>{mode}</Chip>
             <Chip tone={readinessTone}>{asset.workerState.readinessStatus}</Chip>
+            <Chip tone={asset.config.mismatchRiskMode === "enforce" ? "rose" : asset.config.mismatchRiskMode === "block_only" ? "amber" : "indigo"}>
+              risk {asset.config.mismatchRiskMode}
+            </Chip>
           </div>
           <div className="text-sm text-[var(--wa-ivory)]">{asset.slot.label}</div>
           <div className="mt-1 text-[10px] uppercase tracking-[0.16em] text-[var(--wa-dim)]">
@@ -426,9 +451,14 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
         </div>
         <div className="font-mono text-3xl leading-none text-[var(--wa-ivory)]">{formatV2Countdown(asset.slot.secondsRemaining)}</div>
       </div>
-      <div className="grid grid-cols-3 gap-px overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)]">
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)] sm:grid-cols-4">
         <MiniStat label="Budget" value={formatV2Usd(asset.config.maxPairNotionalUsd)} />
         <MiniStat label="Seuil" value={asset.config.grossEntryThreshold.toFixed(3)} />
+        <MiniStat
+          label="P fatal 95%"
+          value={formatRiskProbability(best?.mismatchRiskEstimate?.pFatalUpper95)}
+          tone={getAssetMismatchTone(best)}
+        />
         <MiniStat label="Breakers" value={String(asset.activeBreakers.length)} tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"} />
       </div>
       <div className="mt-4 border-t border-[var(--wa-gold-border)] pt-4 text-sm text-[var(--wa-mist)]">
@@ -565,6 +595,24 @@ function PanelMessage({ title, message, tone = "default" }: { title: string; mes
 
 function getReadinessTone(status: ReadinessStatus): V2Tone {
   return status === "ready" ? "emerald" : status === "blocked" ? "rose" : "amber";
+}
+
+function getAssetMismatchTone(opportunity: LiveOpportunity | null): V2Tone {
+  const estimate = opportunity?.mismatchRiskEstimate;
+  const modelState = getMismatchModelDisplayState(estimate);
+  if (modelState === "uncalibrated") {
+    return "amber";
+  }
+  if (!estimate || modelState === "unavailable" || estimate.pFatalUpper95 === null) {
+    return "mist";
+  }
+  if (
+    estimate.maximumAllowedFatalProbability !== null &&
+    estimate.pFatalUpper95 > estimate.maximumAllowedFatalProbability
+  ) {
+    return "rose";
+  }
+  return "emerald";
 }
 
 function findBreakerForIntent(breakers: CircuitBreaker[], intent: OrderIntent) {

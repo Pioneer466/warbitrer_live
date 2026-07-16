@@ -3,12 +3,15 @@ import {
   applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateKalshiFee,
+  calculatePolymarketLevelFee,
   deriveBalancedPayoutPairSize,
+  deriveMultiLevelPairedQuote,
   deriveKalshiPrimaryClipPlan,
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
   getVenueMinimumOrderSize,
   normalizeVenueTargetSize,
+  quoteMultiLevelBuyLeg,
 } from "@/lib/fees";
 import {
   computeKalshiBuyDepthWithinPriceRange,
@@ -16,6 +19,7 @@ import {
   deriveKalshiBuyPriceLevels,
   fetchKalshiOrderbook,
   fetchKalshiFills,
+  fetchFinalizedKalshiResolutionObservation,
   fetchKalshiOrders,
   fetchKalshiResolution,
   fetchKalshiSeries,
@@ -33,6 +37,7 @@ import {
   confirmPolymarketOrderExecution,
   createPolymarketAdapter,
   extractPolymarketTradesForOrder,
+  fetchFinalizedPolymarketResolutionObservation,
   fetchPolymarketBook,
   fetchPolymarketOpenOrders,
   getPolymarketConditionalSellableBalance,
@@ -66,7 +71,20 @@ import {
   summarizeVenueFills,
 } from "@/lib/settlement";
 import { getCurrentSlot } from "@/lib/slot";
+import { shouldPersistOracleSample } from "@/lib/oracle-history";
 import {
+  calculateHybridClusterBudget,
+  calculateMismatchAdjustedPnl,
+  evaluateEconomicMismatchGate,
+} from "@/lib/mismatch-risk";
+import { MismatchRiskRuntime } from "@/lib/mismatch-risk-runtime";
+import { applyMismatchRiskPolicy } from "@/lib/mismatch-risk-policy";
+import {
+  DEFAULT_GLOBAL_RISK_CONFIG,
+  type GlobalRiskConfig,
+} from "@/lib/risk-settings";
+import {
+  findOrderAttemptById,
   findOrderIntent,
   findVenueOrder,
   readCircuitBreakers,
@@ -74,14 +92,15 @@ import {
   readFillsForIntentVenue,
   readLastEntryCosts,
   readLatestSnapshot,
+  readGlobalRiskConfig,
   readLiveFeesUsd,
   readLiveRealizedPnlUsd,
   readOpenOrderIntents,
+  readPendingSlotResolutions,
   readPolymarketCashAdjustmentObservation,
   readPositions,
   readRunEvents,
   readRecentFills,
-  readRecentOrderAttempts,
   readRecentOrderIntents,
   readRecentSettledOrderIntents,
   readRecentVenueOrders,
@@ -101,10 +120,12 @@ import {
   writeMarketFillQualityEvent,
   writeOrderAttempt,
   writeOrderIntent,
+  writeOracleSlotSample,
   writePnlSnapshot,
   writeRunEvent,
   writeSettlement,
   writeSnapshot,
+  writeSlotResolution,
   writeVenueBalance,
   writeVenueOrder,
   writeWorkerState,
@@ -121,6 +142,8 @@ import type {
   MarketSlot,
   OpportunitySnapshot,
   OrderIntent,
+  MismatchRiskEstimate,
+  PairCombination,
   PositionSnapshot,
   StrategyConfig,
   RunEvent,
@@ -156,6 +179,8 @@ const VENUE_BALANCES_CACHE_TTL_MS = 750;
 const OPEN_INTENTS_CACHE_TTL_MS = 750;
 const KALSHI_FEE_MULTIPLIER_CACHE_TTL_MS = 60 * 60 * 1000;
 const PRIMARY_NO_FILL_COOLDOWN_MS = 10_000;
+const POLYMARKET_CRYPTO_RESCUE_FEE_RATE = 0.07;
+const CONSERVATIVE_REMAINING_BUY_FEE_USD_PER_UNIT = 0.07;
 const HEDGE_FAILURE_RECOVERED_COOLDOWN_MS = 10_000;
 const HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS = 10_000;
 const LAST_ENTRY_COSTS_CACHE_TTL_MS = 750;
@@ -202,6 +227,12 @@ const kalshiFeeMultiplierCacheByAsset: Partial<Record<MarketAsset, { value: numb
 let venueBalancesCache: { value: VenueBalance[]; capturedAt: number } | null = null;
 let openIntentsCache: { value: OrderIntent[]; capturedAt: number } | null = null;
 const lastEntryCostsCache = new Map<string, { value: Awaited<ReturnType<typeof readLastEntryCosts>>; capturedAt: number }>();
+const lastOracleSampleAtBySlot = new Map<string, number>();
+const observedResolutionSlots = new Map<string, string>();
+const oraclePersistenceInFlightByAsset: Partial<Record<MarketAsset, Promise<void>>> = {};
+let observedSlotResolutionReconcileInFlight = false;
+const mismatchRiskRuntime = new MismatchRiskRuntime();
+let globalRiskConfigCache: { value: GlobalRiskConfig; capturedAt: number } | null = null;
 
 type RealtimeScanState = {
   sequence: number;
@@ -215,6 +246,38 @@ type RealtimeScanState = {
 };
 
 type ReconcileCadenceKey = "settlements" | "pnl" | "database_maintenance";
+
+type OrderExecutionTiming = {
+  quoteObservedAt: number;
+  decisionAt: number;
+  submitStartedAt: number;
+  venueAckAt: number;
+  fillObservedAt: number;
+};
+
+function buildPairExecutionTiming(
+  primary: OrderExecutionTiming | null,
+  hedge: OrderExecutionTiming | null,
+) {
+  if (!primary && !hedge) {
+    return null;
+  }
+
+  return {
+    quoteObservedAt: primary?.quoteObservedAt ?? hedge?.quoteObservedAt ?? null,
+    decisionAt: primary?.decisionAt ?? hedge?.decisionAt ?? null,
+    primarySubmitStartedAt: primary?.submitStartedAt ?? null,
+    primaryVenueAckAt: primary?.venueAckAt ?? null,
+    primaryFillObservedAt: primary?.fillObservedAt ?? null,
+    hedgeSubmitStartedAt: hedge?.submitStartedAt ?? null,
+    hedgeVenueAckAt: hedge?.venueAckAt ?? null,
+    hedgeFillObservedAt: hedge?.fillObservedAt ?? null,
+    decisionToPrimarySubmitMs:
+      primary ? Math.max(0, primary.submitStartedAt - primary.decisionAt) : null,
+    primaryFillToHedgeSubmitMs:
+      primary && hedge ? Math.max(0, hedge.submitStartedAt - primary.fillObservedAt) : null,
+  };
+}
 
 export function deriveKalshiPrimaryFallbackClipPlan(requestedContracts: number) {
   const normalizedRequestedContracts = normalizeVenueTargetSize("kalshi", requestedContracts, 1, 1);
@@ -747,6 +810,805 @@ function serializePositionSignature(positions: PositionSnapshot[]) {
   );
 }
 
+async function getCachedGlobalRiskConfig(
+  now: number,
+  failClosed = false,
+): Promise<GlobalRiskConfig> {
+  if (globalRiskConfigCache && now - globalRiskConfigCache.capturedAt <= SETTINGS_CACHE_TTL_MS) {
+    return globalRiskConfigCache.value;
+  }
+
+  let value: GlobalRiskConfig;
+  try {
+    value = await readGlobalRiskConfig();
+  } catch (error) {
+    if (failClosed) {
+      throw error;
+    }
+    console.warn(`[risk] global config unavailable, using defaults for diagnostics: ${toErrorMessage(error)}`);
+    return { ...DEFAULT_GLOBAL_RISK_CONFIG };
+  }
+  globalRiskConfigCache = { value, capturedAt: now };
+  return value;
+}
+
+function estimateMismatchRiskByCombination(input: {
+  asset: MarketAsset;
+  slotStartTs: number;
+  slotEndTs: number;
+  now: number;
+  polymarket: OpportunitySnapshot["polymarket"];
+  kalshi: OpportunitySnapshot["kalshi"];
+  opportunities: LiveOpportunity[];
+  oracleMaxAgeMs: number;
+}): Partial<Record<PairCombination, MismatchRiskEstimate>> {
+  const estimates: Partial<Record<PairCombination, MismatchRiskEstimate>> = {};
+  for (const opportunity of input.opportunities) {
+    const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
+    const totalCostUsd = Math.max(
+      0,
+      -(opportunity.fatalMismatchPnlUsd ?? 0) ||
+        opportunity.legs.reduce(
+          (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+          0,
+        ),
+    );
+    estimates[opportunity.combination] = mismatchRiskRuntime.estimate({
+      asset: input.asset,
+      polymarket: input.polymarket,
+      kalshi: input.kalshi,
+      now: input.now,
+      maxSourceAgeMs: input.oracleMaxAgeMs,
+      combination: opportunity.combination,
+      slotStartTs: input.slotStartTs,
+      slotEndTs: input.slotEndTs,
+      pairSize,
+      totalCostUsd,
+    });
+  }
+  return estimates;
+}
+
+function buildMismatchClusterBudget(input: {
+  slotEndTs: number;
+  now: number;
+  balances: VenueBalance[];
+  openIntents: OrderIntent[];
+  config: GlobalRiskConfig;
+}) {
+  const capitalUsd = deriveRiskCapitalUsd(input.balances, input.now, input.config);
+  const exposures = input.openIntents
+    .filter(
+      (intent) =>
+        !intent.shadow &&
+        intent.slotEndTs === input.slotEndTs,
+    )
+    .map((intent) => ({
+      fatalLossUsd:
+        intent.fatalLossExposureUsd ??
+        intent.legs.reduce(
+          (sum, leg) =>
+            sum +
+            Math.max(
+              0,
+              leg.requestedNotionalUsd,
+              leg.requestedPrice === null ? 0 : leg.requestedSize * leg.requestedPrice,
+            ) +
+            Math.max(0, leg.feeUsd),
+          0,
+        ),
+      pFatalUpper95: intent.mismatchPFatalUpper ?? 1,
+    }));
+
+  return calculateHybridClusterBudget({
+    capitalUsd,
+    exposures,
+    expectedRiskFraction: input.config.clusterExpectedFatalLossShare,
+    expectedRiskCapUsd: input.config.clusterExpectedFatalLossCapUsd,
+    absoluteRiskFraction: input.config.clusterAbsoluteFatalLossShare,
+    absoluteRiskCapUsd: input.config.clusterAbsoluteFatalLossCapUsd,
+  });
+}
+
+function deriveRiskCapitalUsd(
+  balances: VenueBalance[],
+  now: number,
+  config: GlobalRiskConfig,
+) {
+  const requiredVenues: Venue[] = ["polymarket", "kalshi"];
+  const freshBalances = requiredVenues.map((venue) =>
+    balances.find(
+      (balance) =>
+        balance.venue === venue &&
+        balance.status === "ready" &&
+        now - balance.capturedAt <= config.balanceMaxAgeMs,
+    ),
+  );
+  return freshBalances.every(Boolean)
+    ? freshBalances.reduce((sum, balance) => sum + (balance?.totalBalanceUsd ?? 0), 0)
+    : 0;
+}
+
+function applyFinalMismatchEstimate(
+  opportunity: LiveOpportunity,
+  estimate: MismatchRiskEstimate | null,
+): LiveOpportunity {
+  if (!estimate) {
+    return opportunity;
+  }
+  return {
+    ...opportunity,
+    mismatchRiskEstimate: estimate,
+    fatalMismatchPnlUsd: estimate.available ? estimate.fatalPnlUsd : opportunity.fatalMismatchPnlUsd,
+    conservativeExpectedPnlUsd: estimate.available
+      ? estimate.conservativePnlUsd
+      : opportunity.conservativeExpectedPnlUsd,
+  };
+}
+
+function rescaleMismatchEstimate(
+  opportunity: LiveOpportunity,
+  estimate: MismatchRiskEstimate | null,
+): MismatchRiskEstimate | null {
+  if (
+    !estimate?.available ||
+    estimate.pFatal === null ||
+    estimate.pFatalUpper95 === null ||
+    estimate.pAligned === null ||
+    estimate.pDouble === null
+  ) {
+    return estimate;
+  }
+
+  const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
+  const totalCostUsd = Math.max(
+    0,
+    -(opportunity.fatalMismatchPnlUsd ?? 0) ||
+      opportunity.legs.reduce(
+        (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+        0,
+      ),
+  );
+  if (pairSize <= 0) {
+    return estimate;
+  }
+
+  const pnl = calculateMismatchAdjustedPnl({
+    pairSize,
+    totalCostUsd,
+    probabilities: {
+      pFatal: estimate.pFatal,
+      pAligned: estimate.pAligned,
+      pDouble: estimate.pDouble,
+    },
+    pFatalUpper95: estimate.pFatalUpper95,
+  });
+  const gate = evaluateEconomicMismatchGate({
+    pairSize,
+    totalCostUsd,
+    pFatalUpper95: estimate.pFatalUpper95,
+  });
+  return {
+    ...estimate,
+    expectedPnlUsd: pnl.expectedPnlUsd,
+    conservativePnlUsd: pnl.conservativePnlUsd,
+    fatalPnlUsd: pnl.fatalPnlUsd,
+    breakEvenFatalProbability: gate.pBreakEven,
+    maximumAllowedFatalProbability: gate.maximumAllowedFatalProbability,
+  };
+}
+
+async function recheckMismatchRiskForExecution(input: {
+  opportunity: LiveOpportunity;
+  intent?: OrderIntent | null;
+  slot: MarketSlot;
+  settings: StrategyConfig;
+  openIntents: OrderIntent[];
+  venueExposureUsd: Record<Venue, number>;
+  now: number;
+}): Promise<
+  | { allowed: true; opportunity: LiveOpportunity }
+  | { allowed: false; reason: string; estimate: MismatchRiskEstimate | null }
+> {
+  let config: GlobalRiskConfig;
+  try {
+    config = await getCachedGlobalRiskConfig(
+      input.now,
+      input.settings.mismatchRiskMode === "enforce",
+    );
+  } catch (error) {
+    return {
+      allowed: false,
+      reason: `Global risk configuration unavailable: ${toErrorMessage(error)}`,
+      estimate: null,
+    };
+  }
+  const [{ polymarket, kalshi }, balances] = await Promise.all([
+    marketDataSupervisor.readSlotState(input.slot, input.now),
+    readCachedVenueBalances(input.now),
+  ]);
+  const candidateOpportunity = input.intent
+    ? buildWorstFillRiskOpportunity({
+        opportunity: input.opportunity,
+        intent: input.intent,
+        polymarket: polymarket.quote,
+        kalshi: kalshi.quote,
+        settings: input.settings,
+      })
+    : input.opportunity;
+  if (!candidateOpportunity) {
+    return {
+      allowed: false,
+      reason: "Worst-fill execution economics unavailable",
+      estimate: null,
+    };
+  }
+  if (!input.settings.shadowMode) {
+    const deterministicIssue = validateWorstFillExecutionCaps({
+      opportunity: candidateOpportunity,
+      intent: input.intent ?? null,
+      settings: input.settings,
+      balances,
+      openIntents: input.openIntents,
+      venueExposureUsd: input.venueExposureUsd,
+      balanceMaxAgeMs: config.balanceMaxAgeMs,
+      now: input.now,
+    });
+    if (deterministicIssue) {
+      return {
+        allowed: false,
+        reason: deterministicIssue,
+        estimate: null,
+      };
+    }
+  }
+  if (input.settings.mismatchRiskMode === "shadow") {
+    return {
+      allowed: true,
+      opportunity: applyHedgeRecoveryReserveToOpportunity(
+        candidateOpportunity,
+        input.intent ?? null,
+        input.settings,
+      ),
+    };
+  }
+  const riskBoundedOpportunity = applyHedgeRecoveryReserveToOpportunity(
+    candidateOpportunity,
+    input.intent ?? null,
+    input.settings,
+  );
+  const pairSize = Math.min(candidateOpportunity.legs[0].size, candidateOpportunity.legs[1].size);
+  const totalCostUsd = candidateOpportunity.legs.reduce(
+    (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+    0,
+  );
+  const estimate = mismatchRiskRuntime.estimate({
+    asset: input.slot.asset,
+    polymarket: polymarket.quote,
+    kalshi: kalshi.quote,
+    now: input.now,
+    maxSourceAgeMs: config.oracleMaxAgeMs,
+    combination: candidateOpportunity.combination,
+    slotStartTs: input.slot.startTs,
+    slotEndTs: input.slot.endTs,
+    pairSize,
+    totalCostUsd,
+  });
+
+  const policy = applyMismatchRiskPolicy({
+    opportunity: riskBoundedOpportunity,
+    estimate,
+    mode: input.settings.mismatchRiskMode,
+    slotEndTs: input.slot.endTs,
+    openIntents: input.openIntents,
+    capitalUsd: deriveRiskCapitalUsd(balances, input.now, config),
+    globalRiskConfig: config,
+    candidateIntentId: input.intent?.id ?? null,
+  });
+  if (!policy.allowed) {
+    return {
+      allowed: false,
+      reason: policy.blockingReasons.map((reason) => reason.message).join(" | "),
+      estimate,
+    };
+  }
+
+  return {
+    allowed: true,
+    opportunity: policy.opportunity,
+  };
+}
+
+export function validateWorstFillExecutionCaps(input: {
+  opportunity: LiveOpportunity;
+  intent: OrderIntent | null;
+  settings: Pick<
+    StrategyConfig,
+    | "grossEntryThreshold"
+    | "executionPriceBuffer"
+    | "maxPairNotionalUsd"
+    | "maxLegCapitalShare"
+    | "maxLegPrice"
+    | "minProjectedNetProfitUsd"
+    | "minProjectedNetReturn"
+    | "minWorstCaseProfitUsd"
+    | "maxVenueExposureUsd"
+    | "hedgeRescueEnabled"
+    | "hedgeRescueMaxLossUsd"
+    | "forcedUnwindMaxLossUsd"
+  >;
+  balances: VenueBalance[];
+  openIntents: OrderIntent[];
+  venueExposureUsd: Record<Venue, number>;
+  balanceMaxAgeMs: number;
+  now: number;
+}) {
+  const allowedGrossCost = input.settings.grossEntryThreshold + input.settings.executionPriceBuffer;
+  const grossCost = input.opportunity.grossCost;
+  if (
+    grossCost === null ||
+    !Number.isFinite(grossCost) ||
+    grossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE
+  ) {
+    return `Worst-fill gross cost ${grossCost?.toFixed(4) ?? "n/a"} exceeds ${allowedGrossCost.toFixed(4)}`;
+  }
+
+  const venueCosts: Record<Venue, number> = { polymarket: 0, kalshi: 0 };
+  let pairSize = Number.POSITIVE_INFINITY;
+  for (const leg of input.opportunity.legs) {
+    if (leg.price === null || !Number.isFinite(leg.price) || leg.price <= 0) {
+      return `Worst-fill ${leg.venue} ${leg.outcome} order price is unavailable`;
+    }
+    if (leg.price > input.settings.maxLegPrice + ORDER_SIZE_TOLERANCE) {
+      return `Worst-fill ${leg.venue} ${leg.outcome} price ${leg.price.toFixed(4)} exceeds max leg price ${input.settings.maxLegPrice.toFixed(4)}`;
+    }
+    const legCostUsd = leg.targetNotionalUsd + leg.feeEstimateUsd;
+    if (!Number.isFinite(legCostUsd) || legCostUsd <= 0) {
+      return `Worst-fill ${leg.venue} ${leg.outcome} cost is invalid`;
+    }
+    venueCosts[leg.venue] += legCostUsd;
+    pairSize = Math.min(pairSize, leg.size);
+  }
+
+  const totalCostUsd = venueCosts.polymarket + venueCosts.kalshi;
+  if (totalCostUsd > input.settings.maxPairNotionalUsd + ORDER_SIZE_TOLERANCE) {
+    return `Worst-fill pair cost ${totalCostUsd.toFixed(4)} exceeds pair budget ${input.settings.maxPairNotionalUsd.toFixed(4)}`;
+  }
+  const maxLegCostUsd = input.settings.maxPairNotionalUsd * input.settings.maxLegCapitalShare;
+  for (const venue of ["polymarket", "kalshi"] as const) {
+    if (venueCosts[venue] > maxLegCostUsd + ORDER_SIZE_TOLERANCE) {
+      return `Worst-fill ${venue} cost ${venueCosts[venue].toFixed(4)} exceeds leg budget ${maxLegCostUsd.toFixed(4)}`;
+    }
+  }
+
+  const projectedNetProfitUsd = pairSize - totalCostUsd;
+  const projectedNetReturn = totalCostUsd > 0 ? projectedNetProfitUsd / totalCostUsd : null;
+  if (
+    !doesSizingMeetProfitThresholds(
+      projectedNetProfitUsd,
+      projectedNetReturn,
+      input.settings,
+    )
+  ) {
+    return `Worst-fill aligned economics fail configured profit thresholds (profit=${projectedNetProfitUsd.toFixed(4)}, return=${projectedNetReturn?.toFixed(6) ?? "n/a"})`;
+  }
+
+  const candidateIntentId = input.intent?.id ?? null;
+  const effectiveBalances = applyVenueBalanceReservations(
+    input.balances,
+    input.openIntents.filter((intent) => intent.id !== candidateIntentId),
+  );
+  const hedgeRecoveryReserveUsd = calculateHedgeRecoveryReserveUsd({
+    pairSize,
+    standardWorstFillCostUsd: totalCostUsd,
+    intent: input.intent,
+    settings: input.settings,
+  });
+  for (const venue of ["polymarket", "kalshi"] as const) {
+    const reserveUsd = venue === input.intent?.hedgeVenue ? hedgeRecoveryReserveUsd : 0;
+    const requiredUsd = venueCosts[venue] + reserveUsd;
+    const balance = effectiveBalances.find((candidate) => candidate.venue === venue);
+    if (
+      !balance ||
+      balance.status !== "ready" ||
+      input.now - balance.capturedAt > input.balanceMaxAgeMs
+    ) {
+      return `Fresh ready balance unavailable for ${venue}`;
+    }
+    if (requiredUsd > balance.availableBalanceUsd + ORDER_SIZE_TOLERANCE) {
+      return `Worst-fill ${venue} requirement ${requiredUsd.toFixed(4)} exceeds available balance ${balance.availableBalanceUsd.toFixed(4)}`;
+    }
+    if (
+      input.venueExposureUsd[venue] + requiredUsd >
+      input.settings.maxVenueExposureUsd + ORDER_SIZE_TOLERANCE
+    ) {
+      return `Worst-fill ${venue} exposure ${(input.venueExposureUsd[venue] + requiredUsd).toFixed(4)} exceeds venue limit ${input.settings.maxVenueExposureUsd.toFixed(4)}`;
+    }
+  }
+
+  return null;
+}
+
+function calculateHedgeRecoveryReserveUsd(input: {
+  pairSize: number;
+  standardWorstFillCostUsd: number;
+  intent: OrderIntent | null;
+  settings: Pick<
+    StrategyConfig,
+    "hedgeRescueEnabled" | "hedgeRescueMaxLossUsd" | "forcedUnwindMaxLossUsd"
+  >;
+}) {
+  if (
+    !input.settings.hedgeRescueEnabled ||
+    input.intent?.hedgeVenue !== "polymarket" ||
+    input.pairSize <= 0
+  ) {
+    return 0;
+  }
+  const effectiveLossCapUsd = Math.min(
+    input.settings.hedgeRescueMaxLossUsd,
+    input.settings.forcedUnwindMaxLossUsd > 0
+      ? input.settings.forcedUnwindMaxLossUsd
+      : input.settings.hedgeRescueMaxLossUsd,
+  );
+  const rescueTotalCostCapUsd = input.pairSize + effectiveLossCapUsd;
+  return round4(Math.max(0, rescueTotalCostCapUsd - input.standardWorstFillCostUsd));
+}
+
+function applyHedgeRecoveryReserveToOpportunity(
+  opportunity: LiveOpportunity,
+  intent: OrderIntent | null,
+  settings: Pick<
+    StrategyConfig,
+    "hedgeRescueEnabled" | "hedgeRescueMaxLossUsd" | "forcedUnwindMaxLossUsd"
+  >,
+): LiveOpportunity {
+  const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
+  const standardWorstFillCostUsd = opportunity.legs.reduce(
+    (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+    0,
+  );
+  const reserveUsd = calculateHedgeRecoveryReserveUsd({
+    pairSize,
+    standardWorstFillCostUsd,
+    intent,
+    settings,
+  });
+  if (reserveUsd <= 0) {
+    return opportunity;
+  }
+  return {
+    ...opportunity,
+    fatalMismatchPnlUsd: round4(-(standardWorstFillCostUsd + reserveUsd)),
+    conservativeExpectedPnlUsd:
+      opportunity.conservativeExpectedPnlUsd === null ||
+      opportunity.conservativeExpectedPnlUsd === undefined
+        ? null
+        : round4(opportunity.conservativeExpectedPnlUsd - reserveUsd),
+  };
+}
+
+function buildWorstFillRiskOpportunity(input: {
+  opportunity: LiveOpportunity;
+  intent: OrderIntent;
+  polymarket: OpportunitySnapshot["polymarket"];
+  kalshi: OpportunitySnapshot["kalshi"];
+  settings: StrategyConfig;
+  reserveHedgeRetryBuffer?: boolean;
+}): LiveOpportunity | null {
+  const maximumHedgeSlippageBps = Math.max(
+    input.intent.maxSlippageBps,
+    input.settings.maxSlippageBps,
+    input.settings.adaptiveSlippageTightBps,
+    input.settings.adaptiveSlippageDefaultBps,
+    input.settings.adaptiveSlippageThinBps,
+  );
+  const riskLegs = input.intent.legs.map((leg) => {
+    const isPrimary = leg.venue === input.intent.primaryVenue;
+    const riskLeg =
+      input.reserveHedgeRetryBuffer !== false &&
+      !isPrimary &&
+      leg.side === "BUY" &&
+      leg.requestedPrice !== null
+      ? {
+          ...leg,
+          requestedPrice: Math.min(0.99, leg.requestedPrice + input.settings.executionPriceBuffer),
+          requestedNotionalUsd: round4(
+            leg.requestedSize * Math.min(0.99, leg.requestedPrice + input.settings.executionPriceBuffer),
+          ),
+        }
+      : leg;
+    const request = buildVenueOrderRequest(
+      riskLeg,
+      isPrimary ? input.intent.maxSlippageBps : maximumHedgeSlippageBps,
+      isPrimary ? primaryImmediateOrderType(riskLeg.venue) : immediatePartialOrderType(riskLeg.venue),
+      false,
+      {
+        kalshiPriceTicksSlippage:
+          isPrimary && riskLeg.venue === "kalshi"
+            ? input.settings.kalshiPrimaryPriceTicksSlippage
+            : undefined,
+      },
+    );
+    if (request.price === null || request.price <= 0 || request.size <= 0) {
+      return null;
+    }
+    const quote = leg.venue === "polymarket"
+      ? quoteMultiLevelBuyLeg({
+          venue: "polymarket",
+          levels: [{ price: request.price, size: request.size }],
+          size: request.size,
+          feeRateBps:
+            input.polymarket.outcomes[leg.outcome === "UP" ? "up" : "down"].feeRateBps ??
+            input.polymarket.feeRateBps,
+          feeRate: input.polymarket.feeRate ?? undefined,
+          feeExponent: input.polymarket.feeExponent ?? undefined,
+        })
+      : quoteMultiLevelBuyLeg({
+          venue: "kalshi",
+          levels: [{ price: request.price, size: request.size }],
+          size: request.size,
+          feeMultiplier: input.kalshi.feeMultiplier,
+        });
+    if (!quote) {
+      return null;
+    }
+    const sourceLeg = input.opportunity.legs.find(
+      (candidate) => candidate.venue === leg.venue && candidate.outcome === leg.outcome,
+    );
+    return {
+      ...(sourceLeg ?? {
+        venue: leg.venue,
+        outcome: leg.outcome,
+        marketRef: leg.marketRef,
+        tokenId: leg.tokenId,
+        depth: null,
+        tickSize: null,
+        minOrderSize: null,
+      }),
+      price: request.price,
+      size: request.size,
+      targetNotionalUsd: quote.worstFillNotionalUsd,
+      feeEstimateUsd: quote.worstFillFeeUsd,
+    };
+  });
+  if (riskLegs.some((leg) => leg === null)) {
+    return null;
+  }
+  const legs = riskLegs as LiveOpportunity["legs"];
+  const pairSize = Math.min(legs[0].size, legs[1].size);
+  const worstFillCostUsd = legs.reduce(
+    (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+    0,
+  );
+  const projectedNetProfitUsd = round4(pairSize - worstFillCostUsd);
+  const conservativeExpectedPnlUsd =
+    input.intent.mismatchPFatalUpper === null || input.intent.mismatchPFatalUpper === undefined
+      ? projectedNetProfitUsd
+      : round4(
+          pairSize * (1 - input.intent.mismatchPFatalUpper) - worstFillCostUsd,
+        );
+  return {
+    ...input.opportunity,
+    grossCost: round4(legs.reduce((sum, leg) => sum + (leg.price ?? 0), 0)),
+    worstCaseProfitUsd: projectedNetProfitUsd,
+    fatalMismatchPnlUsd: round4(-worstFillCostUsd),
+    conservativeExpectedPnlUsd,
+    estimatedFeesUsd: round4(legs.reduce((sum, leg) => sum + leg.feeEstimateUsd, 0)),
+    projectedNetProfitUsd,
+    projectedNetReturn: worstFillCostUsd > 0
+      ? round4(projectedNetProfitUsd / worstFillCostUsd)
+      : null,
+    legs,
+  };
+}
+
+function applyWorstFillEconomicsToIntent(
+  intent: OrderIntent,
+  opportunity: LiveOpportunity,
+  now: number,
+): OrderIntent {
+  const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
+  const fatalLossExposureUsd = Math.max(0, -(opportunity.fatalMismatchPnlUsd ?? 0));
+  const conservativeExpectedPnlUsd =
+    intent.mismatchPFatalUpper === null || intent.mismatchPFatalUpper === undefined
+      ? opportunity.conservativeExpectedPnlUsd ?? null
+      : round4(pairSize * (1 - intent.mismatchPFatalUpper) - fatalLossExposureUsd);
+  return {
+    ...intent,
+    grossCost: opportunity.grossCost ?? intent.grossCost,
+    targetNotionalUsd: round4(
+      intent.legs.reduce((sum, leg) => sum + leg.requestedNotionalUsd, 0),
+    ),
+    projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
+    fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
+    conservativeExpectedPnlUsd,
+    fatalLossExposureUsd,
+    legs: applyOpportunityRiskReservationsToLegs(intent, opportunity),
+    updatedAt: now,
+  };
+}
+
+function applyOpportunityRiskReservationsToLegs(
+  intent: OrderIntent,
+  opportunity: LiveOpportunity,
+): OrderIntent["legs"] {
+  const standardWorstFillCostUsd = opportunity.legs.reduce(
+    (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+    0,
+  );
+  const fatalLossExposureUsd = Math.max(
+    standardWorstFillCostUsd,
+    Math.max(0, -(opportunity.fatalMismatchPnlUsd ?? 0)),
+  );
+  const recoveryReserveUsd = Math.max(
+    0,
+    fatalLossExposureUsd - standardWorstFillCostUsd,
+  );
+
+  return intent.legs.map((leg) => {
+    const opportunityLeg = opportunity.legs.find(
+      (candidate) =>
+        candidate.venue === leg.venue && candidate.outcome === leg.outcome,
+    );
+    const worstFillCostUsd = opportunityLeg
+      ? opportunityLeg.targetNotionalUsd + opportunityLeg.feeEstimateUsd
+      : leg.requestedNotionalUsd + Math.max(0, leg.feeUsd);
+    return {
+      ...leg,
+      worstFillCostUsd: round4(Math.max(0, worstFillCostUsd)),
+      recoveryReserveUsd:
+        leg.venue === intent.hedgeVenue ? round4(recoveryReserveUsd) : 0,
+    };
+  }) as OrderIntent["legs"];
+}
+
+function applyConservativeHedgeRiskFallback(
+  intent: OrderIntent,
+  settings: Pick<
+    StrategyConfig,
+    "hedgeRescueEnabled" | "hedgeRescueMaxLossUsd" | "forcedUnwindMaxLossUsd"
+  >,
+  now: number,
+) {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const pairSize = Math.max(
+    0,
+    primaryLeg?.filledSize ?? 0,
+    Math.min(intent.legs[0].requestedSize, intent.legs[1].requestedSize),
+  );
+  const limitLossUsd = intent.legs.reduce((sum, leg) => {
+    const filledCostUsd =
+      leg.filledSize > 0 && leg.filledPrice !== null
+        ? leg.filledSize * leg.filledPrice + Math.max(0, leg.feeUsd)
+        : 0;
+    const remainingSize = Math.max(0, leg.requestedSize - leg.filledSize);
+    const remainingCostUsd =
+      remainingSize *
+      (0.99 + CONSERVATIVE_REMAINING_BUY_FEE_USD_PER_UNIT);
+    return sum + filledCostUsd + remainingCostUsd;
+  }, 0);
+  const recoveryReserveUsd = calculateHedgeRecoveryReserveUsd({
+    pairSize,
+    standardWorstFillCostUsd: limitLossUsd,
+    intent,
+    settings,
+  });
+  const fatalLossExposureUsd = round4(Math.max(
+    intent.fatalLossExposureUsd ?? 0,
+    limitLossUsd + recoveryReserveUsd,
+  ));
+  const riskLegs = intent.legs.map((leg) => {
+    const filledCostUsd =
+      leg.filledSize > 0 && leg.filledPrice !== null
+        ? leg.filledSize * leg.filledPrice + Math.max(0, leg.feeUsd)
+        : 0;
+    const remainingSize = Math.max(0, leg.requestedSize - leg.filledSize);
+    const worstFillCostUsd =
+      filledCostUsd +
+      remainingSize *
+        (0.99 + CONSERVATIVE_REMAINING_BUY_FEE_USD_PER_UNIT);
+    return {
+      ...leg,
+      worstFillCostUsd: round4(
+        Math.max(leg.worstFillCostUsd ?? 0, worstFillCostUsd),
+      ),
+      recoveryReserveUsd:
+        leg.venue === intent.hedgeVenue
+          ? round4(Math.max(leg.recoveryReserveUsd ?? 0, recoveryReserveUsd))
+          : 0,
+    };
+  }) as OrderIntent["legs"];
+  return {
+    ...intent,
+    fatalMismatchPnlUsd: -fatalLossExposureUsd,
+    fatalLossExposureUsd,
+    conservativeExpectedPnlUsd:
+      intent.mismatchPFatalUpper === null || intent.mismatchPFatalUpper === undefined
+        ? -fatalLossExposureUsd
+        : round4(pairSize * (1 - intent.mismatchPFatalUpper) - fatalLossExposureUsd),
+    legs: riskLegs,
+    updatedAt: now,
+  };
+}
+
+function applyRiskCheckedOpportunityToIntent(
+  intent: OrderIntent,
+  opportunity: LiveOpportunity,
+  now: number,
+): OrderIntent {
+  const estimate = opportunity.mismatchRiskEstimate;
+  return {
+    ...intent,
+    mismatchPFatal: estimate ? estimate.pFatal : intent.mismatchPFatal ?? null,
+    mismatchPFatalUpper: estimate ? estimate.pFatalUpper95 : intent.mismatchPFatalUpper ?? null,
+    mismatchModelVersion: estimate ? estimate.modelVersion : intent.mismatchModelVersion ?? null,
+    fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
+    conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
+    fatalLossExposureUsd: opportunity.fatalMismatchPnlUsd === null || opportunity.fatalMismatchPnlUsd === undefined
+      ? null
+      : round4(Math.max(0, -opportunity.fatalMismatchPnlUsd)),
+    legs: applyOpportunityRiskReservationsToLegs(intent, opportunity),
+    updatedAt: now,
+  };
+}
+
+function buildRiskOpportunityTemplateFromIntent(
+  intent: OrderIntent,
+  settings: StrategyConfig,
+): LiveOpportunity {
+  const legs = intent.legs.map((leg) => ({
+    venue: leg.venue,
+    outcome: leg.outcome,
+    marketRef: leg.marketRef,
+    tokenId: leg.tokenId,
+    price: leg.requestedPrice,
+    depth: null,
+    targetNotionalUsd: leg.requestedNotionalUsd,
+    size: leg.requestedSize,
+    tickSize: null,
+    minOrderSize: null,
+    feeEstimateUsd: leg.feeUsd,
+  })) as LiveOpportunity["legs"];
+  return {
+    asset: intent.asset,
+    id: intent.id,
+    slotKey: intent.slotKey,
+    capturedAt: intent.updatedAt,
+    combination: intent.combination,
+    label: intent.combination,
+    grossCost: intent.grossCost,
+    threshold: settings.grossEntryThreshold,
+    thresholdMet: intent.grossCost <= settings.grossEntryThreshold,
+    worstCaseProfitUsd: intent.projectedNetProfitUsd,
+    fatalMismatchPnlUsd: intent.fatalMismatchPnlUsd ?? null,
+    conservativeExpectedPnlUsd: intent.conservativeExpectedPnlUsd ?? null,
+    mismatchRiskEstimate: null,
+    eligible: true,
+    primaryVenue: intent.primaryVenue,
+    primarySelection: null,
+    improvementFromLastEntry: null,
+    estimatedFeesUsd: round4(intent.legs.reduce((sum, leg) => sum + leg.feeUsd, 0)),
+    projectedNetProfitUsd: intent.projectedNetProfitUsd,
+    projectedNetReturn: null,
+    reasons: [],
+    legs,
+    mismatchGuardAction: "allow",
+    mismatchSizeMultiplier: 1,
+    referencePayoutCount: null,
+    deadZoneDistanceBps: null,
+    deadZoneWidthBps: null,
+    mismatchRisk: null,
+    venueDisagreementPct: null,
+    secondsElapsedInSlot: null,
+    chainlinkMoveBps: null,
+    openDriftBps: null,
+    chainlinkLivePriceUsd: null,
+    observedSlotOpenPriceUsd: null,
+    kalshiTargetPriceUsd: null,
+  };
+}
+
 export function createExecutionCoordinator(
   asset: MarketAsset,
   settings: StrategyConfig,
@@ -762,8 +1624,8 @@ export function createExecutionCoordinator(
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
       const polymarket = polymarketState.quote;
       const kalshi = kalshiState.quote;
-
-      const opportunities = buildSignals({
+      const lastEntryCosts = sharedContext.lastEntryCosts ?? (await readLastEntryCosts(slot.asset, slot.key));
+      const signalInput = {
         slotKey: slot.key,
         now,
         slotStartTs: slot.startTs,
@@ -771,8 +1633,60 @@ export function createExecutionCoordinator(
         kalshi,
         settings,
         balances: effectiveBalances,
-        lastEntryCosts: sharedContext.lastEntryCosts ?? (await readLastEntryCosts(slot.asset, slot.key)),
+        lastEntryCosts,
         secondsRemaining: slot.secondsRemaining,
+      };
+      const baseOpportunities = buildSignals({
+        ...signalInput,
+        settings: getMismatchEstimationSettings(settings),
+      });
+      const globalRiskConfig = await getCachedGlobalRiskConfig(now);
+      const mismatchRiskEstimates = estimateMismatchRiskByCombination({
+        asset: slot.asset,
+        slotStartTs: slot.startTs,
+        slotEndTs: slot.endTs,
+        now,
+        polymarket,
+        kalshi,
+        opportunities: baseOpportunities,
+        oracleMaxAgeMs: globalRiskConfig.oracleMaxAgeMs,
+      });
+      const clusterBudget = settings.mismatchRiskMode === "enforce"
+        ? buildMismatchClusterBudget({
+            slotEndTs: slot.endTs,
+            now,
+            balances,
+            openIntents,
+            config: globalRiskConfig,
+          })
+        : null;
+      const riskSizedOpportunities = buildSignals({
+        ...signalInput,
+        mismatchRiskEstimates,
+        riskBudget: clusterBudget
+          ? {
+              remainingExpectedFatalLossUsd: clusterBudget.remainingExpectedLossUsd,
+              remainingAbsoluteFatalLossUsd: clusterBudget.remainingAbsoluteLossUsd,
+            }
+          : null,
+      });
+      const opportunities = riskSizedOpportunities.map((opportunity) => {
+        const estimate = rescaleMismatchEstimate(
+          opportunity,
+          mismatchRiskEstimates[opportunity.combination] ?? null,
+        );
+        if (!estimate) {
+          return opportunity;
+        }
+        return applyMismatchRiskPolicy({
+          opportunity,
+          estimate,
+          mode: settings.mismatchRiskMode,
+          slotEndTs: slot.endTs,
+          openIntents,
+          capitalUsd: deriveRiskCapitalUsd(balances, now, globalRiskConfig),
+          globalRiskConfig,
+        }).opportunity;
       });
 
       if (options.persistSnapshot !== false) {
@@ -787,6 +1701,17 @@ export function createExecutionCoordinator(
           opportunities,
         });
       }
+
+      scheduleOracleObservation({
+        asset: slot.asset,
+        slotKey: slot.key,
+        slotStartTs: slot.startTs,
+        slotEndTs: slot.endTs,
+        capturedAt: now,
+        polymarket,
+        kalshi,
+        opportunities,
+      });
 
       await syncFeedCircuitBreaker(slot, [polymarket.feedHealth, kalshi.feedHealth], now);
 
@@ -927,25 +1852,53 @@ export function createExecutionCoordinator(
             });
             continue;
           }
-          const intent = preparedIntent.intent;
-
-          if (wouldExceedVenueExposure(intent, exposureUsd, settings.maxVenueExposureUsd)) {
+          const mismatchRecheckAt = Date.now();
+          const mismatchRecheck = await recheckMismatchRiskForExecution({
+            opportunity,
+            intent: preparedIntent.intent,
+            slot,
+            settings,
+            openIntents: currentOpenIntents,
+            venueExposureUsd: exposureUsd,
+            now: mismatchRecheckAt,
+          });
+          if (!mismatchRecheck.allowed) {
             await writeRunEvent({
+              asset: slot.asset,
               level: "warn",
-              eventType: "intent.skipped.exposure_limit",
-              message: `Intent ${intent.id} exceeds venue exposure limit`,
+              eventType: "intent.skipped.mismatch_risk_recheck",
+              message: `Prepared opportunity ${opportunity.combination} rejected by execution-time mismatch risk check`,
               payload: {
-                slotKey: intent.slotKey,
-                limitUsd: settings.maxVenueExposureUsd,
-                exposureUsd,
+                slotKey: slot.key,
+                combination: opportunity.combination,
+                reason: mismatchRecheck.reason,
+                estimate: mismatchRecheck.estimate,
               },
-              createdAt: now,
+              createdAt: mismatchRecheckAt,
             });
             continue;
           }
+          const executionOpportunity = mismatchRecheck.opportunity;
+          const intent = applyRiskCheckedOpportunityToIntent(
+            preparedIntent.intent,
+            executionOpportunity,
+            mismatchRecheckAt,
+          );
 
-          for (const leg of intent.legs) {
-            exposureUsd[leg.venue] += leg.requestedNotionalUsd;
+          for (const leg of executionOpportunity.legs) {
+            exposureUsd[leg.venue] += leg.targetNotionalUsd + leg.feeEstimateUsd;
+          }
+          const standardWorstFillCostUsd = executionOpportunity.legs.reduce(
+            (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
+            0,
+          );
+          const recoveryReserveUsd = Math.max(
+            0,
+            -(executionOpportunity.fatalMismatchPnlUsd ?? -standardWorstFillCostUsd) -
+              standardWorstFillCostUsd,
+          );
+          if (recoveryReserveUsd > 0) {
+            exposureUsd[intent.hedgeVenue] += recoveryReserveUsd;
           }
 
           await writeOrderIntent(intent);
@@ -956,7 +1909,7 @@ export function createExecutionCoordinator(
             payload: {
               slotKey: intent.slotKey,
               primaryVenue: intent.primaryVenue,
-              primarySelection: opportunity.primarySelection ?? null,
+              primarySelection: executionOpportunity.primarySelection ?? null,
             },
             createdAt: now,
           });
@@ -1059,6 +2012,14 @@ export function createExecutionCoordinator(
         );
 
         reconcileErrors.push(
+          ...(await runReconcileStep("reconcile_observed_slot_resolutions", now, async () => {
+            if (asset === "btc") {
+              await reconcileObservedSlotResolutions(now);
+            }
+          })),
+        );
+
+        reconcileErrors.push(
           ...(await runReconcileStep("backfill_unwound_pnl", now, async () => {
             await backfillUnwoundIntentPnl(asset, now);
           })),
@@ -1112,6 +2073,131 @@ export function createExecutionCoordinator(
       }
     },
   };
+}
+
+export function getMismatchEstimationSettings(
+  settings: StrategyConfig,
+): StrategyConfig {
+  return settings.mismatchRiskMode === "enforce"
+    ? { ...settings, mismatchRiskMode: "shadow" }
+    : settings;
+}
+
+async function persistOracleObservation(snapshot: OpportunitySnapshot) {
+  const resolutionKey = `${snapshot.asset}:${snapshot.slotKey}`;
+  const polymarketSlug = snapshot.polymarket.ref.slug ?? buildPolymarketSlotSlug(snapshot.asset, snapshot.slotStartTs);
+  const polymarketMarketRef = snapshot.polymarket.ref.conditionId ?? snapshot.polymarket.ref.id ?? null;
+  const kalshiMarketRef = snapshot.kalshi.slotAligned ? snapshot.kalshi.ref.id || null : null;
+  const resolutionSignature = JSON.stringify({
+    polymarketSlug,
+    polymarketMarketRef,
+    kalshiMarketRef,
+    polymarketResolution: snapshot.polymarket.resolution,
+    kalshiResolution: snapshot.kalshi.resolution,
+  });
+  if (observedResolutionSlots.get(resolutionKey) !== resolutionSignature) {
+    try {
+      await writeSlotResolution({
+        asset: snapshot.asset,
+        slotKey: snapshot.slotKey,
+        slotStartTs: snapshot.slotStartTs,
+        slotEndTs: snapshot.slotEndTs,
+        polymarketSlug,
+        polymarketMarketRef,
+        kalshiMarketRef,
+        polymarketResolution: snapshot.polymarket.resolution,
+        kalshiResolution: snapshot.kalshi.resolution,
+        polymarketSettlementValueUsd: null,
+        kalshiSettlementValueUsd: null,
+        firstObservedAt: snapshot.capturedAt,
+        updatedAt: snapshot.capturedAt,
+        resolvedAt: null,
+        source: "market-data-observation",
+        raw: {},
+      });
+      observedResolutionSlots.set(resolutionKey, resolutionSignature);
+    } catch (error) {
+      console.warn(`[oracle] failed to register slot ${resolutionKey}: ${toErrorMessage(error)}`);
+    }
+  }
+
+  const hotOpportunity = snapshot.opportunities.some(
+    (opportunity) => opportunity.grossCost !== null && opportunity.grossCost <= opportunity.threshold,
+  );
+  const lastCapturedAt = lastOracleSampleAtBySlot.get(resolutionKey) ?? null;
+  if (!shouldPersistOracleSample(lastCapturedAt, snapshot.slotEndTs, snapshot.capturedAt, hotOpportunity)) {
+    return;
+  }
+
+  const cf = snapshot.kalshi.cfBenchmarks ?? null;
+  try {
+    await writeOracleSlotSample({
+      asset: snapshot.asset,
+      slotKey: snapshot.slotKey,
+      slotStartTs: snapshot.slotStartTs,
+      slotEndTs: snapshot.slotEndTs,
+      capturedAt: snapshot.capturedAt,
+      chainlinkStartPriceUsd: snapshot.polymarket.observedSlotOpenPriceUsd,
+      chainlinkStartCapturedAt: snapshot.polymarket.observedSlotOpenCapturedAt,
+      chainlinkLivePriceUsd: snapshot.polymarket.chainlinkLivePriceUsd,
+      chainlinkSourceTs: snapshot.polymarket.chainlinkLivePriceCapturedAt,
+      cfIndexId: cf?.indexId ?? null,
+      cfLivePriceUsd: cf?.liveValueUsd ?? null,
+      cfSourceTs: cf?.sourceTimestampMs ?? null,
+      cfTrailingAverageUsd: cf?.trailing60s.valueUsd ?? null,
+      cfTrailingWindowSize: cf?.trailing60s.windowSize ?? null,
+      cfFinalMinuteAverageUsd: cf?.finalMinuteAverage15m?.valueUsd ?? null,
+      cfFinalMinuteWindowSize: cf?.finalMinuteAverage15m?.windowSize ?? null,
+      kalshiTargetPriceUsd: snapshot.kalshi.targetPriceUsd,
+      modelVersion:
+        snapshot.opportunities.find((opportunity) => opportunity.mismatchRiskEstimate)?.mismatchRiskEstimate
+          ?.modelVersion ?? null,
+      riskByCombination: Object.fromEntries(
+        snapshot.opportunities.map((opportunity) => [
+          opportunity.combination,
+          {
+            model: opportunity.mismatchRiskEstimate ?? null,
+            heuristicRisk: opportunity.mismatchRisk,
+            guardAction: opportunity.mismatchGuardAction,
+            deadZoneDistanceBps: opportunity.deadZoneDistanceBps,
+            venueDisagreementPct: opportunity.venueDisagreementPct,
+          },
+        ]),
+      ),
+      economicsByCombination: Object.fromEntries(
+        snapshot.opportunities.map((opportunity) => [
+          opportunity.combination,
+          {
+            grossCost: opportunity.grossCost,
+            pairSize: Math.min(opportunity.legs[0].size, opportunity.legs[1].size),
+            projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
+            conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
+            fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
+            eligible: opportunity.eligible,
+          },
+        ]),
+      ),
+    });
+    lastOracleSampleAtBySlot.set(resolutionKey, snapshot.capturedAt);
+  } catch (error) {
+    console.warn(`[oracle] failed to persist sample ${resolutionKey}: ${toErrorMessage(error)}`);
+  }
+}
+
+function scheduleOracleObservation(snapshot: OpportunitySnapshot) {
+  if (oraclePersistenceInFlightByAsset[snapshot.asset]) {
+    return;
+  }
+  const pending = persistOracleObservation(snapshot)
+    .catch((error) => {
+      console.warn(`[oracle] asynchronous persistence failed for ${snapshot.slotKey}: ${toErrorMessage(error)}`);
+    })
+    .finally(() => {
+      if (oraclePersistenceInFlightByAsset[snapshot.asset] === pending) {
+        delete oraclePersistenceInFlightByAsset[snapshot.asset];
+      }
+    });
+  oraclePersistenceInFlightByAsset[snapshot.asset] = pending;
 }
 
 export function isOpportunitySnapshotFresh(
@@ -1717,113 +2803,92 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       throw new Error(`Intent ${currentIntent.id} missing legs after entry depth preflight`);
     }
   }
-  const primaryMaxSlippageBps = entryDepthPreflight.maxSlippageBps;
-
-  const primaryClipPlan =
-    currentIntent.primaryVenue === "kalshi"
-      ? deriveKalshiPrimaryFallbackClipPlan(primaryLeg.requestedSize)
-      : deriveKalshiPrimaryClipPlan(
-          primaryLeg.requestedSize,
-          settings.kalshiPrimaryMaxClipContracts,
-          settings.kalshiPrimaryMaxClips,
-          settings.kalshiPrimaryProbeClipContracts,
-        );
-  const useLegacyKalshiMultiClipPrimary = false;
-  if (useLegacyKalshiMultiClipPrimary && currentIntent.primaryVenue === "kalshi" && primaryClipPlan.length > 1) {
-    const multiClipResult = await executeKalshiPrimaryMultiClip(
-      currentIntent,
-      primaryLeg,
-      slot,
-      settings,
-      now,
-      primaryClipPlan,
-    );
-    currentIntent = multiClipResult.intent;
-    if (multiClipResult.outcome === "hedged") {
-      await writeLiveTradeRunEvent(currentIntent, Date.now(), "hedged");
-      return currentIntent;
-    }
-    if (multiClipResult.outcome === "filled") {
-      return executeHedgeLeg(currentIntent, slot, settings, now);
-    }
-    return currentIntent;
-  }
-
-  let executionPrimaryLeg = primaryLeg;
-  let primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, primaryMaxSlippageBps, "IOC", false, {
-    kalshiPriceTicksSlippage: currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
+  const finalRiskCheckAt = Date.now();
+  const [finalOpenIntents, finalPositions] = await Promise.all([
+    readOpenOrderIntents(),
+    readPositions(),
+  ]);
+  const finalRiskCheck = await recheckMismatchRiskForExecution({
+    opportunity: buildRiskOpportunityTemplateFromIntent(currentIntent, settings),
+    intent: currentIntent,
+    slot,
+    settings,
+    openIntents: finalOpenIntents,
+    venueExposureUsd: calculateVenueExposureUsd(
+      finalPositions,
+      finalOpenIntents.filter((candidate) => candidate.id !== currentIntent.id),
+    ),
+    now: finalRiskCheckAt,
   });
-  const primaryRestPreflight =
-    currentIntent.primaryVenue === "kalshi"
-      ? await preflightKalshiPrimaryRestLiquidity(primaryLeg, primaryRequest, settings)
-      : null;
-  if (primaryRestPreflight?.status === "insufficient") {
-    const resizedIntent = await resizeKalshiPrimaryIntentFromRestPreflight(
+  if (!finalRiskCheck.allowed) {
+    currentIntent = markIntentStatus(
       currentIntent,
-      primaryLeg.id,
-      slot,
-      settings,
-      Date.now(),
-      primaryRestPreflight,
+      "skipped",
+      finalRiskCheckAt,
+      `Final mismatch risk check failed: ${finalRiskCheck.reason}`,
     );
-    if (!resizedIntent) {
-      return skipIntentBeforeSubmission(
-        currentIntent,
-        Date.now(),
-        `Primary order skipped before submission (Kalshi REST depth insufficient for ${primaryRequest.size.toFixed(2)} contracts)`,
-        "kalshi_rest_preflight_insufficient_depth",
-        {
-          venue: currentIntent.primaryVenue,
-          orderType: primaryRequest.orderType,
-          restPreflight: primaryRestPreflight,
-        },
-      );
-    }
-
-    currentIntent = resizedIntent;
-    const resizedPrimaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
-    if (!resizedPrimaryLeg) {
-      return skipIntentBeforeSubmission(
-        currentIntent,
-        Date.now(),
-        "Primary order skipped before submission (primary leg missing after REST resize)",
-        "kalshi_rest_preflight_resize_missing_leg",
-        { restPreflight: primaryRestPreflight },
-      );
-    }
-    executionPrimaryLeg = resizedPrimaryLeg;
-    primaryRequest = buildVenueOrderRequest(resizedPrimaryLeg, primaryMaxSlippageBps, "IOC", false, {
-      kalshiPriceTicksSlippage: settings.kalshiPrimaryPriceTicksSlippage,
-    });
+    await writeOrderIntent(currentIntent);
     await writeRunEvent({
-      level: "info",
-      eventType: "order.primary.preflight_resized",
-      message: `Primary Kalshi order resized by REST book preflight for intent ${currentIntent.id}`,
+      asset: currentIntent.asset,
+      level: "warn",
+      eventType: "intent.skipped.final_mismatch_risk_recheck",
+      message: `Intent ${currentIntent.id} rejected after final WS preflight`,
       payload: {
         intentId: currentIntent.id,
         slotKey: currentIntent.slotKey,
-        originalRequestedSize: primaryRestPreflight.requestedSize,
-        resizedRequestedSize: primaryRequest.size,
-        restPreflight: primaryRestPreflight,
+        combination: currentIntent.combination,
+        reason: finalRiskCheck.reason,
+        estimate: finalRiskCheck.estimate,
       },
-      createdAt: Date.now(),
+      createdAt: finalRiskCheckAt,
     });
+    return currentIntent;
   }
-  const hedgePreflight =
-    currentIntent.primaryVenue === "kalshi"
-      ? await preflightPolymarketHedgeLiquidity(currentIntent, settings)
-      : null;
-  if (hedgePreflight?.status === "insufficient" || hedgePreflight?.status === "unavailable") {
+  currentIntent = applyRiskCheckedOpportunityToIntent(
+    currentIntent,
+    finalRiskCheck.opportunity,
+    finalRiskCheckAt,
+  );
+  await writeOrderIntent(currentIntent);
+  primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+  hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    throw new Error(`Intent ${currentIntent.id} missing legs after final mismatch risk check`);
+  }
+  const primaryMaxSlippageBps = entryDepthPreflight.maxSlippageBps;
+
+  const finalEntrySnapshotAt = Date.now();
+  const finalEntryState = await marketDataSupervisor.readSlotState(
+    slot,
+    finalEntrySnapshotAt,
+  );
+  const finalEntryIssue = validateFinalWsEntryDepthCoverage(
+    slot,
+    primaryLeg,
+    hedgeLeg,
+    finalEntryState.polymarket.quote,
+    finalEntryState.kalshi.quote,
+    settings,
+    finalEntrySnapshotAt,
+  );
+  if (finalEntryIssue) {
     return skipIntentBeforeSubmission(
       currentIntent,
-      Date.now(),
-      `Primary order skipped before submission (Polymarket hedge preflight ${hedgePreflight.status})`,
-      "polymarket_hedge_preflight_unavailable",
-      { hedgePreflight },
+      finalEntrySnapshotAt,
+      `Final entry snapshot rejected primary submission (${finalEntryIssue})`,
+      "final_ws_depth_recheck",
+      { issue: finalEntryIssue },
     );
   }
+
+  const executionPrimaryLeg = primaryLeg;
+  const primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, primaryMaxSlippageBps, primaryImmediateOrderType(executionPrimaryLeg.venue), false, {
+    kalshiPriceTicksSlippage: currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
+  });
   let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let primaryOrder: LiveOrder;
+  let primaryExecutionTiming: OrderExecutionTiming | null = null;
+  let persistPrimaryConfirmation: (() => Promise<void>) | null = null;
   try {
     const primaryExecution = await submitAndConfirmOrder({
       intent: currentIntent,
@@ -1832,26 +2897,14 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       stage: "primary",
       now,
       timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      deferConfirmedPersistence: true,
     });
     primaryResult = primaryExecution.result;
     primaryOrder = primaryExecution.order;
-    await writeRunEvent({
-      level: "info",
-      eventType: "order.primary.submitted",
-      message: `Primary ${currentIntent.primaryVenue} order ${primaryOrder.venueOrderId}`,
-      payload: {
-        intentId: currentIntent.id,
-        venue: currentIntent.primaryVenue,
-        orderType: primaryRequest.orderType,
-        requestedPrice: executionPrimaryLeg.requestedPrice,
-        orderPrice: primaryRequest.price,
-        requestedSize: primaryRequest.size,
-        restPreflight: primaryRestPreflight,
-        entryDepthPreflight,
-        computedMaxSlippageBps: primaryMaxSlippageBps,
-      },
-      createdAt: now,
-    });
+    primaryExecutionTiming = "timing" in primaryExecution ? primaryExecution.timing : null;
+    persistPrimaryConfirmation = "persistConfirmed" in primaryExecution
+      ? primaryExecution.persistConfirmed
+      : null;
   } catch (error) {
     const recovered = await recoverKalshiOrderSubmissionForIntent(
       currentIntent,
@@ -1861,6 +2914,18 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       "primary",
     );
     if (!recovered) {
+      if (shouldFailClosedOnSubmissionError(executionPrimaryLeg)) {
+        return markIntentManualRequired(
+          currentIntent,
+          Date.now(),
+          "polymarket_primary_submission_truth_unknown",
+          `Polymarket primary may have reached the venue before the submission error (${toErrorMessage(error)})`,
+          {
+            clientOrderId: primaryRequest.clientOrderId,
+            error: toErrorMessage(error),
+          },
+        );
+      }
       currentIntent = markIntentStatus(
         currentIntent,
         "failed",
@@ -1899,11 +2964,36 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
-    currentIntent = updateIntentLeg(currentIntent, executionPrimaryLeg.venue, primaryOrder, "filled", now);
-    currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
-    await writeOrderIntent(currentIntent);
-    await writeLiveTradeRunEvent(currentIntent, now);
-    if (primaryResult.status !== "filled") {
+    const primaryFillObservedAt = Date.now();
+    currentIntent = updateIntentLeg(currentIntent, executionPrimaryLeg.venue, primaryOrder, "filled", primaryFillObservedAt);
+    currentIntent = markIntentStatus(currentIntent, "primary_filled", primaryFillObservedAt);
+    const primaryWasPartial =
+      primaryOrder.filledSize + ORDER_SIZE_TOLERANCE < primaryOrder.requestedSize;
+    let hedgedIntent: OrderIntent;
+    try {
+      hedgedIntent = await executeHedgeLeg(currentIntent, slot, settings, primaryFillObservedAt, primaryExecutionTiming);
+    } finally {
+      await persistPrimaryConfirmation?.();
+      persistPrimaryConfirmation = null;
+    }
+    await writeRunEvent({
+      level: "info",
+      eventType: "order.primary.submitted",
+      message: `Primary ${currentIntent.primaryVenue} order ${primaryOrder.venueOrderId}`,
+      payload: {
+        intentId: currentIntent.id,
+        venue: currentIntent.primaryVenue,
+        orderType: primaryRequest.orderType,
+        requestedPrice: executionPrimaryLeg.requestedPrice,
+        orderPrice: primaryRequest.price,
+        requestedSize: primaryRequest.size,
+        entryDepthPreflight,
+        computedMaxSlippageBps: primaryMaxSlippageBps,
+        executionTiming: buildPairExecutionTiming(primaryExecutionTiming, null),
+      },
+      createdAt: Date.now(),
+    });
+    if (primaryWasPartial) {
       await writeRunEvent({
         level: "warn",
         eventType: "order.primary.partial_filled",
@@ -1917,16 +3007,14 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
           filledSize: primaryOrder.filledSize,
           requestedSize: primaryOrder.requestedSize,
         },
-        createdAt: now,
+        createdAt: Date.now(),
       });
     }
-
-    if (currentIntent.primaryVenue === "polymarket") {
-      currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
-    }
-
-    return executeHedgeLeg(currentIntent, slot, settings, now);
+    return hedgedIntent;
   }
+
+  await persistPrimaryConfirmation?.();
+  persistPrimaryConfirmation = null;
 
   if (isTerminalOrderStatus(primaryResult.status)) {
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
@@ -2858,7 +3946,7 @@ async function executeIncrementalHedgeLeg(
   await writeOrderIntent(currentIntent);
 
   const hedgeMaxSlippageBps = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
-  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, "FOK", false);
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, immediatePartialOrderType(hedgeLeg.venue), false);
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
   try {
@@ -2866,7 +3954,7 @@ async function executeIncrementalHedgeLeg(
       intent: currentIntent,
       leg: hedgeLeg,
       request: hedgeRequest,
-      stage: "incremental_hedge",
+      stage: `incremental_hedge:${clip.clipIndex}`,
       now,
       timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
     });
@@ -2898,6 +3986,24 @@ async function executeIncrementalHedgeLeg(
       "hedge",
     );
     if (!recovered) {
+      if (shouldFailClosedOnSubmissionError(hedgeLeg)) {
+        return {
+          intent: await markIntentManualRequired(
+            currentIntent,
+            Date.now(),
+            "polymarket_incremental_hedge_submission_truth_unknown",
+            `Polymarket incremental hedge may have reached the venue before the submission error (${toErrorMessage(error)})`,
+            {
+              clientOrderId: hedgeRequest.clientOrderId,
+              error: toErrorMessage(error),
+              unhedgedPrimarySize,
+              clipIndex: clip.clipIndex,
+              clipCount: clip.clipCount,
+            },
+          ),
+          outcome: "awaiting_confirmation" as const,
+        };
+      }
       return failIncrementalHedge(
         currentIntent,
         null,
@@ -3337,6 +4443,34 @@ export function shouldHoldPolymarketHedgeFailurePendingTruth(
   return !isAgedPolymarketSoftNoFillSafeToRecover(intent, result, now);
 }
 
+export function shouldHoldHedgeRescueOrderPendingTruth(
+  intent: Pick<OrderIntent, "hedgeVenue" | "status" | "updatedAt">,
+  hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side">,
+  result: Pick<LiveOrder, "filledSize" | "raw" | "status" | "venueOrderId">,
+  now = Date.now(),
+) {
+  return (
+    result.filledSize <= ORDER_SIZE_TOLERANCE &&
+    (
+      !isTerminalOrderStatus(result.status) ||
+      shouldHoldPolymarketHedgeFailurePendingTruth(
+        intent,
+        hedgeLeg,
+        result,
+        now,
+      )
+    )
+  );
+}
+
+export function shouldFailClosedOnSubmissionError(
+  leg: Pick<OrderIntent["legs"][number], "venue">,
+) {
+  // A lost Polymarket HTTP response cannot prove zero exposure because the
+  // signed client id is not available through the venue recovery APIs.
+  return leg.venue === "polymarket";
+}
+
 function hasPolymarketPendingExposureTruth(
   truth:
     | {
@@ -3547,7 +4681,13 @@ async function failIncrementalHedge(
   };
 }
 
-async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
+async function executeHedgeLeg(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  primaryExecutionTiming: OrderExecutionTiming | null = null,
+) {
   const resizedIntent = resizeHedgeLegToFilledPrimary(intent, now);
   const primaryLeg = resizedIntent.legs.find((leg) => leg.venue === resizedIntent.primaryVenue);
   const hedgeLeg = resizedIntent.legs.find((leg) => leg.venue === resizedIntent.hedgeVenue);
@@ -3582,13 +4722,30 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     );
   }
 
+  const polymarketSubmissionBlock = getPolymarketHedgeSubmissionBlock(hedgeLeg);
+  if (polymarketSubmissionBlock) {
+    return markIntentManualRequired(
+      resizedIntent,
+      now,
+      polymarketSubmissionBlock.stage,
+      `Resized Polymarket hedge notional ${polymarketSubmissionBlock.requestedNotionalUsd.toFixed(4)} USD is below the ${polymarketSubmissionBlock.minimumNotionalUsd.toFixed(2)} USD venue minimum`,
+      {
+        hedgeVenue: hedgeLeg.venue,
+        hedgeRequestedSize: hedgeLeg.requestedSize,
+        primaryVenue: primaryLeg.venue,
+        primaryFilledSize: primaryLeg.filledSize,
+        ...polymarketSubmissionBlock,
+      },
+    );
+  }
+
   let currentIntent = markIntentStatus(resizedIntent, "hedging", now);
-  await writeOrderIntent(currentIntent);
 
   const hedgeMaxSlippageBps = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
-  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, "FOK", false);
+  const hedgeRequest = buildVenueOrderRequest(hedgeLeg, hedgeMaxSlippageBps, immediatePartialOrderType(hedgeLeg.venue), false);
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
+  let hedgeExecutionTiming: OrderExecutionTiming | null = null;
   try {
     const hedgeExecution = await submitAndConfirmOrder({
       intent: currentIntent,
@@ -3600,6 +4757,7 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
     });
     hedgeResult = hedgeExecution.result;
     hedgeOrder = hedgeExecution.order;
+    hedgeExecutionTiming = "timing" in hedgeExecution ? hedgeExecution.timing : null;
     await writeRunEvent({
       level: "info",
       eventType: "order.hedge.submitted",
@@ -3620,6 +4778,18 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       "hedge",
     );
     if (!recovered) {
+      if (shouldFailClosedOnSubmissionError(hedgeLeg)) {
+        return markIntentManualRequired(
+          currentIntent,
+          Date.now(),
+          "polymarket_hedge_submission_truth_unknown",
+          `Polymarket hedge may have reached the venue before the submission error (${toErrorMessage(error)})`,
+          {
+            clientOrderId: hedgeRequest.clientOrderId,
+            error: toErrorMessage(error),
+          },
+        );
+      }
       await writeRunEvent({
         level: "error",
         eventType: "order.hedge.submit_failed",
@@ -3652,7 +4822,9 @@ async function executeHedgeLeg(intent: OrderIntent, slot: MarketSlot, settings: 
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
     }
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-    currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_filled", hedgeOrder);
+    currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_filled", hedgeOrder, {
+      executionTiming: buildPairExecutionTiming(primaryExecutionTiming, hedgeExecutionTiming),
+    });
     if (currentIntent.status === "hedged") {
       await writeLiveTradeRunEvent(currentIntent, now, "hedged");
     }
@@ -3908,7 +5080,13 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
     let currentIntent = intent;
     const intentOrders = recentOrders.filter((order) => order.intentId === intent.id);
     const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, primaryLeg, "entry");
-    if (primaryOrderSummary && primaryOrderSummary.filledSize > 0) {
+    if (
+      primaryOrderSummary &&
+      isPrimaryFillSizeHedgable(intent, {
+        filledSize: primaryOrderSummary.filledSize,
+        requestedSize: primaryLeg.requestedSize,
+      })
+    ) {
       currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, primaryOrderSummary, now);
       currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
       await writeOrderIntent(currentIntent);
@@ -4234,13 +5412,134 @@ async function retryLegWithinExecutionBuffer(
   if (!repriced) {
     return null;
   }
-  const { intent: repricedIntent, leg: repricedLeg } = repriced;
-  const retryOrderType: "IOC" | "FOK" = stage === "primary" ? "IOC" : "FOK";
+  let repricedIntent = repriced.intent;
+  let repricedLeg = repriced.leg;
+  if (stage === "primary") {
+    const riskCheckAt = Date.now();
+    const [retryOpenIntents, retryPositions] = await Promise.all([
+      readOpenOrderIntents(),
+      readPositions(),
+    ]);
+    const riskCheck = await recheckMismatchRiskForExecution({
+      opportunity: buildRiskOpportunityTemplateFromIntent(repricedIntent, settings),
+      intent: repricedIntent,
+      slot,
+      settings,
+      openIntents: retryOpenIntents,
+      venueExposureUsd: calculateVenueExposureUsd(
+        retryPositions,
+        retryOpenIntents.filter((candidate) => candidate.id !== repricedIntent.id),
+      ),
+      now: riskCheckAt,
+    });
+    if (!riskCheck.allowed) {
+      await writeRunEvent({
+        asset: intent.asset,
+        level: "warn",
+        eventType: "order.primary.retry_blocked_mismatch_risk",
+        message: `Primary retry blocked after worst-fill mismatch risk recheck for intent ${intent.id}`,
+        payload: {
+          intentId: intent.id,
+          reason: riskCheck.reason,
+          estimate: riskCheck.estimate,
+          retryAttempt,
+        },
+        createdAt: riskCheckAt,
+      });
+      return null;
+    }
+    repricedIntent = applyRiskCheckedOpportunityToIntent(
+      repricedIntent,
+      riskCheck.opportunity,
+      riskCheckAt,
+    );
+    repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
+  } else {
+    const economicsAt = Date.now();
+    const { polymarket, kalshi } = await marketDataSupervisor.readSlotState(slot, economicsAt);
+    const worstFillOpportunity = buildWorstFillRiskOpportunity({
+      opportunity: buildRiskOpportunityTemplateFromIntent(repricedIntent, settings),
+      intent: repricedIntent,
+      polymarket: polymarket.quote,
+      kalshi: kalshi.quote,
+      settings,
+      reserveHedgeRetryBuffer: false,
+    });
+    if (worstFillOpportunity) {
+      repricedIntent = applyWorstFillEconomicsToIntent(
+        repricedIntent,
+        applyHedgeRecoveryReserveToOpportunity(
+          worstFillOpportunity,
+          repricedIntent,
+          settings,
+        ),
+        economicsAt,
+      );
+      repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
+    } else {
+      repricedIntent = applyConservativeHedgeRiskFallback(
+        repricedIntent,
+        settings,
+        economicsAt,
+      );
+      repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
+      await writeRunEvent({
+        asset: intent.asset,
+        level: "error",
+        eventType: "order.hedge.retry_risk_fallback",
+        message: `Hedge retry risk calculation unavailable for intent ${intent.id}; conservative fallback persisted`,
+        payload: {
+          intentId: intent.id,
+          retryAttempt,
+          fatalLossExposureUsd: repricedIntent.fatalLossExposureUsd,
+        },
+        createdAt: economicsAt,
+      });
+    }
+  }
+  const retryOrderType = stage === "primary"
+    ? primaryImmediateOrderType(repricedLeg.venue)
+    : immediatePartialOrderType(repricedLeg.venue);
   const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, retryOrderType, false, {
     kalshiPriceTicksSlippage:
       stage === "primary" && repricedLeg.venue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
   });
   const retryPriceLadderTicks = getRetryPriceLadderTicks(repricedLeg, retryAttempt);
+
+  if (stage === "primary") {
+    const primaryLeg = repricedIntent.legs.find((candidate) => candidate.venue === repricedIntent.primaryVenue);
+    const hedgeLeg = repricedIntent.legs.find((candidate) => candidate.venue === repricedIntent.hedgeVenue);
+    if (!primaryLeg || !hedgeLeg) {
+      return null;
+    }
+    const retrySnapshotAt = Date.now();
+    const { polymarket, kalshi } = await marketDataSupervisor.readSlotState(slot, retrySnapshotAt);
+    const wsSnapshotIssue = validateFinalWsEntryDepthCoverage(
+      slot,
+      primaryLeg,
+      hedgeLeg,
+      polymarket.quote,
+      kalshi.quote,
+      settings,
+      retrySnapshotAt,
+    );
+    if (wsSnapshotIssue) {
+      await writeRunEvent({
+        asset: intent.asset,
+        level: "warn",
+        eventType: "order.primary.retry_blocked_ws_preflight",
+        message: `Primary retry blocked by final WS preflight for intent ${intent.id}`,
+        payload: {
+          intentId: intent.id,
+          slotKey: intent.slotKey,
+          retryAttempt,
+          reason: wsSnapshotIssue,
+        },
+        createdAt: retrySnapshotAt,
+      });
+      return null;
+    }
+  }
 
   if (options?.persistRepricedIntent !== false) {
     await writeOrderIntent(repricedIntent);
@@ -4265,14 +5564,32 @@ async function retryLegWithinExecutionBuffer(
     createdAt: now,
   });
 
-  const retryExecution = await submitAndConfirmOrder({
-    intent: repricedIntent,
-    leg: repricedLeg,
-    request,
-    stage: `${stage}_retry`,
-    now,
-    timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
-  });
+  let retryExecution: Awaited<ReturnType<typeof submitAndConfirmOrder>>;
+  try {
+    retryExecution = await submitAndConfirmOrder({
+      intent: repricedIntent,
+      leg: repricedLeg,
+      request,
+      stage: `${stage}_retry:${retryAttempt}`,
+      now,
+      timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+    });
+  } catch (error) {
+    if (shouldFailClosedOnSubmissionError(repricedLeg)) {
+      await markIntentManualRequired(
+        repricedIntent,
+        Date.now(),
+        `polymarket_${stage}_retry_submission_truth_unknown`,
+        `Polymarket ${stage} retry may have reached the venue before the submission error (${toErrorMessage(error)})`,
+        {
+          retryAttempt,
+          clientOrderId: request.clientOrderId,
+          error: toErrorMessage(error),
+        },
+      );
+    }
+    throw error;
+  }
   const result = retryExecution.result;
   const order = retryExecution.order;
   await writeRunEvent({
@@ -4468,33 +5785,60 @@ async function repriceIntentWithinExecutionBuffer(
       settings.kalshiPrimaryMaxClips,
     ) ?? Number.POSITIVE_INFINITY,
   );
-  const balancedSizing = deriveBalancedPayoutPairSize({
+  const polyLevels = (
+    polyLeg.outcome === "UP"
+      ? polymarketState.quote.orderbookLevels?.upAsks
+      : polymarketState.quote.orderbookLevels?.downAsks
+  )?.map(([price, size]) => ({ price, size })) ?? [];
+  const kalshiLevels = deriveKalshiBuyPriceLevels(
+    kalshiState.quote.orderbookLevels,
+    kalshiLeg.outcome === "YES" ? "YES" : "NO",
+  ).map(([price, size]) => ({ price, size }));
+  if (polyLevels.length === 0 || kalshiLevels.length === 0) {
+    return null;
+  }
+  const multiLevelSizing = deriveMultiLevelPairedQuote({
     targetPairBudgetUsd: settings.maxPairNotionalUsd,
     maxLegCapitalShare: settings.maxLegCapitalShare,
     pairSizeCap: desiredPairSize,
+    minPairSize: Math.max(
+      settings.minOrderSize,
+      pair.poly.minOrderSize ?? 0,
+      pair.kalshi.minOrderSize ?? 1,
+    ),
+    minProjectedNetProfitUsd: settings.minProjectedNetProfitUsd,
+    minProjectedNetReturn: settings.minProjectedNetReturn,
+    minConservativeNetProfitUsd: settings.minWorstCaseProfitUsd,
     polymarket: {
-      price: pair.poly.price,
-      depth: pair.poly.depth,
-      minOrderSize: pair.poly.minOrderSize,
-      fallbackMinOrderSize: settings.minOrderSize,
+      levels: polyLevels,
+      maxPrice: settings.maxLegPrice,
+      depthSafetyFactor: settings.polymarketHedgeDepthSafetyFactor,
       feeRateBps: pair.poly.feeRateBps,
+      feeRate: polymarketState.quote.feeRate ?? undefined,
+      feeExponent: polymarketState.quote.feeExponent ?? undefined,
     },
     kalshi: {
-      price: pair.kalshi.price,
-      depth: pair.kalshi.depth,
-      minOrderSize: pair.kalshi.minOrderSize,
-      fallbackMinOrderSize: 1,
+      levels: kalshiLevels,
+      maxPrice: settings.maxLegPrice,
+      depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+      depthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
       feeMultiplier: pair.kalshi.feeMultiplier,
     },
-    kalshiDepthHeadroomContracts: settings.kalshiDepthHeadroomContracts,
   });
-  if (balancedSizing.commonSize <= 0) {
+  if (multiLevelSizing.commonSize <= 0) {
+    return null;
+  }
+  const repricedGrossCost = round4(
+    (multiLevelSizing.polymarket.notionalUsd + multiLevelSizing.kalshi.notionalUsd) /
+      multiLevelSizing.commonSize,
+  );
+  if (repricedGrossCost > allowedGrossCost + ORDER_SIZE_TOLERANCE) {
     return null;
   }
   if (
     !doesSizingMeetProfitThresholds(
-      balancedSizing.projectedNetProfitUsd,
-      balancedSizing.projectedNetReturn,
+      multiLevelSizing.projectedNetProfitUsd,
+      multiLevelSizing.projectedNetReturn,
       settings,
     )
   ) {
@@ -4502,17 +5846,18 @@ async function repriceIntentWithinExecutionBuffer(
   }
 
   const updatedLegs = intent.legs.map((leg) => {
-    const liveLeg = leg.venue === "polymarket" ? pair.poly : pair.kalshi;
-    const size = leg.venue === "polymarket" ? balancedSizing.polySize : balancedSizing.kalshiSize;
-    if (size <= 0 || liveLeg.price === null) {
+    const quote = leg.venue === "polymarket"
+      ? multiLevelSizing.polymarket
+      : multiLevelSizing.kalshi;
+    if (quote.size <= 0 || quote.limitPrice === null) {
       return null;
     }
 
     return {
       ...leg,
-      requestedPrice: liveLeg.price,
-      requestedSize: size,
-      requestedNotionalUsd: round4(size * liveLeg.price),
+      requestedPrice: quote.limitPrice,
+      requestedSize: quote.size,
+      requestedNotionalUsd: quote.notionalUsd,
     };
   });
 
@@ -4522,8 +5867,20 @@ async function repriceIntentWithinExecutionBuffer(
 
   return {
     ...intent,
-    grossCost: pair.grossCost,
-    projectedNetProfitUsd: balancedSizing.projectedNetProfitUsd,
+    grossCost: repricedGrossCost,
+    targetNotionalUsd: round4(
+      multiLevelSizing.polymarket.notionalUsd + multiLevelSizing.kalshi.notionalUsd,
+    ),
+    projectedNetProfitUsd: multiLevelSizing.projectedNetProfitUsd,
+    fatalMismatchPnlUsd: round4(-multiLevelSizing.worstFillCostUsd),
+    conservativeExpectedPnlUsd:
+      intent.mismatchPFatalUpper === null || intent.mismatchPFatalUpper === undefined
+        ? intent.conservativeExpectedPnlUsd ?? null
+        : round4(
+            multiLevelSizing.commonSize * (1 - intent.mismatchPFatalUpper) -
+              multiLevelSizing.worstFillCostUsd,
+          ),
+    fatalLossExposureUsd: round4(multiLevelSizing.worstFillCostUsd),
     updatedAt: now,
     legs: updatedLegs as OrderIntent["legs"],
   };
@@ -5136,11 +6493,42 @@ async function preflightEntryDepthAndAdjustIntent(
     };
   }
 
-  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const preflightNow = Date.now();
+  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, preflightNow);
+  const wsSnapshotIssue = validateFinalWsEntrySnapshot(
+    slot,
+    primaryLeg,
+    hedgeLeg,
+    polymarketState.quote,
+    kalshiState.quote,
+    settings,
+    preflightNow,
+  );
+  if (wsSnapshotIssue) {
+    return {
+      status: "skipped",
+      reason: `Entry WS preflight skipped primary submission (${wsSnapshotIssue})`,
+      maxSlippageBps: settings.maxSlippageBps,
+      primary: null,
+      hedge: null,
+    };
+  }
   const primaryLive = getLiveIntentLegSnapshot(primaryLeg, polymarketState.quote, kalshiState.quote);
   const hedgeLive = getLiveIntentLegSnapshot(hedgeLeg, polymarketState.quote, kalshiState.quote);
-  const primaryCheck = buildEntryDepthCheck(primaryLeg, primaryLive, settings);
-  const hedgeCheck = buildEntryDepthCheck(hedgeLeg, hedgeLive, settings);
+  const primaryCheck = buildWsEntryDepthCheck(
+    primaryLeg,
+    primaryLive,
+    polymarketState.quote,
+    kalshiState.quote,
+    settings,
+  );
+  const hedgeCheck = buildWsEntryDepthCheck(
+    hedgeLeg,
+    hedgeLive,
+    polymarketState.quote,
+    kalshiState.quote,
+    settings,
+  );
   const limitingCoverage = Math.min(primaryCheck.coverageRatio, hedgeCheck.coverageRatio);
   const maxSlippageBps = deriveAdaptiveSlippageBps(limitingCoverage, settings);
 
@@ -5160,7 +6548,10 @@ async function preflightEntryDepthAndAdjustIntent(
   if (limitingCoverage + ORDER_SIZE_TOLERANCE >= 1) {
     return {
       status: "ready",
-      intent,
+      intent: {
+        ...intent,
+        maxSlippageBps,
+      },
       maxSlippageBps,
       primary: primaryCheck,
       hedge: hedgeCheck,
@@ -5169,7 +6560,14 @@ async function preflightEntryDepthAndAdjustIntent(
   }
 
   const safePairSize = Math.min(primaryCheck.executableDepth, hedgeCheck.executableDepth);
-  const resizedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now, safePairSize);
+  const resizedIntent = resizeIntentFromWsBookSnapshot(
+    intent,
+    polymarketState.quote,
+    kalshiState.quote,
+    settings,
+    preflightNow,
+    safePairSize,
+  );
   if (!resizedIntent) {
     return {
       status: "skipped",
@@ -5204,6 +6602,232 @@ type EntryDepthCheck = {
   executableDepth: number;
   coverageRatio: number;
 };
+
+export function validateFinalWsEntrySnapshot(
+  slot: MarketSlot,
+  primaryLeg: OrderIntent["legs"][number],
+  hedgeLeg: OrderIntent["legs"][number],
+  polymarket: OpportunitySnapshot["polymarket"],
+  kalshi: OpportunitySnapshot["kalshi"],
+  settings: StrategyConfig,
+  now: number,
+) {
+  if (
+    !polymarket.slotAligned ||
+    !kalshi.slotAligned ||
+    polymarket.ref.slotKey !== slot.key ||
+    kalshi.ref.slotKey !== slot.key
+  ) {
+    return "market slot alignment changed";
+  }
+  if (
+    polymarket.feedHealth.feedStatus !== "ready" ||
+    kalshi.feedHealth.feedStatus !== "ready"
+  ) {
+    return "feed health is not ready";
+  }
+  if (polymarket.source !== "ws" || kalshi.source !== "ws") {
+    return `non-WS source poly=${polymarket.source} kalshi=${kalshi.source}`;
+  }
+  if (!polymarket.orderbookLevels || !kalshi.orderbookLevels) {
+    return "multi-level WS orderbook unavailable";
+  }
+
+  for (const leg of [primaryLeg, hedgeLeg]) {
+    const quote = leg.venue === "polymarket" ? polymarket : kalshi;
+    const outcome = leg.venue === "polymarket"
+      ? leg.outcome === "UP"
+        ? polymarket.outcomes.up
+        : polymarket.outcomes.down
+      : leg.outcome === "YES"
+        ? kalshi.outcomes.yes
+        : kalshi.outcomes.no;
+    const maxAgeMs = leg.venue === "polymarket"
+      ? Math.min(settings.maxSignalAgeMs, settings.polymarketHedgeBookMaxAgeMs)
+      : settings.maxSignalAgeMs;
+    const ageMs = outcome.chart.lastUpdatedAt === null
+      ? Number.POSITIVE_INFINITY
+      : Math.max(0, now - outcome.chart.lastUpdatedAt);
+    if (outcome.chart.source !== "ws" || quote.stalenessMs === null || quote.stalenessMs > maxAgeMs || ageMs > maxAgeMs) {
+      return `${leg.venue} ${leg.outcome} book is stale or not WS`;
+    }
+  }
+  return null;
+}
+
+export function validateFinalWsEntryDepthCoverage(
+  slot: MarketSlot,
+  primaryLeg: OrderIntent["legs"][number],
+  hedgeLeg: OrderIntent["legs"][number],
+  polymarket: OpportunitySnapshot["polymarket"],
+  kalshi: OpportunitySnapshot["kalshi"],
+  settings: StrategyConfig,
+  now: number,
+) {
+  const snapshotIssue = validateFinalWsEntrySnapshot(
+    slot,
+    primaryLeg,
+    hedgeLeg,
+    polymarket,
+    kalshi,
+    settings,
+    now,
+  );
+  if (snapshotIssue) {
+    return snapshotIssue;
+  }
+
+  for (const leg of [primaryLeg, hedgeLeg]) {
+    const liveLeg = getLiveIntentLegSnapshot(leg, polymarket, kalshi);
+    const depth = buildWsEntryDepthCheck(
+      leg,
+      liveLeg,
+      polymarket,
+      kalshi,
+      settings,
+    );
+    if (depth.coverageRatio + ORDER_SIZE_TOLERANCE < 1) {
+      return `${leg.venue} ${leg.outcome} executable depth coverage ${depth.coverageRatio.toFixed(4)} is below 1.0000`;
+    }
+  }
+
+  return null;
+}
+
+function buildWsEntryDepthCheck(
+  leg: OrderIntent["legs"][number],
+  liveLeg: ReturnType<typeof getLiveIntentLegSnapshot>,
+  polymarket: OpportunitySnapshot["polymarket"],
+  kalshi: OpportunitySnapshot["kalshi"],
+  settings: StrategyConfig,
+): EntryDepthCheck {
+  const maxPrice = leg.requestedPrice;
+  const levels = leg.venue === "polymarket"
+    ? (leg.outcome === "UP"
+        ? polymarket.orderbookLevels?.upAsks
+        : polymarket.orderbookLevels?.downAsks) ?? []
+    : deriveKalshiBuyPriceLevels(
+        kalshi.orderbookLevels,
+        leg.outcome === "YES" ? "YES" : "NO",
+      );
+  const displayedDepth = maxPrice === null
+    ? 0
+    : levels.reduce(
+        (sum, [price, size]) =>
+          Number.isFinite(price) && Number.isFinite(size) && price <= maxPrice + ORDER_SIZE_TOLERANCE
+            ? sum + Math.max(0, size)
+            : sum,
+        0,
+      );
+  const executableDepth = deriveEntryExecutableDepth(leg, displayedDepth, settings);
+  return {
+    venue: leg.venue,
+    requestedSize: leg.requestedSize,
+    livePrice: liveLeg?.price ?? null,
+    displayedDepth,
+    executableDepth,
+    coverageRatio: leg.requestedSize > 0 ? executableDepth / leg.requestedSize : 0,
+  };
+}
+
+function resizeIntentFromWsBookSnapshot(
+  intent: OrderIntent,
+  polymarket: OpportunitySnapshot["polymarket"],
+  kalshi: OpportunitySnapshot["kalshi"],
+  settings: StrategyConfig,
+  now: number,
+  safePairSize: number,
+) {
+  const pairSize = normalizeVenueTargetSize("kalshi", safePairSize, 1, 1);
+  const polyLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  if (!polyLeg || !kalshiLeg || pairSize <= 0) {
+    return null;
+  }
+  const minimumPairSize = Math.max(
+    polyLeg.requestedSize > 0 ? polymarket.outcomes[polyLeg.outcome === "UP" ? "up" : "down"].minOrderSize ?? settings.minOrderSize : 0,
+    kalshi.outcomes[kalshiLeg.outcome === "YES" ? "yes" : "no"].minOrderSize ?? 1,
+  );
+  if (pairSize + ORDER_SIZE_TOLERANCE < minimumPairSize) {
+    return null;
+  }
+
+  const polyOutcome = polymarket.outcomes[polyLeg.outcome === "UP" ? "up" : "down"];
+  const kalshiOutcome = kalshiLeg.outcome === "YES" ? "YES" : "NO";
+  const polyQuote = quoteMultiLevelBuyLeg({
+    venue: "polymarket",
+    levels: (
+      polyLeg.outcome === "UP"
+        ? polymarket.orderbookLevels?.upAsks
+        : polymarket.orderbookLevels?.downAsks
+    )?.map(([price, size]) => ({ price, size })) ?? [],
+    size: pairSize,
+    maxPrice: polyLeg.requestedPrice,
+    depthSafetyFactor: settings.polymarketHedgeDepthSafetyFactor,
+    depthHeadroom: settings.polymarketHedgeHeadroomShares,
+    feeRateBps: polyOutcome.feeRateBps ?? polymarket.feeRateBps,
+    feeRate: polymarket.feeRate ?? undefined,
+    feeExponent: polymarket.feeExponent ?? undefined,
+  });
+  const kalshiQuote = quoteMultiLevelBuyLeg({
+    venue: "kalshi",
+    levels: deriveKalshiBuyPriceLevels(kalshi.orderbookLevels, kalshiOutcome).map(
+      ([price, size]) => ({ price, size }),
+    ),
+    size: pairSize,
+    maxPrice: kalshiLeg.requestedPrice,
+    depthSafetyFactor: settings.kalshiPrimaryDepthSafetyFactor,
+    depthHeadroom: settings.kalshiDepthHeadroomContracts,
+    feeMultiplier: kalshi.feeMultiplier,
+  });
+  if (!polyQuote || !kalshiQuote || polyQuote.limitPrice === null || kalshiQuote.limitPrice === null) {
+    return null;
+  }
+
+  const totalCostUsd = polyQuote.costUsd + kalshiQuote.costUsd;
+  const worstFillCostUsd = polyQuote.worstFillCostUsd + kalshiQuote.worstFillCostUsd;
+  const projectedNetProfitUsd = round4(pairSize - totalCostUsd);
+  const projectedNetReturn = totalCostUsd > 0 ? round4(projectedNetProfitUsd / totalCostUsd) : null;
+  if (!doesSizingMeetProfitThresholds(projectedNetProfitUsd, projectedNetReturn, settings)) {
+    return null;
+  }
+  if (settings.mismatchRiskMode === "enforce") {
+    const pFatalUpper = intent.mismatchPFatalUpper;
+    const breakEvenFatalProbability = Math.max(0, projectedNetProfitUsd / pairSize);
+    if (
+      pFatalUpper === null ||
+      pFatalUpper === undefined ||
+      pFatalUpper > 0.5 * breakEvenFatalProbability + ORDER_SIZE_TOLERANCE
+    ) {
+      return null;
+    }
+  }
+
+  const legs = intent.legs.map((leg) => {
+    const quote = leg.venue === "polymarket" ? polyQuote : kalshiQuote;
+    return {
+      ...leg,
+      requestedPrice: quote.limitPrice,
+      requestedSize: pairSize,
+      requestedNotionalUsd: quote.notionalUsd,
+    };
+  }) as OrderIntent["legs"];
+  const conservativeExpectedPnlUsd = intent.mismatchPFatalUpper === null || intent.mismatchPFatalUpper === undefined
+    ? intent.conservativeExpectedPnlUsd ?? null
+    : round4(pairSize * (1 - intent.mismatchPFatalUpper) - worstFillCostUsd);
+
+  return {
+    ...intent,
+    updatedAt: now,
+    grossCost: round4((polyQuote.notionalUsd + kalshiQuote.notionalUsd) / pairSize),
+    targetNotionalUsd: round4(polyQuote.notionalUsd + kalshiQuote.notionalUsd),
+    projectedNetProfitUsd,
+    fatalMismatchPnlUsd: round4(-worstFillCostUsd),
+    conservativeExpectedPnlUsd,
+    fatalLossExposureUsd: round4(worstFillCostUsd),
+    legs,
+  };
+}
 
 function buildEntryDepthCheck(
   leg: OrderIntent["legs"][number],
@@ -5437,6 +7061,19 @@ export function getPolymarketHedgeMinNotionalViolation(
   };
 }
 
+export function getPolymarketHedgeSubmissionBlock(
+  hedgeLeg: Pick<OrderIntent["legs"][number], "venue" | "side" | "requestedNotionalUsd">,
+) {
+  const violation = getPolymarketHedgeMinNotionalViolation(hedgeLeg);
+  return violation
+    ? {
+        action: "manual_required" as const,
+        stage: "polymarket_hedge_below_minimum_notional",
+        ...violation,
+      }
+    : null;
+}
+
 export function sumPolymarketAskDepthWithinLimit(
   asks: Array<{ price: string; size: string }>,
   limitPrice: number,
@@ -5529,6 +7166,21 @@ export function estimateRescueHedgeLossUsd(input: {
   return round4(Math.max(0, input.size * input.primaryEntryPrice + input.size * input.hedgePrice + primaryFeeUsd + hedgeFeeUsd - input.size));
 }
 
+export function isHedgedPairEconomicsWithinLossCap(
+  economics: ReturnType<typeof deriveHedgedPairEconomics>,
+  maximumAcceptedLossUsd = 0,
+) {
+  if (
+    economics.polymarketFilledSize <= ORDER_SIZE_TOLERANCE ||
+    economics.kalshiFilledSize <= ORDER_SIZE_TOLERANCE
+  ) {
+    return false;
+  }
+  return maximumAcceptedLossUsd > 0
+    ? economics.netWorstCaseUsd + maximumAcceptedLossUsd >= -ORDER_SIZE_TOLERANCE
+    : economics.netWorstCaseUsd > ORDER_SIZE_TOLERANCE;
+}
+
 export function evaluateExposureRecoveryOptions(input: {
   rescueHedgeLossUsd: number | null;
   rescueHedgeSize: number;
@@ -5613,6 +7265,13 @@ async function attemptHedgeRescueBeforeUnwind(
     return { intent: currentIntent, recovered: false, hold: false };
   }
 
+  const maxRescueLossUsd = Math.min(
+    settings.hedgeRescueMaxLossUsd,
+    settings.forcedUnwindMaxLossUsd > 0
+      ? settings.forcedUnwindMaxLossUsd
+      : settings.hedgeRescueMaxLossUsd,
+  );
+
   for (let attempt = 1; attempt <= settings.hedgeRescueMaxAttempts; attempt += 1) {
     if (attempt > 1 && settings.hedgeRescueDelayMs > 0) {
       await sleep(settings.hedgeRescueDelayMs);
@@ -5632,6 +7291,9 @@ async function attemptHedgeRescueBeforeUnwind(
         currentIntent,
         attemptNow,
         "hedge_rescue_already_complete",
+        null,
+        {},
+        maxRescueLossUsd,
       );
       await writeRunEvent({
         asset: currentIntent.asset,
@@ -5654,10 +7316,6 @@ async function attemptHedgeRescueBeforeUnwind(
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
-    const maxRescueLossUsd = Math.min(
-      settings.hedgeRescueMaxLossUsd,
-      settings.forcedUnwindMaxLossUsd > 0 ? settings.forcedUnwindMaxLossUsd : settings.hedgeRescueMaxLossUsd,
-    );
     const maxHedgePrice = Math.min(0.99, Math.max(0.001, 1 - primaryEntryPrice + maxRescueLossUsd / unhedgedSize));
     const bookFetchStartedAt = Date.now();
     let book: Awaited<ReturnType<typeof fetchPolymarketBook>>;
@@ -5709,11 +7367,27 @@ async function attemptHedgeRescueBeforeUnwind(
     const targetSize = Math.min(unhedgedSize, executableDepth);
     const normalizedTargetSize = normalizeVenueTargetSize("polymarket", targetSize, null, settings.minOrderSize);
     const quote = quotePolymarketBuyFromAsks(book.asks, maxHedgePrice, normalizedTargetSize);
+    const latestSnapshot = await readLatestSnapshot(currentIntent.asset, currentIntent.slotKey).catch(() => null);
+    const polymarketQuote = latestSnapshot?.polymarket ?? null;
+    const outcomeQuote = hedgeLeg.outcome === "UP"
+      ? polymarketQuote?.outcomes.up
+      : polymarketQuote?.outcomes.down;
+    const feeRateBps = outcomeQuote?.feeRateBps ?? polymarketQuote?.feeRateBps ?? 0;
+    const hedgeFeeUsd = calculatePolymarketLevelFee({
+      shares: quote.filledSize,
+      price: quote.vwap ?? maxHedgePrice,
+      feeRateBps,
+      feeRate:
+        polymarketQuote?.feeRate ??
+        (feeRateBps > 0 ? undefined : POLYMARKET_CRYPTO_RESCUE_FEE_RATE),
+      feeExponent: polymarketQuote?.feeExponent ?? 1,
+    });
     const hedgeLossUsd = estimateRescueHedgeLossUsd({
       primaryEntryPrice,
       hedgePrice: quote.vwap ?? maxHedgePrice,
       size: quote.filledSize,
       primaryFeeUsd: primaryLeg.feeUsd ? (primaryLeg.feeUsd * quote.filledSize) / Math.max(primaryLeg.filledSize, ORDER_SIZE_TOLERANCE) : 0,
+      hedgeFeeUsd,
     });
     const unwindEstimate = await estimatePrimaryUnwindRecoveryLoss(currentIntent, primaryLeg, attemptNow, settings);
     const holdEstimate = await estimateHoldToSettlementLoss(currentIntent, primaryLeg, attemptNow);
@@ -5749,6 +7423,7 @@ async function attemptHedgeRescueBeforeUnwind(
         targetSize: normalizedTargetSize,
         quote,
         maxHedgePrice,
+        hedgeFeeUsd,
         hedgeLossUsd,
         unwindLossUsd: unwindEstimate.expectedLossUsd,
         holdExpectedLossUsd: holdEstimate.expectedLossUsd,
@@ -5770,6 +7445,7 @@ async function attemptHedgeRescueBeforeUnwind(
         reason: decision.reason,
         unhedgedSize,
         hedgeLossUsd,
+        hedgeFeeUsd,
         unwindLossUsd: unwindEstimate.expectedLossUsd,
         holdExpectedLossUsd: holdEstimate.expectedLossUsd,
         holdWorstCaseLossUsd: holdEstimate.worstCaseLossUsd,
@@ -5821,38 +7497,41 @@ async function attemptHedgeRescueBeforeUnwind(
         intent: currentIntent,
         leg: rescueLeg,
         request: rescueRequest,
-        stage: "hedge_rescue",
+        stage: `hedge_rescue:${attempt}`,
         now: Date.now(),
         timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
       });
       rescueResult = rescueExecution.result;
       rescueOrder = rescueExecution.order;
     } catch (error) {
+      const ambiguousSubmissionAt = Date.now();
+      const errorMessage = toErrorMessage(error);
       await writeRunEvent({
         asset: currentIntent.asset,
-        level: "warn",
+        level: "error",
         eventType: "order.hedge_rescue.submit_failed",
-        message: `Hedge rescue submission failed for intent ${currentIntent.id}`,
+        message: `Hedge rescue submission truth is unknown for intent ${currentIntent.id}`,
         payload: {
           intentId: currentIntent.id,
           slotKey: currentIntent.slotKey,
           attempt,
           orderType,
-          error: toErrorMessage(error),
+          error: errorMessage,
         },
-        createdAt: Date.now(),
+        createdAt: ambiguousSubmissionAt,
       });
-      await writeIntentIncidentRunEvent(
+      currentIntent = await markIntentManualRequired(
         currentIntent,
-        Date.now(),
-        "hedge_rescue_submit_failed",
-        `Hedge rescue submission failed (${toErrorMessage(error)})`,
+        ambiguousSubmissionAt,
+        "hedge_rescue_submission_truth_unknown",
+        `Polymarket hedge rescue may have reached the venue before the submission error (${errorMessage})`,
         {
           attempt,
           orderType,
+          error: errorMessage,
         },
       );
-      return { intent: currentIntent, recovered: false, hold: false };
+      return { intent: currentIntent, recovered: false, hold: true };
     }
     await writeRunEvent({
       asset: currentIntent.asset,
@@ -5872,6 +7551,33 @@ async function attemptHedgeRescueBeforeUnwind(
       },
       createdAt: Date.now(),
     });
+
+    if (
+      shouldHoldHedgeRescueOrderPendingTruth(
+        currentIntent,
+        hedgeLeg,
+        rescueOrder,
+        Date.now(),
+      )
+    ) {
+      const pendingTruthAt = Date.now();
+      currentIntent = await holdPolymarketHedgeFailurePendingTruth(
+        currentIntent,
+        hedgeLeg,
+        rescueOrder,
+        pendingTruthAt,
+        "hedge_rescue_truth_pending",
+        {
+          attempt,
+          orderType,
+          orderId: rescueOrder.venueOrderId,
+          orderStatus: rescueOrder.status,
+          requestedSize: rescueOrder.requestedSize,
+          filledSize: rescueOrder.filledSize,
+        },
+      );
+      return { intent: currentIntent, recovered: false, hold: true };
+    }
 
     if (rescueOrder.filledSize > 0) {
       currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, rescueOrder, "hedged", Date.now());
@@ -5909,6 +7615,10 @@ async function attemptHedgeRescueBeforeUnwind(
           completedNow,
           "hedge_rescue_completed",
           rescueOrder,
+          {
+            maximumAcceptedLossUsd: maxRescueLossUsd,
+          },
+          maxRescueLossUsd,
         );
         if (currentIntent.status === "hedged") {
           await writeLiveTradeRunEvent(currentIntent, completedNow, "hedged");
@@ -6012,6 +7722,40 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   currentIntent = rescue.intent;
   if (rescue.recovered || rescue.hold) {
     return currentIntent;
+  }
+
+  const partiallyHedgedLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+  const residualPrimarySize = deriveUnhedgedPrimarySize(currentIntent);
+  if (residualPrimarySize <= ORDER_SIZE_TOLERANCE) {
+    const maximumAcceptedLossUsd = Math.min(
+      settings.hedgeRescueMaxLossUsd,
+      settings.forcedUnwindMaxLossUsd > 0
+        ? settings.forcedUnwindMaxLossUsd
+        : settings.hedgeRescueMaxLossUsd,
+    );
+    return markIntentHedgedAfterEconomicCheck(
+      currentIntent,
+      Date.now(),
+      "hedge_rescue_covered_before_unwind",
+      hedgeOrder,
+      {
+        maximumAcceptedLossUsd,
+      },
+      maximumAcceptedLossUsd,
+    );
+  }
+  if ((partiallyHedgedLeg?.filledSize ?? 0) > ORDER_SIZE_TOLERANCE && residualPrimarySize > ORDER_SIZE_TOLERANCE) {
+    return markIntentManualRequired(
+      currentIntent,
+      Date.now(),
+      "partial_hedge_residual_unresolved",
+      `Hedge rescue left ${residualPrimarySize.toFixed(6)} primary units uncovered; automatic full-intent unwind is unsafe`,
+      {
+        hedgeFilledSize: partiallyHedgedLeg?.filledSize ?? 0,
+        residualPrimarySize,
+      },
+      hedgeOrder,
+    );
   }
 
   if (shouldDeferPolymarketUnwindToSettlement(currentIntent, now)) {
@@ -6140,17 +7884,17 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         continue;
       }
 
-      currentIntent = markIntentStatus(
+      currentIntent = await markIntentManualRequired(
         currentIntent,
-        "unwind_required",
         now,
+        "primary_unwind_submit_failed",
         `Primary unwind submission failed (${errorMessage}); manual intervention required`,
+        {
+          venue: currentIntent.primaryVenue,
+          error: errorMessage,
+        },
+        hedgeOrder,
       );
-      await writeOrderIntent(currentIntent);
-      await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_submit_failed", {
-        venue: currentIntent.primaryVenue,
-        error: errorMessage,
-      });
       await writeRunEvent({
         level: "error",
         eventType: "order.unwind.submit_failed",
@@ -6162,7 +7906,6 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         },
         createdAt: now,
       });
-      await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, "primary_unwind_submit_failed");
       break;
     }
 
@@ -6497,13 +8240,10 @@ async function markIntentHedgedAfterEconomicCheck(
   stage: string,
   hedgeOrder: LiveOrder | null = null,
   extraPayload: Record<string, unknown> = {},
+  maximumAcceptedLossUsd = 0,
 ) {
   const economics = deriveHedgedPairEconomics(intent.legs);
-  if (
-    economics.polymarketFilledSize <= ORDER_SIZE_TOLERANCE ||
-    economics.kalshiFilledSize <= ORDER_SIZE_TOLERANCE ||
-    economics.netWorstCaseUsd <= ORDER_SIZE_TOLERANCE
-  ) {
+  if (!isHedgedPairEconomicsWithinLossCap(economics, maximumAcceptedLossUsd)) {
     const currentIntent = markIntentStatus(
       intent,
       "manual_required",
@@ -7021,6 +8761,141 @@ async function fetchVenueSettlementResolutions(intent: OrderIntent) {
     polymarketResolution,
     kalshiResolution,
   });
+}
+
+async function reconcileObservedSlotResolutions(now: number) {
+  if (observedSlotResolutionReconcileInFlight) {
+    return;
+  }
+  observedSlotResolutionReconcileInFlight = true;
+  try {
+    const pending = await readPendingSlotResolutions(now - RESOLUTION_GRACE_MS, 10);
+    for (const slot of pending) {
+      const [polymarketObservation, kalshiObservation] = await Promise.all([
+        fetchFinalizedPolymarketResolutionObservation(
+          slot.polymarketSlug,
+          slot.polymarketMarketRef ?? undefined,
+        ).catch(() => null),
+        slot.kalshiMarketRef
+          ? fetchFinalizedKalshiResolutionObservation(slot.kalshiMarketRef).catch(
+              () => null,
+            )
+          : Promise.resolve(null),
+      ]);
+      const {
+        polymarketResolution: nextPolymarketResolution,
+        kalshiResolution: nextKalshiResolution,
+      } = mergeObservedSlotResolutionOutcomes({
+        storedSource: slot.source,
+        storedPolymarketResolution: slot.polymarketResolution,
+        storedKalshiResolution: slot.kalshiResolution,
+        fetchedPolymarketResolution: polymarketObservation?.resolution ?? null,
+        fetchedKalshiResolution: kalshiObservation?.resolution ?? null,
+      });
+      const polymarketBenchmarkConflict = hasOfficialBenchmarkConflict(
+        slot.polymarketSettlementValueUsd,
+        polymarketObservation?.benchmarkValueUsd ?? null,
+      );
+      const kalshiBenchmarkConflict = hasOfficialBenchmarkConflict(
+        slot.kalshiSettlementValueUsd,
+        kalshiObservation?.benchmarkValueUsd ?? null,
+      );
+      if (polymarketBenchmarkConflict || kalshiBenchmarkConflict) {
+        await writeRunEvent({
+          asset: slot.asset,
+          level: "warn",
+          eventType: "oracle.resolution_benchmark_conflict",
+          message: `Official terminal benchmark conflict for ${slot.slotKey}`,
+          payload: {
+            slotKey: slot.slotKey,
+            stored: {
+              polymarket: slot.polymarketSettlementValueUsd,
+              kalshi: slot.kalshiSettlementValueUsd,
+            },
+            observed: {
+              polymarket: polymarketObservation?.benchmarkValueUsd ?? null,
+              kalshi: kalshiObservation?.benchmarkValueUsd ?? null,
+            },
+          },
+          createdAt: now,
+        });
+      }
+      const resolvedAt = nextPolymarketResolution && nextKalshiResolution ? now : null;
+      await writeSlotResolution({
+        ...slot,
+        polymarketResolution: nextPolymarketResolution,
+        kalshiResolution: nextKalshiResolution,
+        polymarketSettlementValueUsd:
+          slot.polymarketSettlementValueUsd ??
+          polymarketObservation?.benchmarkValueUsd ??
+          null,
+        kalshiSettlementValueUsd:
+          slot.kalshiSettlementValueUsd ??
+          kalshiObservation?.benchmarkValueUsd ??
+          null,
+        updatedAt: now,
+        resolvedAt,
+        source: "official-venue-resolution",
+        raw: {
+          outcomeMismatch:
+            nextPolymarketResolution && nextKalshiResolution
+              ? (nextPolymarketResolution === "UP") !== (nextKalshiResolution === "YES")
+              : null,
+          fatalByCombination:
+            nextPolymarketResolution && nextKalshiResolution
+              ? {
+                  POLY_UP_KALSHI_NO:
+                    nextPolymarketResolution === "DOWN" && nextKalshiResolution === "YES",
+                  POLY_DOWN_KALSHI_YES:
+                    nextPolymarketResolution === "UP" && nextKalshiResolution === "NO",
+                }
+              : null,
+          benchmarkSources: {
+            polymarket: polymarketObservation?.benchmarkSource ?? null,
+            kalshi: kalshiObservation?.benchmarkSource ?? null,
+          },
+          benchmarkConflict: {
+            polymarket: polymarketBenchmarkConflict,
+            kalshi: kalshiBenchmarkConflict,
+          },
+        },
+      });
+    }
+  } finally {
+    observedSlotResolutionReconcileInFlight = false;
+  }
+}
+
+function hasOfficialBenchmarkConflict(
+  stored: number | null,
+  observed: number | null,
+) {
+  return (
+    stored !== null &&
+    observed !== null &&
+    Math.abs(stored - observed) > 1e-6
+  );
+}
+
+export function mergeObservedSlotResolutionOutcomes(input: {
+  storedSource: string;
+  storedPolymarketResolution: "UP" | "DOWN" | null;
+  storedKalshiResolution: "YES" | "NO" | null;
+  fetchedPolymarketResolution: "UP" | "DOWN" | null;
+  fetchedKalshiResolution: "YES" | "NO" | null;
+}) {
+  return {
+    polymarketResolution:
+      input.fetchedPolymarketResolution ??
+      (input.storedSource === "official-venue-resolution"
+        ? input.storedPolymarketResolution
+        : null),
+    kalshiResolution:
+      input.fetchedKalshiResolution ??
+      (input.storedSource === "official-venue-resolution"
+        ? input.storedKalshiResolution
+        : null),
+  };
 }
 
 export function deriveSettledVenueResolutions({
@@ -8182,6 +10057,14 @@ export function buildVenueOrderRequest(
   };
 }
 
+export function immediatePartialOrderType(venue: Venue): "FAK" | "IOC" {
+  return venue === "polymarket" ? "FAK" : "IOC";
+}
+
+export function primaryImmediateOrderType(venue: Venue): "FOK" | "IOC" {
+  return venue === "polymarket" ? "FOK" : "IOC";
+}
+
 function buildLiveOrderRecord(
   asset: MarketAsset,
   intentId: string,
@@ -8210,7 +10093,7 @@ function buildLiveOrderRecord(
     feeUsd: result.feeUsd,
     status: result.status,
     createdAt: now,
-    updatedAt: now,
+    updatedAt: Date.now(),
     raw: result.raw,
   };
 }
@@ -8222,6 +10105,7 @@ async function submitAndConfirmOrder(input: {
   stage: string;
   now: number;
   timeoutMs: number;
+  deferConfirmedPersistence?: boolean;
 }) {
   input.request.clientOrderId = buildStableClientOrderId(input);
   const attemptId = `${input.intent.id}:${input.leg.id}:${input.stage}:${input.request.clientOrderId}`;
@@ -8251,8 +10135,23 @@ async function submitAndConfirmOrder(input: {
     updatedAt: input.now,
   });
 
+  let acknowledgedSubmission: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null = null;
+  let acknowledgedAt: number | null = null;
+  let submissionStartedAt: number | null = null;
   try {
+    const submitStartedAt = Date.now();
+    submissionStartedAt = submitStartedAt;
     const submission = await adapterFor(input.leg.venue).placeOrder(input.request);
+    const venueAckAt = Date.now();
+    acknowledgedSubmission = submission;
+    acknowledgedAt = venueAckAt;
+    const submittedTiming: OrderExecutionTiming = {
+      quoteObservedAt: input.intent.createdAt,
+      decisionAt: input.now,
+      submitStartedAt,
+      venueAckAt,
+      fillObservedAt: venueAckAt,
+    };
     await writeOrderAttempt({
       id: attemptId,
       asset: input.intent.asset,
@@ -8268,7 +10167,10 @@ async function submitAndConfirmOrder(input: {
       status: "submitted",
       truthStatus: extractVenueTruthStatus(submission.raw),
       request: serializeVenueOrderRequest(input.request),
-      result: serializeVenueOrderResult(submission),
+      result: {
+        ...serializeVenueOrderResult(submission),
+        executionTiming: submittedTiming,
+      },
       error: null,
       createdAt: input.now,
       updatedAt: Date.now(),
@@ -8280,38 +10182,101 @@ async function submitAndConfirmOrder(input: {
       submission,
       input.timeoutMs,
     );
+    const timing: OrderExecutionTiming = {
+      ...submittedTiming,
+      fillObservedAt: Date.now(),
+    };
     const order = buildLiveOrderRecord(input.intent.asset, input.intent.id, input.leg, input.request, result, input.now);
     await writeVenueOrder(order);
-    await writeOrderAttempt({
-      id: attemptId,
-      asset: input.intent.asset,
-      shadow: input.intent.shadow,
-      intentId: input.intent.id,
-      legId: input.leg.id,
-      stage: input.stage,
-      venue: input.leg.venue,
-      side: input.request.side,
-      orderType: input.request.orderType,
-      clientOrderId: input.request.clientOrderId,
-      venueOrderId: result.venueOrderId,
-      status: "confirmed",
-      truthStatus: extractVenueTruthStatus(result.raw) ?? result.status,
-      request: serializeVenueOrderRequest(input.request),
-      result: serializeVenueOrderResult(result),
-      error: null,
-      createdAt: input.now,
-      updatedAt: Date.now(),
-    });
+    const persistConfirmed = async () => {
+      await writeOrderAttempt({
+        id: attemptId,
+        asset: input.intent.asset,
+        shadow: input.intent.shadow,
+        intentId: input.intent.id,
+        legId: input.leg.id,
+        stage: input.stage,
+        venue: input.leg.venue,
+        side: input.request.side,
+        orderType: input.request.orderType,
+        clientOrderId: input.request.clientOrderId,
+        venueOrderId: result.venueOrderId,
+        status: "confirmed",
+        truthStatus: extractVenueTruthStatus(result.raw) ?? result.status,
+        request: serializeVenueOrderRequest(input.request),
+        result: {
+          ...serializeVenueOrderResult(result),
+          executionTiming: timing,
+        },
+        error: null,
+        createdAt: input.now,
+        updatedAt: Date.now(),
+      });
+    };
+    if (!input.deferConfirmedPersistence) {
+      await persistConfirmed();
+    }
 
     return {
       submission,
       result,
       order,
+      timing,
+      persistConfirmed: input.deferConfirmedPersistence ? persistConfirmed : null,
     };
   } catch (error) {
     const recovered = await recoverSubmittedKalshiOrderAttempt(input, attemptId);
     if (recovered) {
       return recovered;
+    }
+
+    if (acknowledgedSubmission) {
+      const timing: OrderExecutionTiming = {
+        quoteObservedAt: input.intent.createdAt,
+        decisionAt: input.now,
+        submitStartedAt: submissionStartedAt ?? input.now,
+        venueAckAt: acknowledgedAt ?? input.now,
+        fillObservedAt: acknowledgedAt ?? input.now,
+      };
+      await writeOrderAttempt({
+        id: attemptId,
+        asset: input.intent.asset,
+        shadow: input.intent.shadow,
+        intentId: input.intent.id,
+        legId: input.leg.id,
+        stage: input.stage,
+        venue: input.leg.venue,
+        side: input.request.side,
+        orderType: input.request.orderType,
+        clientOrderId: input.request.clientOrderId,
+        venueOrderId: acknowledgedSubmission.venueOrderId,
+        status: "submitted",
+        truthStatus: extractVenueTruthStatus(acknowledgedSubmission.raw) ?? "truth_pending",
+        request: serializeVenueOrderRequest(input.request),
+        result: {
+          ...serializeVenueOrderResult(acknowledgedSubmission),
+          executionTiming: timing,
+        },
+        error: `Confirmation failed after venue acknowledgement: ${toErrorMessage(error)}`,
+        createdAt: input.now,
+        updatedAt: Date.now(),
+      });
+      const order = buildLiveOrderRecord(
+        input.intent.asset,
+        input.intent.id,
+        input.leg,
+        input.request,
+        acknowledgedSubmission,
+        input.now,
+      );
+      await writeVenueOrder(order);
+      return {
+        submission: acknowledgedSubmission,
+        result: acknowledgedSubmission,
+        order,
+        timing,
+        persistConfirmed: null,
+      };
     }
 
     await writeOrderAttempt({
@@ -8388,17 +10353,7 @@ async function findReusableOrderAttempt(
   },
   attemptId: string,
 ) {
-  const existingAttempts = await readRecentOrderAttempts(500, input.intent.asset);
-  const existing = existingAttempts.find(
-    (attempt) =>
-      attempt.id === attemptId ||
-      (
-        attempt.intentId === input.intent.id &&
-        attempt.legId === input.leg.id &&
-        attempt.stage === input.stage &&
-        attempt.clientOrderId === input.request.clientOrderId
-      ),
-  );
+  const existing = await findOrderAttemptById(attemptId);
 
   if (!existing) {
     return null;
@@ -8674,6 +10629,10 @@ function updateIntentLeg(
         venueOrderId: order.venueOrderId,
         filledSize,
         filledPrice: order.averageFillPrice ?? leg.filledPrice,
+        filledAt:
+          order.filledSize > 0
+            ? Math.max(leg.filledAt ?? 0, order.updatedAt)
+            : leg.filledAt,
         feeUsd: order.feeUsd ?? leg.feeUsd,
         status,
       };
@@ -8705,6 +10664,10 @@ function accumulateIntentLegOrder(
         venueOrderId: order.venueOrderId,
         filledSize: nextFilledSize,
         filledPrice: nextFilledSize > 0 ? round4(nextGrossNotionalUsd / nextFilledSize) : leg.filledPrice,
+        filledAt:
+          order.filledSize > 0
+            ? Math.max(leg.filledAt ?? 0, order.updatedAt)
+            : leg.filledAt,
         feeUsd: round4(leg.feeUsd + (order.feeUsd ?? 0)),
         status,
       };
@@ -8732,6 +10695,10 @@ function updateIntentLegFromFillSummary(
         venueOrderId: summary.venueOrderId ?? leg.venueOrderId,
         filledSize,
         filledPrice: summary.filledSize >= leg.filledSize ? summary.averageFillPrice : leg.filledPrice,
+        filledAt:
+          summary.filledSize > 0
+            ? Math.max(leg.filledAt ?? 0, summary.lastFilledAt ?? now)
+            : leg.filledAt,
         feeUsd: Math.max(leg.feeUsd, summary.feeUsd),
         status:
           leg.status === "unwound"
@@ -8955,12 +10922,21 @@ async function confirmImmediateOrderExecution(
       return submission;
     }
 
+    const fillWakeup = marketDataSupervisor.waitForOrderFill({
+      venue,
+      venueOrderId: submission.venueOrderId,
+      clientOrderId: request.clientOrderId,
+      marketRef: request.marketRef,
+      timeoutMs,
+    });
+
     const confirmation = await confirmPolymarketOrderExecution({
       orderId: submission.venueOrderId,
       expectedSize: request.size,
       expectedSizeIsExact: request.side !== "BUY" || request.buyMode !== "amount",
       orderType: request.orderType,
       timeoutMs,
+      pollWakeup: fillWakeup,
     });
     const confirmedResult = {
       ...confirmation.result,
@@ -8978,6 +10954,7 @@ async function confirmImmediateOrderExecution(
         expectedSizeIsExact: request.side !== "BUY" || request.buyMode !== "amount",
         orderType: request.orderType,
         timeoutMs: Math.min(1_000, timeoutMs),
+        pollWakeup: fillWakeup,
       });
       return {
         ...canceledConfirmation.result,
@@ -9003,6 +10980,16 @@ async function confirmImmediateOrderExecution(
 
   const deadline = Date.now() + timeoutMs;
   let latest = submission;
+  let fillWakeup: Promise<boolean> | null = marketDataSupervisor.waitForOrderFill({
+    venue,
+    venueOrderId: submission.venueOrderId,
+    clientOrderId: request.clientOrderId,
+    marketRef: request.marketRef,
+    timeoutMs,
+  }).then(
+    () => true,
+    () => true,
+  );
   while (Date.now() <= deadline) {
     const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId).catch(() => null);
     if (liveOrder) {
@@ -9011,7 +10998,17 @@ async function confirmImmediateOrderExecution(
         return latest;
       }
     }
-    await sleep(200);
+    if (fillWakeup) {
+      const wokeForFill = await Promise.race([
+        sleep(200).then(() => false),
+        fillWakeup,
+      ]);
+      if (wokeForFill) {
+        fillWakeup = null;
+      }
+    } else {
+      await sleep(200);
+    }
   }
 
   if (request.orderType === "FOK" && (latest.status === "live" || latest.status === "pending")) {
@@ -9336,13 +11333,31 @@ function extractPolymarketOrderTruthFromRaw(raw: Record<string, unknown> | undef
 
 export function shouldTreatPrimaryOrderAsFilled(
   intent: Pick<OrderIntent, "primaryVenue">,
-  order: Pick<LiveOrder, "filledSize" | "status">,
+  order: Pick<LiveOrder, "filledSize" | "orderType" | "requestedSize" | "status">,
+) {
+  if (!isPrimaryFillSizeHedgable(intent, order)) {
+    return false;
+  }
+
+  if (intent.primaryVenue === "polymarket") {
+    return order.status === "filled" || (order.orderType === "FOK" && order.status === "pending");
+  }
+
+  return order.status === "filled" || order.status === "partially_filled";
+}
+
+export function isPrimaryFillSizeHedgable(
+  intent: Pick<OrderIntent, "primaryVenue">,
+  order: Pick<LiveOrder, "filledSize" | "requestedSize">,
 ) {
   if (order.filledSize <= 0) {
     return false;
   }
 
-  return order.status === "filled" || (intent.primaryVenue === "kalshi" && order.status === "partially_filled");
+  return (
+    intent.primaryVenue === "kalshi" ||
+    order.filledSize + ORDER_SIZE_TOLERANCE >= order.requestedSize
+  );
 }
 
 export function shouldTreatHedgeOrderAsComplete(
@@ -9363,7 +11378,7 @@ export function shouldTreatHedgeOrderAsComplete(
 export function shouldTreatPrimaryExecutionAsFilled(
   intent: Pick<OrderIntent, "primaryVenue">,
   result: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
-  order: Pick<LiveOrder, "filledSize" | "status">,
+  order: Pick<LiveOrder, "filledSize" | "orderType" | "requestedSize" | "status">,
 ) {
   if (shouldTreatPrimaryOrderAsFilled(intent, order)) {
     return true;
@@ -9823,14 +11838,6 @@ function findLatestIntentReduceOnlyOrder(
 
 function adapterFor(venue: OrderIntent["primaryVenue"]) {
   return venue === "polymarket" ? polymarketAdapter : kalshiAdapter;
-}
-
-function wouldExceedVenueExposure(
-  intent: OrderIntent,
-  exposureUsd: Record<"polymarket" | "kalshi", number>,
-  maxVenueExposureUsd: number,
-) {
-  return intent.legs.some((leg) => exposureUsd[leg.venue] + leg.requestedNotionalUsd > maxVenueExposureUsd + 1e-9);
 }
 
 async function refreshLatestSnapshot(slot: MarketSlot) {

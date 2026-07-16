@@ -79,6 +79,7 @@ const settings: StrategyConfig = {
   mismatchGuardPhase2StartSeconds: 480,
   mismatchGuardPhase2MinMoveBps: 10,
   mismatchGuardMaxVenueDisagreementPct: 0.12,
+  mismatchRiskMode: "shadow",
 };
 
 const balances: VenueBalance[] = [
@@ -1506,5 +1507,50 @@ describe("live signal engine", () => {
     expect(signal.mismatchRisk).toBe("low");
     expect(signal.eligible).toBe(false);
     expect(signal.reasons).toContain("Entrée bloquée sur les 180 dernières secondes");
+  });
+
+  it("sizes an enforce signal once a calibrated estimate and cluster budget are available", () => {
+    const estimate = {
+      available: true,
+      modelVersion: "structural-ewma-gaussian-v1-calibrated",
+      reason: null,
+      pFatal: 0.005,
+      pFatalUpper95: 0.01,
+      pAligned: 0.99,
+      pDouble: 0.005,
+      expectedPnlUsd: null,
+      conservativePnlUsd: null,
+      fatalPnlUsd: null,
+      breakEvenFatalProbability: null,
+      maximumAllowedFatalProbability: null,
+      chainlinkAgeMs: 10,
+      cfAgeMs: 10,
+      observationCount: 1_000,
+    };
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket(),
+      kalshi: tradableKalshi(),
+      settings: buildV3Settings({
+        mismatchGuardEnabled: false,
+        mismatchRiskMode: "enforce",
+      }),
+      balances,
+      lastEntryCosts: {},
+      mismatchRiskEstimates: {
+        POLY_UP_KALSHI_NO: estimate,
+        POLY_DOWN_KALSHI_YES: estimate,
+      },
+      riskBudget: {
+        remainingExpectedFatalLossUsd: 25,
+        remainingAbsoluteFatalLossUsd: 75,
+      },
+    });
+
+    expect(signal.legs[0].size).toBeGreaterThan(0);
+    expect(signal.legs[1].size).toBe(signal.legs[0].size);
+    expect(signal.reasons.join(" | ")).not.toContain("Modèle mismatch indisponible");
   });
 });

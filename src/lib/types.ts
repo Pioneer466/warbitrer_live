@@ -51,6 +51,7 @@ export type CircuitBreakerReason =
   | "market_degraded"
   | "rpc_unhealthy";
 export type PrimarySelectionMode = "kalshi_only" | "shadow" | "dynamic";
+export type MismatchRiskMode = "shadow" | "block_only" | "enforce";
 export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" | "failed";
 export type RunEventLevel = "info" | "warn" | "error";
 export type NotificationKind = "trade_live" | "manual_intervention" | "incident";
@@ -168,7 +169,33 @@ export type PolymarketQuote = {
   observedSlotOpenPriceUsd: number | null;
   observedSlotOpenCapturedAt: number | null;
   feeRateBps: number;
+  feeRate?: number | null;
+  feeExponent?: number | null;
   negRisk: boolean;
+};
+
+export type KalshiCfBenchmarkIndexId =
+  | "BRTI"
+  | "ETHUSD_RTI"
+  | "SOLUSD_RTI"
+  | "XRPUSD_RTI"
+  | "DOGEUSD_RTI";
+
+export type KalshiCfBenchmarkWindow = {
+  valueUsd: number;
+  windowSize: number;
+  windowStartTsMs: number;
+  windowEndTsExclusive: number;
+};
+
+export type KalshiCfBenchmarkState = {
+  indexId: KalshiCfBenchmarkIndexId;
+  liveValueUsd: number;
+  sourceTimestampMs: number;
+  receivedAtMs: number;
+  capturedAt: number;
+  trailing60s: KalshiCfBenchmarkWindow;
+  finalMinuteAverage15m: KalshiCfBenchmarkWindow | null;
 };
 
 export type KalshiQuote = {
@@ -190,6 +217,7 @@ export type KalshiQuote = {
   feeType: string;
   lastTradeYesPrice: number | null;
   lastTradeNoPrice: number | null;
+  cfBenchmarks?: KalshiCfBenchmarkState | null;
   orderbookLevels?: {
     yesBids: Array<[number, number]>;
     noBids: Array<[number, number]>;
@@ -254,6 +282,7 @@ export type StrategyConfig = {
   mismatchGuardPhase2StartSeconds: number;
   mismatchGuardPhase2MinMoveBps: number;
   mismatchGuardMaxVenueDisagreementPct: number;
+  mismatchRiskMode: MismatchRiskMode;
 };
 
 export type StrategyConfigMap = AssetScoped<StrategyConfig>;
@@ -304,6 +333,9 @@ export type LiveOpportunity = {
   threshold: number;
   thresholdMet: boolean;
   worstCaseProfitUsd: number | null;
+  fatalMismatchPnlUsd?: number | null;
+  conservativeExpectedPnlUsd?: number | null;
+  mismatchRiskEstimate?: MismatchRiskEstimate | null;
   eligible: boolean;
   primaryVenue: Venue | null;
   primarySelection: PrimarySelectionAudit | null;
@@ -326,6 +358,24 @@ export type LiveOpportunity = {
   chainlinkLivePriceUsd: number | null;
   observedSlotOpenPriceUsd: number | null;
   kalshiTargetPriceUsd: number | null;
+};
+
+export type MismatchRiskEstimate = {
+  available: boolean;
+  modelVersion: string;
+  reason: string | null;
+  pFatal: number | null;
+  pFatalUpper95: number | null;
+  pAligned: number | null;
+  pDouble: number | null;
+  expectedPnlUsd: number | null;
+  conservativePnlUsd: number | null;
+  fatalPnlUsd: number | null;
+  breakEvenFatalProbability: number | null;
+  maximumAllowedFatalProbability: number | null;
+  chainlinkAgeMs: number | null;
+  cfAgeMs: number | null;
+  observationCount: number;
 };
 
 export type PrimarySelectionAudit = {
@@ -364,8 +414,14 @@ export type OrderIntentLeg = {
   requestedPrice: number | null;
   requestedSize: number;
   requestedNotionalUsd: number;
+  /** Durable worst-fill cost, including fees, reserved for this venue. */
+  worstFillCostUsd?: number;
+  /** Additional durable recovery envelope reserved on the hedge venue. */
+  recoveryReserveUsd?: number;
   filledPrice: number | null;
   filledSize: number;
+  /** Latest observed fill timestamp used to retire stale cash reservations safely. */
+  filledAt?: number;
   feeUsd: number;
   cashAdjustmentUsd?: number;
   status: ExecutionLegStatus;
@@ -394,6 +450,12 @@ export type OrderIntent = {
   maxSlippageBps: number;
   failureReason: string | null;
   projectedNetProfitUsd: number | null;
+  mismatchPFatal?: number | null;
+  mismatchPFatalUpper?: number | null;
+  mismatchModelVersion?: string | null;
+  fatalMismatchPnlUsd?: number | null;
+  conservativeExpectedPnlUsd?: number | null;
+  fatalLossExposureUsd?: number | null;
   realizedPnlUsd: number | null;
   roi: number | null;
   polyResolution: "UP" | "DOWN" | null;
@@ -466,6 +528,42 @@ export type LiveFill = {
   liquidity: "TAKER" | "MAKER" | null;
   filledAt: number;
   raw: Record<string, unknown>;
+};
+
+export type RealtimeOrderFill = {
+  venue: Venue;
+  venueOrderId: string;
+  clientOrderId: string | null;
+  tradeId: string;
+  marketRef: string | null;
+  tokenId: string | null;
+  side: OrderSide | null;
+  outcome: Resolution | null;
+  price: number;
+  size: number;
+  liquidity: "TAKER" | "MAKER" | null;
+  status: string | null;
+  filledAt: number;
+  capturedAt: number;
+  raw: Record<string, unknown>;
+};
+
+export type WaitForOrderFillRequest = {
+  venue: Venue;
+  venueOrderId: string;
+  clientOrderId?: string | null;
+  marketRef?: string | null;
+  afterCapturedAt?: number;
+  timeoutMs: number;
+};
+
+export type ReadRecentOrderFillsRequest = {
+  venue?: Venue;
+  venueOrderId?: string;
+  clientOrderId?: string | null;
+  marketRef?: string | null;
+  afterCapturedAt?: number;
+  limit?: number;
 };
 
 export type PositionSnapshot = {
@@ -666,6 +764,8 @@ export type DatabaseMaintenanceSummary = {
   finishedAt: number;
   deleted: {
     snapshots: number;
+    oracleSamples: number;
+    slotResolutions: number;
     pnlSnapshots: number;
     runEvents: number;
     fills: number;

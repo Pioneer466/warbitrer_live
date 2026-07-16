@@ -112,8 +112,198 @@ describe("venue exposure", () => {
 
     const exposure = calculateVenueExposureUsd(positions, openIntents);
 
-    expect(exposure.polymarket).toBeCloseTo(20.5 + 4.5, 4);
-    expect(exposure.kalshi).toBeCloseTo(24.5 + 2.75, 4);
+    expect(exposure.polymarket).toBeCloseTo(20.5 + 0.1 + 4.5, 4);
+    expect(exposure.kalshi).toBeCloseTo(24.5 + 0.1 + 2.75, 4);
+  });
+
+  it("keeps worst-fill fees and recovery reserves across ticks", () => {
+    const intent = {
+      id: "intent-reserved",
+      asset: "btc",
+      shadow: false,
+      slotKey: "btc:slot-reserved",
+      slotStartTs: 1,
+      slotEndTs: 2,
+      combination: "POLY_UP_KALSHI_NO",
+      status: "executing_primary",
+      createdAt: 1,
+      updatedAt: 1,
+      resolvedAt: null,
+      primaryVenue: "polymarket",
+      hedgeVenue: "kalshi",
+      grossCost: 0.9,
+      targetNotionalUsd: 9,
+      maxSlippageBps: 30,
+      failureReason: null,
+      projectedNetProfitUsd: 1,
+      realizedPnlUsd: null,
+      roi: null,
+      polyResolution: null,
+      kalshiResolution: null,
+      legs: [
+        {
+          id: "poly-reserved",
+          intentId: "intent-reserved",
+          venue: "polymarket",
+          outcome: "UP",
+          marketRef: "poly-market",
+          side: "BUY",
+          requestedPrice: 0.5,
+          requestedSize: 10,
+          requestedNotionalUsd: 5,
+          worstFillCostUsd: 5.4,
+          recoveryReserveUsd: 0,
+          filledPrice: null,
+          filledSize: 0,
+          feeUsd: 0.1,
+          status: "submitted",
+          venueOrderId: "poly-order",
+          payoutUsd: null,
+          resolvedOutcome: null,
+        },
+        {
+          id: "kalshi-reserved",
+          intentId: "intent-reserved",
+          venue: "kalshi",
+          outcome: "NO",
+          marketRef: "kalshi-market",
+          side: "BUY",
+          requestedPrice: 0.4,
+          requestedSize: 10,
+          requestedNotionalUsd: 4,
+          worstFillCostUsd: 4.3,
+          recoveryReserveUsd: 2,
+          filledPrice: null,
+          filledSize: 0,
+          feeUsd: 0.1,
+          status: "pending",
+          venueOrderId: null,
+          payoutUsd: null,
+          resolvedOutcome: null,
+        },
+      ],
+    } as OrderIntent;
+
+    expect(calculateVenueExposureUsd([], [intent])).toEqual({
+      polymarket: 5.4,
+      kalshi: 6.3,
+    });
+    expect(
+      applyVenueBalanceReservations(
+        [
+          {
+            venue: "polymarket",
+            status: "ready",
+            currency: "USDC",
+            availableBalanceUsd: 20,
+            totalBalanceUsd: 20,
+            portfolioValueUsd: 0,
+            allowanceUsd: null,
+            capturedAt: 1,
+            notes: [],
+            raw: {},
+          },
+          {
+            venue: "kalshi",
+            status: "ready",
+            currency: "USD",
+            availableBalanceUsd: 20,
+            totalBalanceUsd: 20,
+            portfolioValueUsd: 0,
+            allowanceUsd: null,
+            capturedAt: 1,
+            notes: [],
+            raw: {},
+          },
+        ],
+        [intent],
+      ),
+    ).toEqual([
+      expect.objectContaining({ availableBalanceUsd: 14.6 }),
+      expect.objectContaining({ availableBalanceUsd: 13.7 }),
+    ]);
+  });
+
+  it("keeps filled cash reserved until a newer venue balance absorbs the fill", () => {
+    const filledIntent = {
+      status: "hedged",
+      updatedAt: 200,
+      legs: [
+        {
+          venue: "polymarket",
+          requestedNotionalUsd: 5,
+          worstFillCostUsd: 5.4,
+          recoveryReserveUsd: 0,
+          filledPrice: 0.5,
+          filledSize: 10,
+          filledAt: 300,
+          feeUsd: 0.1,
+          status: "hedged",
+        },
+        {
+          venue: "kalshi",
+          requestedNotionalUsd: 4,
+          worstFillCostUsd: 4.3,
+          recoveryReserveUsd: 2,
+          filledPrice: 0.4,
+          filledSize: 10,
+          filledAt: 300,
+          feeUsd: 0.1,
+          status: "hedged",
+        },
+      ],
+    } as unknown as OrderIntent;
+    const balances: VenueBalance[] = [
+      {
+        venue: "polymarket",
+        status: "ready",
+        currency: "USDC",
+        availableBalanceUsd: 20,
+        totalBalanceUsd: 20,
+        portfolioValueUsd: 0,
+        allowanceUsd: null,
+        capturedAt: 100,
+        notes: [],
+        raw: {},
+      },
+      {
+        venue: "kalshi",
+        status: "ready",
+        currency: "USD",
+        availableBalanceUsd: 20,
+        totalBalanceUsd: 20,
+        portfolioValueUsd: 0,
+        allowanceUsd: null,
+        capturedAt: 100,
+        notes: [],
+        raw: {},
+      },
+    ];
+
+    expect(applyVenueBalanceReservations(balances, [filledIntent])).toEqual([
+      expect.objectContaining({ availableBalanceUsd: 14.9 }),
+      expect.objectContaining({ availableBalanceUsd: 15.9 }),
+    ]);
+    expect(
+      applyVenueBalanceReservations(
+        balances.map((balance) => ({ ...balance, capturedAt: 300 })),
+        [filledIntent],
+      ),
+    ).toEqual([
+      expect.objectContaining({ availableBalanceUsd: 14.9 }),
+      expect.objectContaining({ availableBalanceUsd: 15.9 }),
+    ]);
+    expect(
+      applyVenueBalanceReservations(
+        balances.map((balance) => ({ ...balance, capturedAt: 301 })),
+        [filledIntent],
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ venue: "polymarket", availableBalanceUsd: 20 }),
+        expect.objectContaining({ venue: "kalshi", availableBalanceUsd: 20 }),
+      ]),
+    );
   });
 
   it("does not count already hedged intents as slot execution blockers", () => {

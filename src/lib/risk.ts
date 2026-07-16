@@ -23,16 +23,31 @@ export function calculateVenueExposureUsd(
 }
 
 export function calculateLegExposureUsd(
-  leg: Pick<OrderIntent["legs"][number], "filledSize" | "filledPrice" | "requestedNotionalUsd">,
+  leg: Pick<
+    OrderIntent["legs"][number],
+    | "filledSize"
+    | "filledPrice"
+    | "filledAt"
+    | "requestedNotionalUsd"
+    | "feeUsd"
+    | "worstFillCostUsd"
+    | "recoveryReserveUsd"
+  >,
 ) {
-  if (leg.filledSize > 0 && leg.filledPrice !== null) {
-    return leg.filledSize * leg.filledPrice;
-  }
+  const observedExposure =
+    leg.filledSize > 0 && leg.filledPrice !== null
+      ? leg.filledSize * leg.filledPrice + Math.max(0, leg.feeUsd)
+      : leg.requestedNotionalUsd + Math.max(0, leg.feeUsd);
+  const durableRiskReservation =
+    readNonNegative(leg.worstFillCostUsd) + readNonNegative(leg.recoveryReserveUsd);
 
-  return leg.requestedNotionalUsd;
+  return Math.max(observedExposure, durableRiskReservation);
 }
 
-export function calculateReservedVenueBalanceUsd(openIntents: OrderIntent[]): Record<Venue, number> {
+export function calculateReservedVenueBalanceUsd(
+  openIntents: OrderIntent[],
+  balanceCapturedAtByVenue: Partial<Record<Venue, number>> = {},
+): Record<Venue, number> {
   const reserved: Record<Venue, number> = {
     polymarket: 0,
     kalshi: 0,
@@ -40,11 +55,23 @@ export function calculateReservedVenueBalanceUsd(openIntents: OrderIntent[]): Re
 
   for (const intent of openIntents) {
     for (const leg of intent.legs) {
-      if (leg.status !== "pending" && leg.status !== "submitted") {
-        continue;
+      const recoveryReserveUsd =
+        intent.status === "hedged" ? 0 : readNonNegative(leg.recoveryReserveUsd);
+      if (leg.status === "pending" || leg.status === "submitted") {
+        reserved[leg.venue] += Math.max(
+          leg.requestedNotionalUsd + Math.max(0, leg.feeUsd),
+          readNonNegative(leg.worstFillCostUsd),
+        );
+      } else if (
+        leg.filledSize > 0 &&
+        leg.filledPrice !== null &&
+        (balanceCapturedAtByVenue[leg.venue] ?? Number.NEGATIVE_INFINITY) <=
+          (leg.filledAt ?? intent.updatedAt)
+      ) {
+        reserved[leg.venue] +=
+          leg.filledSize * leg.filledPrice + Math.max(0, leg.feeUsd);
       }
-
-      reserved[leg.venue] += leg.requestedNotionalUsd;
+      reserved[leg.venue] += recoveryReserveUsd;
     }
   }
 
@@ -55,7 +82,13 @@ export function applyVenueBalanceReservations(
   balances: VenueBalance[],
   openIntents: OrderIntent[],
 ): VenueBalance[] {
-  const reserved = calculateReservedVenueBalanceUsd(openIntents);
+  const balanceCapturedAtByVenue = Object.fromEntries(
+    balances.map((balance) => [balance.venue, balance.capturedAt]),
+  ) as Partial<Record<Venue, number>>;
+  const reserved = calculateReservedVenueBalanceUsd(
+    openIntents,
+    balanceCapturedAtByVenue,
+  );
 
   return balances.map((balance) => {
     const reservedUsd = reserved[balance.venue];
@@ -81,4 +114,8 @@ export function hasUnresolvedExposureBlocker(openIntents: OrderIntent[]) {
 
 function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
+}
+
+function readNonNegative(value: number | null | undefined) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
 }

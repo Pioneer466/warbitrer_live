@@ -34,6 +34,9 @@ export type KalshiMarketSummary = {
   title: string;
   updated_time?: string;
   floor_strike?: string | number;
+  cap_strike?: string | number;
+  strike_type?: string;
+  expiration_value?: string | number | null;
   open_time: string;
   close_time: string;
   status: string;
@@ -65,6 +68,12 @@ type KalshiSeriesResponse = {
 
 type KalshiMarketResponse = {
   market: KalshiMarketSummary;
+};
+
+export type FinalizedKalshiResolutionObservation = {
+  resolution: "YES" | "NO";
+  benchmarkValueUsd: number | null;
+  benchmarkSource: "kalshi-expiration-value" | null;
 };
 
 export type KalshiOrderbook = {
@@ -272,6 +281,85 @@ export async function fetchKalshiResolution(ticker: string) {
   }
 
   return response.market.result === "yes" ? ("YES" as const) : ("NO" as const);
+}
+
+export async function fetchFinalizedKalshiResolution(ticker: string) {
+  const response = await fetchJson<KalshiMarketResponse>(`${getKalshiMarketDataBaseUrl()}/markets/${ticker}`);
+  const status = response.market.status?.toLowerCase?.() ?? "";
+  if (status !== "finalized" || !response.market.result) {
+    return null;
+  }
+
+  const result = response.market.result.toLowerCase();
+  if (result === "yes") {
+    return "YES" as const;
+  }
+  if (result === "no") {
+    return "NO" as const;
+  }
+  return null;
+}
+
+export async function fetchFinalizedKalshiResolutionObservation(
+  ticker: string,
+): Promise<FinalizedKalshiResolutionObservation | null> {
+  const response = await fetchJson<KalshiMarketResponse>(
+    `${getKalshiMarketDataBaseUrl()}/markets/${ticker}`,
+  );
+  const market = response.market;
+  const status = market.status?.toLowerCase?.() ?? "";
+  const result = market.result?.toLowerCase?.() ?? "";
+  if (status !== "finalized" || (result !== "yes" && result !== "no")) {
+    return null;
+  }
+  const resolution = result === "yes" ? "YES" : "NO";
+  const expirationValue = readPositiveFiniteMarketNumber(market.expiration_value);
+  const floorStrike = readPositiveFiniteMarketNumber(market.floor_strike);
+  const capStrike = readPositiveFiniteMarketNumber(market.cap_strike);
+  const strikeType = market.strike_type?.toLowerCase?.() ?? "";
+  const impliedResolution = deriveKalshiStrikeResolution({
+    expirationValue,
+    floorStrike,
+    capStrike,
+    strikeType,
+  });
+  const benchmarkValueUsd = impliedResolution === resolution ? expirationValue : null;
+
+  return {
+    resolution,
+    benchmarkValueUsd,
+    benchmarkSource:
+      benchmarkValueUsd === null ? null : "kalshi-expiration-value",
+  };
+}
+
+function deriveKalshiStrikeResolution(input: {
+  expirationValue: number | null;
+  floorStrike: number | null;
+  capStrike: number | null;
+  strikeType: string;
+}): "YES" | "NO" | null {
+  if (input.expirationValue === null) {
+    return null;
+  }
+  if (input.strikeType === "greater" && input.floorStrike !== null) {
+    return input.expirationValue > input.floorStrike ? "YES" : "NO";
+  }
+  if (input.strikeType === "greater_or_equal" && input.floorStrike !== null) {
+    return input.expirationValue >= input.floorStrike ? "YES" : "NO";
+  }
+  if (input.strikeType === "less" && input.capStrike !== null) {
+    return input.expirationValue < input.capStrike ? "YES" : "NO";
+  }
+  if (input.strikeType === "less_or_equal" && input.capStrike !== null) {
+    return input.expirationValue <= input.capStrike ? "YES" : "NO";
+  }
+  return null;
+}
+
+function readPositiveFiniteMarketNumber(value: unknown) {
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
 }
 
 export async function fetchKalshiSeries(asset: MarketSlot["asset"]) {
@@ -579,20 +667,7 @@ export function createKalshiAdapter(): VenueAdapter {
       }
 
       const response = await kalshiFetch<KalshiBalanceResponse>("/portfolio/balance");
-      const summary = deriveKalshiBalanceSummary(response);
-
-      return {
-        venue: "kalshi",
-        capturedAt: response.updated_ts,
-        status: "ready",
-        currency: "USD",
-        availableBalanceUsd: summary.availableBalanceUsd,
-        totalBalanceUsd: summary.totalBalanceUsd,
-        portfolioValueUsd: summary.portfolioValueUsd,
-        allowanceUsd: null,
-        notes: summary.notes,
-        raw: response as unknown as Record<string, unknown>,
-      };
+      return mapKalshiBalance(response, Date.now());
     },
     async getPositions(now = Date.now()) {
       if (!hasKalshiCredentials()) {
@@ -890,6 +965,37 @@ export function deriveKalshiBalanceSummary(response: KalshiBalanceResponse): Kal
     totalBalanceUsd: reportedPortfolioValueUsd,
     notes: [],
   };
+}
+
+export function mapKalshiBalance(
+  response: KalshiBalanceResponse,
+  capturedAt = Date.now(),
+): VenueBalance {
+  const summary = deriveKalshiBalanceSummary(response);
+
+  return {
+    venue: "kalshi",
+    capturedAt,
+    status: "ready",
+    currency: "USD",
+    availableBalanceUsd: summary.availableBalanceUsd,
+    totalBalanceUsd: summary.totalBalanceUsd,
+    portfolioValueUsd: summary.portfolioValueUsd,
+    allowanceUsd: null,
+    notes: summary.notes,
+    raw: {
+      ...response,
+      sourceUpdatedAtMs: normalizeKalshiTimestampMs(response.updated_ts),
+    },
+  };
+}
+
+function normalizeKalshiTimestampMs(timestamp: number) {
+  if (!Number.isFinite(timestamp) || timestamp < 0) {
+    return null;
+  }
+
+  return Math.round(timestamp < 1_000_000_000_000 ? timestamp * 1_000 : timestamp);
 }
 
 function createUnavailableKalshiQuote(

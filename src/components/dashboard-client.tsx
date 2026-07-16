@@ -3,6 +3,11 @@
 import { TradingToggle } from "@/components/trading-toggle";
 import { usePollingJson } from "@/components/use-polling-json";
 import {
+  AssetMismatchRiskOverview,
+  IntentMismatchRiskDetails,
+  OpportunityMismatchRiskDetails,
+} from "@/components/mismatch-risk-view";
+import {
   Chip,
   formatV2Countdown,
   formatV2Usd,
@@ -16,6 +21,7 @@ import {
   type V2Tone,
 } from "@/components/v2-ui";
 import { formatDateTime, formatPrice } from "@/lib/format";
+import type { GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   DashboardResponse,
   HistoryResponse,
@@ -30,6 +36,7 @@ import type {
 export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 2_000);
   const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 2_000);
+  const globalRisk = usePollingJson<GlobalRiskConfig>("/api/settings/risk", 5_000);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -76,6 +83,9 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
           </div>
           <div className="flex flex-wrap gap-2 border-t border-[var(--wa-gold-border)] px-5 py-3 sm:px-6">
             <Chip tone={workerState.readinessStatus === "ready" ? "emerald" : "rose"}>{workerState.readinessStatus}</Chip>
+            <Chip tone={config.mismatchRiskMode === "enforce" ? "rose" : config.mismatchRiskMode === "block_only" ? "amber" : "indigo"}>
+              risk {config.mismatchRiskMode}
+            </Chip>
             {activeBreakers.map((breaker) => <Chip key={breaker.key} tone="rose">{breaker.key}</Chip>)}
           </div>
         </Surface>
@@ -119,6 +129,17 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
             />
           </Surface>
         </div>
+      </section>
+
+      <section>
+        <SectionLabel right={`mode ${config.mismatchRiskMode}`}>Risque Mismatch</SectionLabel>
+        <AssetMismatchRiskOverview
+          mode={config.mismatchRiskMode}
+          opportunities={opportunities}
+          globalConfig={globalRisk.data}
+          globalConfigError={globalRisk.error}
+          globalConfigLoading={globalRisk.loading}
+        />
       </section>
 
       <section>
@@ -220,6 +241,7 @@ function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
         <ProxyMetric label="désaccord" value={formatNullablePct(opportunity.venueDisagreementPct)} />
         <ProxyMetric label="zone" value={formatNullableBps(opportunity.deadZoneDistanceBps)} />
       </div>
+      <OpportunityMismatchRiskDetails opportunity={opportunity} />
       {opportunity.reasons.length > 0 ? (
         <div className="px-5 py-3 text-[11px] text-[var(--wa-amber)]">{opportunity.reasons.join(" · ")}</div>
       ) : null}
@@ -271,12 +293,13 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
             <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">{leg.venue} · {leg.outcome}</div>
             <div className="text-[10px] text-[var(--wa-mist)]">
               {leg.filledSize > 0 && leg.filledPrice !== null
-                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}`
-                : `notionnel ${formatV2Usd(leg.requestedNotionalUsd)} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}`}
+                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}${formatLegRiskReservations(leg)}`
+                : `notionnel ${formatV2Usd(leg.requestedNotionalUsd)} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${formatLegRiskReservations(leg)}`}
             </div>
           </div>
         ))}
       </div>
+      <IntentMismatchRiskDetails intent={intent} />
       {intent.entrySizingReason ? <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">{intent.entrySizingReason}</div> : null}
       {intent.failureReason ? <div className="mt-2 rounded border border-[rgba(232,80,106,0.18)] bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">{intent.failureReason}</div> : null}
     </div>
@@ -423,6 +446,17 @@ function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
 
 function deriveLegCashAdjustmentUsd(leg: OrderIntent["legs"][number]) {
   return leg.cashAdjustmentUsd ?? 0;
+}
+
+function formatLegRiskReservations(leg: OrderIntent["legs"][number]) {
+  const parts: string[] = [];
+  if (leg.worstFillCostUsd !== undefined) {
+    parts.push(`worst ${formatV2Usd(leg.worstFillCostUsd)}`);
+  }
+  if ((leg.recoveryReserveUsd ?? 0) > 0) {
+    parts.push(`recovery ${formatV2Usd(leg.recoveryReserveUsd)}`);
+  }
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
 function formatSignedUsd(value: number | null | undefined) {

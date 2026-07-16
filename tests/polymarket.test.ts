@@ -2,6 +2,7 @@ import { Side } from "@polymarket/clob-client-v2";
 
 import {
   buildPolymarketClobOrderPlan,
+  derivePolymarketConfirmationRequestTimeoutMs,
   derivePolymarketDepth,
   derivePolymarketEffectiveFeeRateBps,
   extractPolymarketCollateralAllowanceInfo,
@@ -9,6 +10,8 @@ import {
   extractPolymarketPositionValueUsd,
   fetchPolymarketMarket,
   fetchPolymarketResolution,
+  fetchFinalizedPolymarketResolution,
+  fetchFinalizedPolymarketResolutionObservation,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
   getPolymarketSoftNoFillMessage,
@@ -28,6 +31,12 @@ describe("Polymarket helpers", () => {
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+  });
+
+  it("bounds confirmation REST calls by the remaining confirmation deadline", () => {
+    expect(derivePolymarketConfirmationRequestTimeoutMs(1_500, 1_000, 15_000)).toBe(500);
+    expect(derivePolymarketConfirmationRequestTimeoutMs(30_000, 1_000, 15_000)).toBe(15_000);
+    expect(derivePolymarketConfirmationRequestTimeoutMs(999, 1_000, 15_000)).toBe(0);
   });
 
   it("builds BUY hedge orders as exact share limit orders by default", () => {
@@ -132,6 +141,7 @@ describe("Polymarket helpers", () => {
             closed: true,
             enableOrderBook: true,
             outcomePrices: '["0","1"]',
+            umaResolutionStatus: "resolved",
           },
         ],
       },
@@ -164,6 +174,13 @@ describe("Polymarket helpers", () => {
     ).resolves.toBe("DOWN");
 
     await expect(
+      fetchFinalizedPolymarketResolution(
+        "eth-updown-15m-1777022100",
+        "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
+      ),
+    ).resolves.toBe("DOWN");
+
+    await expect(
       fetchPolymarketMarket(
         "eth-updown-15m-1777022100",
         "0x95f328bdcb938c4028ad72e6aeb94bbe5d27718b6907b2c88aa66d7d14669b85",
@@ -175,6 +192,199 @@ describe("Polymarket helpers", () => {
 
     expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/markets?slug=eth-updown-15m-1777022100");
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/events?slug=eth-updown-15m-1777022100");
+  });
+
+  it("rejects a closed Polymarket outcome until UMA reports it resolved", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [{
+        id: "market-1",
+        conditionId: "condition-1",
+        question: "BTC Up or Down",
+        slug: "btc-updown-15m-1",
+        endDate: "2026-01-01T00:15:00Z",
+        startDate: "2026-01-01T00:00:00Z",
+        outcomes: '["Up","Down"]',
+        clobTokenIds: '["up","down"]',
+        feeType: "crypto_fees_v2",
+        active: false,
+        closed: true,
+        enableOrderBook: true,
+        outcomePrices: '["1","0"]',
+        umaResolutionStatus: "proposed",
+      }],
+    });
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchFinalizedPolymarketResolution("btc-updown-15m-1", "condition-1"),
+    ).resolves.toBeNull();
+  });
+
+  it("keeps coherent Gamma terminal metadata as optional calibration telemetry", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      return {
+        ok: true,
+        json: async () =>
+          url.includes("/events?")
+            ? [
+                {
+                  id: "event-1",
+                  slug: "btc-updown-15m-1",
+                  eventMetadata: {
+                    finalPrice: "99",
+                    priceToBeat: "100",
+                  },
+                  markets: [
+                    {
+                      id: "market-1",
+                      conditionId: "condition-1",
+                      slug: "btc-updown-15m-1",
+                    },
+                  ],
+                },
+              ]
+            : [
+                {
+                  id: "market-1",
+                  conditionId: "condition-1",
+                  slug: "btc-updown-15m-1",
+                  closed: true,
+                  outcomePrices: '["0","1"]',
+                  umaResolutionStatus: "resolved",
+                },
+              ],
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchFinalizedPolymarketResolutionObservation(
+        "btc-updown-15m-1",
+        "condition-1",
+      ),
+    ).resolves.toEqual({
+      resolution: "DOWN",
+      benchmarkValueUsd: 99,
+      benchmarkSource: "polymarket-gamma-event-final-price",
+    });
+  });
+
+  it("never lets absent or inconsistent Gamma metadata invalidate the outcome label", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () =>
+        String(input).includes("/events?")
+          ? [
+              {
+                id: "event-1",
+                slug: "btc-updown-15m-1",
+                eventMetadata: { finalPrice: 101, priceToBeat: 100 },
+                markets: [
+                  {
+                    id: "market-1",
+                    conditionId: "condition-1",
+                    slug: "btc-updown-15m-1",
+                  },
+                ],
+              },
+            ]
+          : [
+              {
+                id: "market-1",
+                conditionId: "condition-1",
+                slug: "btc-updown-15m-1",
+                closed: true,
+                outcomePrices: '["0","1"]',
+                umaResolutionStatus: "resolved",
+              },
+            ],
+    }));
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchFinalizedPolymarketResolutionObservation(
+        "btc-updown-15m-1",
+        "condition-1",
+      ),
+    ).resolves.toEqual({
+      resolution: "DOWN",
+      benchmarkValueUsd: null,
+      benchmarkSource: null,
+    });
+  });
+
+  it("treats equality to Polymarket priceToBeat as UP metadata", async () => {
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () =>
+        String(input).includes("/events?")
+          ? [
+              {
+                id: "event-1",
+                slug: "btc-updown-15m-1",
+                eventMetadata: { finalPrice: 100, priceToBeat: 100 },
+                markets: [
+                  {
+                    id: "market-1",
+                    conditionId: "condition-1",
+                    slug: "btc-updown-15m-1",
+                  },
+                ],
+              },
+            ]
+          : [
+              {
+                id: "market-1",
+                conditionId: "condition-1",
+                slug: "btc-updown-15m-1",
+                closed: true,
+                outcomePrices: '["1","0"]',
+                umaResolutionStatus: "resolved",
+              },
+            ],
+    }));
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchFinalizedPolymarketResolutionObservation(
+        "btc-updown-15m-1",
+        "condition-1",
+      ),
+    ).resolves.toMatchObject({ resolution: "UP", benchmarkValueUsd: 100 });
+  });
+
+  it("keeps the outcome when Gamma event metadata is absent", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async (input: RequestInfo | URL) => ({
+        ok: true,
+        json: async () =>
+          String(input).includes("/events?")
+            ? [{
+                id: "event-1",
+                slug: "btc-updown-15m-1",
+                markets: [{ id: "market-1", conditionId: "condition-1", slug: "btc-updown-15m-1" }],
+              }]
+            : [{
+                id: "market-1",
+                conditionId: "condition-1",
+                slug: "btc-updown-15m-1",
+                closed: true,
+                outcomePrices: '["1","0"]',
+                umaResolutionStatus: "resolved",
+              }],
+      })) as any,
+    );
+
+    await expect(
+      fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1"),
+    ).resolves.toEqual({
+      resolution: "UP",
+      benchmarkValueUsd: null,
+      benchmarkSource: null,
+    });
   });
 
   it("classifies Polymarket FOK kill responses as soft no-fill errors", () => {

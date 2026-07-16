@@ -3,6 +3,7 @@
 import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
+import { IntentMismatchRiskDetails } from "@/components/mismatch-risk-view";
 import {
   Chip,
   formatV2Usd,
@@ -187,12 +188,13 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
             <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">{leg.venue} · {leg.outcome}</div>
             <div className="text-[10px] text-[var(--wa-mist)]">
               {leg.filledSize > 0 && leg.filledPrice !== null
-                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}`
-                : `req ${formatPrice(leg.requestedSize, 2)} · filled 0 · notionnel ${formatV2Usd(leg.requestedNotionalUsd)}`}
+                ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}${formatLegRiskReservations(leg)}`
+                : `req ${formatPrice(leg.requestedSize, 2)} · filled 0 · notionnel ${formatV2Usd(leg.requestedNotionalUsd)}${formatLegRiskReservations(leg)}`}
             </div>
           </div>
         ))}
       </div>
+      <IntentMismatchRiskDetails intent={intent} />
       {intent.failureReason ? <div className="mt-2 rounded bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">{intent.failureReason}</div> : null}
       {intent.entrySizingReason ? <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">{intent.entrySizingReason}</div> : null}
     </div>
@@ -320,6 +322,17 @@ function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
 
 function deriveLegCashAdjustmentUsd(leg: OrderIntent["legs"][number]) {
   return leg.cashAdjustmentUsd ?? 0;
+}
+
+function formatLegRiskReservations(leg: OrderIntent["legs"][number]) {
+  const parts: string[] = [];
+  if (leg.worstFillCostUsd !== undefined) {
+    parts.push(`worst ${formatV2Usd(leg.worstFillCostUsd)}`);
+  }
+  if ((leg.recoveryReserveUsd ?? 0) > 0) {
+    parts.push(`recovery ${formatV2Usd(leg.recoveryReserveUsd)}`);
+  }
+  return parts.length > 0 ? ` · ${parts.join(" · ")}` : "";
 }
 
 function formatSignedUsd(value: number | null | undefined) {

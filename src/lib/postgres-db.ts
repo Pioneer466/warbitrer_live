@@ -6,6 +6,12 @@ import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { enrichPnlSnapshot } from "@/lib/pnl";
 import { isRiskActivePosition } from "@/lib/positions";
 import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
+import { DEFAULT_GLOBAL_RISK_CONFIG, normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
+import {
+  SLOT_RESOLUTION_RETENTION_MS,
+  type OracleSlotSample,
+  type SlotResolutionRecord,
+} from "@/lib/oracle-history";
 import type {
   MarketAsset,
   DatabaseMaintenanceSummary,
@@ -101,6 +107,12 @@ async function bootstrapDatabase(pool: Pool) {
       updated_at BIGINT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS global_risk_config (
+      id INTEGER PRIMARY KEY,
+      payload JSONB NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS worker_state (
       id INTEGER PRIMARY KEY,
       phase TEXT NOT NULL,
@@ -127,6 +139,61 @@ async function bootstrapDatabase(pool: Pool) {
       ON opportunity_snapshots(slot_key, captured_at DESC);
     CREATE INDEX IF NOT EXISTS opportunity_snapshots_captured_idx
       ON opportunity_snapshots(captured_at DESC);
+
+    CREATE TABLE IF NOT EXISTS oracle_slot_samples (
+      id BIGSERIAL PRIMARY KEY,
+      asset TEXT NOT NULL,
+      slot_key TEXT NOT NULL,
+      slot_start_ts BIGINT NOT NULL,
+      slot_end_ts BIGINT NOT NULL,
+      captured_at BIGINT NOT NULL,
+      chainlink_start_price_usd DOUBLE PRECISION,
+      chainlink_start_captured_at BIGINT,
+      chainlink_live_price_usd DOUBLE PRECISION,
+      chainlink_source_ts BIGINT,
+      cf_index_id TEXT,
+      cf_live_price_usd DOUBLE PRECISION,
+      cf_source_ts BIGINT,
+      cf_trailing_average_usd DOUBLE PRECISION,
+      cf_trailing_window_size INTEGER,
+      cf_final_minute_average_usd DOUBLE PRECISION,
+      cf_final_minute_window_size INTEGER,
+      kalshi_target_price_usd DOUBLE PRECISION,
+      model_version TEXT,
+      risk_json JSONB NOT NULL,
+      economics_json JSONB NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS oracle_slot_samples_asset_slot_idx
+      ON oracle_slot_samples(asset, slot_key, captured_at DESC);
+    CREATE INDEX IF NOT EXISTS oracle_slot_samples_captured_brin_idx
+      ON oracle_slot_samples USING BRIN(captured_at)
+      WITH (pages_per_range = 32);
+
+    CREATE TABLE IF NOT EXISTS slot_resolutions (
+      asset TEXT NOT NULL,
+      slot_key TEXT NOT NULL,
+      slot_start_ts BIGINT NOT NULL,
+      slot_end_ts BIGINT NOT NULL,
+      polymarket_slug TEXT NOT NULL,
+      polymarket_market_ref TEXT,
+      kalshi_market_ref TEXT,
+      polymarket_resolution TEXT,
+      kalshi_resolution TEXT,
+      polymarket_settlement_value_usd DOUBLE PRECISION,
+      kalshi_settlement_value_usd DOUBLE PRECISION,
+      first_observed_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      resolved_at BIGINT,
+      source TEXT NOT NULL,
+      raw_json JSONB NOT NULL,
+      PRIMARY KEY (asset, slot_key)
+    );
+    CREATE INDEX IF NOT EXISTS slot_resolutions_unresolved_retry_idx
+      ON slot_resolutions(updated_at ASC, slot_end_ts ASC)
+      WHERE resolved_at IS NULL;
+    CREATE INDEX IF NOT EXISTS slot_resolutions_resolved_idx
+      ON slot_resolutions(resolved_at DESC)
+      WHERE resolved_at IS NOT NULL;
 
     CREATE TABLE IF NOT EXISTS venue_balances (
       venue TEXT PRIMARY KEY,
@@ -439,9 +506,23 @@ async function bootstrapDatabase(pool: Pool) {
   `);
 
     await pool.query(`
+    ALTER TABLE oracle_slot_samples
+    ADD COLUMN IF NOT EXISTS chainlink_start_captured_at BIGINT
+  `);
+
+    await pool.query(`
     ALTER TABLE worker_states
     ADD COLUMN IF NOT EXISTS loop_health_json JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
+
+    await pool.query(
+      `
+      INSERT INTO global_risk_config (id, payload, updated_at)
+      VALUES (1, $1::jsonb, $2)
+      ON CONFLICT (id) DO NOTHING
+    `,
+      [JSON.stringify(DEFAULT_GLOBAL_RISK_CONFIG), now],
+    );
 
     await pool.query(
       `
@@ -609,6 +690,16 @@ async function bootstrapDatabase(pool: Pool) {
   `);
 
     await pool.query(`
+    ALTER TABLE order_intents
+      ADD COLUMN IF NOT EXISTS mismatch_p_fatal DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS mismatch_p_fatal_upper DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS mismatch_model_version TEXT,
+      ADD COLUMN IF NOT EXISTS fatal_mismatch_pnl_usd DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS conservative_expected_pnl_usd DOUBLE PRECISION,
+      ADD COLUMN IF NOT EXISTS fatal_loss_exposure_usd DOUBLE PRECISION
+  `);
+
+    await pool.query(`
     ALTER TABLE venue_orders
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
@@ -720,6 +811,7 @@ async function bootstrapDatabase(pool: Pool) {
       "adaptiveSlippageThinBps",
       "dailyLossCapEnabled",
       "dailyLossHardCapUsd",
+      "mismatchRiskMode",
     ] as const) {
       await pool.query(
         `
@@ -902,6 +994,26 @@ export async function updateStrategyConfig(pool: Pool, asset: MarketAsset, paylo
   return payload;
 }
 
+export async function getGlobalRiskConfig(pool: Pool): Promise<GlobalRiskConfig> {
+  const result = await pool.query("SELECT payload FROM global_risk_config WHERE id = 1 LIMIT 1");
+  return normalizeGlobalRiskConfig(result.rows[0]?.payload as Partial<GlobalRiskConfig> | undefined);
+}
+
+export async function updateGlobalRiskConfig(pool: Pool, payload: GlobalRiskConfig) {
+  const normalized = normalizeGlobalRiskConfig(payload);
+  await pool.query(
+    `
+      INSERT INTO global_risk_config (id, payload, updated_at)
+      VALUES (1, $1::jsonb, $2)
+      ON CONFLICT (id) DO UPDATE SET
+        payload = EXCLUDED.payload,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [JSON.stringify(normalized), Date.now()],
+  );
+  return normalized;
+}
+
 export async function getWorkerState(pool: Pool, asset: MarketAsset): Promise<WorkerState> {
   const result = await pool.query(
     `
@@ -1069,6 +1181,165 @@ export async function insertOpportunitySnapshot(
   );
 }
 
+export async function insertOracleSlotSample(pool: Pool, sample: OracleSlotSample) {
+  await pool.query(
+    `
+      INSERT INTO oracle_slot_samples (
+        asset, slot_key, slot_start_ts, slot_end_ts, captured_at,
+        chainlink_start_price_usd, chainlink_start_captured_at,
+        chainlink_live_price_usd, chainlink_source_ts,
+        cf_index_id, cf_live_price_usd, cf_source_ts,
+        cf_trailing_average_usd, cf_trailing_window_size,
+        cf_final_minute_average_usd, cf_final_minute_window_size,
+        kalshi_target_price_usd, model_version, risk_json, economics_json
+      )
+      VALUES (
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9,
+        $10, $11, $12,
+        $13, $14,
+        $15, $16,
+        $17, $18, $19::jsonb, $20::jsonb
+      )
+    `,
+    [
+      sample.asset,
+      sample.slotKey,
+      sample.slotStartTs,
+      sample.slotEndTs,
+      sample.capturedAt,
+      sample.chainlinkStartPriceUsd,
+      sample.chainlinkStartCapturedAt,
+      sample.chainlinkLivePriceUsd,
+      sample.chainlinkSourceTs,
+      sample.cfIndexId,
+      sample.cfLivePriceUsd,
+      sample.cfSourceTs,
+      sample.cfTrailingAverageUsd,
+      sample.cfTrailingWindowSize,
+      sample.cfFinalMinuteAverageUsd,
+      sample.cfFinalMinuteWindowSize,
+      sample.kalshiTargetPriceUsd,
+      sample.modelVersion,
+      JSON.stringify(sample.riskByCombination),
+      JSON.stringify(sample.economicsByCombination),
+    ],
+  );
+}
+
+export async function upsertSlotResolution(pool: Pool, resolution: SlotResolutionRecord) {
+  await pool.query(
+    `
+      INSERT INTO slot_resolutions (
+        asset, slot_key, slot_start_ts, slot_end_ts, polymarket_slug,
+        polymarket_market_ref, kalshi_market_ref, polymarket_resolution, kalshi_resolution,
+        polymarket_settlement_value_usd, kalshi_settlement_value_usd,
+        first_observed_at, updated_at, resolved_at, source, raw_json
+      )
+      VALUES (
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9,
+        $10, $11,
+        $12, $13, $14, $15, $16::jsonb
+      )
+      ON CONFLICT (asset, slot_key) DO UPDATE SET
+        polymarket_slug = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND slot_resolutions.resolved_at IS NOT NULL
+            AND EXCLUDED.source <> 'official-venue-resolution'
+            THEN slot_resolutions.polymarket_slug
+          ELSE EXCLUDED.polymarket_slug
+        END,
+        polymarket_market_ref = COALESCE(EXCLUDED.polymarket_market_ref, slot_resolutions.polymarket_market_ref),
+        kalshi_market_ref = COALESCE(EXCLUDED.kalshi_market_ref, slot_resolutions.kalshi_market_ref),
+        polymarket_resolution = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND EXCLUDED.source <> 'official-venue-resolution'
+            THEN slot_resolutions.polymarket_resolution
+          WHEN slot_resolutions.source <> 'official-venue-resolution'
+            AND EXCLUDED.source = 'official-venue-resolution'
+            THEN EXCLUDED.polymarket_resolution
+          ELSE COALESCE(EXCLUDED.polymarket_resolution, slot_resolutions.polymarket_resolution)
+        END,
+        kalshi_resolution = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND EXCLUDED.source <> 'official-venue-resolution'
+            THEN slot_resolutions.kalshi_resolution
+          WHEN slot_resolutions.source <> 'official-venue-resolution'
+            AND EXCLUDED.source = 'official-venue-resolution'
+            THEN EXCLUDED.kalshi_resolution
+          ELSE COALESCE(EXCLUDED.kalshi_resolution, slot_resolutions.kalshi_resolution)
+        END,
+        polymarket_settlement_value_usd = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND slot_resolutions.polymarket_settlement_value_usd IS NOT NULL
+            THEN slot_resolutions.polymarket_settlement_value_usd
+          ELSE COALESCE(
+            EXCLUDED.polymarket_settlement_value_usd,
+            slot_resolutions.polymarket_settlement_value_usd
+          )
+        END,
+        kalshi_settlement_value_usd = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND slot_resolutions.kalshi_settlement_value_usd IS NOT NULL
+            THEN slot_resolutions.kalshi_settlement_value_usd
+          ELSE COALESCE(
+            EXCLUDED.kalshi_settlement_value_usd,
+            slot_resolutions.kalshi_settlement_value_usd
+          )
+        END,
+        updated_at = GREATEST(EXCLUDED.updated_at, slot_resolutions.updated_at),
+        resolved_at = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND EXCLUDED.source <> 'official-venue-resolution'
+            THEN slot_resolutions.resolved_at
+          ELSE COALESCE(EXCLUDED.resolved_at, slot_resolutions.resolved_at)
+        END,
+        source = CASE
+          WHEN slot_resolutions.source = 'official-venue-resolution'
+            AND EXCLUDED.source <> 'official-venue-resolution'
+            THEN slot_resolutions.source
+          ELSE EXCLUDED.source
+        END,
+        raw_json = slot_resolutions.raw_json || EXCLUDED.raw_json
+    `,
+    [
+      resolution.asset,
+      resolution.slotKey,
+      resolution.slotStartTs,
+      resolution.slotEndTs,
+      resolution.polymarketSlug,
+      resolution.polymarketMarketRef,
+      resolution.kalshiMarketRef,
+      resolution.polymarketResolution,
+      resolution.kalshiResolution,
+      resolution.polymarketSettlementValueUsd,
+      resolution.kalshiSettlementValueUsd,
+      resolution.firstObservedAt,
+      resolution.updatedAt,
+      resolution.resolvedAt,
+      resolution.source,
+      JSON.stringify(resolution.raw),
+    ],
+  );
+}
+
+export async function listPendingSlotResolutions(pool: Pool, now: number, limit = 50): Promise<SlotResolutionRecord[]> {
+  const result = await pool.query(
+    `
+      SELECT *
+      FROM slot_resolutions
+      WHERE resolved_at IS NULL
+        AND slot_end_ts <= $1
+        AND slot_end_ts >= $1 - $3
+      ORDER BY updated_at ASC, slot_end_ts ASC
+      LIMIT $2
+    `,
+    [now, limit, SLOT_RESOLUTION_RETENTION_MS],
+  );
+  return result.rows.map(mapSlotResolutionRow);
+}
+
 export async function getLatestOpportunitySnapshot(pool: Pool, asset: MarketAsset, slotKey?: string) {
   const result = await pool.query(
     `
@@ -1177,19 +1448,24 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
         resolved_at, primary_venue, hedge_venue, gross_cost, target_notional_usd, max_slippage_bps,
         entry_sizing_reason, failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
-        kalshi_resolution, legs_json
+        kalshi_resolution, legs_json, mismatch_p_fatal, mismatch_p_fatal_upper, mismatch_model_version,
+        fatal_mismatch_pnl_usd, conservative_expected_pnl_usd, fatal_loss_exposure_usd
       )
       VALUES (
         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
         $11, $12, $13, $14, $15, $16,
         $17, $18, $19, $20, $21, $22,
-        $23, $24::jsonb
+        $23, $24::jsonb, $25, $26, $27,
+        $28, $29, $30
       )
       ON CONFLICT (id) DO UPDATE SET
         asset = EXCLUDED.asset,
         status = EXCLUDED.status,
         updated_at = EXCLUDED.updated_at,
         resolved_at = EXCLUDED.resolved_at,
+        gross_cost = EXCLUDED.gross_cost,
+        target_notional_usd = EXCLUDED.target_notional_usd,
+        max_slippage_bps = EXCLUDED.max_slippage_bps,
         entry_sizing_reason = EXCLUDED.entry_sizing_reason,
         failure_reason = EXCLUDED.failure_reason,
         projected_net_profit_usd = EXCLUDED.projected_net_profit_usd,
@@ -1197,7 +1473,13 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         roi = EXCLUDED.roi,
         poly_resolution = EXCLUDED.poly_resolution,
         kalshi_resolution = EXCLUDED.kalshi_resolution,
-        legs_json = EXCLUDED.legs_json
+        legs_json = EXCLUDED.legs_json,
+        mismatch_p_fatal = EXCLUDED.mismatch_p_fatal,
+        mismatch_p_fatal_upper = EXCLUDED.mismatch_p_fatal_upper,
+        mismatch_model_version = EXCLUDED.mismatch_model_version,
+        fatal_mismatch_pnl_usd = EXCLUDED.fatal_mismatch_pnl_usd,
+        conservative_expected_pnl_usd = EXCLUDED.conservative_expected_pnl_usd,
+        fatal_loss_exposure_usd = EXCLUDED.fatal_loss_exposure_usd
     `,
     [
       intent.id,
@@ -1224,6 +1506,12 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
       intent.polyResolution,
       intent.kalshiResolution,
       JSON.stringify(intent.legs),
+      intent.mismatchPFatal ?? null,
+      intent.mismatchPFatalUpper ?? null,
+      intent.mismatchModelVersion ?? null,
+      intent.fatalMismatchPnlUsd ?? null,
+      intent.conservativeExpectedPnlUsd ?? null,
+      intent.fatalLossExposureUsd ?? null,
     ],
   );
 }
@@ -1390,6 +1678,11 @@ export async function listRecentOrderAttempts(pool: Pool, limit = 100, asset?: M
     asset ? [limit, asset] : [limit],
   );
   return result.rows.map(mapOrderAttemptRow);
+}
+
+export async function findOrderAttemptById(pool: Pool, attemptId: string): Promise<OrderAttempt | null> {
+  const result = await pool.query("SELECT * FROM order_attempts WHERE id = $1 LIMIT 1", [attemptId]);
+  return result.rows[0] ? mapOrderAttemptRow(result.rows[0]) : null;
 }
 
 export async function listRecentVenueOrders(pool: Pool, limit = 50, asset?: MarketAsset): Promise<LiveOrder[]> {
@@ -2095,6 +2388,8 @@ export async function runDatabaseMaintenance(
   const startedAt = Date.now();
   const deleted: DatabaseMaintenanceSummary["deleted"] = {
     snapshots: 0,
+    oracleSamples: 0,
+    slotResolutions: 0,
     pnlSnapshots: 0,
     runEvents: 0,
     fills: 0,
@@ -2144,6 +2439,16 @@ export async function runDatabaseMaintenance(
   deleted.snapshots = await deleteBefore(pool, config.retention.snapshotsMs, now, `
     DELETE FROM opportunity_snapshots
     WHERE captured_at < $1
+  `);
+
+  deleted.oracleSamples = await deleteBefore(pool, config.retention.oracleSamplesMs, now, `
+    DELETE FROM oracle_slot_samples
+    WHERE captured_at < $1
+  `);
+
+  deleted.slotResolutions = await deleteBefore(pool, config.retention.slotResolutionsMs, now, `
+    DELETE FROM slot_resolutions
+    WHERE slot_end_ts < $1
   `);
 
   return {
@@ -2772,6 +3077,27 @@ function mapOpportunitySnapshotRow(row: any) {
   };
 }
 
+function mapSlotResolutionRow(row: any): SlotResolutionRecord {
+  return {
+    asset: row.asset,
+    slotKey: row.slot_key,
+    slotStartTs: row.slot_start_ts,
+    slotEndTs: row.slot_end_ts,
+    polymarketSlug: row.polymarket_slug,
+    polymarketMarketRef: row.polymarket_market_ref,
+    kalshiMarketRef: row.kalshi_market_ref,
+    polymarketResolution: row.polymarket_resolution,
+    kalshiResolution: row.kalshi_resolution,
+    polymarketSettlementValueUsd: row.polymarket_settlement_value_usd,
+    kalshiSettlementValueUsd: row.kalshi_settlement_value_usd,
+    firstObservedAt: row.first_observed_at,
+    updatedAt: row.updated_at,
+    resolvedAt: row.resolved_at,
+    source: row.source,
+    raw: row.raw_json ?? {},
+  };
+}
+
 function mapOrderIntentRow(row: any): OrderIntent {
   return {
     id: row.id,
@@ -2793,6 +3119,12 @@ function mapOrderIntentRow(row: any): OrderIntent {
     maxSlippageBps: row.max_slippage_bps,
     failureReason: row.failure_reason,
     projectedNetProfitUsd: row.projected_net_profit_usd,
+    mismatchPFatal: row.mismatch_p_fatal ?? null,
+    mismatchPFatalUpper: row.mismatch_p_fatal_upper ?? null,
+    mismatchModelVersion: row.mismatch_model_version ?? null,
+    fatalMismatchPnlUsd: row.fatal_mismatch_pnl_usd ?? null,
+    conservativeExpectedPnlUsd: row.conservative_expected_pnl_usd ?? null,
+    fatalLossExposureUsd: row.fatal_loss_exposure_usd ?? null,
     realizedPnlUsd: row.realized_pnl_usd,
     roi: row.roi,
     polyResolution: row.poly_resolution,

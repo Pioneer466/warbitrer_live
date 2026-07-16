@@ -4,6 +4,8 @@ import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
   fetchKalshiResolution,
+  fetchFinalizedKalshiResolution,
+  fetchFinalizedKalshiResolutionObservation,
   fetchKalshiMarkets,
   fetchKalshiMarketsForSlot,
   getKalshiFillFeeUsd,
@@ -13,6 +15,7 @@ import {
   getKalshiOrderPriceUsd,
   getKalshiSoftNoFillMessage,
   isTrackedKalshiPosition,
+  mapKalshiBalance,
   mapKalshiPosition,
   mapKalshiOrderStatus,
   normalizeKalshiOrderPrice,
@@ -426,6 +429,144 @@ describe("Kalshi quote derivation", () => {
     await expect(fetchKalshiResolution("KXETH15M-SETTLED")).resolves.toBe("NO");
   });
 
+  it("requires finalized Kalshi truth for mismatch calibration labels", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXETH15M-DETERMINED",
+            status: "determined",
+            result: "yes",
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXETH15M-FINALIZED",
+            status: "finalized",
+            result: "no",
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXETH15M-UNKNOWN",
+            status: "finalized",
+            result: "voided",
+          },
+        }),
+      });
+
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(fetchFinalizedKalshiResolution("KXETH15M-DETERMINED")).resolves.toBeNull();
+    await expect(fetchFinalizedKalshiResolution("KXETH15M-FINALIZED")).resolves.toBe("NO");
+    await expect(fetchFinalizedKalshiResolution("KXETH15M-UNKNOWN")).resolves.toBeNull();
+  });
+
+  it("captures a coherent finalized Kalshi expiration benchmark", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXBTC15M-FINALIZED",
+            status: "finalized",
+            result: "yes",
+            strike_type: "greater",
+            floor_strike: "64665.91",
+            expiration_value: "64669.86",
+          },
+        }),
+      }) as any,
+    );
+
+    await expect(
+      fetchFinalizedKalshiResolutionObservation("KXBTC15M-FINALIZED"),
+    ).resolves.toEqual({
+      resolution: "YES",
+      benchmarkValueUsd: 64669.86,
+      benchmarkSource: "kalshi-expiration-value",
+    });
+  });
+
+  it("uses the strict greater rule at equality and drops inconsistent values", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXBTC15M-EQUAL",
+            status: "finalized",
+            result: "no",
+            strike_type: "greater",
+            floor_strike: 100,
+            expiration_value: 100,
+          },
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXBTC15M-INCONSISTENT",
+            status: "finalized",
+            result: "no",
+            strike_type: "greater",
+            floor_strike: 100,
+            expiration_value: 101,
+          },
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock as any);
+
+    await expect(
+      fetchFinalizedKalshiResolutionObservation("KXBTC15M-EQUAL"),
+    ).resolves.toMatchObject({ resolution: "NO", benchmarkValueUsd: 100 });
+    await expect(
+      fetchFinalizedKalshiResolutionObservation("KXBTC15M-INCONSISTENT"),
+    ).resolves.toEqual({
+      resolution: "NO",
+      benchmarkValueUsd: null,
+      benchmarkSource: null,
+    });
+  });
+
+  it("keeps the outcome when Kalshi expiration metadata is malformed", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          market: {
+            ticker: "KXBTC15M-MALFORMED",
+            status: "finalized",
+            result: "yes",
+            strike_type: "greater",
+            floor_strike: 100,
+            expiration_value: "not-a-number",
+          },
+        }),
+      }) as any,
+    );
+
+    await expect(
+      fetchFinalizedKalshiResolutionObservation("KXBTC15M-MALFORMED"),
+    ).resolves.toEqual({
+      resolution: "YES",
+      benchmarkValueUsd: null,
+      benchmarkSource: null,
+    });
+  });
+
   it("signs Kalshi authenticated requests with the full trade-api path", () => {
     expect(
       buildKalshiSigningPath(
@@ -455,6 +596,31 @@ describe("Kalshi quote derivation", () => {
       totalBalanceUsd: 52,
       notes: ["Kalshi portfolio_value inferieur au cash disponible; fallback sur le solde cash."],
     });
+  });
+
+  it("timestamps Kalshi balances at local observation time and preserves the source timestamp", () => {
+    const capturedAt = 1_784_220_000_123;
+
+    expect(
+      mapKalshiBalance(
+        {
+          balance: 5200,
+          portfolio_value: 6100,
+          updated_ts: 1_784_219_999,
+        },
+        capturedAt,
+      ),
+    ).toEqual(
+      expect.objectContaining({
+        capturedAt,
+        availableBalanceUsd: 52,
+        totalBalanceUsd: 61,
+        raw: expect.objectContaining({
+          updated_ts: 1_784_219_999,
+          sourceUpdatedAtMs: 1_784_219_999_000,
+        }),
+      }),
+    );
   });
 
   it("maps Kalshi positions with mark-to-market pricing and unrealized pnl", () => {
