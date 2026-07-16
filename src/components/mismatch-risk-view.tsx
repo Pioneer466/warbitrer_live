@@ -45,6 +45,7 @@ export function AssetMismatchRiskOverview({
           title="Estimation du créneau"
           mode={mode}
           modelState={modelState}
+          executionUsable={estimate?.executionUsable}
         />
         <div className="grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] md:grid-cols-4">
           <RiskMetric
@@ -141,7 +142,14 @@ export function OpportunityMismatchRiskDetails({
         <span className="text-[9px] uppercase tracking-[0.20em] text-[rgba(201,168,100,0.45)]">
           Modèle probabiliste
         </span>
-        <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
+        <div className="flex flex-wrap gap-2">
+          <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
+          {estimate?.available ? (
+            <Chip tone={estimate.executionUsable === false ? "amber" : "emerald"}>
+              {estimate.executionUsable === false ? "diagnostic" : "exec fresh"}
+            </Chip>
+          ) : null}
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] sm:grid-cols-4">
         <RiskMetric label="P fatal" value={formatRiskProbability(estimate?.pFatal)} />
@@ -214,10 +222,12 @@ function RiskPanelHeader({
   title,
   mode,
   modelState,
+  executionUsable,
 }: {
   title: string;
   mode: MismatchRiskMode;
   modelState: MismatchModelDisplayState;
+  executionUsable?: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
@@ -228,6 +238,11 @@ function RiskPanelHeader({
       <div className="flex flex-wrap gap-2">
         <Chip tone={modeTone(mode)}>{mode}</Chip>
         <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
+        {modelState !== "unavailable" ? (
+          <Chip tone={executionUsable === false ? "amber" : "emerald"}>
+            {executionUsable === false ? "diagnostic" : "exec fresh"}
+          </Chip>
+        ) : null}
       </div>
     </div>
   );
@@ -236,7 +251,7 @@ function RiskPanelHeader({
 function RiskEstimateFooter({ estimate }: { estimate: MismatchRiskEstimate | null }) {
   const modelState = getMismatchModelDisplayState(estimate);
   const details = estimate
-    ? `${estimate.observationCount} obs · Chainlink ${formatRiskAge(estimate.chainlinkAgeMs)} · CF ${formatRiskAge(estimate.cfAgeMs)}`
+    ? `${estimate.observationCount} obs · Chainlink ${formatRiskAge(estimate.chainlinkAgeMs)} · CF ${formatRiskAge(estimate.cfAgeMs)} · skew ${formatRiskAge(estimate.sourceTimestampSkewMs)}`
     : "Aucune estimation pour le créneau";
 
   return (
@@ -247,7 +262,12 @@ function RiskEstimateFooter({ estimate }: { estimate: MismatchRiskEstimate | nul
       </div>
       {estimate?.reason ? (
         <div className={`mt-2 text-[10px] ${modelState === "calibrated" ? V2_TONE_TEXT.mist : V2_TONE_TEXT.amber}`}>
-          {estimate.reason}
+          {formatRiskReason(estimate.reason)}
+        </div>
+      ) : null}
+      {estimate?.executionUsable === false && estimate.executionReason ? (
+        <div className={`mt-2 text-[10px] ${V2_TONE_TEXT.amber}`}>
+          Diagnostic disponible, exécution stricte bloquée : {formatRiskReason(estimate.executionReason)}
         </div>
       ) : null}
     </div>
@@ -311,4 +331,16 @@ function formatSignedUsd(value: number | null | undefined) {
     return "--";
   }
   return `${value >= 0 ? "+" : "-"}${formatV2Usd(Math.abs(value))}`;
+}
+
+function formatRiskReason(reason: string) {
+  const labels: Record<string, string> = {
+    economics_unavailable: "probabilités disponibles, P&L absent faute de taille exécutable",
+    chainlink_stale: "prix Chainlink trop ancien",
+    cf_stale: "prix CF trop ancien",
+    oracle_timestamp_skew: "timestamps Chainlink et CF trop éloignés",
+    insufficient_history: "historique encore insuffisant",
+    insufficient_returns: "variations appariées encore insuffisantes",
+  };
+  return labels[reason] ?? reason;
 }

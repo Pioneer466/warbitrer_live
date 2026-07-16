@@ -77,7 +77,10 @@ import {
   calculateMismatchAdjustedPnl,
   evaluateEconomicMismatchGate,
 } from "@/lib/mismatch-risk";
-import { MismatchRiskRuntime } from "@/lib/mismatch-risk-runtime";
+import {
+  MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
+  MismatchRiskRuntime,
+} from "@/lib/mismatch-risk-runtime";
 import { applyMismatchRiskPolicy } from "@/lib/mismatch-risk-policy";
 import {
   DEFAULT_GLOBAL_RISK_CONFIG,
@@ -843,6 +846,10 @@ function estimateMismatchRiskByCombination(input: {
   oracleMaxAgeMs: number;
 }): Partial<Record<PairCombination, MismatchRiskEstimate>> {
   const estimates: Partial<Record<PairCombination, MismatchRiskEstimate>> = {};
+  const diagnosticMaxSourceAgeMs = Math.max(
+    input.oracleMaxAgeMs,
+    MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
+  );
   for (const opportunity of input.opportunities) {
     const pairSize = Math.min(opportunity.legs[0].size, opportunity.legs[1].size);
     const totalCostUsd = Math.max(
@@ -858,7 +865,10 @@ function estimateMismatchRiskByCombination(input: {
       polymarket: input.polymarket,
       kalshi: input.kalshi,
       now: input.now,
-      maxSourceAgeMs: input.oracleMaxAgeMs,
+      maxSourceAgeMs: diagnosticMaxSourceAgeMs,
+      maxPairSkewMs: diagnosticMaxSourceAgeMs,
+      executionMaxSourceAgeMs: input.oracleMaxAgeMs,
+      executionMaxPairSkewMs: input.oracleMaxAgeMs,
       combination: opportunity.combination,
       slotStartTs: input.slotStartTs,
       slotEndTs: input.slotEndTs,
@@ -1087,7 +1097,16 @@ async function recheckMismatchRiskForExecution(input: {
     polymarket: polymarket.quote,
     kalshi: kalshi.quote,
     now: input.now,
-    maxSourceAgeMs: config.oracleMaxAgeMs,
+    maxSourceAgeMs: Math.max(
+      config.oracleMaxAgeMs,
+      MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
+    ),
+    maxPairSkewMs: Math.max(
+      config.oracleMaxAgeMs,
+      MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS,
+    ),
+    executionMaxSourceAgeMs: config.oracleMaxAgeMs,
+    executionMaxPairSkewMs: config.oracleMaxAgeMs,
     combination: candidateOpportunity.combination,
     slotStartTs: input.slot.startTs,
     slotEndTs: input.slot.endTs,

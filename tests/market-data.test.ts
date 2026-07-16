@@ -5,6 +5,7 @@ import {
   applyLevelDelta,
   chooseFeedSource,
   computeFeedStatus,
+  isChainlinkPriceStreamSilent,
   KALSHI_CF_BENCHMARK_INDEX_BY_ASSET,
   MarketDataSupervisor,
   parseKalshiCfBenchmarksValue,
@@ -99,6 +100,13 @@ describe("market data helpers", () => {
     expect(shouldRestResync(11_000, 68_000, 70_000, 4_000, 60_000)).toBe(false);
     expect(shouldRestResync(10_000, 68_000, 70_000, 4_000, 60_000)).toBe(true);
     expect(shouldRestResync(10_000, 5_000, 15_000, 4_000, 60_000)).toBe(true);
+  });
+
+  it("distinguishes Chainlink price silence from websocket heartbeat activity", () => {
+    expect(isChainlinkPriceStreamSilent(null, 1_000, 15_000)).toBe(false);
+    expect(isChainlinkPriceStreamSilent(null, 1_000, 16_001)).toBe(true);
+    expect(isChainlinkPriceStreamSilent(14_000, 1_000, 20_000)).toBe(false);
+    expect(isChainlinkPriceStreamSilent(2_000, 14_000, 20_000)).toBe(false);
   });
 
   it("applies top-of-book level deltas and removes empty levels", () => {

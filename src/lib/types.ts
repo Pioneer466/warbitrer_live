@@ -362,6 +362,8 @@ export type LiveOpportunity = {
 
 export type MismatchRiskEstimate = {
   available: boolean;
+  executionUsable?: boolean;
+  executionReason?: string | null;
   modelVersion: string;
   reason: string | null;
   pFatal: number | null;
@@ -375,6 +377,7 @@ export type MismatchRiskEstimate = {
   maximumAllowedFatalProbability: number | null;
   chainlinkAgeMs: number | null;
   cfAgeMs: number | null;
+  sourceTimestampSkewMs?: number | null;
   observationCount: number;
 };
 

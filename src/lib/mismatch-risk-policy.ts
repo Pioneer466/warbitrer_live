@@ -30,6 +30,7 @@ const TERMINAL_INTENT_STATUSES = new Set<OrderIntentStatus>([
 export type MismatchRiskPolicyReasonCode =
   | "estimate_unavailable"
   | "estimate_invalid"
+  | "execution_reference_unusable"
   | "model_uncalibrated"
   | "non_positive_aligned_margin"
   | "fatal_probability_above_limit"
@@ -198,7 +199,16 @@ export function recheckMismatchRiskCandidate(
         input.estimate.reason ?? "raison inconnue",
       ),
     );
-  } else if (!economics) {
+  } else if (input.estimate.executionUsable === false) {
+    diagnosticReasons.push(
+      policyReason(
+        "execution_reference_unusable",
+        input.estimate.executionReason ?? "références non synchronisées",
+      ),
+    );
+  }
+
+  if (input.estimate.available && !economics) {
     diagnosticReasons.push(
       policyReason("estimate_invalid", economicsResult.reason ?? "données invalides"),
     );
@@ -293,6 +303,7 @@ export function recheckMismatchRiskCandidate(
       new Set([
         "estimate_unavailable",
         "estimate_invalid",
+        "execution_reference_unusable",
         "model_uncalibrated",
         "non_positive_aligned_margin",
         "fatal_probability_above_limit",
@@ -411,6 +422,8 @@ function policyReason(
       return { code, message: `Modèle mismatch indisponible${suffix}` };
     case "estimate_invalid":
       return { code, message: `Estimation mismatch invalide${suffix}` };
+    case "execution_reference_unusable":
+      return { code, message: `Références trop anciennes ou désynchronisées pour exécution${suffix}` };
     case "model_uncalibrated":
       return { code, message: `Modèle mismatch non calibré${suffix}` };
     case "non_positive_aligned_margin":

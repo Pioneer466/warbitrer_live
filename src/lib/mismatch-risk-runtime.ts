@@ -15,6 +15,7 @@ import type {
 
 export const MISMATCH_RISK_RUNTIME_MODEL_VERSION =
   "structural-ewma-gaussian-v1-uncalibrated";
+export const MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS = 10_000;
 
 const DEFAULT_MAX_OBSERVATIONS = 900;
 const DEFAULT_STATISTICS_OBSERVATIONS = 300;
@@ -47,6 +48,9 @@ export type MismatchRiskObservationInput = {
   kalshi: KalshiQuote;
   now: number;
   maxSourceAgeMs: number;
+  maxPairSkewMs?: number;
+  executionMaxSourceAgeMs?: number;
+  executionMaxPairSkewMs?: number;
 };
 
 export type MismatchRiskRuntimeEstimateInput = MismatchRiskObservationInput & {
@@ -94,6 +98,12 @@ type ExtractedReference = {
   cfTimestampMs: number;
   chainlinkAgeMs: number;
   cfAgeMs: number;
+  sourceTimestampSkewMs: number;
+};
+
+type ExecutionReferenceQuality = {
+  usable: boolean;
+  reason: string | null;
 };
 
 type ReferenceExtractionResult =
@@ -189,17 +199,20 @@ export class MismatchRiskRuntime {
       );
     }
 
-    this.observe(input);
+    this.observe({
+      ...input,
+      maxSourceAgeMs:
+        input.executionMaxSourceAgeMs ?? input.maxSourceAgeMs,
+      maxPairSkewMs:
+        input.executionMaxPairSkewMs ??
+        input.maxPairSkewMs ??
+        this.options.maxPairSkewMs,
+    });
     const observationCount = this.observations.get(input.asset)?.length ?? 0;
     const { reference } = extracted;
-    if (!isPositiveFinite(input.pairSize) || !isNonNegativeFinite(input.totalCostUsd)) {
-      return unavailableEstimate(
-        "invalid_economics",
-        observationCount,
-        reference.chainlinkAgeMs,
-        reference.cfAgeMs,
-      );
-    }
+    const economicsAvailable =
+      isPositiveFinite(input.pairSize) &&
+      isNonNegativeFinite(input.totalCostUsd);
     if (
       !isNonNegativeFinite(input.slotStartTs) ||
       !isPositiveFinite(input.slotEndTs) ||
@@ -322,33 +335,45 @@ export class MismatchRiskRuntime {
         probabilities.pFatal,
         statistics.effectiveObservationCount,
       );
-      const pnl = calculateMismatchAdjustedPnl({
-        pairSize: input.pairSize,
-        totalCostUsd: input.totalCostUsd,
-        probabilities,
-        pFatalUpper95,
-      });
-      const gate = evaluateEconomicMismatchGate({
-        pairSize: input.pairSize,
-        totalCostUsd: input.totalCostUsd,
-        pFatalUpper95,
-      });
+      const pnl = economicsAvailable
+        ? calculateMismatchAdjustedPnl({
+            pairSize: input.pairSize,
+            totalCostUsd: input.totalCostUsd,
+            probabilities,
+            pFatalUpper95,
+          })
+        : null;
+      const gate = economicsAvailable
+        ? evaluateEconomicMismatchGate({
+            pairSize: input.pairSize,
+            totalCostUsd: input.totalCostUsd,
+            pFatalUpper95,
+          })
+        : null;
+      const executionQuality = evaluateExecutionReferenceQuality(
+        reference,
+        input.executionMaxSourceAgeMs ?? input.maxSourceAgeMs,
+        input.executionMaxPairSkewMs ?? input.maxPairSkewMs ?? this.options.maxPairSkewMs,
+      );
 
       return {
         available: true,
+        executionUsable: executionQuality.usable,
+        executionReason: executionQuality.reason,
         modelVersion: MISMATCH_RISK_RUNTIME_MODEL_VERSION,
-        reason: null,
+        reason: economicsAvailable ? null : "economics_unavailable",
         pFatal: probabilities.pFatal,
         pFatalUpper95,
         pAligned: probabilities.pAligned,
         pDouble: probabilities.pDouble,
-        expectedPnlUsd: pnl.expectedPnlUsd,
-        conservativePnlUsd: pnl.conservativePnlUsd,
-        fatalPnlUsd: pnl.fatalPnlUsd,
-        breakEvenFatalProbability: gate.pBreakEven,
-        maximumAllowedFatalProbability: gate.maximumAllowedFatalProbability,
+        expectedPnlUsd: pnl?.expectedPnlUsd ?? null,
+        conservativePnlUsd: pnl?.conservativePnlUsd ?? null,
+        fatalPnlUsd: pnl?.fatalPnlUsd ?? null,
+        breakEvenFatalProbability: gate?.pBreakEven ?? null,
+        maximumAllowedFatalProbability: gate?.maximumAllowedFatalProbability ?? null,
         chainlinkAgeMs: risk.chainlinkAgeMs,
         cfAgeMs: risk.cfAgeMs,
+        sourceTimestampSkewMs: reference.sourceTimestampSkewMs,
         observationCount,
       };
     } catch {
@@ -548,6 +573,7 @@ function extractReference(
 
   const chainlinkAgeMs = input.now - chainlinkTimestampMs;
   const cfAgeMs = input.now - cf.sourceTimestampMs;
+  const maxPairSkewMs = input.maxPairSkewMs ?? options.maxPairSkewMs;
   if (chainlinkAgeMs < -options.futureToleranceMs) {
     return unavailableReference(
       "chainlink_timestamp_in_future",
@@ -564,7 +590,11 @@ function extractReference(
   if (cfAgeMs > input.maxSourceAgeMs) {
     return unavailableReference("cf_stale", chainlinkAgeMs, cfAgeMs);
   }
-  if (Math.abs(chainlinkTimestampMs - cf.sourceTimestampMs) > options.maxPairSkewMs) {
+  if (!isNonNegativeFinite(maxPairSkewMs)) {
+    return unavailableReference("invalid_input", chainlinkAgeMs, cfAgeMs);
+  }
+  const sourceTimestampSkewMs = Math.abs(chainlinkTimestampMs - cf.sourceTimestampMs);
+  if (sourceTimestampSkewMs > maxPairSkewMs) {
     return unavailableReference("oracle_timestamp_skew", chainlinkAgeMs, cfAgeMs);
   }
 
@@ -577,8 +607,29 @@ function extractReference(
       cfTimestampMs: cf.sourceTimestampMs,
       chainlinkAgeMs: Math.max(0, chainlinkAgeMs),
       cfAgeMs: Math.max(0, cfAgeMs),
+      sourceTimestampSkewMs,
     },
   };
+}
+
+function evaluateExecutionReferenceQuality(
+  reference: ExtractedReference,
+  maxSourceAgeMs: number,
+  maxPairSkewMs: number,
+): ExecutionReferenceQuality {
+  if (!isNonNegativeFinite(maxSourceAgeMs) || !isNonNegativeFinite(maxPairSkewMs)) {
+    return { usable: false, reason: "execution_reference_limits_invalid" };
+  }
+  if (reference.chainlinkAgeMs > maxSourceAgeMs) {
+    return { usable: false, reason: "chainlink_stale" };
+  }
+  if (reference.cfAgeMs > maxSourceAgeMs) {
+    return { usable: false, reason: "cf_stale" };
+  }
+  if (reference.sourceTimestampSkewMs > maxPairSkewMs) {
+    return { usable: false, reason: "oracle_timestamp_skew" };
+  }
+  return { usable: true, reason: null };
 }
 
 function buildForecast(args: {
@@ -599,16 +650,35 @@ function buildForecast(args: {
     return null;
   }
 
-  const horizonSeconds = (input.slotEndTs - input.now) / 1_000;
+  const chainlinkHorizonSeconds = Math.max(
+    0,
+    (input.slotEndTs - reference.chainlinkTimestampMs) / 1_000,
+  );
+  const cfHorizonSeconds = Math.max(
+    0,
+    (input.slotEndTs - reference.cfTimestampMs) / 1_000,
+  );
   const chainlinkTerminalStdDev =
-    reference.chainlinkPriceUsd * chainlinkVolatility * Math.sqrt(horizonSeconds);
+    reference.chainlinkPriceUsd * chainlinkVolatility * Math.sqrt(chainlinkHorizonSeconds);
   if (input.slotEndTs - input.now > FINAL_MINUTE_MS) {
-    const secondsBeforeFinalMinute = horizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT;
+    const secondsBeforeFinalMinute = Math.max(
+      0,
+      cfHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT,
+    );
     const cfAverageVarianceTime = secondsBeforeFinalMinute + FINAL_AVERAGE_SAMPLE_COUNT / 3;
-    const covarianceTime = secondsBeforeFinalMinute + FINAL_AVERAGE_SAMPLE_COUNT / 2;
-    const geometry =
-      covarianceTime /
-      Math.sqrt(horizonSeconds * cfAverageVarianceTime);
+    const sharedHorizonSeconds = Math.min(
+      chainlinkHorizonSeconds,
+      cfHorizonSeconds,
+    );
+    const covarianceTime =
+      Math.max(0, sharedHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT) +
+      FINAL_AVERAGE_SAMPLE_COUNT / 2;
+    const geometryDenominator = Math.sqrt(
+      chainlinkHorizonSeconds * cfAverageVarianceTime,
+    );
+    const geometry = geometryDenominator <= 0
+      ? 0
+      : clamp(covarianceTime / geometryDenominator, 0, 1);
     return {
       chainlinkTerminalMean: reference.chainlinkPriceUsd,
       chainlinkTerminalStdDev,
@@ -638,7 +708,7 @@ function buildForecast(args: {
       ? 0
       : reference.cfPriceUsd *
         cfVolatility *
-        Math.sqrt(Math.max(horizonSeconds, 1 / FINAL_AVERAGE_SAMPLE_COUNT) / 3);
+        Math.sqrt(Math.max(cfHorizonSeconds, 1 / FINAL_AVERAGE_SAMPLE_COUNT) / 3);
   const conditioned = conditionCfFinalAverage({
     observedAverage: finalMinuteAverage.valueUsd,
     observedSampleCount: finalMinuteAverage.windowSize,
@@ -772,6 +842,8 @@ function unavailableEstimate(
 ): MismatchRiskEstimate {
   return {
     available: false,
+    executionUsable: false,
+    executionReason: reason,
     modelVersion: MISMATCH_RISK_RUNTIME_MODEL_VERSION,
     reason,
     pFatal: null,
@@ -786,6 +858,7 @@ function unavailableEstimate(
     chainlinkAgeMs:
       chainlinkAgeMs === null ? null : Math.max(0, chainlinkAgeMs),
     cfAgeMs: cfAgeMs === null ? null : Math.max(0, cfAgeMs),
+    sourceTimestampSkewMs: null,
     observationCount,
   };
 }

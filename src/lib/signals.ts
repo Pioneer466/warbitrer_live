@@ -279,6 +279,7 @@ function buildSignal({
     mismatchRiskEstimate.pFatalUpper95 !== null;
   const enforceUsableMismatchRisk =
     usableMismatchRisk &&
+    mismatchRiskEstimate.executionUsable !== false &&
     !mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated");
   const sizingFatalProbability = enforceMismatchRisk
     ? enforceUsableMismatchRisk

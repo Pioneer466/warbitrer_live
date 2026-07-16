@@ -169,9 +169,6 @@ describe("MismatchRiskRuntime estimates", () => {
       }),
     ).toMatchObject({ available: false, reason: "oracle_timestamp_skew" });
     expect(
-      runtime.estimate({ ...common, pairSize: Number.NaN }),
-    ).toMatchObject({ available: false, reason: "invalid_economics" });
-    expect(
       runtime.estimate({
         ...common,
         kalshi: kalshiQuote(100, now, null, { targetPriceUsd: null }),
@@ -246,6 +243,65 @@ describe("MismatchRiskRuntime estimates", () => {
     expect(complementary.pFatal).toBeCloseTo(first.pDouble!, 12);
     expect(complementary.pDouble).toBeCloseTo(first.pFatal!, 12);
     expect(complementary.pAligned).toBeCloseTo(first.pAligned!, 12);
+    expect(runtime.getObservationCount(ASSET)).toBe(80);
+  });
+
+  it("keeps probabilities available when candidate economics are not executable", () => {
+    const runtime = new MismatchRiskRuntime({ minimumObservations: 20 });
+    const latest = feedHistory(runtime, 80);
+    const estimate = runtime.estimate({
+      asset: ASSET,
+      combination: "POLY_UP_KALSHI_NO",
+      ...latest,
+      slotStartTs: BASE_TS - 1_000,
+      slotEndTs: latest.now + 180_000,
+      pairSize: 0,
+      totalCostUsd: 0,
+      maxSourceAgeMs: 2_500,
+    });
+
+    expect(estimate).toMatchObject({
+      available: true,
+      executionUsable: true,
+      reason: "economics_unavailable",
+      expectedPnlUsd: null,
+      conservativePnlUsd: null,
+      fatalPnlUsd: null,
+    });
+    expect(estimate.pFatal).not.toBeNull();
+    expect(estimate.pFatalUpper95).not.toBeNull();
+  });
+
+  it("separates diagnostic estimates from strict execution freshness", () => {
+    const runtime = new MismatchRiskRuntime({ minimumObservations: 20 });
+    const latest = feedHistory(runtime, 80);
+    const now = latest.now + 6_000;
+    const estimate = runtime.estimate({
+      asset: ASSET,
+      combination: "POLY_UP_KALSHI_NO",
+      polymarket: latest.polymarket,
+      kalshi: kalshiQuote(101.5, now),
+      slotStartTs: BASE_TS - 1_000,
+      slotEndTs: now + 180_000,
+      now,
+      pairSize: 20,
+      totalCostUsd: 18,
+      maxSourceAgeMs: 10_000,
+      maxPairSkewMs: 10_000,
+      executionMaxSourceAgeMs: 2_500,
+      executionMaxPairSkewMs: 2_500,
+    });
+
+    expect(estimate).toMatchObject({
+      available: true,
+      executionUsable: false,
+      executionReason: "chainlink_stale",
+      chainlinkAgeMs: 6_000,
+      cfAgeMs: 0,
+      sourceTimestampSkewMs: 6_000,
+      observationCount: 80,
+    });
+    expect(estimate.pFatal).not.toBeNull();
     expect(runtime.getObservationCount(ASSET)).toBe(80);
   });
 

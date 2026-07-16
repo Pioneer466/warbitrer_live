@@ -84,6 +84,8 @@ function estimate(
 ): MismatchRiskEstimate {
   return {
     available: true,
+    executionUsable: true,
+    executionReason: null,
     modelVersion: "test-v1-calibrated",
     reason: null,
     pFatal: 0.01,
@@ -97,6 +99,7 @@ function estimate(
     maximumAllowedFatalProbability: 0.05,
     chainlinkAgeMs: 100,
     cfAgeMs: 100,
+    sourceTimestampSkewMs: 0,
     observationCount: 300,
     ...overrides,
   };
@@ -224,6 +227,31 @@ describe("mismatch risk policy modes", () => {
     expect(enforced.allowed).toBe(false);
     expect(enforced.blockingReasons.map((reason) => reason.code)).toContain(
       "model_uncalibrated",
+    );
+  });
+
+  it("keeps asynchronous diagnostics visible but blocks them in enforce", () => {
+    const diagnosticOnly = estimate({
+      executionUsable: false,
+      executionReason: "chainlink_stale",
+      chainlinkAgeMs: 6_000,
+      sourceTimestampSkewMs: 5_000,
+    });
+
+    const shadow = recheckMismatchRiskCandidate(
+      policyInput({ mode: "shadow", estimate: diagnosticOnly }),
+    );
+    expect(shadow.allowed).toBe(true);
+    expect(shadow.diagnosticReasons.map((reason) => reason.code)).toContain(
+      "execution_reference_unusable",
+    );
+
+    const enforced = recheckMismatchRiskCandidate(
+      policyInput({ mode: "enforce", estimate: diagnosticOnly }),
+    );
+    expect(enforced.allowed).toBe(false);
+    expect(enforced.blockingReasons.map((reason) => reason.code)).toContain(
+      "execution_reference_unusable",
     );
   });
 

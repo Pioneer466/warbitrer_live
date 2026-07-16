@@ -63,6 +63,7 @@ const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
 const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const POLYMARKET_RTDS_HEARTBEAT_MS = 5_000;
+export const POLYMARKET_CHAINLINK_SILENCE_TIMEOUT_MS = 15_000;
 const KALSHI_WS_HEARTBEAT_MS = 5_000;
 const KALSHI_WS_HEARTBEAT_TIMEOUT_MS = 20_000;
 const KALSHI_WS_BOOTSTRAP_TIMEOUT_MS = 5_000;
@@ -810,6 +811,7 @@ class PolymarketRealtimeFeed {
   private lastWsMessageAt: number | null = null;
   private lastUserMessageAt: number | null = null;
   private lastPriceMessageAt: number | null = null;
+  private priceWsConnectedAt: number | null = null;
   private lastError: string | null = null;
   private lastChainlinkError: string | null = null;
   private chainlinkLivePriceUsd: number | null = null;
@@ -873,9 +875,10 @@ class PolymarketRealtimeFeed {
       details: [
         this.lastError ?? "Feed Polymarket actif",
         this.lastUserMessageAt ? "user channel connecte" : "user channel en fallback REST",
-        this.chainlinkLivePriceUsd === null
-          ? this.lastChainlinkError ?? "flux Chainlink live indisponible"
-          : `Chainlink live ${this.chainlinkLivePriceUsd.toFixed(4)} USD`,
+        this.lastChainlinkError ??
+          (this.chainlinkLivePriceUsd === null
+            ? "flux Chainlink live indisponible"
+            : `Chainlink live ${this.chainlinkLivePriceUsd.toFixed(4)} USD`),
       ],
       subscriptions: this.subscriptions,
     });
@@ -1144,6 +1147,7 @@ class PolymarketRealtimeFeed {
     ws.on("open", () => {
       this.clearPriceReconnectTimer();
       this.priceReconnectAttempt = 0;
+      this.priceWsConnectedAt = Date.now();
       this.startPriceHeartbeat(ws);
       this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
         status: "subscribed",
@@ -1168,11 +1172,9 @@ class PolymarketRealtimeFeed {
       const raw = buffer.toString();
       const nowTs = Date.now();
       if (raw === "PONG") {
-        this.lastPriceMessageAt = nowTs;
         this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
           status: "subscribed",
           source: "ws",
-          lastMessageAt: nowTs,
           details: `flux Chainlink ${chainlinkSymbol} actif`,
         });
         return;
@@ -1200,6 +1202,7 @@ class PolymarketRealtimeFeed {
       if (this.priceWs === ws) {
         this.priceWs = null;
       }
+      this.priceWsConnectedAt = null;
       try {
         if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
           ws.close();
@@ -1215,6 +1218,7 @@ class PolymarketRealtimeFeed {
       if (this.priceWs === ws) {
         this.priceWs = null;
       }
+      this.priceWsConnectedAt = null;
       this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
         status: "closed",
         source: this.lastPriceMessageAt === null ? "unavailable" : "ws",
@@ -1366,6 +1370,37 @@ class PolymarketRealtimeFeed {
     this.stopPriceHeartbeat();
     this.priceWsHeartbeat = setInterval(() => {
       if (this.priceWs !== ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const now = Date.now();
+      if (
+        isChainlinkPriceStreamSilent(
+          this.lastPriceMessageAt,
+          this.priceWsConnectedAt,
+          now,
+        )
+      ) {
+        const referenceAt = latestTimestamp(this.lastPriceMessageAt, this.priceWsConnectedAt) ?? now;
+        this.lastChainlinkError = `Chainlink RTDS sans nouveau prix depuis ${now - referenceAt}ms`;
+        this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+          status: "error",
+          source: "ws",
+          details: this.lastChainlinkError,
+        });
+        console.warn("[poly-chainlink-ws] price-stream-stalled", {
+          asset: this.marketAsset(),
+          symbol: getMarketCatalogEntry(this.marketAsset()).polymarketChainlinkSymbol,
+          silenceMs: now - referenceAt,
+        });
+        this.priceWs = null;
+        this.priceWsConnectedAt = null;
+        const terminable = ws as WebSocket & { terminate?: () => void };
+        if (typeof terminable.terminate === "function") {
+          terminable.terminate();
+        } else {
+          ws.close(1011, "Chainlink RTDS price stream stalled");
+        }
+        this.schedulePriceReconnect();
         return;
       }
       ws.send("PING");
@@ -1576,6 +1611,7 @@ class PolymarketRealtimeFeed {
     this.lastWsMessageAt = null;
     this.lastUserMessageAt = null;
     this.lastPriceMessageAt = null;
+    this.priceWsConnectedAt = null;
     this.lastError = null;
     this.lastChainlinkError = null;
     this.chainlinkLivePriceUsd = null;
@@ -1587,6 +1623,28 @@ class PolymarketRealtimeFeed {
     this.userReconnectAttempt = 0;
     this.subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
   }
+}
+
+export function isChainlinkPriceStreamSilent(
+  lastPriceAt: number | null,
+  connectedAt: number | null,
+  now: number,
+  timeoutMs = POLYMARKET_CHAINLINK_SILENCE_TIMEOUT_MS,
+) {
+  const referenceAt = latestTimestamp(lastPriceAt, connectedAt);
+  return (
+    referenceAt !== null &&
+    Number.isFinite(referenceAt) &&
+    Number.isFinite(now) &&
+    Number.isFinite(timeoutMs) &&
+    timeoutMs >= 0 &&
+    now - referenceAt > timeoutMs
+  );
+}
+
+function latestTimestamp(...values: Array<number | null>) {
+  const timestamps = values.filter((value): value is number => value !== null && Number.isFinite(value));
+  return timestamps.length > 0 ? Math.max(...timestamps) : null;
 }
 
 class KalshiRealtimeFeed {
