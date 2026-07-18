@@ -53,6 +53,9 @@ export function TradesClient() {
   const intentMap = new Map(intents.map((intent) => [intent.id, intent]));
   const successIntents = intents.filter((intent) => intent.status === "hedged" || intent.status === "settled");
   const errorIntents = intents.filter(isErrorIntent);
+  const pendingIntents = intents.filter(
+    (intent) => !successIntents.includes(intent) && !errorIntents.includes(intent),
+  );
   const totalNotional = intents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
   const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
   const visibleFills = showAllFills ? fills : fills.slice(0, 8);
@@ -90,13 +93,14 @@ export function TradesClient() {
       </PageSection>
 
       <section>
-        <SectionLabel right={`${successIntents.length} réussis · ${errorIntents.length} erreurs`}>Intents</SectionLabel>
+        <SectionLabel right={`${successIntents.length} réussis · ${pendingIntents.length} en cours · ${errorIntents.length} non exécutés/erreurs`}>Intents</SectionLabel>
         {intents.length === 0 ? (
           <Surface><V2EmptyState message="Aucun intent pour ce filtre" /></Surface>
         ) : (
-          <div className="grid gap-3 xl:grid-cols-2">
+          <div className="grid gap-3 xl:grid-cols-3">
             <IntentColumn title="Réussis" subtitle="hedged / settled" intents={successIntents} emptyMessage="Aucun trade réussi." tone="emerald" />
-            <IntentColumn title="Erreurs" subtitle="failed / unwound / recovery" intents={errorIntents} emptyMessage="Aucun intent en erreur." tone="rose" />
+            <IntentColumn title="En cours" subtitle="shadow en attente / exécution" intents={pendingIntents} emptyMessage="Aucun intent en cours." tone="amber" />
+            <IntentColumn title="Non exécutés / erreurs" subtitle="no fill / failed / recovery" intents={errorIntents} emptyMessage="Aucun rejet ou incident." tone="rose" />
           </div>
         )}
       </section>
@@ -147,13 +151,13 @@ function IntentColumn({ title, subtitle, intents, emptyMessage, tone }: { title:
     <Surface>
       <div className="flex items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
         <div className="flex items-center gap-3">
-          <span className={`h-4 w-[3px] rounded ${tone === "emerald" ? "bg-[var(--wa-emerald)]" : "bg-[var(--wa-rose)]"}`} />
+          <span className={`h-4 w-[3px] rounded ${tone === "emerald" ? "bg-[var(--wa-emerald)]" : tone === "amber" ? "bg-[var(--wa-amber)]" : "bg-[var(--wa-rose)]"}`} />
           <div>
             <div className="text-sm text-[var(--wa-ivory)]">{title}</div>
             <div className="mt-0.5 text-[9px] text-[var(--wa-dim)]">{subtitle}</div>
           </div>
         </div>
-        <span className={`font-mono text-sm ${tone === "emerald" ? "text-[var(--wa-emerald)]" : "text-[var(--wa-rose)]"}`}>{intents.length}</span>
+        <span className={`font-mono text-sm ${tone === "emerald" ? "text-[var(--wa-emerald)]" : tone === "amber" ? "text-[var(--wa-amber)]" : "text-[var(--wa-rose)]"}`}>{intents.length}</span>
       </div>
       {visible.length === 0 ? <V2EmptyState message={emptyMessage} /> : visible.map((intent, index) => <IntentRow key={intent.id} intent={intent} last={index === visible.length - 1 && intents.length <= 4} />)}
       {intents.length > 4 ? (
@@ -247,8 +251,39 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
         ))}
       </div>
       <IntentMismatchRiskDetails intent={intent} />
+      {intent.shadowExecution ? <ShadowExecutionDetails intent={intent} /> : null}
       {intent.failureReason ? <div className="mt-2 rounded bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">{intent.failureReason}</div> : null}
       {intent.entrySizingReason ? <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">{intent.entrySizingReason}</div> : null}
+    </div>
+  );
+}
+
+function ShadowExecutionDetails({ intent }: { intent: OrderIntent }) {
+  const audit = intent.shadowExecution;
+  if (!audit) {
+    return null;
+  }
+  const latency = audit.latencyMs === null ? null : `${(audit.latencyMs / 1000).toFixed(1)}s`;
+  const restLatency = audit.restFetchDurationMs === null
+    ? null
+    : `${(audit.restFetchDurationMs / 1000).toFixed(1)}s`;
+  const cooldown = audit.nextEligibleAt === null
+    ? ""
+    : ` · prochain essai ${formatDateTime(audit.nextEligibleAt)}`;
+  const meta = audit.status === "scheduled"
+    ? audit.restCapturedAt === null
+      ? `lecture REST lancée ${formatDateTime(audit.restStartedAt)}`
+      : `REST ${restLatency ?? "--"} · confirmation simulée ${formatDateTime(audit.completionNotBeforeAt)}`
+    : audit.status === "filled"
+      ? `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · fill ${(audit.fillRatio * 100).toFixed(0)}% · coût ${audit.realizedGrossCost === null ? "--" : formatPrice(audit.realizedGrossCost, 4)}${cooldown}`
+      : `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · ${audit.reason ?? audit.reasonCode ?? "aucun fill"}${cooldown}`;
+  return (
+    <div className="mt-2 rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2 text-[10px] text-[var(--wa-mist)]">
+      <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <span className="font-mono text-[var(--wa-ivory)]">{audit.modelVersion}</span>
+        <Chip tone={audit.status === "filled" ? "emerald" : audit.status === "no_fill" ? "rose" : "amber"}>{audit.status}</Chip>
+      </div>
+      <div>{meta}</div>
     </div>
   );
 }

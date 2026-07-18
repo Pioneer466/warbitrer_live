@@ -476,6 +476,39 @@ export type OrderIntentLeg = {
   resolvedOutcome: Resolution | null;
 };
 
+export type ShadowExecutionAudit = {
+  modelVersion: string;
+  status: "scheduled" | "filled" | "no_fill";
+  scheduledAt: number;
+  completionNotBeforeAt: number;
+  restStartedAt: number;
+  restCapturedAt: number | null;
+  restFetchDurationMs: number | null;
+  restErrors: string[];
+  evaluatedAt: number | null;
+  latencyMs: number | null;
+  nextEligibleAt: number | null;
+  requestedPairSize: number;
+  filledPairSize: number;
+  fillRatio: number;
+  signalGrossCost: number;
+  realizedGrossCost: number | null;
+  realizedTotalCostUsd: number | null;
+  projectedNetProfitUsd: number | null;
+  reasonCode: string | null;
+  reason: string | null;
+  legs: Array<{
+    venue: Venue;
+    outcome: Resolution;
+    requestedSize: number;
+    executableSize: number;
+    limitPrice: number | null;
+    vwapPrice: number | null;
+    feeUsd: number;
+    slippageBps: number | null;
+  }>;
+};
+
 export type OrderIntent = {
   id: string;
   asset: MarketAsset;
@@ -503,6 +536,7 @@ export type OrderIntent = {
   conservativeExpectedPnlUsd?: number | null;
   fatalLossExposureUsd?: number | null;
   mismatchRiskAudit?: MismatchRiskAudit | null;
+  shadowExecution?: ShadowExecutionAudit | null;
   realizedPnlUsd: number | null;
   roi: number | null;
   polyResolution: "UP" | "DOWN" | null;

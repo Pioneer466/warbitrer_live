@@ -99,8 +99,10 @@ Le web et le worker tournent ensemble. Le worker crée automatiquement le schém
 ## Shadow vs live
 
 - `enableTrading=false` : aucune exécution
-- `enableTrading=true` et `shadowMode=true` : intents/ordres/fills synthétiques, même interface, aucune soumission aux venues
+- `enableTrading=true` et `shadowMode=true` : simulation `rest-orderbook-v2`, sans soumission aux venues. Dès qu'une opportunité crée un intent, les carnets REST Polymarket et Kalshi sont demandés en parallèle. La paire est évaluée sur ces carnets avec profondeur, haircuts, slippage, frais, taille partielle commune et contrôles économiques. Un fill préparé reste en cours jusqu'à 15 secondes après la création pour simuler le temps d'exécution/confirmation; un échec REST ou un `no_fill` immédiatement démontrable n'attend pas artificiellement.
 - `enableTrading=true` et `shadowMode=false` : exécution live réelle
+
+En shadow, `maxOpenIntentsPerSlot` ne limite plus tout le créneau. Un seul intent peut être en cours sur un actif, puis un cooldown durable de 60 secondes après sa finalisation autorise une nouvelle tentative si l'opportunité existe encore ou si une autre apparaît. La durée REST, la latence totale, le prochain instant éligible, les fills partiels et les raisons de `no_fill` sont visibles dans `/trades`.
 
 Le dashboard `/` agrège le portefeuille global, `/btc`, `/eth`, `/sol`, `/xrp`, `/doge`, `/bnb` et `/hype` exposent les dashboards opérateur par actif, et `/trades` reste la vue transversale.
 La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation wallet.

@@ -1,6 +1,7 @@
 import {
   applyVenueBalanceReservations,
   calculateVenueExposureUsd,
+  countShadowExecutionBlockers,
   countSlotExecutionBlockers,
 } from "@/lib/risk";
 import type { OrderIntent, PositionSnapshot, VenueBalance } from "@/lib/types";
@@ -439,6 +440,85 @@ describe("venue exposure", () => {
     expect(countSlotExecutionBlockers(openIntents, "btc:slot-1")).toBe(1);
   });
 });
+
+describe("shadow execution blockers", () => {
+  it("blocks only in-flight shadow work on the same asset", () => {
+    const base = buildIntentForBlockerTest();
+    const intents = [
+      { ...base, id: "shadow-hedged", shadow: true, status: "hedged" as const },
+      { ...base, id: "shadow-pending", shadow: true, status: "executing_primary" as const },
+      { ...base, id: "live-hedged", shadow: false, status: "hedged" as const },
+    ];
+
+    expect(countShadowExecutionBlockers(intents, base.asset)).toBe(1);
+    expect(countSlotExecutionBlockers(intents, base.slotKey)).toBe(1);
+  });
+});
+
+function buildIntentForBlockerTest(): OrderIntent {
+  return {
+    id: "blocker-intent",
+    asset: "btc",
+    shadow: true,
+    slotKey: "btc:slot-blocker",
+    slotStartTs: 1,
+    slotEndTs: 2,
+    combination: "POLY_UP_KALSHI_NO",
+    status: "hedged",
+    createdAt: 1,
+    updatedAt: 1,
+    resolvedAt: null,
+    primaryVenue: "kalshi",
+    hedgeVenue: "polymarket",
+    grossCost: 0.9,
+    targetNotionalUsd: 9,
+    maxSlippageBps: 30,
+    failureReason: null,
+    projectedNetProfitUsd: 1,
+    realizedPnlUsd: null,
+    roi: null,
+    polyResolution: null,
+    kalshiResolution: null,
+    legs: [
+      {
+        id: "poly-leg",
+        intentId: "blocker-intent",
+        venue: "polymarket",
+        outcome: "UP",
+        marketRef: "poly",
+        side: "BUY",
+        requestedPrice: 0.4,
+        requestedSize: 10,
+        requestedNotionalUsd: 4,
+        filledPrice: 0.4,
+        filledSize: 10,
+        feeUsd: 0,
+        status: "hedged",
+        venueOrderId: "poly-order",
+        payoutUsd: null,
+        resolvedOutcome: null,
+      },
+      {
+        id: "kalshi-leg",
+        intentId: "blocker-intent",
+        venue: "kalshi",
+        outcome: "NO",
+        marketRef: "kalshi",
+        side: "BUY",
+        requestedPrice: 0.48,
+        requestedSize: 10,
+        requestedNotionalUsd: 4.8,
+        filledPrice: 0.48,
+        filledSize: 10,
+        feeUsd: 0,
+        status: "hedged",
+        venueOrderId: "kalshi-order",
+        payoutUsd: null,
+        resolvedOutcome: null,
+      },
+    ],
+  };
+}
 
 describe("venue balance reservations", () => {
   it("reserves in-flight venue cash globally across assets", () => {

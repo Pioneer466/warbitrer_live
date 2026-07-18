@@ -113,3 +113,46 @@ No live API or real Postgres integration test was run.
 ```text
 Read AGENTS.md, README.md, README-CODEX-CONTEXT.md, and docs/codex/session-handoff.md. Continue the unresolved Kalshi WebSocket diagnosis. Keep live trading disabled, do not print secrets, and do not modify execution logic until feed evidence identifies the smallest safe change.
 ```
+
+## 2026-07-17 - Shadow execution realism
+
+### Objective and evidence
+
+The shadow executor was audited after analyzing `warbitrer-mismatch-20260717T170222Z.tar.gz`. The archive contained 408 exact mismatch-audited intents but only 75 independent asset/slot/combination situations. The old shadow path filled both legs completely at the requested price in 1 ms and allowed repeated hedged entries, materially overstating trade count and executable P&L.
+
+### Implemented behavior
+
+- New deterministic model `rest-orderbook-v2` in `src/lib/shadow-execution.ts`.
+- A shadow intent is persisted as `executing_primary` with two pending `SHADOW_REST_IOC` orders. Full Polymarket and Kalshi books are fetched immediately and in parallel, rather than being observed only after a delay.
+- A prepared fill completes no earlier than 15 seconds after intent creation to represent order/confirmation time. REST failures and immediately demonstrable `no_fill` decisions terminate without an artificial wait.
+- Quotes apply configured venue depth safety factors and headroom, original price/slippage limits, multi-level VWAP, venue fees, pair/leg capital limits, and profit/return thresholds.
+- The simulator fills only the common executable integer pair size. It records a partial paired fill when sufficient minimum size remains, otherwise `no_fill`.
+- Degraded/unaligned feeds, missing books, price movement beyond the limit, insufficient common depth, and invalid delayed economics are durable `no_fill` reasons.
+- Only in-flight shadow intents block another attempt on the same asset. After every completed attempt, a durable 60-second cooldown replaces the previous one-intent-per-slot ceiling.
+- Pending shadow work is resumed from Postgres after normal loop iterations or worker restart and is excluded from live venue reconciliation.
+- Audit data is stored in `order_intents.shadow_execution_json` and shown in `/trades`, including model version, REST duration, total latency, next eligible time, fill ratio, realized gross cost, and rejection reason.
+- Live order submission, confirmation, rescue, unwind, and global live execution locking were not changed.
+
+### Modified files
+
+- `src/lib/shadow-execution.ts`
+- `src/lib/engine.ts`
+- `src/lib/risk.ts`
+- `src/lib/types.ts`
+- `src/lib/postgres-db.ts`
+- `src/components/trades-client.tsx`
+- `tests/shadow-execution.test.ts`
+- `tests/risk.test.ts`
+- `tests/postgres-db.test.ts`
+- `README.md`
+- `docs/codex/session-handoff.md`
+
+### Verification and remaining limits
+
+- `npm run typecheck`: passed.
+- `npm test`: 32 files and 388 tests passed.
+- `npm run build`: passed (Next.js production build).
+- `npm run build:worker`: passed (Node 22 worker bundle).
+- No live venue call or production database integration test was run.
+- This v2 model is intentionally conservative but still models both legs from one immediate paired REST capture. It does not yet replay sub-second queue position, adverse movement between primary and hedge, or real account-specific fill probability.
+- Keep trading and mismatch risk in shadow until delayed fill/no-fill distributions have been observed across several days. Do not compare new trade counts directly with the old instant-fill dataset.

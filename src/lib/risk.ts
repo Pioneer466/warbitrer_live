@@ -108,6 +108,12 @@ export function countSlotExecutionBlockers(openIntents: OrderIntent[], slotKey: 
   return openIntents.filter((intent) => intent.slotKey === slotKey && intent.status !== "hedged").length;
 }
 
+export function countShadowExecutionBlockers(openIntents: OrderIntent[], asset: OrderIntent["asset"]) {
+  return openIntents.filter(
+    (intent) => intent.shadow && intent.asset === asset && intent.status !== "hedged",
+  ).length;
+}
+
 export function hasUnresolvedExposureBlocker(openIntents: OrderIntent[]) {
   return openIntents.some((intent) => intent.status !== "hedged");
 }

@@ -255,14 +255,15 @@ describe("postgres mismatch-risk persistence", () => {
     await upsertOrderIntent(pool, intent);
 
     const [sql, params] = query.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain("$31::jsonb");
+    expect(sql).toContain("$32::jsonb");
     expect(sql).toContain("gross_cost = EXCLUDED.gross_cost");
     expect(sql).toContain("target_notional_usd = EXCLUDED.target_notional_usd");
     expect(sql).toContain("max_slippage_bps = EXCLUDED.max_slippage_bps");
     expect(sql).toContain("mismatch_risk_audit_json = EXCLUDED.mismatch_risk_audit_json");
-    expect(params).toHaveLength(31);
+    expect(params).toHaveLength(32);
     expect(params.slice(24, 30)).toEqual([0.02, 0.04, "mismatch-v1", -9, 1.5, 12]);
     expect(JSON.parse(params[30] as string)).toEqual(intent.mismatchRiskAudit);
+    expect(JSON.parse(params[31] as string)).toEqual(intent.shadowExecution);
 
     query.mockResolvedValueOnce({
       rows: [
@@ -293,6 +294,7 @@ describe("postgres mismatch-risk persistence", () => {
           conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd,
           fatal_loss_exposure_usd: intent.fatalLossExposureUsd,
           mismatch_risk_audit_json: intent.mismatchRiskAudit,
+          shadow_execution_json: intent.shadowExecution,
           realized_pnl_usd: intent.realizedPnlUsd,
           roi: intent.roi,
           poly_resolution: intent.polyResolution,
@@ -312,6 +314,7 @@ describe("postgres mismatch-risk persistence", () => {
       conservativeExpectedPnlUsd: 1.5,
       fatalLossExposureUsd: 12,
       mismatchRiskAudit: intent.mismatchRiskAudit,
+      shadowExecution: intent.shadowExecution,
       legs: [
         expect.objectContaining({
           worstFillCostUsd: 4.7,
@@ -494,6 +497,29 @@ function buildOrderIntent(): OrderIntent {
       enforceReasons: [],
       legacyGuardAction: "allow",
       legacySizeMultiplier: 1,
+    },
+    shadowExecution: {
+      modelVersion: "rest-orderbook-v2",
+      status: "scheduled",
+      scheduledAt: 123_100,
+      completionNotBeforeAt: 138_100,
+      restStartedAt: 123_100,
+      restCapturedAt: null,
+      restFetchDurationMs: null,
+      restErrors: [],
+      evaluatedAt: null,
+      latencyMs: null,
+      nextEligibleAt: null,
+      requestedPairSize: 10,
+      filledPairSize: 0,
+      fillRatio: 0,
+      signalGrossCost: 0.9,
+      realizedGrossCost: null,
+      realizedTotalCostUsd: null,
+      projectedNetProfitUsd: null,
+      reasonCode: null,
+      reason: null,
+      legs: [],
     },
     realizedPnlUsd: null,
     roi: null,

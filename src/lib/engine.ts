@@ -55,9 +55,18 @@ import { isRiskActivePosition } from "@/lib/positions";
 import {
   applyVenueBalanceReservations,
   calculateVenueExposureUsd,
+  countShadowExecutionBlockers,
   countSlotExecutionBlockers,
   hasUnresolvedExposureBlocker,
 } from "@/lib/risk";
+import {
+  buildCompletedShadowAudit,
+  buildScheduledShadowAudit,
+  deriveShadowPairExecution,
+  getShadowReentryCooldownRemainingMs,
+  SHADOW_EXECUTION_MODEL_VERSION,
+  type ShadowPairExecutionDecision,
+} from "@/lib/shadow-execution";
 import { buildSignals } from "@/lib/signals";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import {
@@ -663,7 +672,7 @@ async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
     return created;
   }
 
-  if (candidate) {
+  if (candidate && !(settings.shadowMode && scanState.hasOpenIntent)) {
     const candidates = await readExecutionCandidates(nowTs);
     const winner = selectWinningExecutionCandidate(candidates, nowTs);
     if (!winner || !isWinningCandidateForScanState(winner, scanState, nowTs)) {
@@ -1821,7 +1830,7 @@ export function createExecutionCoordinator(
         readiness: readiness.state.readiness,
       }, now, false);
 
-      if (!settings.enableTrading || pausingBreakers.length > 0) {
+      if (!settings.enableTrading || (!settings.shadowMode && pausingBreakers.length > 0)) {
         return [];
       }
 
@@ -1845,21 +1854,43 @@ export function createExecutionCoordinator(
 
       const executeWithinLock = async () => {
         const initialOpenIntents = await readOpenOrderIntents(slot.asset);
-        const resumed = await resumeInFlightIntents(
-          initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now),
-          slot,
-          settings,
-          now,
+        const activeSlotIntents = initialOpenIntents.filter(
+          (intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now,
         );
+        const resumed = [
+          ...(await resumeShadowIntents(
+            initialOpenIntents.filter((intent) => intent.shadow),
+            snapshot,
+            settings,
+          )),
+          ...(await resumeInFlightIntents(
+            activeSlotIntents.filter((intent) => !intent.shadow),
+            slot,
+            settings,
+            now,
+          )),
+        ];
         const openIntents = await readOpenOrderIntents();
         const assetOpenIntents = openIntents.filter((intent) => intent.asset === slot.asset);
 
-        if (hasUnresolvedExposureBlocker(openIntents)) {
+        if (hasUnresolvedExposureBlocker(openIntents.filter((intent) => !intent.shadow))) {
           return resumed;
         }
 
         const blockingOpenForSlot = countSlotExecutionBlockers(assetOpenIntents, slot.key);
-        if (blockingOpenForSlot >= settings.maxOpenIntentsPerSlot) {
+        const shadowExecutionBlockers = countShadowExecutionBlockers(assetOpenIntents, slot.asset);
+        const latestShadowIntent = settings.shadowMode
+          ? (await readRecentOrderIntents(200, slot.asset)).find((intent) => intent.shadow) ?? null
+          : null;
+        const shadowCooldownRemainingMs = getShadowReentryCooldownRemainingMs(
+          latestShadowIntent,
+          Date.now(),
+        );
+        if (
+          settings.shadowMode
+            ? shadowExecutionBlockers > 0 || shadowCooldownRemainingMs > 0
+            : blockingOpenForSlot >= settings.maxOpenIntentsPerSlot
+        ) {
           return resumed;
         }
 
@@ -1871,7 +1902,9 @@ export function createExecutionCoordinator(
               ? [...sharedContext.venuePositions.polymarket, ...sharedContext.venuePositions.kalshi]
               : await readPositions();
         const exposureUsd = calculateVenueExposureUsd(positions, openIntents);
-        const creationBudget = settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
+        const creationBudget = settings.shadowMode
+          ? 1
+          : settings.maxOpenIntentsPerSlot - blockingOpenForSlot;
         let createdCount = 0;
 
         for (const opportunity of eligible) {
@@ -1888,11 +1921,20 @@ export function createExecutionCoordinator(
 
           const currentOpenIntents = await readOpenOrderIntents();
           const currentAssetOpenIntents = currentOpenIntents.filter((intent) => intent.asset === slot.asset);
-          if (hasUnresolvedExposureBlocker(currentOpenIntents)) {
+          if (hasUnresolvedExposureBlocker(currentOpenIntents.filter((intent) => !intent.shadow))) {
             break;
           }
 
-          if (countSlotExecutionBlockers(currentAssetOpenIntents, slot.key) >= settings.maxOpenIntentsPerSlot) {
+          const currentSlotBlockers = countSlotExecutionBlockers(currentAssetOpenIntents, slot.key);
+          const currentShadowBlockers = countShadowExecutionBlockers(
+            currentAssetOpenIntents,
+            slot.asset,
+          );
+          if (
+            settings.shadowMode
+              ? currentShadowBlockers > 0
+              : currentSlotBlockers >= settings.maxOpenIntentsPerSlot
+          ) {
             break;
           }
 
@@ -1997,7 +2039,7 @@ export function createExecutionCoordinator(
           });
 
           const executed = settings.shadowMode
-            ? await executeShadowIntent(intent, now)
+            ? await executeShadowIntent(intent, snapshot, settings, Date.now())
             : await executeIntent(intent, slot, settings, now);
           created.push(executed);
           createdCount += 1;
@@ -5079,9 +5121,21 @@ async function executeHedgeLeg(
   );
 }
 
-async function executeShadowIntent(intent: OrderIntent, now: number) {
-  let currentIntent = markIntentStatus(intent, "executing_primary", now);
-  await writeOrderIntent(currentIntent);
+async function executeShadowIntent(
+  intent: OrderIntent,
+  snapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+  now: number,
+) {
+  const restStartedAt = now;
+  let currentIntent = markIntentStatus(
+    {
+      ...intent,
+      shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
+    },
+    "executing_primary",
+    now,
+  );
 
   const primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
   const hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
@@ -5089,29 +5143,297 @@ async function executeShadowIntent(intent: OrderIntent, now: number) {
     throw new Error(`Intent ${intent.id} missing legs for shadow execution`);
   }
 
-  const primaryOrder = buildShadowOrder(currentIntent.asset, currentIntent.id, primaryLeg, now, "primary");
-  const hedgeOrder = buildShadowOrder(currentIntent.asset, currentIntent.id, hedgeLeg, now + 1, "hedge");
+  const primaryOrder = buildPendingShadowOrder(currentIntent, primaryLeg, now, "primary");
+  const hedgeOrder = buildPendingShadowOrder(currentIntent, hedgeLeg, now, "hedge");
   await writeVenueOrder(primaryOrder);
   await writeVenueOrder(hedgeOrder);
-  await writeFill(buildShadowFill(currentIntent.asset, currentIntent.id, primaryLeg, now, primaryOrder.venueOrderId));
-  await writeFill(buildShadowFill(currentIntent.asset, currentIntent.id, hedgeLeg, now + 1, hedgeOrder.venueOrderId));
-
-  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
-  currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now + 1);
-  currentIntent = markIntentStatus(currentIntent, "hedged", now + 1, null);
+  currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "submitted", now);
+  currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
   await writeOrderIntent(currentIntent);
   await writeRunEvent({
+    asset: currentIntent.asset,
     level: "info",
-    eventType: "intent.shadow.executed",
-    message: `Shadow intent ${currentIntent.id} executed without venue submission`,
+    eventType: "intent.shadow.scheduled",
+    message: `Shadow intent ${currentIntent.id} started immediate REST orderbook execution`,
     payload: {
+      intentId: currentIntent.id,
       slotKey: currentIntent.slotKey,
       primaryVenue: currentIntent.primaryVenue,
+      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      restStartedAt,
+      requestedPairSize: currentIntent.shadowExecution?.requestedPairSize ?? null,
     },
     createdAt: now,
   });
 
+  return completeShadowIntent(currentIntent, snapshot, settings, restStartedAt);
+}
+
+async function resumeShadowIntents(
+  intents: OrderIntent[],
+  snapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+) {
+  const resumed: OrderIntent[] = [];
+  for (const intent of intents) {
+    if (!intent.shadow || intent.status !== "executing_primary") {
+      continue;
+    }
+
+    const restStartedAt = Date.now();
+    const currentIntent = {
+      ...intent,
+      shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
+    };
+    await writeOrderIntent(currentIntent);
+    resumed.push(await completeShadowIntent(currentIntent, snapshot, settings, restStartedAt));
+  }
+
+  return resumed;
+}
+
+async function completeShadowIntent(
+  intent: OrderIntent,
+  signalSnapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+  restStartedAt: number,
+) {
+  const restCapture = await captureShadowRestSnapshot(intent, signalSnapshot, restStartedAt);
+  const rawDecision = deriveShadowPairExecution({
+    intent,
+    snapshot: restCapture.snapshot,
+    settings,
+  });
+  const decision: ShadowPairExecutionDecision = restCapture.errors.length === 0
+    ? rawDecision
+    : {
+        ...rawDecision,
+        status: "no_fill",
+        reasonCode: "rest_orderbook_unavailable",
+        reason: restCapture.errors.join("; "),
+        filledPairSize: 0,
+        realizedGrossCost: null,
+        realizedTotalCostUsd: null,
+        projectedNetProfitUsd: null,
+      };
+  const scheduledAudit = intent.shadowExecution ?? buildScheduledShadowAudit(intent, restStartedAt);
+  const capturedIntent: OrderIntent = {
+    ...intent,
+    shadowExecution: {
+      ...scheduledAudit,
+      restStartedAt,
+      restCapturedAt: restCapture.capturedAt,
+      restFetchDurationMs: Math.max(0, restCapture.capturedAt - restStartedAt),
+      restErrors: restCapture.errors,
+    },
+  };
+  await writeOrderIntent(capturedIntent);
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "info",
+    eventType: "intent.shadow.rest_captured",
+    message: `Shadow intent ${intent.id} captured execution books through REST`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      restFetchDurationMs: capturedIntent.shadowExecution?.restFetchDurationMs ?? null,
+      completionNotBeforeAt: capturedIntent.shadowExecution?.completionNotBeforeAt ?? null,
+      preparedDecision: decision.status,
+      restErrors: restCapture.errors,
+    },
+    createdAt: restCapture.capturedAt,
+  });
+  if (decision.status === "filled") {
+    const remainingCompletionDelayMs = Math.max(
+      0,
+      scheduledAudit.completionNotBeforeAt - Date.now(),
+    );
+    if (remainingCompletionDelayMs > 0) {
+      await sleep(remainingCompletionDelayMs);
+    }
+  }
+  const evaluatedAt = Date.now();
+  const completedAudit = buildCompletedShadowAudit(intent, decision, evaluatedAt, {
+    startedAt: restStartedAt,
+    capturedAt: restCapture.capturedAt,
+    errors: restCapture.errors,
+  });
+  const completedOrders = intent.legs.map((leg) =>
+    buildCompletedShadowOrder(intent, leg, decision, completedAudit, evaluatedAt),
+  ) as [LiveOrder, LiveOrder];
+  await Promise.all(completedOrders.map((order) => writeVenueOrder(order)));
+
+  let currentIntent: OrderIntent = { ...intent, shadowExecution: completedAudit };
+  if (decision.status === "no_fill") {
+    for (const order of completedOrders) {
+      currentIntent = updateIntentLeg(currentIntent, order.venue, order, "failed", evaluatedAt);
+    }
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "skipped",
+      evaluatedAt,
+      `Shadow non exécuté: ${decision.reason ?? decision.reasonCode ?? "liquidité indisponible"}`,
+    );
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: "info",
+      eventType: "intent.shadow.no_fill",
+      message: `Shadow intent ${currentIntent.id} produced no executable pair from REST books`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+        latencyMs: completedAudit.latencyMs,
+        restFetchDurationMs: completedAudit.restFetchDurationMs,
+        nextEligibleAt: completedAudit.nextEligibleAt,
+        reasonCode: decision.reasonCode,
+        reason: decision.reason,
+        legs: completedAudit.legs,
+      },
+      createdAt: evaluatedAt,
+    });
+    return currentIntent;
+  }
+
+  for (const order of completedOrders) {
+    const leg = currentIntent.legs.find((candidate) => candidate.venue === order.venue);
+    if (!leg) {
+      throw new Error(`Intent ${intent.id} missing ${order.venue} leg during shadow completion`);
+    }
+    const capacity = decision.legs.find((candidate) => candidate.leg.venue === order.venue);
+    if (!capacity?.quote) {
+      throw new Error(`Intent ${intent.id} missing ${order.venue} shadow fill quote`);
+    }
+    await writeFill(
+      buildShadowFill(currentIntent, leg, order, capacity.quote, completedAudit, evaluatedAt),
+    );
+    currentIntent = updateIntentLeg(
+      currentIntent,
+      order.venue,
+      order,
+      order.venue === currentIntent.hedgeVenue ? "hedged" : "filled",
+      evaluatedAt,
+    );
+  }
+  currentIntent = markIntentStatus(currentIntent, "hedged", evaluatedAt, null);
+  await writeOrderIntent(currentIntent);
+  await writeRunEvent({
+    asset: currentIntent.asset,
+    level: "info",
+    eventType: "intent.shadow.filled",
+    message: `Shadow intent ${currentIntent.id} filled from immediate REST orderbook depth`,
+    payload: {
+      intentId: currentIntent.id,
+      slotKey: currentIntent.slotKey,
+      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      latencyMs: completedAudit.latencyMs,
+      restFetchDurationMs: completedAudit.restFetchDurationMs,
+      nextEligibleAt: completedAudit.nextEligibleAt,
+      requestedPairSize: completedAudit.requestedPairSize,
+      filledPairSize: completedAudit.filledPairSize,
+      fillRatio: completedAudit.fillRatio,
+      signalGrossCost: completedAudit.signalGrossCost,
+      realizedGrossCost: completedAudit.realizedGrossCost,
+      realizedTotalCostUsd: completedAudit.realizedTotalCostUsd,
+      projectedNetProfitUsd: completedAudit.projectedNetProfitUsd,
+      legs: completedAudit.legs,
+    },
+    createdAt: evaluatedAt,
+  });
   return currentIntent;
+}
+
+async function captureShadowRestSnapshot(
+  intent: OrderIntent,
+  signalSnapshot: OpportunitySnapshot,
+  restStartedAt: number,
+) {
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  const [polymarketResult, kalshiResult] = await Promise.allSettled([
+    polymarketLeg?.tokenId
+      ? fetchPolymarketBook(polymarketLeg.tokenId)
+      : Promise.reject(new Error("référence de marché absente")),
+    kalshiLeg?.marketRef
+      ? fetchKalshiOrderbook(kalshiLeg.marketRef)
+      : Promise.reject(new Error("référence de marché absente")),
+  ]);
+  const capturedAt = Date.now();
+  const errors: string[] = [];
+  const previousPolymarketLevels = signalSnapshot.polymarket.orderbookLevels ?? {
+    upBids: [],
+    upAsks: [],
+    downBids: [],
+    downAsks: [],
+  };
+  const polymarketAsks = polymarketResult.status === "fulfilled"
+    ? polymarketResult.value.asks
+        .map((level) => [Number(level.price), Number(level.size)] as [number, number])
+        .filter(([price, size]) => Number.isFinite(price) && Number.isFinite(size) && size > 0)
+    : [];
+  if (polymarketResult.status === "rejected") {
+    errors.push(`Polymarket REST: ${toErrorMessage(polymarketResult.reason)}`);
+  }
+  const polymarketLevels = {
+    ...previousPolymarketLevels,
+    ...(polymarketLeg?.outcome === "UP"
+      ? { upAsks: polymarketAsks }
+      : { downAsks: polymarketAsks }),
+  };
+
+  const kalshiLevels = kalshiResult.status === "fulfilled"
+    ? normalizeKalshiNumericOrderbookLevels(kalshiResult.value)
+    : { yesBids: [], noBids: [] };
+  if (kalshiResult.status === "rejected") {
+    errors.push(`Kalshi REST: ${toErrorMessage(kalshiResult.reason)}`);
+  }
+
+  return {
+    capturedAt,
+    errors,
+    snapshot: {
+      ...signalSnapshot,
+      capturedAt,
+      polymarket: {
+        ...signalSnapshot.polymarket,
+        slotAligned: true,
+        source: "rest-fallback" as const,
+        lastMessageAt: capturedAt,
+        stalenessMs: 0,
+        orderbookLevels: polymarketLevels,
+        feedHealth: {
+          ...signalSnapshot.polymarket.feedHealth,
+          feedStatus: polymarketResult.status === "fulfilled" ? "ready" as const : "degraded" as const,
+          source: "rest-fallback" as const,
+          lastMessageAt: capturedAt,
+          stalenessMs: 0,
+          details: polymarketResult.status === "fulfilled"
+            ? [`Shadow REST book captured in ${capturedAt - restStartedAt}ms`]
+            : errors,
+        },
+      },
+      kalshi: {
+        ...signalSnapshot.kalshi,
+        slotAligned: true,
+        source: "rest-fallback" as const,
+        lastMessageAt: capturedAt,
+        stalenessMs: 0,
+        orderbookLevels: kalshiLevels,
+        feedHealth: {
+          ...signalSnapshot.kalshi.feedHealth,
+          feedStatus: kalshiResult.status === "fulfilled" ? "ready" as const : "degraded" as const,
+          source: "rest-fallback" as const,
+          lastMessageAt: capturedAt,
+          stalenessMs: 0,
+          details: kalshiResult.status === "fulfilled"
+            ? [`Shadow REST book captured in ${capturedAt - restStartedAt}ms`]
+            : errors,
+        },
+      },
+    } satisfies OpportunitySnapshot,
+  };
 }
 
 async function attachRecentPolymarketFills(intent: OrderIntent) {
@@ -5158,6 +5480,9 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
   const resumed: OrderIntent[] = [];
 
   for (const intent of intents) {
+    if (intent.shadow) {
+      continue;
+    }
     if (intent.status !== "executing_primary" && intent.status !== "primary_filled") {
       continue;
     }
@@ -9327,6 +9652,9 @@ async function reconcileInFlightIntentStates(
         : await readPositions(asset);
 
   for (const intent of openIntents) {
+    if (intent.shadow) {
+      continue;
+    }
     if (
       intent.status !== "executing_primary" &&
       intent.status !== "primary_filled" &&
@@ -10629,72 +10957,116 @@ function extractVenueTruthStatus(raw: Record<string, unknown> | null | undefined
   return null;
 }
 
-function buildShadowOrder(
-  asset: MarketAsset,
-  intentId: string,
+function buildPendingShadowOrder(
+  intent: OrderIntent,
   leg: OrderIntent["legs"][number],
   now: number,
   suffix: string,
 ): LiveOrder {
   return {
-    id: `shadow:${intentId}:${leg.venue}:${suffix}`,
-    asset,
+    id: `shadow:${intent.id}:${leg.venue}:${suffix}`,
+    asset: intent.asset,
     shadow: true,
-    intentId,
+    intentId: intent.id,
     venue: leg.venue,
-    venueOrderId: `shadow-${suffix}-${intentId}-${leg.venue}`,
-    clientOrderId: `shadow-${suffix}-${intentId}`,
+    venueOrderId: `shadow-${suffix}-${intent.id}-${leg.venue}`,
+    clientOrderId: `shadow-${suffix}-${intent.id}`,
     marketRef: leg.marketRef,
     tokenId: leg.tokenId,
     side: leg.side,
     outcome: leg.outcome,
-    orderType: "SHADOW",
+    orderType: "SHADOW_REST_IOC",
     requestedPrice: leg.requestedPrice,
     requestedSize: leg.requestedSize,
-    filledSize: leg.requestedSize,
-    averageFillPrice: leg.requestedPrice,
-    feeUsd: leg.feeUsd > 0 ? leg.feeUsd : deriveLegFeeEstimate(leg),
-    status: "filled",
+    filledSize: 0,
+    averageFillPrice: null,
+    feeUsd: 0,
+    status: "pending",
     createdAt: now,
     updatedAt: now,
     raw: {
       shadow: true,
+      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      restStartedAt: intent.shadowExecution?.restStartedAt ?? null,
+      completionNotBeforeAt: intent.shadowExecution?.completionNotBeforeAt ?? null,
+    },
+  };
+}
+
+function buildCompletedShadowOrder(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  decision: ShadowPairExecutionDecision,
+  audit: NonNullable<OrderIntent["shadowExecution"]>,
+  now: number,
+): LiveOrder {
+  const suffix = leg.venue === intent.primaryVenue ? "primary" : "hedge";
+  const pending = buildPendingShadowOrder(intent, leg, intent.createdAt, suffix);
+  const capacity = decision.legs.find((candidate) => candidate.leg.venue === leg.venue);
+  const quote = decision.status === "filled" ? capacity?.quote ?? null : null;
+  return {
+    ...pending,
+    filledSize: decision.status === "filled" ? decision.filledPairSize : 0,
+    averageFillPrice: quote?.vwapPrice ?? null,
+    feeUsd: quote?.feeUsd ?? 0,
+    status:
+      decision.status === "no_fill"
+        ? "canceled"
+        : decision.filledPairSize + ORDER_SIZE_TOLERANCE >= leg.requestedSize
+          ? "filled"
+          : "partially_filled",
+    updatedAt: now,
+    raw: {
+      ...pending.raw,
+      evaluatedAt: now,
+      latencyMs: audit.latencyMs,
+      restFetchDurationMs: audit.restFetchDurationMs,
+      nextEligibleAt: audit.nextEligibleAt,
+      decision: decision.status,
+      reasonCode: decision.reasonCode,
+      reason: decision.reason,
+      limitPrice: capacity?.limitPrice ?? null,
+      executableSize: capacity?.executableSize ?? 0,
+      consumedLevels: quote?.consumedLevels ?? [],
     },
   };
 }
 
 function buildShadowFill(
-  asset: MarketAsset,
-  intentId: string,
+  intent: OrderIntent,
   leg: OrderIntent["legs"][number],
+  order: LiveOrder,
+  quote: NonNullable<ReturnType<typeof quoteMultiLevelBuyLeg>>,
+  audit: NonNullable<OrderIntent["shadowExecution"]>,
   now: number,
-  venueOrderId: string,
 ) {
   return {
-    id: `shadow-fill:${intentId}:${leg.venue}:${leg.outcome}:${now}`,
-    asset,
+    id: `shadow-fill:${intent.id}:${leg.venue}:${leg.outcome}:${now}`,
+    asset: intent.asset,
     shadow: true,
-    intentId,
+    intentId: intent.id,
     venue: leg.venue,
-    venueOrderId,
-    tradeId: `shadow-trade:${intentId}:${leg.venue}:${now}`,
+    venueOrderId: order.venueOrderId,
+    tradeId: `shadow-trade:${intent.id}:${leg.venue}:${now}`,
     marketRef: leg.marketRef,
     tokenId: leg.tokenId,
     side: leg.side,
     outcome: leg.outcome,
-    price: leg.requestedPrice ?? 0,
-    size: leg.requestedSize,
-    feeUsd: deriveLegFeeEstimate(leg),
+    price: quote.vwapPrice ?? 0,
+    size: order.filledSize,
+    feeUsd: quote.feeUsd,
     liquidity: "TAKER" as const,
     filledAt: now,
     raw: {
       shadow: true,
+      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      latencyMs: audit.latencyMs,
+      limitPrice: quote.limitPrice,
+      requestedSize: leg.requestedSize,
+      fillRatio: audit.fillRatio,
+      consumedLevels: quote.consumedLevels,
     },
   };
-}
-
-function deriveLegFeeEstimate(leg: OrderIntent["legs"][number]) {
-  return round4(leg.requestedNotionalUsd * 0.001);
 }
 
 function updateIntentLeg(
