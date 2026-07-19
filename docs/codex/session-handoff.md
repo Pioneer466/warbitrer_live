@@ -156,3 +156,11 @@ The shadow executor was audited after analyzing `warbitrer-mismatch-20260717T170
 - No live venue call or production database integration test was run.
 - This v2 model is intentionally conservative but still models both legs from one immediate paired REST capture. It does not yet replay sub-second queue position, adverse movement between primary and hedge, or real account-specific fill probability.
 - Keep trading and mismatch risk in shadow until delayed fill/no-fill distributions have been observed across several days. Do not compare new trade counts directly with the old instant-fill dataset.
+
+## 2026-07-19 - Terminal Polymarket order status repair
+
+- During the VPS migration audit, 226 Polymarket order rows attached to terminal intents were found in `pending` or `partially_filled` state.
+- The rows did not represent open intents, but the reconciler could repeatedly downgrade a stored non-pending order to `pending` whenever the venue trade feed still contained pending trade truth.
+- Pending-only trade observations now preserve any established stored order status, while still retaining pending trade evidence in `raw_json`; authoritative open-order observations keep their existing reconciliation behavior.
+- A regression test covers live, partial, filled, canceled, rejected, expired, and already-pending statuses.
+- Production must remain scan-only with the global manual breaker active while the affected historical rows are repaired and the reconciler is reintroduced.

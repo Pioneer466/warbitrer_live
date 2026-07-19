@@ -8824,7 +8824,7 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedConte
     if (matchingTrades.some(isPendingPolymarketTrade)) {
       await writeVenueOrder({
         ...existingOrder,
-        status: "pending",
+        status: mergePolymarketTradeObservationStatus(existingOrder.status, "pending"),
         filledSize: Math.max(existingOrder.filledSize, truth.effectiveFilledSize),
         averageFillPrice: truth.averageFillPrice ?? existingOrder.averageFillPrice,
         feeUsd: Math.max(existingOrder.feeUsd ?? 0, truth.feeUsd),
@@ -12575,6 +12575,13 @@ function mergePolymarketOrderStatusForNonDowngrade(existing: LiveOrder, mapped: 
   }
 
   return mapped.status;
+}
+
+export function mergePolymarketTradeObservationStatus(
+  existingStatus: LiveOrder["status"],
+  observedStatus: LiveOrder["status"],
+) {
+  return observedStatus === "pending" ? existingStatus : observedStatus;
 }
 
 function extractPolymarketOpenOrderFromRaw(raw: Record<string, unknown> | null | undefined) {

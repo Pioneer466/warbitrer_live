@@ -27,6 +27,7 @@ import {
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isRetryablePolymarketInventorySyncError,
+  mergePolymarketTradeObservationStatus,
   immediatePartialOrderType,
   isPrimaryFillSizeHedgable,
   primaryImmediateOrderType,
@@ -1588,6 +1589,27 @@ describe("primary unwind completion", () => {
         requestedSize: 9,
       }),
     ).toBe(false);
+  });
+});
+
+describe("Polymarket reconciliation status monotonicity", () => {
+  it.each(["live", "partially_filled", "filled", "canceled", "rejected", "expired"] as const)(
+    "does not downgrade an existing %s order when venue trades are only pending",
+    (status) => {
+      expect(
+        mergePolymarketTradeObservationStatus(status, "pending"),
+      ).toBe(status);
+    },
+  );
+
+  it("keeps an already pending order pending", () => {
+    expect(
+      mergePolymarketTradeObservationStatus("pending", "pending"),
+    ).toBe("pending");
+  });
+
+  it("accepts a non-pending trade observation", () => {
+    expect(mergePolymarketTradeObservationStatus("pending", "filled")).toBe("filled");
   });
 });
 
