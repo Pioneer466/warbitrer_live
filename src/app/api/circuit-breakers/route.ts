@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
 import {
   OrderIntentRevisionConflictError,
   readCircuitBreakers,
@@ -103,6 +104,8 @@ function getPayloadNumber(payload: Record<string, unknown> | null, key: string) 
 
 export async function PUT(request: Request) {
   try {
+    authenticateApiMutation(request);
+
     const body = (await request.json()) as {
       key?: CircuitBreakerKey;
       active?: boolean;

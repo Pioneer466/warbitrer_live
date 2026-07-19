@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
 import { repairSettledIntentResolutions } from "@/lib/engine";
 import { isMarketAsset } from "@/lib/market-catalog";
 
@@ -9,6 +10,8 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
+    authenticateApiMutation(request);
+
     const body = (await request.json().catch(() => ({}))) as {
       asset?: string;
       intentId?: string;
@@ -18,11 +21,7 @@ export async function POST(request: Request) {
     };
 
     const asset =
-      body.asset === undefined || body.asset === "all"
-        ? "all"
-        : isMarketAsset(body.asset)
-          ? body.asset
-          : null;
+      body.asset === undefined || body.asset === "all" ? "all" : isMarketAsset(body.asset) ? body.asset : null;
 
     if (asset === null) {
       return NextResponse.json({ error: "asset invalide" }, { status: 400 });

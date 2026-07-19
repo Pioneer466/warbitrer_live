@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
 import { buildRecoveryResponse, convertPolymarketMarket } from "@/lib/recovery";
 
 export const runtime = "nodejs";
@@ -20,6 +21,8 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
+    authenticateApiMutation(request);
+
     const body = (await request.json()) as {
       action?: "redeem" | "convert";
       marketRef?: string;
