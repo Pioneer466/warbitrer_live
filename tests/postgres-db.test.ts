@@ -10,18 +10,21 @@ import {
 import {
   buildBootstrapStrategyConfigs,
   areFillsEconomicallyIdentical,
+  assertOrderIntentIdentity,
   findOrderAttemptById,
   getGlobalRiskConfig,
+  insertOrderIntent,
   insertOracleSlotSample,
   listOrderAttemptsForIntent,
   listPendingSlotResolutions,
   listRecentOrderIntents,
   mergeOrderAttemptEvidence,
   mergeVenueOrderEvidence,
+  OrderIntentRevisionConflictError,
   PersistenceIdentityConflictError,
   runDatabaseMaintenance,
   updateGlobalRiskConfig,
-  upsertOrderIntent,
+  updateOrderIntent,
   upsertSlotResolution,
 } from "@/lib/postgres-db";
 import { DEFAULT_GLOBAL_RISK_CONFIG } from "@/lib/risk-settings";
@@ -412,60 +415,24 @@ describe("postgres mismatch-risk persistence", () => {
     ]);
   });
 
-  it("binds and maps all mismatch fields on order intents", async () => {
-    const { pool, query } = createMockPool();
+  it("inserts and maps all order-intent fields at revision zero", async () => {
     const intent = buildOrderIntent();
+    const row = buildOrderIntentRow(intent);
+    const { pool, query } = createMockPool([row]);
 
-    await upsertOrderIntent(pool, intent);
+    await expect(insertOrderIntent(pool, intent)).resolves.toEqual(intent);
 
     const [sql, params] = query.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain("$32::jsonb");
-    expect(sql).toContain("gross_cost = EXCLUDED.gross_cost");
-    expect(sql).toContain("target_notional_usd = EXCLUDED.target_notional_usd");
-    expect(sql).toContain("max_slippage_bps = EXCLUDED.max_slippage_bps");
-    expect(sql).toContain("mismatch_risk_audit_json = EXCLUDED.mismatch_risk_audit_json");
-    expect(params).toHaveLength(32);
-    expect(params.slice(24, 30)).toEqual([0.02, 0.04, "mismatch-v1", -9, 1.5, 12]);
-    expect(JSON.parse(params[30] as string)).toEqual(intent.mismatchRiskAudit);
-    expect(JSON.parse(params[31] as string)).toEqual(intent.shadowExecution);
+    expect(sql).toContain("$33::jsonb");
+    expect(sql).toContain("RETURNING *");
+    expect(sql).not.toContain("ON CONFLICT");
+    expect(params).toHaveLength(33);
+    expect(params.slice(25, 31)).toEqual([0.02, 0.04, "mismatch-v1", -9, 1.5, 12]);
+    expect(JSON.parse(params[31] as string)).toEqual(intent.mismatchRiskAudit);
+    expect(JSON.parse(params[32] as string)).toEqual(intent.shadowExecution);
 
     query.mockResolvedValueOnce({
-      rows: [
-        {
-          id: intent.id,
-          asset: intent.asset,
-          shadow: intent.shadow,
-          slot_key: intent.slotKey,
-          slot_start_ts: intent.slotStartTs,
-          slot_end_ts: intent.slotEndTs,
-          combination: intent.combination,
-          status: intent.status,
-          created_at: intent.createdAt,
-          updated_at: intent.updatedAt,
-          resolved_at: intent.resolvedAt,
-          primary_venue: intent.primaryVenue,
-          hedge_venue: intent.hedgeVenue,
-          gross_cost: intent.grossCost,
-          target_notional_usd: intent.targetNotionalUsd,
-          entry_sizing_reason: intent.entrySizingReason,
-          max_slippage_bps: intent.maxSlippageBps,
-          failure_reason: intent.failureReason,
-          projected_net_profit_usd: intent.projectedNetProfitUsd,
-          mismatch_p_fatal: intent.mismatchPFatal,
-          mismatch_p_fatal_upper: intent.mismatchPFatalUpper,
-          mismatch_model_version: intent.mismatchModelVersion,
-          fatal_mismatch_pnl_usd: intent.fatalMismatchPnlUsd,
-          conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd,
-          fatal_loss_exposure_usd: intent.fatalLossExposureUsd,
-          mismatch_risk_audit_json: intent.mismatchRiskAudit,
-          shadow_execution_json: intent.shadowExecution,
-          realized_pnl_usd: intent.realizedPnlUsd,
-          roi: intent.roi,
-          poly_resolution: intent.polyResolution,
-          kalshi_resolution: intent.kalshiResolution,
-          legs_json: intent.legs,
-        },
-      ],
+      rows: [row],
       rowCount: 1,
     });
 
@@ -494,46 +461,100 @@ describe("postgres mismatch-risk persistence", () => {
     });
 
     query.mockResolvedValueOnce({
-      rows: [
-        {
-          id: intent.id,
-          asset: intent.asset,
-          shadow: intent.shadow,
-          slot_key: intent.slotKey,
-          slot_start_ts: intent.slotStartTs,
-          slot_end_ts: intent.slotEndTs,
-          combination: intent.combination,
-          status: intent.status,
-          created_at: intent.createdAt,
-          updated_at: intent.updatedAt,
-          resolved_at: intent.resolvedAt,
-          primary_venue: intent.primaryVenue,
-          hedge_venue: intent.hedgeVenue,
-          gross_cost: intent.grossCost,
-          target_notional_usd: intent.targetNotionalUsd,
-          entry_sizing_reason: intent.entrySizingReason,
-          max_slippage_bps: intent.maxSlippageBps,
-          failure_reason: intent.failureReason,
-          projected_net_profit_usd: intent.projectedNetProfitUsd,
-          mismatch_p_fatal: intent.mismatchPFatal,
-          mismatch_p_fatal_upper: intent.mismatchPFatalUpper,
-          mismatch_model_version: intent.mismatchModelVersion,
-          fatal_mismatch_pnl_usd: intent.fatalMismatchPnlUsd,
-          conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd,
-          fatal_loss_exposure_usd: intent.fatalLossExposureUsd,
-          mismatch_risk_audit_json: null,
-          realized_pnl_usd: intent.realizedPnlUsd,
-          roi: intent.roi,
-          poly_resolution: intent.polyResolution,
-          kalshi_resolution: intent.kalshiResolution,
-          legs_json: intent.legs,
-        },
-      ],
+      rows: [{ ...row, mismatch_risk_audit_json: null, shadow_execution_json: null }],
       rowCount: 1,
     });
 
     const [historical] = await listRecentOrderIntents(pool, 1);
     expect(historical.mismatchRiskAudit).toBeNull();
+  });
+
+  it("updates an order intent only at the expected revision and returns the canonical row", async () => {
+    const intent = buildOrderIntent();
+    const existing = { ...intent, revision: 4 };
+    const updated = {
+      ...existing,
+      status: "executing_primary" as const,
+      updatedAt: 200,
+      maxSlippageBps: 45,
+    };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [buildOrderIntentRow(existing)], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [buildOrderIntentRow({ ...updated, revision: 5 })], rowCount: 1 });
+    const pool = { query } as unknown as Pool;
+
+    await expect(updateOrderIntent(pool, updated)).resolves.toMatchObject({
+      status: "executing_primary",
+      revision: 5,
+    });
+
+    const [sql, params] = query.mock.calls[1] as [string, unknown[]];
+    expect(sql).toContain("WHERE id = $1 AND revision = $2");
+    expect(sql).toContain("revision = revision + 1");
+    expect(sql).not.toContain("asset =");
+    expect(sql).toContain("max_slippage_bps = $8");
+    expect(params.slice(0, 4)).toEqual([intent.id, 4, "executing_primary", 200]);
+    expect(params[7]).toBe(45);
+  });
+
+  it("reports the canonical revision when a CAS update loses a race", async () => {
+    const intent = { ...buildOrderIntent(), revision: 4 };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [buildOrderIntentRow(intent)], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ revision: 5 }], rowCount: 1 });
+    const pool = { query } as unknown as Pool;
+
+    await expect(updateOrderIntent(pool, intent)).rejects.toMatchObject({
+      name: "OrderIntentRevisionConflictError",
+      intentId: intent.id,
+      expectedRevision: 4,
+      actualRevision: 5,
+    } satisfies Partial<OrderIntentRevisionConflictError>);
+  });
+
+  it("rejects immutable parent and leg identity changes", () => {
+    const intent = buildOrderIntent();
+
+    expect(() => assertOrderIntentIdentity(intent, { ...intent, asset: "eth" })).toThrow(
+      PersistenceIdentityConflictError,
+    );
+    expect(() =>
+      assertOrderIntentIdentity(intent, {
+        ...intent,
+        legs: intent.legs.map((leg, index) =>
+          index === 0 ? { ...leg, marketRef: "different-market" } : leg,
+        ) as OrderIntent["legs"],
+      }),
+    ).toThrow(PersistenceIdentityConflictError);
+    expect(() => assertOrderIntentIdentity(intent, { ...intent, maxSlippageBps: 45 })).not.toThrow();
+    expect(() =>
+      assertOrderIntentIdentity(intent, {
+        ...intent,
+        primaryVenue: "polymarket",
+        hedgeVenue: "polymarket",
+      }),
+    ).toThrow(PersistenceIdentityConflictError);
+    expect(() =>
+      assertOrderIntentIdentity(intent, {
+        ...intent,
+        legs: intent.legs.map((leg) => ({ ...leg, venue: "polymarket" as const })) as OrderIntent["legs"],
+      }),
+    ).toThrow(PersistenceIdentityConflictError);
+  });
+
+  it("rejects an insert without exactly one leg per execution venue", async () => {
+    const intent = buildOrderIntent();
+    const { pool, query } = createMockPool();
+    const invalid = {
+      ...intent,
+      legs: intent.legs.map((leg) => ({ ...leg, venue: "polymarket" as const })) as OrderIntent["legs"],
+    };
+
+    await expect(insertOrderIntent(pool, invalid)).rejects.toBeInstanceOf(PersistenceIdentityConflictError);
+    expect(query).not.toHaveBeenCalled();
   });
 
   it("looks up and maps a single order attempt directly", async () => {
@@ -716,6 +737,7 @@ function buildOrderIntent(): OrderIntent {
 
   return {
     id: "intent-1",
+    revision: 0,
     asset: "btc",
     shadow: false,
     slotKey: "btc:123",
@@ -812,5 +834,43 @@ function buildOrderIntent(): OrderIntent {
         marketRef: "kalshi-market",
       },
     ],
+  };
+}
+
+function buildOrderIntentRow(intent: OrderIntent) {
+  return {
+    id: intent.id,
+    revision: intent.revision,
+    asset: intent.asset,
+    shadow: intent.shadow,
+    slot_key: intent.slotKey,
+    slot_start_ts: intent.slotStartTs,
+    slot_end_ts: intent.slotEndTs,
+    combination: intent.combination,
+    status: intent.status,
+    created_at: intent.createdAt,
+    updated_at: intent.updatedAt,
+    resolved_at: intent.resolvedAt,
+    primary_venue: intent.primaryVenue,
+    hedge_venue: intent.hedgeVenue,
+    gross_cost: intent.grossCost,
+    target_notional_usd: intent.targetNotionalUsd,
+    entry_sizing_reason: intent.entrySizingReason ?? null,
+    max_slippage_bps: intent.maxSlippageBps,
+    failure_reason: intent.failureReason,
+    projected_net_profit_usd: intent.projectedNetProfitUsd,
+    mismatch_p_fatal: intent.mismatchPFatal ?? null,
+    mismatch_p_fatal_upper: intent.mismatchPFatalUpper ?? null,
+    mismatch_model_version: intent.mismatchModelVersion ?? null,
+    fatal_mismatch_pnl_usd: intent.fatalMismatchPnlUsd ?? null,
+    conservative_expected_pnl_usd: intent.conservativeExpectedPnlUsd ?? null,
+    fatal_loss_exposure_usd: intent.fatalLossExposureUsd ?? null,
+    mismatch_risk_audit_json: intent.mismatchRiskAudit ?? null,
+    shadow_execution_json: intent.shadowExecution ?? null,
+    realized_pnl_usd: intent.realizedPnlUsd,
+    roi: intent.roi,
+    poly_resolution: intent.polyResolution,
+    kalshi_resolution: intent.kalshiResolution,
+    legs_json: intent.legs,
   };
 }

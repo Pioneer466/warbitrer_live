@@ -30,7 +30,9 @@ async function main() {
   const now = Date.now();
   const intent = intentId ? await findOrderIntent(intentId) : await findIntentBySlotKey(slotKey!);
   if (!intent) {
-    throw new Error(intentId ? `Intent introuvable: ${intentId}` : `Aucun intent compatible introuvable pour le slot ${slotKey}`);
+    throw new Error(
+      intentId ? `Intent introuvable: ${intentId}` : `Aucun intent compatible introuvable pour le slot ${slotKey}`,
+    );
   }
 
   if (intent.status !== "unwind_required") {
@@ -49,7 +51,9 @@ async function main() {
   const slotSlug = slot.polymarketSlug;
   const polyResolution = intent.polyResolution ?? (await fetchPolymarketResolution(slotSlug).catch(() => null));
   if (polyResolution === null) {
-    throw new Error(`Resolution Polymarket introuvable pour ${slotSlug}. Attends la resolution ou passe par /api/recovery.`);
+    throw new Error(
+      `Resolution Polymarket introuvable pour ${slotSlug}. Attends la resolution ou passe par /api/recovery.`,
+    );
   }
 
   const fills = await readFillsForIntentVenue(intent.id, "polymarket");
@@ -80,15 +84,15 @@ async function main() {
     failureReason: "Intent manually closed after Polymarket settlement / reclaim",
   });
 
-  await writeOrderIntent(closedIntent);
-  await clearResolvedSlotBreaker(closedIntent.asset, closedIntent.slotKey);
+  const persistedClosedIntent = await writeOrderIntent(closedIntent);
+  await clearResolvedSlotBreaker(persistedClosedIntent.asset, persistedClosedIntent.slotKey);
   await writeRunEvent({
     level: "warn",
     eventType: "intent.unwound.manual_close",
-    message: `Intent ${closedIntent.id} manually closed after Polymarket settlement`,
+    message: `Intent ${persistedClosedIntent.id} manually closed after Polymarket settlement`,
     payload: {
-      intentId: closedIntent.id,
-      slotKey: closedIntent.slotKey,
+      intentId: persistedClosedIntent.id,
+      slotKey: persistedClosedIntent.slotKey,
       polyResolution,
       payoutUsd,
       remainingExposureSize,
@@ -100,10 +104,10 @@ async function main() {
     JSON.stringify(
       {
         ok: true,
-        intentId: closedIntent.id,
-        status: closedIntent.status,
+        intentId: persistedClosedIntent.id,
+        status: persistedClosedIntent.status,
         polyResolution,
-        realizedPnlUsd: closedIntent.realizedPnlUsd,
+        realizedPnlUsd: persistedClosedIntent.realizedPnlUsd,
         slotBreakerCleared: true,
       },
       null,
@@ -115,7 +119,8 @@ async function main() {
 async function findIntentBySlotKey(slotKey: string) {
   const recentIntents = await readRecentOrderIntents(200);
   const candidates = recentIntents.filter(
-    (intent) => intent.slotKey === slotKey && intent.status === "unwind_required" && intent.primaryVenue === "polymarket",
+    (intent) =>
+      intent.slotKey === slotKey && intent.status === "unwind_required" && intent.primaryVenue === "polymarket",
   );
 
   if (candidates.length === 0) {
@@ -226,10 +231,7 @@ function loadEnvFile(path: string) {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     env[key] = value;

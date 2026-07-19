@@ -39,6 +39,8 @@ import {
   immediatePartialOrderType,
   isPrimaryFillSizeHedgable,
   primaryImmediateOrderType,
+  persistPostSubmissionIntentEvidence,
+  persistPostSubmissionLegEvidence,
   mergeObservedSlotResolutionOutcomes,
   resolvePrimaryRetryPlan,
   resolveKalshiPrimaryMultiClipRetryPlan,
@@ -61,6 +63,8 @@ import {
   shouldSyncFeedCircuitBreaker,
   selectWinningExecutionCandidate,
   sumPolymarketAskDepthWithinLimit,
+  tryWithExecutionLock,
+  updateIntentLeg,
   quotePolymarketBuyFromAsks,
   summarizeIntentLegOrders,
   summarizeIntentLegFills,
@@ -68,6 +72,7 @@ import {
   validateFinalWsEntryDepthCoverage,
   validateFinalWsEntrySnapshot,
 } from "@/lib/engine";
+import { OrderIntentRevisionConflictError } from "@/lib/postgres-db";
 import type { VenueReconcileFetchStates } from "@/lib/engine";
 import type {
   CircuitBreaker,
@@ -76,6 +81,7 @@ import type {
   LiveFill,
   LiveOpportunity,
   LiveOrder,
+  MarketAsset,
   MarketSlot,
   OutcomeQuote,
   OrderIntent,
@@ -90,6 +96,7 @@ import { deriveHedgedPairEconomics } from "@/lib/settlement";
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   const base: OrderIntent = {
     id: "intent-1",
+    revision: 0,
     asset: "btc",
     shadow: false,
     slotKey: "btc:slot-1",
@@ -177,6 +184,377 @@ describe("mismatch estimation bootstrap", () => {
     };
 
     expect(getMismatchEstimationSettings(blockOnlySettings)).toBe(blockOnlySettings);
+  });
+});
+
+describe("order-intent concurrency safety", () => {
+  it("routes shadow work only through the asset/slot shadow lock", async () => {
+    const callback = vi.fn(async () => ["created"]);
+    const calls: string[] = [];
+    const acquireLive = async <T>(owner: string, run: () => Promise<T>) => {
+      calls.push(`live:${owner}`);
+      return { acquired: true as const, value: await run() };
+    };
+    const acquireShadow = async <T>(asset: MarketAsset, slotKey: string, owner: string, run: () => Promise<T>) => {
+      calls.push(`shadow:${asset}:${slotKey}:${owner}`);
+      return { acquired: true as const, value: await run() };
+    };
+
+    await expect(
+      tryWithExecutionLock(true, "btc", "btc:slot-1", callback, acquireLive, acquireShadow),
+    ).resolves.toEqual({
+      acquired: true,
+      value: ["created"],
+    });
+    expect(calls).toEqual(["shadow:btc:btc:slot-1:shadow:btc:btc:slot-1"]);
+    expect(callback).toHaveBeenCalledOnce();
+  });
+
+  it("routes live work only through the global live lock", async () => {
+    const callback = vi.fn(async () => "created");
+    const calls: string[] = [];
+    const acquireLive = async <T>(owner: string, run: () => Promise<T>) => {
+      calls.push(`live:${owner}`);
+      return { acquired: true as const, value: await run() };
+    };
+    const acquireShadow = async <T>(asset: MarketAsset, slotKey: string, owner: string, run: () => Promise<T>) => {
+      calls.push(`shadow:${asset}:${slotKey}:${owner}`);
+      return { acquired: true as const, value: await run() };
+    };
+
+    await expect(
+      tryWithExecutionLock(false, "eth", "eth:slot-2", callback, acquireLive, acquireShadow),
+    ).resolves.toEqual({
+      acquired: true,
+      value: "created",
+    });
+    expect(calls).toEqual(["live:live:eth:eth:slot-2"]);
+    expect(callback).toHaveBeenCalledOnce();
+  });
+
+  it("does not let stale Kalshi order evidence reduce an intent fill", () => {
+    const intent = buildIntent({
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      legs: [
+        {
+          ...buildIntent().legs[1],
+          filledSize: 10,
+          filledPrice: 0.45,
+          feeUsd: 0.2,
+          status: "filled",
+          venueOrderId: "kalshi-current-order",
+        },
+        buildIntent().legs[0],
+      ],
+    });
+    const updated = updateIntentLeg(
+      intent,
+      "kalshi",
+      buildOrder({
+        venue: "kalshi",
+        tokenId: undefined,
+        side: "BUY",
+        outcome: "YES",
+        marketRef: "kalshi-market",
+        venueOrderId: "kalshi-stale-order",
+        filledSize: 4,
+        averageFillPrice: 0.4,
+        feeUsd: 0.1,
+      }),
+      "submitted",
+      3,
+    );
+
+    expect(updated.legs.find((leg) => leg.venue === "kalshi")).toMatchObject({
+      filledSize: 10,
+      filledPrice: 0.45,
+      feeUsd: 0.2,
+      status: "filled",
+      venueOrderId: "kalshi-current-order",
+    });
+
+    const noFillEvidence = updateIntentLeg(
+      intent,
+      "kalshi",
+      buildOrder({
+        venue: "kalshi",
+        venueOrderId: "kalshi-zero-fill",
+        tokenId: undefined,
+        side: "BUY",
+        outcome: "YES",
+        marketRef: "kalshi-market",
+        filledSize: 0,
+        averageFillPrice: null,
+      }),
+      "failed",
+      4,
+    );
+    expect(noFillEvidence.legs.find((leg) => leg.venue === "kalshi")).toMatchObject({
+      filledSize: 10,
+      status: "filled",
+      venueOrderId: "kalshi-current-order",
+    });
+  });
+
+  it("allows late positive fill and recovery transitions", () => {
+    const failed = buildIntent({
+      legs: buildIntent().legs.map((leg) =>
+        leg.venue === "kalshi" ? { ...leg, status: "failed" as const, filledSize: 0 } : leg,
+      ) as OrderIntent["legs"],
+    });
+    const filledOrder = buildOrder({
+      venue: "kalshi",
+      venueOrderId: "kalshi-late-fill",
+      tokenId: undefined,
+      side: "BUY",
+      outcome: "YES",
+      marketRef: "kalshi-market",
+      filledSize: 4,
+      averageFillPrice: 0.44,
+    });
+    const filled = updateIntentLeg(failed, "kalshi", filledOrder, "filled", 3);
+    const hedged = updateIntentLeg(filled, "kalshi", filledOrder, "hedged", 4);
+    const unwound = updateIntentLeg(filled, "kalshi", filledOrder, "unwound", 4);
+
+    expect(filled.legs.find((leg) => leg.venue === "kalshi")?.status).toBe("filled");
+    expect(hedged.legs.find((leg) => leg.venue === "kalshi")?.status).toBe("hedged");
+    expect(unwound.legs.find((leg) => leg.venue === "kalshi")?.status).toBe("unwound");
+  });
+
+  it("merges a concurrent partial hedge proof without submitting another order", async () => {
+    const intent = buildIntent({ status: "hedging", revision: 0, failureReason: null });
+    const canonical = buildIntent({ status: "primary_filled", revision: 1, failureReason: null });
+    const partialHedge = buildOrder({
+      venue: "kalshi",
+      venueOrderId: "hedge-partial",
+      tokenId: undefined,
+      side: "BUY",
+      outcome: "YES",
+      marketRef: "kalshi-market",
+      filledSize: 4,
+      averageFillPrice: 0.46,
+      status: "partially_filled",
+    });
+    const writeIntent = vi
+      .fn<(candidate: OrderIntent) => Promise<OrderIntent>>()
+      .mockRejectedValueOnce(new OrderIntentRevisionConflictError(intent.id, 0, 1))
+      .mockImplementationOnce(async (candidate) => ({ ...candidate, revision: 2 }));
+    const readIntent = vi.fn(async () => canonical);
+    const recordIncident = vi.fn(async () => undefined);
+
+    const result = await persistPostSubmissionLegEvidence(intent, partialHedge, "submitted", 5, "hedge_partial", {
+      writeIntent,
+      readIntent,
+      recordIncident,
+    });
+
+    expect(result).toMatchObject({ durable: true, recoveredFromConflict: true });
+    expect(result.intent.status).toBe("primary_filled");
+    expect(result.intent.legs.find((leg) => leg.venue === "polymarket")?.filledSize).toBe(10);
+    expect(result.intent.legs.find((leg) => leg.venue === "kalshi")).toMatchObject({
+      filledSize: 4,
+      status: "submitted",
+      venueOrderId: "hedge-partial",
+    });
+    expect(writeIntent).toHaveBeenCalledTimes(2);
+    expect(recordIncident).not.toHaveBeenCalled();
+  });
+
+  it("persists a concurrent primary fill before hedge execution", async () => {
+    const intent = buildIntent({ status: "primary_filled", revision: 0, failureReason: null });
+    const canonical = buildIntent({
+      status: "executing_primary",
+      revision: 1,
+      failureReason: null,
+      legs: buildIntent().legs.map((leg) =>
+        leg.venue === "polymarket"
+          ? {
+              ...leg,
+              filledSize: 0,
+              filledPrice: null,
+              feeUsd: 0,
+              status: "submitted" as const,
+              venueOrderId: "poly-order",
+            }
+          : leg,
+      ) as OrderIntent["legs"],
+    });
+    const primaryFill = buildOrder({
+      venue: "polymarket",
+      venueOrderId: "poly-order",
+      tokenId: "token-1",
+      side: "BUY",
+      outcome: "DOWN",
+      marketRef: "poly-market",
+      filledSize: 10,
+      averageFillPrice: 0.45,
+      feeUsd: 0.5,
+      status: "filled",
+    });
+    const writeIntent = vi
+      .fn<(candidate: OrderIntent) => Promise<OrderIntent>>()
+      .mockRejectedValueOnce(new OrderIntentRevisionConflictError(intent.id, 0, 1))
+      .mockImplementationOnce(async (candidate) => ({ ...candidate, revision: 2 }));
+
+    const result = await persistPostSubmissionLegEvidence(intent, primaryFill, "filled", 5, "primary_fill", {
+      writeIntent,
+      readIntent: vi.fn(async () => canonical),
+      recordIncident: vi.fn(async () => undefined),
+    });
+
+    expect(result).toMatchObject({ durable: true, recoveredFromConflict: true });
+    expect(result.intent.status).toBe("primary_filled");
+    expect(result.intent.legs.find((leg) => leg.venue === "polymarket")).toMatchObject({
+      filledSize: 10,
+      status: "filled",
+      venueOrderId: "poly-order",
+    });
+  });
+
+  it("persists a concurrent complete hedge fill before finalization", async () => {
+    const intent = buildIntent({ status: "hedging", revision: 0, failureReason: null });
+    const canonical = buildIntent({ status: "primary_filled", revision: 1, failureReason: null });
+    const completeHedge = buildOrder({
+      venue: "kalshi",
+      venueOrderId: "hedge-complete",
+      tokenId: undefined,
+      side: "BUY",
+      outcome: "YES",
+      marketRef: "kalshi-market",
+      requestedSize: 10,
+      filledSize: 10,
+      averageFillPrice: 0.45,
+      status: "filled",
+    });
+    const writeIntent = vi
+      .fn<(candidate: OrderIntent) => Promise<OrderIntent>>()
+      .mockRejectedValueOnce(new OrderIntentRevisionConflictError(intent.id, 0, 1))
+      .mockImplementationOnce(async (candidate) => ({ ...candidate, revision: 2 }));
+
+    const result = await persistPostSubmissionLegEvidence(intent, completeHedge, "hedged", 5, "hedge_full", {
+      writeIntent,
+      readIntent: vi.fn(async () => canonical),
+      recordIncident: vi.fn(async () => undefined),
+    });
+
+    expect(result).toMatchObject({ durable: true, recoveredFromConflict: true });
+    expect(result.intent.legs.find((leg) => leg.venue === "kalshi")).toMatchObject({
+      filledSize: 10,
+      status: "hedged",
+      venueOrderId: "hedge-complete",
+    });
+  });
+
+  it("persists an aggregated rescue fill without double-counting concurrent evidence", async () => {
+    const observed = buildIntent({
+      status: "rescue_hedge",
+      revision: 0,
+      failureReason: null,
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      legs: buildIntent().legs.map((leg) =>
+        leg.venue === "polymarket"
+          ? {
+              ...leg,
+              filledSize: 6,
+              filledPrice: 0.46,
+              feeUsd: 0.3,
+              status: "hedged" as const,
+              venueOrderId: "rescue-order",
+            }
+          : {
+              ...leg,
+              filledSize: 10,
+              filledPrice: 0.45,
+              status: "filled" as const,
+              venueOrderId: "kalshi-primary",
+            },
+      ) as OrderIntent["legs"],
+    });
+    const canonical = buildIntent({
+      status: "rescue_hedge",
+      revision: 1,
+      failureReason: null,
+      primaryVenue: "kalshi",
+      hedgeVenue: "polymarket",
+      legs: buildIntent().legs.map((leg) =>
+        leg.venue === "polymarket"
+          ? {
+              ...leg,
+              filledSize: 2,
+              filledPrice: 0.44,
+              feeUsd: 0.1,
+              status: "submitted" as const,
+              venueOrderId: "initial-partial",
+            }
+          : {
+              ...leg,
+              filledSize: 10,
+              filledPrice: 0.45,
+              status: "filled" as const,
+              venueOrderId: "kalshi-primary",
+            },
+      ) as OrderIntent["legs"],
+    });
+    const rescueOrder = buildOrder({
+      venue: "polymarket",
+      venueOrderId: "rescue-order",
+      tokenId: "token-1",
+      side: "BUY",
+      outcome: "DOWN",
+      marketRef: "poly-market",
+      filledSize: 4,
+      averageFillPrice: 0.47,
+      status: "filled",
+    });
+    const writeIntent = vi
+      .fn<(candidate: OrderIntent) => Promise<OrderIntent>>()
+      .mockRejectedValueOnce(new OrderIntentRevisionConflictError(observed.id, 0, 1))
+      .mockImplementationOnce(async (candidate) => ({ ...candidate, revision: 2 }));
+
+    const result = await persistPostSubmissionIntentEvidence(observed, rescueOrder, 5, "hedge_rescue", {
+      writeIntent,
+      readIntent: vi.fn(async () => canonical),
+      recordIncident: vi.fn(async () => undefined),
+    });
+
+    expect(result).toMatchObject({ durable: true, recoveredFromConflict: true });
+    expect(result.intent.legs.find((leg) => leg.venue === "polymarket")).toMatchObject({
+      filledSize: 6,
+      status: "hedged",
+      venueOrderId: "rescue-order",
+    });
+  });
+
+  it("records a fail-closed incident when post-submission CAS cannot converge", async () => {
+    const intent = buildIntent({ status: "hedging", revision: 0, failureReason: null });
+    const partialHedge = buildOrder({
+      venue: "kalshi",
+      venueOrderId: "hedge-partial",
+      tokenId: undefined,
+      side: "BUY",
+      outcome: "YES",
+      marketRef: "kalshi-market",
+      filledSize: 4,
+      averageFillPrice: 0.46,
+      status: "partially_filled",
+    });
+    const writeIntent = vi.fn(async (candidate: OrderIntent) => {
+      throw new OrderIntentRevisionConflictError(candidate.id, candidate.revision, candidate.revision + 1);
+    });
+    const readIntent = vi.fn(async () => ({ ...intent, revision: 1 }));
+    const recordIncident = vi.fn(async () => undefined);
+
+    const result = await persistPostSubmissionLegEvidence(intent, partialHedge, "submitted", 5, "hedge_partial", {
+      writeIntent,
+      readIntent,
+      recordIncident,
+    });
+
+    expect(result.durable).toBe(false);
+    expect(writeIntent).toHaveBeenCalledTimes(3);
+    expect(recordIncident).toHaveBeenCalledOnce();
   });
 });
 

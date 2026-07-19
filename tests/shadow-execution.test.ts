@@ -67,9 +67,7 @@ describe("REST shadow execution", () => {
       shadowExecution: null,
     };
 
-    expect(getShadowReentryCooldownRemainingMs(intent, 90_000)).toBe(
-      SHADOW_REENTRY_COOLDOWN_MS - 20_000,
-    );
+    expect(getShadowReentryCooldownRemainingMs(intent, 90_000)).toBe(SHADOW_REENTRY_COOLDOWN_MS - 20_000);
     expect(getShadowReentryCooldownRemainingMs(intent, 130_000)).toBe(0);
     expect(getShadowReentryCooldownRemainingMs(null, 90_000)).toBe(0);
   });
@@ -133,15 +131,18 @@ describe("REST shadow execution", () => {
   });
 });
 
-function buildIntent(overrides: {
-  polyPrice?: number;
-  kalshiPrice?: number;
-  grossCost?: number;
-} = {}): OrderIntent {
+function buildIntent(
+  overrides: {
+    polyPrice?: number;
+    kalshiPrice?: number;
+    grossCost?: number;
+  } = {},
+): OrderIntent {
   const polyPrice = overrides.polyPrice ?? 0.4;
   const kalshiPrice = overrides.kalshiPrice ?? 0.48;
   return {
     id: "shadow-intent",
+    revision: 0,
     asset: "btc",
     shadow: true,
     slotKey: "btc:slot-1",

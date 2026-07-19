@@ -1,4 +1,5 @@
 import * as postgres from "@/lib/postgres-db";
+export { OrderIntentRevisionConflictError } from "@/lib/postgres-db";
 import { isMarketAsset } from "@/lib/market-catalog";
 import { queueRunEventNotification } from "@/lib/notifications";
 import type { OracleSlotSample, SlotResolutionRecord } from "@/lib/oracle-history";
@@ -114,8 +115,12 @@ export async function readVenueBalances() {
   return postgres.listVenueBalances(await db());
 }
 
+export async function insertOrderIntent(intent: OrderIntent) {
+  return postgres.insertOrderIntent(await db(), intent);
+}
+
 export async function writeOrderIntent(intent: OrderIntent) {
-  return postgres.upsertOrderIntent(await db(), intent);
+  return postgres.updateOrderIntent(await db(), intent);
 }
 
 export async function readOpenOrderIntents(asset?: MarketAsset) {
@@ -311,6 +316,15 @@ export async function readExecutionCandidates(now?: number) {
 
 export async function tryWithGlobalLiveExecutionLock<T>(owner: string, fn: () => Promise<T>) {
   return postgres.tryWithGlobalLiveExecutionLock(await db(), owner, fn);
+}
+
+export async function tryWithShadowExecutionLock<T>(
+  asset: MarketAsset,
+  slotKey: string,
+  owner: string,
+  fn: () => Promise<T>,
+) {
+  return postgres.tryWithShadowExecutionLock(await db(), asset, slotKey, owner, fn);
 }
 
 export async function readDashboard(slot: MarketSlot): Promise<DashboardResponse> {

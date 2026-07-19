@@ -488,6 +488,8 @@ export type ShadowExecutionAudit = {
 
 export type OrderIntent = {
   id: string;
+  /** Optimistic-concurrency token incremented by every durable update. */
+  revision: number;
   asset: MarketAsset;
   shadow: boolean;
   slotKey: string;

@@ -1,11 +1,4 @@
-import type {
-  LiveFill,
-  LiveOpportunity,
-  OrderIntent,
-  OrderIntentLeg,
-  Resolution,
-  Venue,
-} from "@/lib/types";
+import type { LiveFill, LiveOpportunity, OrderIntent, OrderIntentLeg, Resolution, Venue } from "@/lib/types";
 
 export function createIntentFromOpportunity({
   opportunity,
@@ -34,6 +27,7 @@ export function createIntentFromOpportunity({
 
   return {
     id: intentId,
+    revision: 0,
     asset: opportunity.asset,
     shadow,
     slotKey: opportunity.slotKey,
@@ -58,16 +52,33 @@ export function createIntentFromOpportunity({
     mismatchRiskAudit: opportunity.mismatchRiskAudit ?? null,
     fatalMismatchPnlUsd: opportunity.fatalMismatchPnlUsd ?? null,
     conservativeExpectedPnlUsd: opportunity.conservativeExpectedPnlUsd ?? null,
-    fatalLossExposureUsd: opportunity.fatalMismatchPnlUsd == null
-      ? null
-      : Math.max(0, -opportunity.fatalMismatchPnlUsd),
+    fatalLossExposureUsd:
+      opportunity.fatalMismatchPnlUsd == null ? null : Math.max(0, -opportunity.fatalMismatchPnlUsd),
     realizedPnlUsd: null,
     roi: null,
     polyResolution: null,
     kalshiResolution: null,
     legs: [
-      buildIntentLeg(intentId, firstLeg.venue, firstLeg.outcome, firstLeg.marketRef, firstLeg.tokenId, firstLeg.price, firstLeg.size, firstLeg.targetNotionalUsd),
-      buildIntentLeg(intentId, secondLeg.venue, secondLeg.outcome, secondLeg.marketRef, secondLeg.tokenId, secondLeg.price, secondLeg.size, secondLeg.targetNotionalUsd),
+      buildIntentLeg(
+        intentId,
+        firstLeg.venue,
+        firstLeg.outcome,
+        firstLeg.marketRef,
+        firstLeg.tokenId,
+        firstLeg.price,
+        firstLeg.size,
+        firstLeg.targetNotionalUsd,
+      ),
+      buildIntentLeg(
+        intentId,
+        secondLeg.venue,
+        secondLeg.outcome,
+        secondLeg.marketRef,
+        secondLeg.tokenId,
+        secondLeg.price,
+        secondLeg.size,
+        secondLeg.targetNotionalUsd,
+      ),
     ],
   };
 }
@@ -93,7 +104,12 @@ function deriveExecutionPrimaryVenue(opportunity: Pick<LiveOpportunity, "legs" |
   return opportunity.primaryVenue ?? opportunity.legs[0]?.venue ?? null;
 }
 
-export function markIntentStatus(intent: OrderIntent, status: OrderIntent["status"], now: number, failureReason?: string | null): OrderIntent {
+export function markIntentStatus(
+  intent: OrderIntent,
+  status: OrderIntent["status"],
+  now: number,
+  failureReason?: string | null,
+): OrderIntent {
   return {
     ...intent,
     status,
@@ -231,13 +247,12 @@ export function summarizeVenueFills(
 export function calculateLegSpentUsd(
   leg: Pick<OrderIntentLeg, "filledSize" | "filledPrice" | "requestedNotionalUsd" | "feeUsd" | "cashAdjustmentUsd">,
 ) {
-  const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
+  const tradedNotional =
+    leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
   return round4(tradedNotional + leg.feeUsd + (leg.cashAdjustmentUsd ?? 0));
 }
 
-export function deriveHedgedPairEconomics(
-  legs: OrderIntent["legs"],
-): {
+export function deriveHedgedPairEconomics(legs: OrderIntent["legs"]): {
   guaranteedPayoutUsd: number;
   totalSpentUsd: number;
   netWorstCaseUsd: number;

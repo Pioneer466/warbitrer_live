@@ -16,16 +16,12 @@ import type { LiveOpportunity, MismatchRiskAudit, MismatchRiskEstimate, OrderInt
 describe("mismatch risk display", () => {
   it("distinguishes unavailable, uncalibrated and calibrated estimates", () => {
     expect(getMismatchModelDisplayState(null)).toBe("unavailable");
-    expect(
-      getMismatchModelDisplayState(
-        buildEstimate({ available: false, modelVersion: "mismatch-v2" }),
-      ),
-    ).toBe("unavailable");
+    expect(getMismatchModelDisplayState(buildEstimate({ available: false, modelVersion: "mismatch-v2" }))).toBe(
+      "unavailable",
+    );
     expect(getMismatchModelDisplayState(buildEstimate({ available: false }))).toBe("uncalibrated");
     expect(
-      getMismatchModelDisplayState(
-        buildEstimate({ modelVersion: "structural-ewma-gaussian-v1-UNCALIBRATED" }),
-      ),
+      getMismatchModelDisplayState(buildEstimate({ modelVersion: "structural-ewma-gaussian-v1-UNCALIBRATED" })),
     ).toBe("uncalibrated");
     expect(getMismatchModelDisplayState(buildEstimate({ modelVersion: "mismatch-v2" }))).toBe("calibrated");
   });
@@ -33,10 +29,7 @@ describe("mismatch risk display", () => {
   it("selects the opportunity with the highest fatal upper bound", () => {
     const lower = buildEstimate({ pFatalUpper95: 0.03 });
     const higher = buildEstimate({ pFatalUpper95: 0.08 });
-    const selected = selectHighestRiskEstimate([
-      buildOpportunity(lower),
-      buildOpportunity(higher),
-    ]);
+    const selected = selectHighestRiskEstimate([buildOpportunity(lower), buildOpportunity(higher)]);
 
     expect(selected).toBe(higher);
   });
@@ -56,11 +49,13 @@ describe("mismatch risk display", () => {
     expect(formatMismatchEconomicsBasis("reference")).toBe("économie de référence");
     expect(formatMismatchAuditSettlementLabel("would_allow", "fatal_mismatch")).toBe("autorisé + fatal");
 
-    const opportunity = buildOpportunity(buildEstimate({
-      economicsBasis: "reference",
-      economicsPairSize: 7,
-      economicsTotalCostUsd: 6.2,
-    }));
+    const opportunity = buildOpportunity(
+      buildEstimate({
+        economicsBasis: "reference",
+        economicsPairSize: 7,
+        economicsTotalCostUsd: 6.2,
+      }),
+    );
     expect(readOpportunityMismatchEconomics(opportunity)).toEqual({
       basis: "reference",
       pairSize: 7,
@@ -82,9 +77,15 @@ describe("mismatch risk display", () => {
   });
 
   it("classifies settled intent payouts from the two held legs", () => {
-    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "UP", kalshiResolution: "YES" }))).toBe("aligned");
-    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "UP", kalshiResolution: "NO" }))).toBe("double_payout");
-    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "DOWN", kalshiResolution: "YES" }))).toBe("fatal_mismatch");
+    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "UP", kalshiResolution: "YES" }))).toBe(
+      "aligned",
+    );
+    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "UP", kalshiResolution: "NO" }))).toBe(
+      "double_payout",
+    );
+    expect(classifySettledIntentMismatch(buildIntent({ polyResolution: "DOWN", kalshiResolution: "YES" }))).toBe(
+      "fatal_mismatch",
+    );
     const reverseCombination = buildIntent({
       combination: "POLY_DOWN_KALSHI_YES",
       polyResolution: "UP",
@@ -93,13 +94,19 @@ describe("mismatch risk display", () => {
     reverseCombination.legs[0].outcome = "DOWN";
     reverseCombination.legs[1].outcome = "YES";
     expect(classifySettledIntentMismatch(reverseCombination)).toBe("fatal_mismatch");
-    expect(classifySettledIntentMismatch(buildIntent({ status: "hedged", polyResolution: null, kalshiResolution: null }))).toBeNull();
+    expect(
+      classifySettledIntentMismatch(buildIntent({ status: "hedged", polyResolution: null, kalshiResolution: null })),
+    ).toBeNull();
   });
 
   it("summarizes only exact execution audits and their settled outcomes", () => {
     const intents = [
-      buildIntent({ mismatchRiskAudit: buildAudit({ decision: "would_allow", enforceReady: true, source: "execution" }) }),
-      buildIntent({ mismatchRiskAudit: buildAudit({ decision: "would_block", enforceReady: false, source: "execution" }) }),
+      buildIntent({
+        mismatchRiskAudit: buildAudit({ decision: "would_allow", enforceReady: true, source: "execution" }),
+      }),
+      buildIntent({
+        mismatchRiskAudit: buildAudit({ decision: "would_block", enforceReady: false, source: "execution" }),
+      }),
       buildIntent({
         mismatchRiskAudit: buildAudit({ decision: "would_allow_fail_open", enforceReady: false, source: "execution" }),
         polyResolution: "UP",
@@ -267,6 +274,7 @@ function buildAudit(overrides: Partial<MismatchRiskAudit> = {}): MismatchRiskAud
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   return {
     id: "intent",
+    revision: 0,
     asset: "btc",
     shadow: true,
     slotKey: "btc:slot-1",

@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { readCircuitBreakers, readOpenOrderIntents, writeCircuitBreaker, writeOrderIntent } from "@/lib/storage";
+import {
+  OrderIntentRevisionConflictError,
+  readCircuitBreakers,
+  readOpenOrderIntents,
+  writeCircuitBreaker,
+  writeOrderIntent,
+} from "@/lib/storage";
 import { isMarketAsset } from "@/lib/market-catalog";
 import type { CircuitBreaker, CircuitBreakerKey, CircuitBreakerReason, OrderIntent } from "@/lib/types";
 
@@ -12,9 +18,7 @@ export async function GET(request: Request) {
   try {
     const breakers = await readCircuitBreakers();
     const url = new URL(request.url);
-    const body = url.searchParams.get("details") === "1"
-      ? await buildDetailedBreakerResponse(breakers)
-      : breakers;
+    const body = url.searchParams.get("details") === "1" ? await buildDetailedBreakerResponse(breakers) : breakers;
 
     return NextResponse.json(body, {
       headers: {
@@ -36,9 +40,10 @@ async function buildDetailedBreakerResponse(breakers: CircuitBreaker[]) {
       scope,
       requiresManualClear: getPayloadBoolean(breaker.payload, "requiresManualClear"),
       cooldownUntil: getPayloadNumber(breaker.payload, "cooldownUntil"),
-      cooldownRemainingMs: getPayloadNumber(breaker.payload, "cooldownUntil") === null
-        ? null
-        : Math.max(0, getPayloadNumber(breaker.payload, "cooldownUntil")! - now),
+      cooldownRemainingMs:
+        getPayloadNumber(breaker.payload, "cooldownUntil") === null
+          ? null
+          : Math.max(0, getPayloadNumber(breaker.payload, "cooldownUntil")! - now),
       unresolvedIntentIds: findUnresolvedIntentIds(scope, openIntents),
     };
   });
@@ -70,13 +75,8 @@ function parseBreakerScope(key: CircuitBreakerKey) {
   };
 }
 
-function findUnresolvedIntentIds(
-  scope: ReturnType<typeof parseBreakerScope>,
-  openIntents: OrderIntent[],
-) {
-  return openIntents
-    .filter((intent) => matchesBreakerScope(scope, intent))
-    .map((intent) => intent.id);
+function findUnresolvedIntentIds(scope: ReturnType<typeof parseBreakerScope>, openIntents: OrderIntent[]) {
+  return openIntents.filter((intent) => matchesBreakerScope(scope, intent)).map((intent) => intent.id);
 }
 
 function matchesBreakerScope(
@@ -132,7 +132,7 @@ export async function PUT(request: Request) {
     const breaker = {
       key: body.key,
       active: body.active,
-      reason: body.active ? body.reason ?? "manual" : null,
+      reason: body.active ? (body.reason ?? "manual") : null,
       triggeredAt: body.active ? now : null,
       payload: body.payload ?? null,
     };
@@ -140,6 +140,16 @@ export async function PUT(request: Request) {
     await writeCircuitBreaker(breaker);
     return NextResponse.json({ ...breaker, closedIntentIds });
   } catch (error) {
+    if (error instanceof OrderIntentRevisionConflictError) {
+      return NextResponse.json(
+        {
+          error: error.message,
+          status: 409,
+          timestamp: Date.now(),
+        },
+        { status: 409 },
+      );
+    }
     return createApiErrorResponse(error);
   }
 }
@@ -162,7 +172,8 @@ async function closeBreakerUnresolvedIntents(
 ) {
   const scope = parseBreakerScope(key);
   const openIntents = await readOpenOrderIntents();
-  const explicitIntentId = typeof requestedIntentId === "string" && requestedIntentId.trim() ? requestedIntentId.trim() : null;
+  const explicitIntentId =
+    typeof requestedIntentId === "string" && requestedIntentId.trim() ? requestedIntentId.trim() : null;
   const payloadIntentId = typeof breaker?.payload?.intentId === "string" ? breaker.payload.intentId : null;
   const targetIntentId = explicitIntentId ?? payloadIntentId;
   const closeableIntents = openIntents.filter((intent) => {

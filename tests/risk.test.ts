@@ -48,6 +48,7 @@ describe("venue exposure", () => {
     const openIntents: OrderIntent[] = [
       {
         id: "intent-1",
+        revision: 0,
         asset: "btc",
         shadow: false,
         slotKey: "btc:slot-1",
@@ -311,6 +312,7 @@ describe("venue exposure", () => {
     const openIntents: OrderIntent[] = [
       {
         id: "intent-hedged",
+        revision: 0,
         asset: "btc",
         shadow: false,
         slotKey: "btc:slot-1",
@@ -374,6 +376,7 @@ describe("venue exposure", () => {
       },
       {
         id: "intent-hedging",
+        revision: 0,
         asset: "btc",
         shadow: false,
         slotKey: "btc:slot-1",
@@ -458,6 +461,7 @@ describe("shadow execution blockers", () => {
 function buildIntentForBlockerTest(): OrderIntent {
   return {
     id: "blocker-intent",
+    revision: 0,
     asset: "btc",
     shadow: true,
     slotKey: "btc:slot-blocker",
@@ -552,6 +556,7 @@ describe("venue balance reservations", () => {
     const openIntents: OrderIntent[] = [
       {
         id: "intent-btc",
+        revision: 0,
         asset: "btc",
         shadow: false,
         slotKey: "btc:slot-1",
@@ -615,6 +620,7 @@ describe("venue balance reservations", () => {
       },
       {
         id: "intent-eth",
+        revision: 0,
         asset: "eth",
         shadow: false,
         slotKey: "eth:slot-1",

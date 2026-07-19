@@ -95,6 +95,7 @@ import {
   findOrderAttemptById,
   findOrderIntent,
   findVenueOrder,
+  insertOrderIntent,
   readCircuitBreakers,
   readExecutionCandidates,
   readFillsForIntentVenue,
@@ -105,6 +106,7 @@ import {
   readLiveRealizedPnlUsd,
   readOpenOrderIntents,
   readOrderAttemptsForIntent,
+  OrderIntentRevisionConflictError,
   readPendingSlotResolutions,
   readPolymarketCashAdjustmentObservation,
   readPositions,
@@ -119,6 +121,7 @@ import {
   replaceVenuePositions,
   runDatabaseMaintenance,
   tryWithGlobalLiveExecutionLock,
+  tryWithShadowExecutionLock,
   updateStablePnlChangeFromIntent,
   writeStablePnlChange,
   writeCircuitBreaker,
@@ -2002,7 +2005,7 @@ export function createExecutionCoordinator(
             continue;
           }
           const executionOpportunity = mismatchRecheck.opportunity;
-          const intent = applyRiskCheckedOpportunityToIntent(
+          const draftIntent = applyRiskCheckedOpportunityToIntent(
             preparedIntent.intent,
             executionOpportunity,
             mismatchRecheckAt,
@@ -2020,10 +2023,10 @@ export function createExecutionCoordinator(
             -(executionOpportunity.fatalMismatchPnlUsd ?? -standardWorstFillCostUsd) - standardWorstFillCostUsd,
           );
           if (recoveryReserveUsd > 0) {
-            exposureUsd[intent.hedgeVenue] += recoveryReserveUsd;
+            exposureUsd[draftIntent.hedgeVenue] += recoveryReserveUsd;
           }
 
-          await writeOrderIntent(intent);
+          const intent = await insertOrderIntent(draftIntent);
           await writeRunEvent({
             level: "info",
             eventType: "intent.created",
@@ -2047,11 +2050,7 @@ export function createExecutionCoordinator(
         return created;
       };
 
-      if (settings.shadowMode) {
-        return executeWithinLock();
-      }
-
-      const lockResult = await tryWithGlobalLiveExecutionLock(`execute:${slot.asset}:${slot.key}`, executeWithinLock);
+      const lockResult = await tryWithExecutionLock(settings.shadowMode, slot.asset, slot.key, executeWithinLock);
       if (!lockResult.acquired) {
         await recordExecutionLockBusy(slot.asset, slot.key, now);
         return [];
@@ -2197,6 +2196,20 @@ export function createExecutionCoordinator(
       }
     },
   };
+}
+
+export async function tryWithExecutionLock<T>(
+  shadowMode: boolean,
+  asset: MarketAsset,
+  slotKey: string,
+  callback: () => Promise<T>,
+  acquireLive: typeof tryWithGlobalLiveExecutionLock = tryWithGlobalLiveExecutionLock,
+  acquireShadow: typeof tryWithShadowExecutionLock = tryWithShadowExecutionLock,
+) {
+  if (shadowMode) {
+    return acquireShadow(asset, slotKey, `shadow:${asset}:${slotKey}`, callback);
+  }
+  return acquireLive(`live:${asset}:${slotKey}`, callback);
 }
 
 export function getMismatchEstimationSettings(settings: StrategyConfig): StrategyConfig {
@@ -2900,7 +2913,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   let currentIntent = markIntentStatus(intent, "executing_primary", now);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   const entryDepthPreflight = await preflightEntryDepthAndAdjustIntent(currentIntent, slot, settings);
   if (entryDepthPreflight.status === "skipped") {
     return skipIntentBeforeSubmission(currentIntent, Date.now(), entryDepthPreflight.reason, "insufficient_depth", {
@@ -2909,7 +2922,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
   if (entryDepthPreflight.intent !== currentIntent) {
     currentIntent = entryDepthPreflight.intent;
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
     hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
     if (!primaryLeg || !hedgeLeg) {
@@ -2940,7 +2953,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       finalRiskCheckAt,
       `Final mismatch risk check failed: ${finalRiskCheck.reason}`,
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "warn",
@@ -2959,7 +2972,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     return currentIntent;
   }
   currentIntent = applyRiskCheckedOpportunityToIntent(currentIntent, finalRiskCheck.opportunity, finalRiskCheckAt);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
   hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {
@@ -2997,7 +3010,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       disabledAt,
       "Live execution was disabled before primary submission",
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "info",
@@ -3058,14 +3071,20 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
 
   if (primaryOrder.filledSize > 0 && shouldTreatPrimaryExecutionAsFilled(currentIntent, primaryResult, primaryOrder)) {
     const primaryFillObservedAt = Date.now();
-    currentIntent = updateIntentLeg(
+    currentIntent = markIntentStatus(currentIntent, "primary_filled", primaryFillObservedAt);
+    const primaryEvidence = await persistPostSubmissionLegEvidence(
       currentIntent,
-      executionPrimaryLeg.venue,
       primaryOrder,
       "filled",
       primaryFillObservedAt,
+      "primary_fill_persistence",
     );
-    currentIntent = markIntentStatus(currentIntent, "primary_filled", primaryFillObservedAt);
+    currentIntent = primaryEvidence.intent;
+    if (!primaryEvidence.durable) {
+      await persistPrimaryConfirmation?.();
+      persistPrimaryConfirmation = null;
+      return currentIntent;
+    }
     const primaryWasPartial = primaryOrder.filledSize + ORDER_SIZE_TOLERANCE < primaryOrder.requestedSize;
     let hedgedIntent: OrderIntent;
     try {
@@ -3123,7 +3142,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   if (isTerminalOrderStatus(primaryResult.status)) {
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
     currentIntent = markIntentStatus(currentIntent, "failed", now, describeTerminalNoFill("Primary", primaryResult));
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
       await writeCircuitBreaker({
         key: buildSlotBreakerKey(currentIntent.slotKey),
@@ -3188,7 +3207,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
   }
 
   currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "submitted", now);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   await writeRunEvent({
     level: "info",
     eventType: "order.primary.awaiting_confirmation",
@@ -3211,8 +3230,8 @@ async function skipIntentBeforeSubmission(
   reason: string,
   payload: Record<string, unknown>,
 ) {
-  const currentIntent = markIntentStatus(intent, "skipped", now, failureReason);
-  await writeOrderIntent(currentIntent);
+  let currentIntent = markIntentStatus(intent, "skipped", now, failureReason);
+  currentIntent = await writeOrderIntent(currentIntent);
   await writeRunEvent({
     level: "info",
     eventType: "order.primary.preflight_skipped",
@@ -3444,7 +3463,7 @@ async function holdPolymarketHedgeFailurePendingTruth(
   if (!alreadyPendingSameOrder) {
     currentIntent = hedgeOrder ? updateIntentLeg(intent, hedgeLeg.venue, hedgeOrder, "submitted", now) : intent;
     currentIntent = markIntentStatus(currentIntent, "truth_pending", now, pendingTruthReason);
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
   }
 
   if (!alreadyPendingSameOrder || !existingPendingTruthBreaker) {
@@ -3586,13 +3605,16 @@ async function executeHedgeLeg(
   });
 
   if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
-    if (currentIntent.hedgeVenue === "polymarket") {
-      currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
-    }
-    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-    currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_filled", hedgeOrder, {
-      executionTiming: buildPairExecutionTiming(primaryExecutionTiming, hedgeExecutionTiming),
-    });
+    currentIntent = await finalizeCompletedHedgeAfterSubmission(
+      currentIntent,
+      hedgeOrder,
+      now,
+      "hedge_filled",
+      "hedge_full_fill_persistence",
+      {
+        executionTiming: buildPairExecutionTiming(primaryExecutionTiming, hedgeExecutionTiming),
+      },
+    );
     if (currentIntent.status === "hedged") {
       await writeLiveTradeRunEvent(currentIntent, now, "hedged");
     }
@@ -3600,8 +3622,17 @@ async function executeHedgeLeg(
   }
 
   if (hedgeOrder.filledSize > 0) {
-    currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-    await writeOrderIntent(currentIntent);
+    const evidence = await persistPostSubmissionLegEvidence(
+      currentIntent,
+      hedgeOrder,
+      "submitted",
+      now,
+      "hedge_partial_fill_persistence",
+    );
+    currentIntent = evidence.intent;
+    if (!evidence.durable) {
+      return currentIntent;
+    }
     await writeRunEvent({
       level: "warn",
       eventType: "order.hedge.partial_fill_rescue",
@@ -3616,15 +3647,14 @@ async function executeHedgeLeg(
       },
       createdAt: now,
     });
-    return attemptPrimaryUnwindAfterHedgeFailure(
+    return continuePartialHedgeRecoveryAfterSubmission(
       currentIntent,
-      primaryLeg,
-      hedgeLeg,
       hedgeOrder,
       settings,
       now,
       `Hedge order partially filled or not final (${hedgeResult.status})`,
       hedgeResult,
+      "hedge_partial_fill_recovery",
     );
   }
 
@@ -3658,11 +3688,13 @@ async function executeHedgeLeg(
       hedgeOrder = retried.order;
 
       if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
-        if (currentIntent.hedgeVenue === "polymarket") {
-          currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
-        }
-        currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "hedged", now);
-        currentIntent = await markIntentHedgedAfterEconomicCheck(currentIntent, now, "hedge_retry_filled", hedgeOrder);
+        currentIntent = await finalizeCompletedHedgeAfterSubmission(
+          currentIntent,
+          hedgeOrder,
+          now,
+          "hedge_retry_filled",
+          "hedge_retry_full_fill_persistence",
+        );
         if (currentIntent.status === "hedged") {
           await writeLiveTradeRunEvent(currentIntent, now, "hedged");
         }
@@ -3670,8 +3702,17 @@ async function executeHedgeLeg(
       }
 
       if (hedgeOrder.filledSize > 0) {
-        currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-        await writeOrderIntent(currentIntent);
+        const evidence = await persistPostSubmissionLegEvidence(
+          currentIntent,
+          hedgeOrder,
+          "submitted",
+          now,
+          "hedge_retry_partial_fill_persistence",
+        );
+        currentIntent = evidence.intent;
+        if (!evidence.durable) {
+          return currentIntent;
+        }
         await writeRunEvent({
           level: "warn",
           eventType: "order.hedge_retry.partial_fill_rescue",
@@ -3686,15 +3727,14 @@ async function executeHedgeLeg(
           },
           createdAt: now,
         });
-        return attemptPrimaryUnwindAfterHedgeFailure(
+        return continuePartialHedgeRecoveryAfterSubmission(
           currentIntent,
-          primaryLeg,
-          hedgeLeg,
           hedgeOrder,
           settings,
           now,
           `Hedge retry partially filled or not final (${hedgeResult.status})`,
           hedgeResult,
+          "hedge_retry_partial_fill_recovery",
         );
       }
     }
@@ -3702,7 +3742,7 @@ async function executeHedgeLeg(
 
   if (!isTerminalOrderStatus(hedgeResult.status)) {
     currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeRunEvent({
       level: "info",
       eventType: "order.hedge.awaiting_confirmation",
@@ -3763,6 +3803,76 @@ async function executeHedgeLeg(
   );
 }
 
+async function finalizeCompletedHedgeAfterSubmission(
+  intent: OrderIntent,
+  hedgeOrder: LiveOrder,
+  now: number,
+  economicStage: string,
+  incidentStage: string,
+  extraPayload: Record<string, unknown> = {},
+) {
+  const evidence = await persistPostSubmissionLegEvidence(intent, hedgeOrder, "hedged", now, incidentStage);
+  let currentIntent = evidence.intent;
+  if (!evidence.durable) {
+    return currentIntent;
+  }
+
+  try {
+    if (currentIntent.hedgeVenue === "polymarket") {
+      currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", now);
+    }
+    return await markIntentHedgedAfterEconomicCheck(currentIntent, now, economicStage, hedgeOrder, extraPayload);
+  } catch (error) {
+    if (!(error instanceof OrderIntentRevisionConflictError)) {
+      throw error;
+    }
+    await recordPostSubmissionIntentPersistenceIncident({
+      intent: currentIntent,
+      order: hedgeOrder,
+      stage: `${incidentStage}_finalize`,
+      error,
+    });
+    return (await findOrderIntent(currentIntent.id).catch(() => null)) ?? currentIntent;
+  }
+}
+
+async function continuePartialHedgeRecoveryAfterSubmission(
+  intent: OrderIntent,
+  hedgeOrder: LiveOrder,
+  settings: StrategyConfig,
+  now: number,
+  failureReason: string,
+  hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>,
+  stage: string,
+) {
+  const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
+  const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg) {
+    const error = new Error(`Intent ${intent.id} missing canonical legs after hedge submission`);
+    await recordPostSubmissionIntentPersistenceIncident({ intent, order: hedgeOrder, stage, error });
+    return intent;
+  }
+
+  try {
+    return await attemptPrimaryUnwindAfterHedgeFailure(
+      intent,
+      primaryLeg,
+      hedgeLeg,
+      hedgeOrder,
+      settings,
+      now,
+      failureReason,
+      hedgeResult,
+    );
+  } catch (error) {
+    if (!(error instanceof OrderIntentRevisionConflictError)) {
+      throw error;
+    }
+    await recordPostSubmissionIntentPersistenceIncident({ intent, order: hedgeOrder, stage, error });
+    return (await findOrderIntent(intent.id).catch(() => null)) ?? intent;
+  }
+}
+
 async function executeShadowIntent(
   intent: OrderIntent,
   snapshot: OpportunitySnapshot,
@@ -3791,7 +3901,7 @@ async function executeShadowIntent(
   await writeVenueOrder(hedgeOrder);
   currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "submitted", now);
   currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   await writeRunEvent({
     asset: currentIntent.asset,
     level: "info",
@@ -3819,11 +3929,11 @@ async function resumeShadowIntents(intents: OrderIntent[], snapshot: Opportunity
     }
 
     const restStartedAt = Date.now();
-    const currentIntent = {
+    let currentIntent: OrderIntent = {
       ...intent,
       shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
     };
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     resumed.push(await completeShadowIntent(currentIntent, snapshot, settings, restStartedAt));
   }
 
@@ -3856,7 +3966,7 @@ async function completeShadowIntent(
           projectedNetProfitUsd: null,
         };
   const scheduledAudit = intent.shadowExecution ?? buildScheduledShadowAudit(intent, restStartedAt);
-  const capturedIntent: OrderIntent = {
+  let capturedIntent: OrderIntent = {
     ...intent,
     shadowExecution: {
       ...scheduledAudit,
@@ -3866,7 +3976,7 @@ async function completeShadowIntent(
       restErrors: restCapture.errors,
     },
   };
-  await writeOrderIntent(capturedIntent);
+  capturedIntent = await writeOrderIntent(capturedIntent);
   await writeRunEvent({
     asset: intent.asset,
     level: "info",
@@ -3890,17 +4000,17 @@ async function completeShadowIntent(
     }
   }
   const evaluatedAt = Date.now();
-  const completedAudit = buildCompletedShadowAudit(intent, decision, evaluatedAt, {
+  const completedAudit = buildCompletedShadowAudit(capturedIntent, decision, evaluatedAt, {
     startedAt: restStartedAt,
     capturedAt: restCapture.capturedAt,
     errors: restCapture.errors,
   });
-  const completedOrders = intent.legs.map((leg) =>
-    buildCompletedShadowOrder(intent, leg, decision, completedAudit, evaluatedAt),
+  const completedOrders = capturedIntent.legs.map((leg) =>
+    buildCompletedShadowOrder(capturedIntent, leg, decision, completedAudit, evaluatedAt),
   ) as [LiveOrder, LiveOrder];
   await Promise.all(completedOrders.map((order) => writeVenueOrder(order)));
 
-  let currentIntent: OrderIntent = { ...intent, shadowExecution: completedAudit };
+  let currentIntent: OrderIntent = { ...capturedIntent, shadowExecution: completedAudit };
   if (decision.status === "no_fill") {
     for (const order of completedOrders) {
       currentIntent = updateIntentLeg(currentIntent, order.venue, order, "failed", evaluatedAt);
@@ -3911,7 +4021,7 @@ async function completeShadowIntent(
       evaluatedAt,
       `Shadow non exécuté: ${decision.reason ?? decision.reasonCode ?? "liquidité indisponible"}`,
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "info",
@@ -3952,7 +4062,7 @@ async function completeShadowIntent(
     );
   }
   currentIntent = markIntentStatus(currentIntent, "hedged", evaluatedAt, null);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   await writeRunEvent({
     asset: currentIntent.asset,
     level: "info",
@@ -4083,15 +4193,16 @@ async function attachRecentPolymarketFills(intent: OrderIntent) {
     }
   }
 
-  intent = (await syncIntentFromStoredVenueFills(intent.id, "polymarket", intent)) ?? intent;
-  await writeOrderIntent(intent);
-  return intent;
+  return (await syncIntentFromStoredVenueFills(intent.id, "polymarket", intent)) ?? intent;
 }
 
 async function attachRecentPolymarketFillsSafely(intent: OrderIntent, stage: "primary" | "hedge", now: number) {
   try {
     return await attachRecentPolymarketFills(intent);
   } catch (error) {
+    if (error instanceof OrderIntentRevisionConflictError) {
+      throw error;
+    }
     await writeRunEvent({
       level: "warn",
       eventType: "fills.polymarket.sync_failed",
@@ -4137,7 +4248,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
     ) {
       currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, primaryOrderSummary, now);
       currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
       await writeLiveTradeRunEvent(currentIntent, now);
 
       const latestHedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, hedgeLeg);
@@ -4168,7 +4279,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
 
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "filled", now);
     currentIntent = markIntentStatus(currentIntent, "primary_filled", now);
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeLiveTradeRunEvent(currentIntent, now);
 
     if (currentIntent.primaryVenue === "polymarket") {
@@ -4523,12 +4634,6 @@ async function retryLegWithinExecutionBuffer(
       });
     }
   }
-  const retryOrderType =
-    stage === "primary" ? primaryImmediateOrderType(repricedLeg.venue) : immediatePartialOrderType(repricedLeg.venue);
-  const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, retryOrderType, false, {
-    kalshiPriceTicksSlippage:
-      stage === "primary" && repricedLeg.venue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
-  });
   const retryPriceLadderTicks = getRetryPriceLadderTicks(repricedLeg, retryAttempt);
 
   if (stage === "primary") {
@@ -4567,8 +4672,15 @@ async function retryLegWithinExecutionBuffer(
   }
 
   if (options?.persistRepricedIntent !== false) {
-    await writeOrderIntent(repricedIntent);
+    repricedIntent = await writeOrderIntent(repricedIntent);
+    repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
   }
+  const retryOrderType =
+    stage === "primary" ? primaryImmediateOrderType(repricedLeg.venue) : immediatePartialOrderType(repricedLeg.venue);
+  const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, retryOrderType, false, {
+    kalshiPriceTicksSlippage:
+      stage === "primary" && repricedLeg.venue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
+  });
   await writeRunEvent({
     level: "info",
     eventType: `order.${stage}.repriced`,
@@ -6172,7 +6284,7 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
       Date.now(),
       "Attempting full hedge rescue before primary unwind",
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     try {
       const rescueExecution = await submitAndConfirmOrder({
         intent: currentIntent,
@@ -6253,11 +6365,42 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
     }
 
     if (rescueOrder.filledSize > 0) {
-      currentIntent = accumulateIntentLegOrder(currentIntent, hedgeLeg.id, rescueOrder, "hedged", Date.now());
-      await writeOrderIntent(currentIntent);
-      await attachRecentPolymarketFillsSafely(currentIntent, "hedge", Date.now()).then((updated) => {
-        currentIntent = updated;
-      });
+      const rescueFillObservedAt = Date.now();
+      const observedIntent = accumulateIntentLegOrder(
+        currentIntent,
+        hedgeLeg.id,
+        rescueOrder,
+        "hedged",
+        rescueFillObservedAt,
+      );
+      const evidence = await persistPostSubmissionIntentEvidence(
+        observedIntent,
+        rescueOrder,
+        rescueFillObservedAt,
+        "hedge_rescue_fill_persistence",
+      );
+      currentIntent = evidence.intent;
+      if (!evidence.durable) {
+        return { intent: currentIntent, recovered: false, hold: true };
+      }
+      try {
+        currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "hedge", Date.now());
+      } catch (error) {
+        if (!(error instanceof OrderIntentRevisionConflictError)) {
+          throw error;
+        }
+        await recordPostSubmissionIntentPersistenceIncident({
+          intent: currentIntent,
+          order: rescueOrder,
+          stage: "hedge_rescue_fill_sync",
+          error,
+        });
+        return {
+          intent: (await findOrderIntent(currentIntent.id).catch(() => null)) ?? currentIntent,
+          recovered: false,
+          hold: true,
+        };
+      }
       const remainingSize = deriveUnhedgedPrimarySize(currentIntent);
       await writeRunEvent({
         asset: currentIntent.asset,
@@ -6386,7 +6529,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
   }
 
   currentIntent = markIntentStatus(currentIntent, "unwind_required", now, failureReason);
-  await writeOrderIntent(currentIntent);
+  currentIntent = await writeOrderIntent(currentIntent);
   await armHedgeFailureGuards(currentIntent, hedgeOrder, hedgeResult ?? null, now);
 
   const rescue = await attemptHedgeRescueBeforeUnwind(currentIntent, settings, Date.now());
@@ -6541,7 +6684,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
           now,
           `Primary unwind waiting for inventory sync (${errorMessage})`,
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: "warn",
           eventType: "order.unwind.inventory_sync_pending",
@@ -6606,7 +6749,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         now,
         failureReason: describeUnwoundAfterFailure(failureReason),
       });
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
       await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_hedge_failure", now, {
         venue: currentIntent.primaryVenue,
         unwindOrderId: unwindResult.venueOrderId,
@@ -6622,7 +6765,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
         now,
         `Primary unwind partially filled (${unwindResult.status}); manual intervention required`,
       );
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
       await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_partial_fill", {
         venue: currentIntent.primaryVenue,
         orderId: unwindResult.venueOrderId,
@@ -6674,7 +6817,7 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       now,
       `Primary unwind failed (${unwindResult.status}); manual intervention required`,
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_failed", {
       venue: currentIntent.primaryVenue,
       orderId: unwindResult.venueOrderId,
@@ -6722,13 +6865,13 @@ async function resolveHedgeExposureBeforePrimaryUnwind(
       return acceptedIntent;
     }
 
-    const currentIntent = markIntentStatus(
+    let currentIntent = markIntentStatus(
       intent,
       "manual_required",
       now,
       `Hedge exposure exceeds primary by ${overfilledHedgeSize.toFixed(6)}; manual intervention required`,
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "error",
@@ -6934,8 +7077,8 @@ async function markIntentManualRequired(
   const failureReason = reason.toLowerCase().includes("manual intervention required")
     ? reason
     : `${reason}; manual intervention required`;
-  const currentIntent = markIntentStatus(intent, "manual_required", now, failureReason);
-  await writeOrderIntent(currentIntent);
+  let currentIntent = markIntentStatus(intent, "manual_required", now, failureReason);
+  currentIntent = await writeOrderIntent(currentIntent);
   await recordMarketFillQualityForIntent(currentIntent, "manual_required", stage, now, payload);
   await writeManualInterventionRunEvent(currentIntent, now, stage, payload);
   await tripManualInterventionBreaker(currentIntent, now, hedgeOrder, stage);
@@ -6952,13 +7095,13 @@ async function markIntentHedgedAfterEconomicCheck(
 ) {
   const economics = deriveHedgedPairEconomics(intent.legs);
   if (!isHedgedPairEconomicsWithinLossCap(economics, maximumAcceptedLossUsd)) {
-    const currentIntent = markIntentStatus(
+    let currentIntent = markIntentStatus(
       intent,
       "manual_required",
       now,
       `Hedged pair worst-case PnL ${economics.netWorstCaseUsd.toFixed(4)} USD; manual intervention required`,
     );
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await recordMarketFillQualityForIntent(currentIntent, "manual_required", "hedged_pair_economic_guard_failed", now, {
       stage,
       economics,
@@ -6991,8 +7134,8 @@ async function markIntentHedgedAfterEconomicCheck(
     return currentIntent;
   }
 
-  const currentIntent = markIntentStatus(intent, "hedged", now, null);
-  await writeOrderIntent(currentIntent);
+  let currentIntent = markIntentStatus(intent, "hedged", now, null);
+  currentIntent = await writeOrderIntent(currentIntent);
   await recordMarketFillQualityForIntent(
     currentIntent,
     stage.includes("rescue") ? "rescue" : "full_fill",
@@ -7338,7 +7481,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
         : updateIntentLeg(intent, primaryLeg.venue, primaryOrder!, "filled", now);
     if (intent.slotEndTs + RESOLUTION_GRACE_MS > now) {
       rescued = markIntentStatus(rescued, "primary_filled", now, "Late primary fill detected; resuming hedge");
-      await writeOrderIntent(rescued);
+      rescued = await writeOrderIntent(rescued);
       await writeLiveTradeRunEvent(rescued, now);
       await writeRunEvent({
         level: "error",
@@ -7361,7 +7504,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
       now,
       "Late primary fill detected after intent had already failed; manual intervention required",
     );
-    await writeOrderIntent(rescued);
+    rescued = await writeOrderIntent(rescued);
     await writeManualInterventionRunEvent(rescued, now, "late_primary_fill_after_failure", {
       venue: intent.primaryVenue,
       orderId: primaryOrder?.venueOrderId ?? primaryOrderSummary?.venueOrderId ?? null,
@@ -7432,14 +7575,15 @@ async function reconcileSettlements(asset: MarketAsset, now: number) {
       venueResolutions.polyResolution,
       venueResolutions.kalshiResolution,
     );
-    const settled = finalizeIntent({
-      intent: settlementIntent,
-      polyResolution: venueResolutions.polyResolution,
-      kalshiResolution: venueResolutions.kalshiResolution,
-      payoutUsd,
-      now,
-    });
-    await writeOrderIntent(settled);
+    const settled = await writeOrderIntent(
+      finalizeIntent({
+        intent: settlementIntent,
+        polyResolution: venueResolutions.polyResolution,
+        kalshiResolution: venueResolutions.kalshiResolution,
+        payoutUsd,
+        now,
+      }),
+    );
     for (const leg of settled.legs) {
       const resolvedOutcome =
         leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
@@ -7633,13 +7777,13 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
     };
   }
 
-  const repairedIntent: OrderIntent = {
+  let repairedIntent: OrderIntent = {
     ...repaired,
     updatedAt: now,
     resolvedAt: intent.resolvedAt ?? repaired.resolvedAt,
   };
 
-  await writeOrderIntent(repairedIntent);
+  repairedIntent = await writeOrderIntent(repairedIntent);
   await updateStablePnlChangeFromIntent(repairedIntent);
   for (const leg of repairedIntent.legs) {
     const resolvedOutcome =
@@ -7917,11 +8061,11 @@ async function holdIntentForUnavailableVenueReconcileTruth(input: {
   const unavailableSources = sourceStates.filter(([, state]) => state?.ok !== true).map(([source]) => source);
   const reason = `${input.venue} ${unavailableSources.join(" and ")} reconciliation unavailable; authoritative venue truth remains pending`;
   const actions = deriveUnavailableVenueTruthActions(input.intent, reason);
-  const currentIntent = actions.writeIntentAndIncident
+  let currentIntent = actions.writeIntentAndIncident
     ? markIntentStatus(input.intent, "truth_pending", input.now, reason)
     : input.intent;
   if (actions.writeIntentAndIncident) {
-    await writeOrderIntent(currentIntent);
+    currentIntent = await writeOrderIntent(currentIntent);
     await writeIntentIncidentRunEvent(currentIntent, input.now, input.stage, reason, {
       venue: input.venue,
       orderId: input.orderId ?? null,
@@ -8022,16 +8166,16 @@ async function reconcileInFlightIntentStates(
 
       if (entryFillSummary) {
         currentIntent = updateIntentLegFromFillSummary(currentIntent, primaryLeg.id, entryFillSummary, now);
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
       }
 
       const hedgeOrderSummary = summarizeIntentLegOrders(intentOrders, hedgeLeg, "entry");
       if (hedgeOrderSummary && hedgeOrderSummary.filledSize > 0) {
         currentIntent = updateIntentLegFromFillSummary(currentIntent, hedgeLeg.id, hedgeOrderSummary, now);
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
       } else if (hedgeOrder && hedgeOrder.filledSize > 0) {
         currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
       }
 
       const exposureResolution = await resolveHedgeExposureBeforePrimaryUnwind(
@@ -8079,7 +8223,7 @@ async function reconcileInFlightIntentStates(
             now,
             failureReason,
           });
-          await writeOrderIntent(currentIntent);
+          currentIntent = await writeOrderIntent(currentIntent);
           await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
             venue: currentIntent.primaryVenue,
             exitFilledSize,
@@ -8111,7 +8255,7 @@ async function reconcileInFlightIntentStates(
           now,
           failureReason: "Primary unwound after hedge failure",
         });
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
           venue: currentIntent.primaryVenue,
           exitFilledSize,
@@ -8156,7 +8300,7 @@ async function reconcileInFlightIntentStates(
           now,
           failureReason: "Primary unwound after hedge failure",
         });
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
         continue;
       }
@@ -8168,7 +8312,7 @@ async function reconcileInFlightIntentStates(
           now,
           `Primary unwind partially filled (${unwindOrder.status}); manual intervention required`,
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_partial_fill_reconcile", {
           venue: currentIntent.primaryVenue,
           orderId: unwindOrder.venueOrderId,
@@ -8185,7 +8329,7 @@ async function reconcileInFlightIntentStates(
           now,
           `Primary unwind not completed (${unwindOrder.status}); manual intervention required`,
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeManualInterventionRunEvent(currentIntent, now, "primary_unwind_not_completed", {
           venue: currentIntent.primaryVenue,
           orderId: unwindOrder.venueOrderId,
@@ -8201,7 +8345,7 @@ async function reconcileInFlightIntentStates(
       if (currentIntent.status === "executing_primary") {
         currentIntent = markIntentStatus(currentIntent, hedgeOrder ? "hedging" : "primary_filled", now);
       }
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
       if (currentIntent.status === "primary_filled" || currentIntent.status === "hedging") {
         await writeLiveTradeRunEvent(currentIntent, now, "primary_filled");
       }
@@ -8217,7 +8361,7 @@ async function reconcileInFlightIntentStates(
             now,
             "Primary submission may have reached the venue; venue truth is still unresolved",
           );
-          await writeOrderIntent(currentIntent);
+          currentIntent = await writeOrderIntent(currentIntent);
           await writeRunEvent({
             asset: currentIntent.asset,
             level: "error",
@@ -8270,7 +8414,7 @@ async function reconcileInFlightIntentStates(
           now,
           "Primary order not observed before timeout or slot end",
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_missing",
@@ -8300,7 +8444,7 @@ async function reconcileInFlightIntentStates(
           shouldTreatPrimaryOrderAsFilled(currentIntent, primaryOrder) ? "filled" : primaryLeg.status,
           now,
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
       }
 
       if (
@@ -8309,7 +8453,7 @@ async function reconcileInFlightIntentStates(
         currentIntent.status === "executing_primary"
       ) {
         currentIntent = markIntentStatus(currentIntent, hedgeOrder ? "hedging" : "primary_filled", now);
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeLiveTradeRunEvent(currentIntent, now, "primary_filled");
       }
 
@@ -8334,7 +8478,7 @@ async function reconcileInFlightIntentStates(
 
         currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
         currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary order ${primaryOrder.status}`);
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_terminal",
@@ -8381,7 +8525,7 @@ async function reconcileInFlightIntentStates(
           now,
           `Primary order not completed before timeout or slot end (${primaryOrder.status})`,
         );
-        await writeOrderIntent(currentIntent);
+        currentIntent = await writeOrderIntent(currentIntent);
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_timeout",
@@ -8494,7 +8638,7 @@ async function reconcileInFlightIntentStates(
         hedgeOrder.status === "filled" ? "hedged" : hedgeLeg.status,
         now,
       );
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
     }
 
     if (shouldTreatHedgeOrderAsComplete(hedgeLeg, hedgeOrder)) {
@@ -8513,7 +8657,7 @@ async function reconcileInFlightIntentStates(
 
     if (hedgeOrder.filledSize > 0) {
       currentIntent = updateIntentLeg(currentIntent, hedgeLeg.venue, hedgeOrder, "submitted", now);
-      await writeOrderIntent(currentIntent);
+      currentIntent = await writeOrderIntent(currentIntent);
       if (
         shouldHoldDestructiveReconcileForVenueTruth({
           venue: hedgeOrder.venue,
@@ -9632,7 +9776,7 @@ function buildShadowFill(
   };
 }
 
-function updateIntentLeg(
+export function updateIntentLeg(
   intent: OrderIntent,
   venue: OrderIntent["legs"][number]["venue"],
   order: LiveOrder,
@@ -9647,19 +9791,230 @@ function updateIntentLeg(
         return leg;
       }
 
-      const filledSize =
-        leg.venue === "polymarket" ? Math.max(leg.filledSize, order.filledSize) : order.filledSize || leg.filledSize;
+      const filledSize = Math.max(leg.filledSize, order.filledSize);
+      const incomingFillRegresses = order.filledSize < leg.filledSize;
+      const incomingHasNoFillAgainstExistingFill = leg.filledSize > 0 && order.filledSize <= 0;
+      const preserveExistingEvidence = incomingFillRegresses || incomingHasNoFillAgainstExistingFill;
+      const mergedStatus = mergeIntentLegStatus(leg.status, status, leg.filledSize, order.filledSize);
       return {
         ...leg,
-        venueOrderId: order.venueOrderId,
+        venueOrderId: preserveExistingEvidence ? leg.venueOrderId : order.venueOrderId,
         filledSize,
-        filledPrice: order.averageFillPrice ?? leg.filledPrice,
+        filledPrice: preserveExistingEvidence ? leg.filledPrice : (order.averageFillPrice ?? leg.filledPrice),
         filledAt: order.filledSize > 0 ? Math.max(leg.filledAt ?? 0, order.updatedAt) : leg.filledAt,
-        feeUsd: order.feeUsd ?? leg.feeUsd,
-        status,
+        feeUsd: Math.max(leg.feeUsd, order.feeUsd ?? 0),
+        status: mergedStatus,
       };
     }) as OrderIntent["legs"],
   };
+}
+
+function mergeIntentLegStatus(
+  current: OrderIntent["legs"][number]["status"],
+  incoming: OrderIntent["legs"][number]["status"],
+  currentFilledSize: number,
+  incomingFilledSize: number,
+) {
+  if (current === "unwound") {
+    return current;
+  }
+  if (incoming === "unwound") {
+    return incoming;
+  }
+  if (current === "hedged") {
+    return current;
+  }
+  if (incoming === "hedged") {
+    return incoming;
+  }
+  if (incoming === "filled") {
+    return incoming;
+  }
+  if (current === "filled") {
+    return current;
+  }
+  if (incomingFilledSize < currentFilledSize || (currentFilledSize > 0 && incomingFilledSize <= 0)) {
+    return current;
+  }
+  if (current === "failed" && incoming === "submitted" && incomingFilledSize <= currentFilledSize) {
+    return current;
+  }
+  return incoming;
+}
+
+type PostSubmissionEvidenceDependencies = {
+  writeIntent: (intent: OrderIntent) => Promise<OrderIntent>;
+  readIntent: (intentId: string) => Promise<OrderIntent | null>;
+  recordIncident: (input: { intent: OrderIntent; order: LiveOrder; stage: string; error: unknown }) => Promise<void>;
+};
+
+export async function persistPostSubmissionLegEvidence(
+  intent: OrderIntent,
+  order: LiveOrder,
+  status: OrderIntent["legs"][number]["status"],
+  now: number,
+  stage: string,
+  dependencies: PostSubmissionEvidenceDependencies = {
+    writeIntent: writeOrderIntent,
+    readIntent: findOrderIntent,
+    recordIncident: recordPostSubmissionIntentPersistenceIncident,
+  },
+) {
+  return persistPostSubmissionIntentEvidence(
+    updateIntentLeg(intent, order.venue, order, status, now),
+    order,
+    now,
+    stage,
+    dependencies,
+  );
+}
+
+export async function persistPostSubmissionIntentEvidence(
+  observedIntent: OrderIntent,
+  order: LiveOrder,
+  now: number,
+  stage: string,
+  dependencies: PostSubmissionEvidenceDependencies = {
+    writeIntent: writeOrderIntent,
+    readIntent: findOrderIntent,
+    recordIncident: recordPostSubmissionIntentPersistenceIncident,
+  },
+) {
+  let candidate = observedIntent;
+  let lastError: unknown = null;
+  let recoveredFromConflict = false;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return {
+        intent: await dependencies.writeIntent(candidate),
+        durable: true as const,
+        recoveredFromConflict,
+      };
+    } catch (error) {
+      lastError = error;
+      if (!(error instanceof OrderIntentRevisionConflictError)) {
+        break;
+      }
+      recoveredFromConflict = true;
+
+      try {
+        const latest = await dependencies.readIntent(observedIntent.id);
+        if (!latest) {
+          break;
+        }
+        const merged = mergePostSubmissionIntentEvidence(latest, candidate, now);
+        if (merged.status === latest.status && JSON.stringify(merged.legs) === JSON.stringify(latest.legs)) {
+          return {
+            intent: latest,
+            durable: true as const,
+            recoveredFromConflict,
+          };
+        }
+        candidate = merged;
+      } catch (readError) {
+        lastError = readError;
+        break;
+      }
+    }
+  }
+
+  await dependencies.recordIncident({
+    intent: candidate,
+    order,
+    stage,
+    error: lastError,
+  });
+  const latest = await dependencies.readIntent(observedIntent.id).catch(() => null);
+  return {
+    intent: latest ?? candidate,
+    durable: false as const,
+    recoveredFromConflict,
+  };
+}
+
+function mergePostSubmissionIntentEvidence(canonical: OrderIntent, observed: OrderIntent, now: number) {
+  const observedLegs = new Map(observed.legs.map((leg) => [leg.id, leg]));
+  return {
+    ...canonical,
+    status: mergePostSubmissionIntentStatus(canonical, observed),
+    updatedAt: Math.max(canonical.updatedAt, now),
+    legs: canonical.legs.map((leg) => {
+      const incoming = observedLegs.get(leg.id);
+      if (!incoming) {
+        return leg;
+      }
+
+      const incomingFillAdvances = incoming.filledSize > leg.filledSize;
+      const preserveExistingEvidence =
+        incoming.filledSize < leg.filledSize || (leg.filledSize > 0 && incoming.filledSize <= 0);
+      return {
+        ...leg,
+        venueOrderId:
+          preserveExistingEvidence || (leg.filledSize > 0 && incoming.filledSize === leg.filledSize)
+            ? leg.venueOrderId
+            : (incoming.venueOrderId ?? leg.venueOrderId),
+        filledSize: Math.max(leg.filledSize, incoming.filledSize),
+        filledPrice: incomingFillAdvances || leg.filledPrice === null ? incoming.filledPrice : leg.filledPrice,
+        filledAt: Math.max(leg.filledAt ?? 0, incoming.filledAt ?? 0) || undefined,
+        feeUsd: Math.max(leg.feeUsd, incoming.feeUsd),
+        status: mergeIntentLegStatus(leg.status, incoming.status, leg.filledSize, incoming.filledSize),
+      };
+    }) as OrderIntent["legs"],
+  };
+}
+
+function mergePostSubmissionIntentStatus(canonical: OrderIntent, observed: OrderIntent) {
+  if (observed.status !== "primary_filled") {
+    return canonical.status;
+  }
+  const primaryLeg = observed.legs.find((leg) => leg.venue === observed.primaryVenue);
+  if (!primaryLeg || primaryLeg.filledSize <= 0) {
+    return canonical.status;
+  }
+  if (canonical.status === "pending" || canonical.status === "executing_primary" || canonical.status === "failed") {
+    return "primary_filled" as const;
+  }
+  return canonical.status;
+}
+
+async function recordPostSubmissionIntentPersistenceIncident(input: {
+  intent: OrderIntent;
+  order: LiveOrder;
+  stage: string;
+  error: unknown;
+}) {
+  const incidentAt = Date.now();
+  await writeCircuitBreaker({
+    key: "global",
+    active: true,
+    reason: "hedge_failure",
+    triggeredAt: incidentAt,
+    payload: {
+      intentId: input.intent.id,
+      slotKey: input.intent.slotKey,
+      stage: input.stage,
+      venue: input.order.venue,
+      orderId: input.order.venueOrderId,
+      orderStatus: input.order.status,
+      filledSize: input.order.filledSize,
+      persistenceError: toErrorMessage(input.error),
+      requiresManualClear: true,
+    },
+  });
+  await writeIntentIncidentRunEvent(
+    input.intent,
+    incidentAt,
+    input.stage,
+    "Post-submission order evidence could not be attached to the canonical intent",
+    {
+      venue: input.order.venue,
+      orderId: input.order.venueOrderId,
+      orderStatus: input.order.status,
+      filledSize: input.order.filledSize,
+      persistenceError: toErrorMessage(input.error),
+    },
+  );
 }
 
 function accumulateIntentLegOrder(
@@ -9708,7 +10063,7 @@ function updateIntentLegFromFillSummary(
         return leg;
       }
 
-      const filledSize = leg.venue === "polymarket" ? Math.max(leg.filledSize, summary.filledSize) : summary.filledSize;
+      const filledSize = Math.max(leg.filledSize, summary.filledSize);
       return {
         ...leg,
         venueOrderId: summary.venueOrderId ?? leg.venueOrderId,
@@ -9898,7 +10253,7 @@ async function syncIntentFromStoredVenueFills(
   venue: OrderIntent["legs"][number]["venue"],
   currentIntent?: OrderIntent,
 ) {
-  const intent = currentIntent ?? (await findOrderIntent(intentId));
+  let intent = currentIntent ?? (await findOrderIntent(intentId));
   if (!intent) {
     return currentIntent ?? null;
   }
@@ -9908,19 +10263,37 @@ async function syncIntentFromStoredVenueFills(
     return intent;
   }
 
-  const leg = intent.legs.find((candidate) => candidate.venue === venue);
-  if (!leg) {
-    return intent;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const leg = intent.legs.find((candidate) => candidate.venue === venue);
+    if (!leg) {
+      return intent;
+    }
+
+    const summary = summarizeIntentLegFills(fills, leg, "entry");
+    if (!summary) {
+      return intent;
+    }
+
+    const updatedIntent = updateIntentLegFromFillSummary(intent, leg.id, summary, Date.now());
+    if (JSON.stringify(updatedIntent.legs) === JSON.stringify(intent.legs)) {
+      return intent;
+    }
+
+    try {
+      return await writeOrderIntent(updatedIntent);
+    } catch (error) {
+      if (!(error instanceof OrderIntentRevisionConflictError) || attempt === 2) {
+        throw error;
+      }
+      const latestIntent = await findOrderIntent(intentId);
+      if (!latestIntent) {
+        throw error;
+      }
+      intent = latestIntent;
+    }
   }
 
-  const summary = summarizeIntentLegFills(fills, leg, "entry");
-  if (!summary) {
-    return intent;
-  }
-
-  const updatedIntent = updateIntentLegFromFillSummary(intent, leg.id, summary, Date.now());
-  await writeOrderIntent(updatedIntent);
-  return updatedIntent;
+  return intent;
 }
 
 async function confirmImmediateOrderExecution(
@@ -11046,7 +11419,7 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
       ? `Primary unwind impossible after Polymarket market close (${errorMessage}); waiting for venue settlement / reclaim`
       : `Primary unwind impossible after Polymarket market close (${errorMessage}); market resolved ${polyResolution}, waiting for reclaim`;
 
-  const deferredIntent: OrderIntent = {
+  let deferredIntent: OrderIntent = {
     ...intent,
     status: "unwind_required",
     updatedAt: now,
@@ -11063,7 +11436,7 @@ async function closeIntentAfterPolymarketOrderbookUnavailable(
     ) as OrderIntent["legs"],
   };
 
-  await writeOrderIntent(deferredIntent);
+  deferredIntent = await writeOrderIntent(deferredIntent);
   await writeRunEvent({
     level: "warn",
     eventType: "intent.unwind.awaiting_polymarket_settlement",

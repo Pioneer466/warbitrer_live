@@ -101,6 +101,7 @@ type SlotResolutionRow = {
 
 type OrderIntentRow = {
   id: string;
+  revision: number;
   asset: MarketAsset;
   shadow: boolean;
   slot_key: string;
@@ -284,6 +285,7 @@ let poolSingleton: Pool | null = null;
 let schemaCompatibilityPromise: Promise<void> | null = null;
 const LIVE_EXECUTION_LOCK_NAMESPACE = 4_298;
 const LIVE_EXECUTION_LOCK_KEY = 2;
+const SHADOW_EXECUTION_LOCK_NAMESPACE = 4_299;
 
 // SHA-256 of the immutable block delimited by migration-checksum markers below.
 const LEGACY_SCHEMA_BASELINE_CHECKSUM = "b9059dd24e724ac105f13482bc09495738664645af3b0cc1ade80d66626c1b18";
@@ -1819,11 +1821,16 @@ export async function getLastEntryCosts(pool: Pool, asset: MarketAsset, slotKey:
   }, {});
 }
 
-export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
-  await pool.query(
+export async function insertOrderIntent(pool: Pool, intent: OrderIntent): Promise<OrderIntent> {
+  if (intent.revision !== 0) {
+    throw new Error(`New order intent ${intent.id} must start at revision 0`);
+  }
+  assertValidOrderIntentIdentityShape(intent);
+
+  const result = await pool.query<OrderIntentRow>(
     `
       INSERT INTO order_intents (
-        id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
+        id, revision, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status, created_at, updated_at,
         resolved_at, primary_venue, hedge_venue, gross_cost, target_notional_usd, max_slippage_bps,
         entry_sizing_reason, failure_reason, projected_net_profit_usd, realized_pnl_usd, roi, poly_resolution,
         kalshi_resolution, legs_json, mismatch_p_fatal, mismatch_p_fatal_upper, mismatch_model_version,
@@ -1831,39 +1838,17 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         mismatch_risk_audit_json, shadow_execution_json
       )
       VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16,
-        $17, $18, $19, $20, $21, $22,
-        $23, $24::jsonb, $25, $26, $27,
-        $28, $29, $30, $31::jsonb, $32::jsonb
+        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+        $12, $13, $14, $15, $16, $17,
+        $18, $19, $20, $21, $22, $23,
+        $24, $25::jsonb, $26, $27, $28,
+        $29, $30, $31, $32::jsonb, $33::jsonb
       )
-      ON CONFLICT (id) DO UPDATE SET
-        asset = EXCLUDED.asset,
-        status = EXCLUDED.status,
-        updated_at = EXCLUDED.updated_at,
-        resolved_at = EXCLUDED.resolved_at,
-        gross_cost = EXCLUDED.gross_cost,
-        target_notional_usd = EXCLUDED.target_notional_usd,
-        max_slippage_bps = EXCLUDED.max_slippage_bps,
-        entry_sizing_reason = EXCLUDED.entry_sizing_reason,
-        failure_reason = EXCLUDED.failure_reason,
-        projected_net_profit_usd = EXCLUDED.projected_net_profit_usd,
-        realized_pnl_usd = EXCLUDED.realized_pnl_usd,
-        roi = EXCLUDED.roi,
-        poly_resolution = EXCLUDED.poly_resolution,
-        kalshi_resolution = EXCLUDED.kalshi_resolution,
-        legs_json = EXCLUDED.legs_json,
-        mismatch_p_fatal = EXCLUDED.mismatch_p_fatal,
-        mismatch_p_fatal_upper = EXCLUDED.mismatch_p_fatal_upper,
-        mismatch_model_version = EXCLUDED.mismatch_model_version,
-        fatal_mismatch_pnl_usd = EXCLUDED.fatal_mismatch_pnl_usd,
-        conservative_expected_pnl_usd = EXCLUDED.conservative_expected_pnl_usd,
-        fatal_loss_exposure_usd = EXCLUDED.fatal_loss_exposure_usd,
-        mismatch_risk_audit_json = EXCLUDED.mismatch_risk_audit_json,
-        shadow_execution_json = EXCLUDED.shadow_execution_json
+      RETURNING *
     `,
     [
       intent.id,
+      intent.revision,
       intent.asset,
       intent.shadow,
       intent.slotKey,
@@ -1901,6 +1886,94 @@ export async function upsertOrderIntent(pool: Pool, intent: OrderIntent) {
         : JSON.stringify(intent.shadowExecution),
     ],
   );
+
+  if (!result.rows[0]) {
+    throw new Error(`Order intent ${intent.id} was not returned after insert`);
+  }
+  return mapOrderIntentRow(result.rows[0]);
+}
+
+export async function updateOrderIntent(pool: Pool, intent: OrderIntent): Promise<OrderIntent> {
+  assertValidOrderIntentRevision(intent);
+  const existingResult = await pool.query<OrderIntentRow>("SELECT * FROM order_intents WHERE id = $1 LIMIT 1", [
+    intent.id,
+  ]);
+  const existingRow = existingResult.rows[0];
+  if (!existingRow) {
+    throw new OrderIntentRevisionConflictError(intent.id, intent.revision, null);
+  }
+
+  assertOrderIntentIdentity(mapOrderIntentRow(existingRow), intent);
+
+  const result = await pool.query<OrderIntentRow>(
+    `
+      UPDATE order_intents
+      SET status = $3,
+          updated_at = $4,
+          resolved_at = $5,
+          gross_cost = $6,
+          target_notional_usd = $7,
+          max_slippage_bps = $8,
+          entry_sizing_reason = $9,
+          failure_reason = $10,
+          projected_net_profit_usd = $11,
+          realized_pnl_usd = $12,
+          roi = $13,
+          poly_resolution = $14,
+          kalshi_resolution = $15,
+          legs_json = $16::jsonb,
+          mismatch_p_fatal = $17,
+          mismatch_p_fatal_upper = $18,
+          mismatch_model_version = $19,
+          fatal_mismatch_pnl_usd = $20,
+          conservative_expected_pnl_usd = $21,
+          fatal_loss_exposure_usd = $22,
+          mismatch_risk_audit_json = $23::jsonb,
+          shadow_execution_json = $24::jsonb,
+          revision = revision + 1
+      WHERE id = $1 AND revision = $2
+      RETURNING *
+    `,
+    [
+      intent.id,
+      intent.revision,
+      intent.status,
+      intent.updatedAt,
+      intent.resolvedAt,
+      intent.grossCost,
+      intent.targetNotionalUsd,
+      intent.maxSlippageBps,
+      intent.entrySizingReason ?? null,
+      intent.failureReason,
+      intent.projectedNetProfitUsd,
+      intent.realizedPnlUsd,
+      intent.roi,
+      intent.polyResolution,
+      intent.kalshiResolution,
+      JSON.stringify(intent.legs),
+      intent.mismatchPFatal ?? null,
+      intent.mismatchPFatalUpper ?? null,
+      intent.mismatchModelVersion ?? null,
+      intent.fatalMismatchPnlUsd ?? null,
+      intent.conservativeExpectedPnlUsd ?? null,
+      intent.fatalLossExposureUsd ?? null,
+      intent.mismatchRiskAudit === null || intent.mismatchRiskAudit === undefined
+        ? null
+        : JSON.stringify(intent.mismatchRiskAudit),
+      intent.shadowExecution === null || intent.shadowExecution === undefined
+        ? null
+        : JSON.stringify(intent.shadowExecution),
+    ],
+  );
+  if (result.rows[0]) {
+    return mapOrderIntentRow(result.rows[0]);
+  }
+
+  const currentResult = await pool.query<Pick<OrderIntentRow, "revision">>(
+    "SELECT revision FROM order_intents WHERE id = $1 LIMIT 1",
+    [intent.id],
+  );
+  throw new OrderIntentRevisionConflictError(intent.id, intent.revision, currentResult.rows[0]?.revision ?? null);
 }
 
 export async function listOpenOrderIntents(pool: Pool, asset?: MarketAsset): Promise<OrderIntent[]> {
@@ -1971,9 +2044,102 @@ const TERMINAL_VENUE_ORDER_STATUSES = new Set<LiveOrder["status"]>(["filled", "c
 const NON_FILLED_TERMINAL_VENUE_ORDER_STATUSES = new Set<LiveOrder["status"]>(["canceled", "rejected", "expired"]);
 
 export class PersistenceIdentityConflictError extends Error {
-  constructor(entity: "venue_order" | "order_attempt", id: string, fields: string[]) {
+  constructor(entity: "order_intent" | "venue_order" | "order_attempt", id: string, fields: string[]) {
     super(`Immutable ${entity} identity conflict for ${id}: ${fields.join(", ")}`);
     this.name = "PersistenceIdentityConflictError";
+  }
+}
+
+export class OrderIntentRevisionConflictError extends Error {
+  constructor(
+    public readonly intentId: string,
+    public readonly expectedRevision: number,
+    public readonly actualRevision: number | null,
+  ) {
+    super(
+      actualRevision === null
+        ? `Order intent ${intentId} no longer exists (expected revision ${expectedRevision})`
+        : `Order intent ${intentId} revision conflict: expected ${expectedRevision}, found ${actualRevision}`,
+    );
+    this.name = "OrderIntentRevisionConflictError";
+  }
+}
+
+function assertValidOrderIntentRevision(intent: OrderIntent) {
+  if (!Number.isSafeInteger(intent.revision) || intent.revision < 0) {
+    throw new Error(`Order intent ${intent.id} has invalid revision ${intent.revision}`);
+  }
+}
+
+function assertValidOrderIntentIdentityShape(intent: OrderIntent) {
+  const conflicts: string[] = [];
+  if (intent.legs.length !== 2 || new Set(intent.legs.map((leg) => leg.id)).size !== 2) {
+    conflicts.push("legs");
+  }
+  const legVenues = new Set(intent.legs.map((leg) => leg.venue));
+  if (legVenues.size !== 2 || !legVenues.has("polymarket") || !legVenues.has("kalshi")) {
+    conflicts.push("legs.venue");
+  }
+  if (
+    intent.primaryVenue === intent.hedgeVenue ||
+    !legVenues.has(intent.primaryVenue) ||
+    !legVenues.has(intent.hedgeVenue)
+  ) {
+    conflicts.push("primaryVenue", "hedgeVenue");
+  }
+  for (const leg of intent.legs) {
+    if (leg.intentId !== intent.id) {
+      conflicts.push(`legs.${leg.id}.intentId`);
+    }
+  }
+  if (conflicts.length > 0) {
+    throw new PersistenceIdentityConflictError("order_intent", intent.id, conflicts);
+  }
+}
+
+export function assertOrderIntentIdentity(existing: OrderIntent, incoming: OrderIntent) {
+  assertValidOrderIntentIdentityShape(existing);
+  assertValidOrderIntentIdentityShape(incoming);
+  const conflicts = collectIdentityConflicts([
+    ["id", existing.id, incoming.id],
+    ["asset", existing.asset, incoming.asset],
+    ["shadow", existing.shadow, incoming.shadow],
+    ["slotKey", existing.slotKey, incoming.slotKey],
+    ["slotStartTs", existing.slotStartTs, incoming.slotStartTs],
+    ["slotEndTs", existing.slotEndTs, incoming.slotEndTs],
+    ["combination", existing.combination, incoming.combination],
+    ["createdAt", existing.createdAt, incoming.createdAt],
+    ["primaryVenue", existing.primaryVenue, incoming.primaryVenue],
+    ["hedgeVenue", existing.hedgeVenue, incoming.hedgeVenue],
+  ]);
+
+  const existingLegs = new Map(existing.legs.map((leg) => [leg.id, leg]));
+  const incomingLegs = new Map(incoming.legs.map((leg) => [leg.id, leg]));
+  if (existingLegs.size !== 2 || incomingLegs.size !== 2 || existingLegs.size !== incomingLegs.size) {
+    conflicts.push("legs");
+  } else {
+    for (const [legId, existingLeg] of existingLegs) {
+      const incomingLeg = incomingLegs.get(legId);
+      if (!incomingLeg) {
+        conflicts.push(`legs.${legId}`);
+        continue;
+      }
+      conflicts.push(
+        ...collectIdentityConflicts([
+          [`legs.${legId}.id`, existingLeg.id, incomingLeg.id],
+          [`legs.${legId}.intentId`, existingLeg.intentId, incomingLeg.intentId],
+          [`legs.${legId}.venue`, existingLeg.venue, incomingLeg.venue],
+          [`legs.${legId}.outcome`, existingLeg.outcome, incomingLeg.outcome],
+          [`legs.${legId}.marketRef`, existingLeg.marketRef, incomingLeg.marketRef],
+          [`legs.${legId}.tokenId`, existingLeg.tokenId ?? null, incomingLeg.tokenId ?? null],
+          [`legs.${legId}.side`, existingLeg.side, incomingLeg.side],
+        ]),
+      );
+    }
+  }
+
+  if (conflicts.length > 0) {
+    throw new PersistenceIdentityConflictError("order_intent", existing.id, conflicts);
   }
 }
 
@@ -3468,6 +3634,36 @@ export async function tryWithGlobalLiveExecutionLock<T>(
   }
 }
 
+export async function tryWithShadowExecutionLock<T>(
+  pool: Pool,
+  asset: MarketAsset,
+  slotKey: string,
+  owner: string,
+  fn: () => Promise<T>,
+): Promise<{ acquired: true; value: T } | { acquired: false; value: null }> {
+  const client = await pool.connect();
+  const lockName = `${asset}:${slotKey}`;
+  let acquired = false;
+  try {
+    const result = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1, hashtext($2)) AS locked", [
+      SHADOW_EXECUTION_LOCK_NAMESPACE,
+      lockName,
+    ]);
+    acquired = Boolean(result.rows[0]?.locked);
+    if (!acquired) {
+      return { acquired: false, value: null };
+    }
+
+    void owner;
+    return { acquired: true, value: await fn() };
+  } finally {
+    if (acquired) {
+      await client.query("SELECT pg_advisory_unlock($1, hashtext($2))", [SHADOW_EXECUTION_LOCK_NAMESPACE, lockName]);
+    }
+    client.release();
+  }
+}
+
 const CIRCUIT_BREAKER_READINESS_KEYS = new Set([
   "circuit-breaker",
   "circuit-breaker-cooldown",
@@ -3850,6 +4046,7 @@ function mapSlotResolutionRow(row: SlotResolutionRow): SlotResolutionRecord {
 function mapOrderIntentRow(row: OrderIntentRow): OrderIntent {
   return {
     id: row.id,
+    revision: row.revision,
     asset: row.asset,
     shadow: row.shadow,
     slotKey: row.slot_key,
