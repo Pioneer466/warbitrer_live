@@ -1,6 +1,7 @@
 import { generateKeyPairSync } from "node:crypto";
 
 import {
+  buildKalshiV2OrderPayload,
   deriveKalshiBalanceSummary,
   buildKalshiSigningPath,
   createKalshiAdapter,
@@ -23,10 +24,11 @@ import {
   mapKalshiBalance,
   mapKalshiPosition,
   mapKalshiOrderStatus,
+  mapKalshiV2OrderResult,
   normalizeKalshiOrderPrice,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
-import type { MarketSlot } from "@/lib/types";
+import type { MarketSlot, VenueOrderRequest } from "@/lib/types";
 import { vi } from "vitest";
 
 const TEST_KALSHI_PRIVATE_KEY_PEM = generateKeyPairSync("rsa", {
@@ -84,6 +86,21 @@ function createKalshiFillFixture(tradeId: string) {
     action: "buy" as const,
     yes_price_dollars: "0.4000",
     count_fp: "1.00",
+  };
+}
+
+function createVenueOrderRequest(overrides: Partial<VenueOrderRequest> = {}): VenueOrderRequest {
+  return {
+    marketRef: "KXBTC15M-TEST",
+    outcome: "YES",
+    side: "BUY",
+    size: 10,
+    price: 0.45,
+    maxCostUsd: 4.5,
+    orderType: "FOK",
+    reduceOnly: false,
+    clientOrderId: "client-v2-test",
+    ...overrides,
   };
 }
 
@@ -872,5 +889,138 @@ describe("Kalshi quote derivation", () => {
     expect(normalizeKalshiOrderPrice(0.45135, "BUY")).toBe(0.46);
     expect(normalizeKalshiOrderPrice(0.45135, "SELL")).toBe(0.45);
     expect(normalizeKalshiOrderPrice(0.45, "BUY")).toBe(0.45);
+  });
+});
+
+describe("Kalshi V2 order mutations", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      DATABASE_URL: "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live",
+      KALSHI_ENV: "prod",
+    };
+    enableAuthenticatedKalshiRequests();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ["BUY YES", { outcome: "YES" as const, side: "BUY" as const, price: 0.45 }, "bid", "0.4500"],
+    ["SELL NO", { outcome: "NO" as const, side: "SELL" as const, price: 0.55 }, "bid", "0.4500"],
+    ["BUY NO", { outcome: "NO" as const, side: "BUY" as const, price: 0.55 }, "ask", "0.4500"],
+    ["SELL YES", { outcome: "YES" as const, side: "SELL" as const, price: 0.45 }, "ask", "0.4500"],
+  ])("maps %s onto the canonical YES book", (_label, overrides, expectedSide, expectedPrice) => {
+    const payload = buildKalshiV2OrderPayload(
+      createVenueOrderRequest({
+        ...overrides,
+        maxCostUsd: overrides.side === "BUY" ? overrides.price * 10 : 0,
+      }),
+    );
+
+    expect(payload).toEqual({
+      ticker: "KXBTC15M-TEST",
+      client_order_id: "client-v2-test",
+      side: expectedSide,
+      count: "10.00",
+      price: expectedPrice,
+      time_in_force: "fill_or_kill",
+      self_trade_prevention_type: "taker_at_cross",
+      post_only: false,
+      cancel_order_on_pause: true,
+      reduce_only: false,
+      subaccount: 0,
+      exchange_index: 0,
+    });
+  });
+
+  it("rejects a request whose final limit exceeds the local max-cost guard", () => {
+    expect(() => buildKalshiV2OrderPayload(createVenueOrderRequest({ maxCostUsd: 4.49 }))).toThrow(
+      "supérieur au plafond",
+    );
+  });
+
+  it("maps the flat V2 response, NO complement price, and per-contract fee", () => {
+    const order = createVenueOrderRequest({ outcome: "NO", price: 0.55, maxCostUsd: 5.5, orderType: "IOC" });
+
+    expect(
+      mapKalshiV2OrderResult(
+        {
+          order_id: "order-v2",
+          client_order_id: order.clientOrderId,
+          fill_count: "4.00",
+          remaining_count: "6.00",
+          average_fill_price: "0.4500",
+          average_fee_paid: "0.0025",
+          ts_ms: 1_785_000_000_000,
+        },
+        order,
+      ),
+    ).toMatchObject({
+      venueOrderId: "order-v2",
+      status: "partially_filled",
+      filledSize: 4,
+      averageFillPrice: 0.55,
+      feeUsd: 0.01,
+    });
+  });
+
+  it("rejects an impossible partial FOK response", () => {
+    const order = createVenueOrderRequest();
+    expect(() =>
+      mapKalshiV2OrderResult(
+        {
+          order_id: "order-v2",
+          fill_count: "4.00",
+          remaining_count: "6.00",
+          ts_ms: 1_785_000_000_000,
+        },
+        order,
+      ),
+    ).toThrow("FOK partielle impossible");
+  });
+
+  it("uses V2 create and cancel endpoints while retaining the GET endpoint", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => ({
+          order_id: "order/v2",
+          client_order_id: "client-v2-test",
+          fill_count: "10.00",
+          remaining_count: "0.00",
+          average_fill_price: "0.4500",
+          average_fee_paid: "0.0010",
+          ts_ms: 1_785_000_000_000,
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ order_id: "order/v2", reduced_by: "0.00", ts_ms: 1_785_000_000_001 }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ order: createKalshiOrderFixture("order-v2") }),
+      });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const adapter = createKalshiAdapter();
+    const result = await adapter.placeOrder(createVenueOrderRequest());
+    await adapter.cancelOrder("order/v2");
+    await adapter.getOrder("order-v2");
+
+    expect(result).toMatchObject({ status: "filled", feeUsd: 0.01 });
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/portfolio/events/orders");
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).not.toHaveProperty("action");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("/portfolio/events/orders/order%2Fv2");
+    expect(String(fetchMock.mock.calls[2]?.[0])).toContain("/portfolio/orders/order-v2");
   });
 });

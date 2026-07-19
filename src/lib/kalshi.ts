@@ -159,6 +159,31 @@ type KalshiOrderResponse = {
   };
 };
 
+export type KalshiV2OrderResponse = {
+  order_id: string;
+  client_order_id?: string;
+  fill_count: string;
+  remaining_count: string;
+  ts_ms: number;
+  average_fill_price?: string;
+  average_fee_paid?: string;
+};
+
+export type KalshiV2OrderPayload = {
+  ticker: string;
+  client_order_id: string;
+  side: "bid" | "ask";
+  count: string;
+  price: string;
+  time_in_force: "fill_or_kill" | "immediate_or_cancel";
+  self_trade_prevention_type: "taker_at_cross";
+  post_only: false;
+  cancel_order_on_pause: true;
+  reduce_only: boolean;
+  subaccount: 0;
+  exchange_index: 0;
+};
+
 type KalshiOrdersResponse = {
   orders: KalshiOrderResponse["order"][];
   cursor?: string | null;
@@ -698,8 +723,9 @@ export function createKalshiAdapter(): VenueAdapter {
     async placeOrder(order) {
       assertProductionVenueEnvironment();
       try {
-        const response = await createKalshiOrder(order);
-        return mapKalshiOrderResult(response.order);
+        const payload = buildKalshiV2OrderPayload(order);
+        const response = await createKalshiOrder(payload);
+        return mapKalshiV2OrderResult(response, order, payload);
       } catch (error) {
         const noFillMessage = getKalshiSoftNoFillMessage(error);
         if (noFillMessage) {
@@ -724,12 +750,12 @@ export function createKalshiAdapter(): VenueAdapter {
       }
     },
     async cancelOrder(orderId: string) {
-      await kalshiFetch(`/portfolio/orders/${orderId}`, {
+      await kalshiFetch(`/portfolio/events/orders/${encodeURIComponent(orderId)}`, {
         method: "DELETE",
       });
     },
     async getOrder(orderId: string) {
-      const response = await kalshiFetch<KalshiOrderResponse>(`/portfolio/orders/${orderId}`);
+      const response = await kalshiFetch<KalshiOrderResponse>(`/portfolio/orders/${encodeURIComponent(orderId)}`);
       return mapKalshiLiveOrder(response.order, "unknown");
     },
   };
@@ -894,33 +920,46 @@ export function mapKalshiFillToLiveFill(
   };
 }
 
-async function createKalshiOrder(order: VenueOrderRequest) {
-  const payload: Record<string, unknown> = {
-    ticker: order.marketRef,
-    client_order_id: order.clientOrderId,
-    action: order.side === "BUY" ? "buy" : "sell",
-    count_fp: formatCount(order.size),
-    type: "limit",
-    time_in_force: order.orderType === "FOK" ? "fill_or_kill" : "immediate_or_cancel",
-  };
-
-  if (order.outcome === "YES") {
-    payload.side = "yes";
-    payload.yes_price_dollars = formatPrice(order.price);
-  } else if (order.outcome === "NO") {
-    payload.side = "no";
-    payload.no_price_dollars = formatPrice(order.price);
-  } else {
+export function buildKalshiV2OrderPayload(order: VenueOrderRequest): KalshiV2OrderPayload {
+  if (order.outcome !== "YES" && order.outcome !== "NO") {
     throw new Error(`Outcome Kalshi invalide: ${order.outcome}`);
   }
-
-  if (order.side === "BUY") {
-    payload.buy_max_cost = Math.ceil(order.maxCostUsd * 100);
-  } else {
-    payload.reduce_only = Boolean(order.reduceOnly);
+  if (order.price === null || !Number.isFinite(order.price) || order.price <= 0 || order.price >= 1) {
+    throw new Error(`Prix Kalshi invalide: ${order.price}`);
+  }
+  if (!Number.isFinite(order.size) || order.size < 0.01) {
+    throw new Error(`Taille Kalshi invalide: ${order.size}`);
   }
 
-  return kalshiFetch<KalshiOrderResponse>("/portfolio/orders", {
+  const formattedCount = formatCount(order.size);
+  if (Math.abs(Number(formattedCount) - order.size) > 1e-9) {
+    throw new Error(`Taille Kalshi non alignée sur 0.01 contrat: ${order.size}`);
+  }
+  if (order.side === "BUY" && order.price * order.size > order.maxCostUsd + 1e-6) {
+    throw new Error(`Coût Kalshi ${round4(order.price * order.size)} supérieur au plafond ${round4(order.maxCostUsd)}`);
+  }
+
+  const yesBookPrice = order.outcome === "YES" ? order.price : round4(1 - order.price);
+  const buysYesEquivalent = (order.outcome === "YES") === (order.side === "BUY");
+
+  return {
+    ticker: order.marketRef,
+    client_order_id: order.clientOrderId,
+    side: buysYesEquivalent ? "bid" : "ask",
+    count: formattedCount,
+    price: formatRequiredPrice(yesBookPrice),
+    time_in_force: order.orderType === "FOK" ? "fill_or_kill" : "immediate_or_cancel",
+    self_trade_prevention_type: "taker_at_cross",
+    post_only: false,
+    cancel_order_on_pause: true,
+    reduce_only: Boolean(order.reduceOnly),
+    subaccount: 0,
+    exchange_index: 0,
+  };
+}
+
+async function createKalshiOrder(payload: KalshiV2OrderPayload) {
+  return kalshiFetch<KalshiV2OrderResponse>("/portfolio/events/orders", {
     method: "POST",
     body: JSON.stringify(payload),
   });
@@ -1272,6 +1311,14 @@ function formatPrice(value: number | null) {
   return value.toFixed(4);
 }
 
+function formatRequiredPrice(value: number) {
+  const formatted = formatPrice(value);
+  if (formatted === undefined || Number(formatted) <= 0 || Number(formatted) >= 1) {
+    throw new Error(`Prix YES Kalshi invalide: ${value}`);
+  }
+  return formatted;
+}
+
 function formatCount(value: number) {
   return value.toFixed(2);
 }
@@ -1310,24 +1357,53 @@ export function getKalshiSoftNoFillMessage(error: unknown) {
   return null;
 }
 
-function mapKalshiOrderResult(order: KalshiOrderResponse["order"]): VenueOrderResult {
-  const filledSize = Number(order.fill_count_fp ?? 0);
-  const remainingSize = Number(order.remaining_count_fp ?? 0);
-  const price =
-    getKalshiOrderPriceUsd(order.side === "yes" ? "YES" : "NO", {
-      yes_price_dollars: order.yes_price_dollars,
-      no_price_dollars: order.no_price_dollars,
-    }) ?? null;
-  const feeUsd = Number(order.taker_fees_dollars ?? order.maker_fees_dollars ?? 0);
+export function mapKalshiV2OrderResult(
+  response: KalshiV2OrderResponse,
+  order: VenueOrderRequest,
+  payload: KalshiV2OrderPayload = buildKalshiV2OrderPayload(order),
+): VenueOrderResult {
+  const filledSize = Number(response.fill_count);
+  const remainingSize = Number(response.remaining_count);
+  if (
+    !response.order_id ||
+    !Number.isFinite(filledSize) ||
+    filledSize < 0 ||
+    !Number.isFinite(remainingSize) ||
+    remainingSize < 0 ||
+    filledSize > order.size + 1e-6 ||
+    filledSize + remainingSize > order.size + 1e-6
+  ) {
+    throw new Error("Réponse Create Order V2 Kalshi invalide");
+  }
+  if (order.orderType === "FOK" && filledSize > 0 && remainingSize > 0) {
+    throw new Error("Réponse Kalshi FOK partielle impossible");
+  }
+
+  const yesAveragePrice = response.average_fill_price === undefined ? null : Number(response.average_fill_price);
+  if (yesAveragePrice !== null && (!Number.isFinite(yesAveragePrice) || yesAveragePrice <= 0 || yesAveragePrice >= 1)) {
+    throw new Error("Prix moyen Create Order V2 Kalshi invalide");
+  }
+  const averageFillPrice =
+    yesAveragePrice === null ? null : order.outcome === "YES" ? yesAveragePrice : round4(1 - yesAveragePrice);
+  const averageFeePaid = response.average_fee_paid === undefined ? 0 : Number(response.average_fee_paid);
+  if (!Number.isFinite(averageFeePaid) || averageFeePaid < 0) {
+    throw new Error("Frais moyens Create Order V2 Kalshi invalides");
+  }
+
+  const status: VenueOrderStatus =
+    filledSize > 0 && remainingSize > 0 ? "partially_filled" : filledSize > 0 ? "filled" : "canceled";
 
   return {
     venue: "kalshi",
-    venueOrderId: order.order_id,
-    status: mapKalshiOrderStatus(order.status, filledSize, remainingSize),
+    venueOrderId: response.order_id,
+    status,
     filledSize,
-    averageFillPrice: price,
-    feeUsd,
-    raw: order as unknown as Record<string, unknown>,
+    averageFillPrice,
+    feeUsd: round4(averageFeePaid * filledSize),
+    raw: {
+      ...response,
+      submitted_request: payload,
+    },
   };
 }
 
