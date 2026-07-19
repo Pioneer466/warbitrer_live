@@ -16,7 +16,7 @@ npm run build
 npm run build:worker
 ```
 
-As of 2026-07-13, the suite has 23 test files and 257 passing tests.
+The suite is expected to grow with each safety iteration; use the current `npm test` output rather than a static count in this document.
 
 ## Existing strengths
 
@@ -39,7 +39,7 @@ The suite covers deterministic behavior for:
 - No API route tests.
 - No middleware/authentication tests.
 - No UI interaction tests for live activation or breaker/recovery actions.
-- No real Postgres integration suite for schema bootstrap, locks, queries, retention, or concurrent workers.
+- Real Postgres coverage currently focuses on migrations; broader query, retention, and concurrent-worker coverage remains incomplete.
 - No end-to-end shadow workflow across worker and database.
 - No CI workflow.
 - No lint script.
@@ -74,11 +74,18 @@ Tests must not call live venue APIs or use real credentials.
 
 ## Database tests
 
-Future integration tests should use an isolated disposable Postgres database, never the developer or production database. They should cover:
+Set `TEST_DATABASE_URL` only to an isolated disposable Postgres instance. Migration integration tests are skipped when it is absent, create a unique temporary schema per test, and drop that schema afterward. CI supplies a dedicated Postgres service; never point this variable at a developer or production database.
 
-- first bootstrap and repeated bootstrap
-- upgrade from representative older schema state
-- advisory locks across multiple pools/processes
+Current migration integration coverage includes:
+
+- fresh migration and idempotent rerun
+- upgrade from representative legacy state without replacing persisted rows
+- advisory-lock serialization across multiple pools
+- transaction rollback and checksum mismatch refusal
+- read-only runtime compatibility status
+
+Broader database tests should add:
+
 - execution-candidate arbitration
 - open-intent and fill idempotency
 - retention boundaries

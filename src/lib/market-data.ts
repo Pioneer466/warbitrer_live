@@ -1,16 +1,11 @@
 import crypto from "node:crypto";
 import WebSocket from "ws";
 
-import {
-  POLY_MARKET_WS_BASE,
-  POLY_RTDS_WS_BASE,
-  POLY_USER_WS_BASE,
-} from "@/lib/constants";
+import { POLY_MARKET_WS_BASE, POLY_RTDS_WS_BASE, POLY_USER_WS_BASE } from "@/lib/constants";
 import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
 import {
   deriveKalshiOutcomeQuotes,
-  deriveKalshiOutcomeQuotesFromMarket,
   deriveKalshiOutcomeQuotesFromMarketWithSource,
   extractKalshiLastTradePrices,
   fetchKalshiMarket,
@@ -50,7 +45,6 @@ import type {
   ReadinessStatus,
   RealtimeOrderFill,
   Resolution,
-  SubscriptionStatus,
   VenueFeedHealth,
   VenueSubscriptionState,
   WaitForOrderFillRequest,
@@ -76,21 +70,13 @@ const WS_RECONNECT_BASE_MS = 1_000;
 const WS_RECONNECT_MAX_MS = 10_000;
 const KALSHI_CF_BENCHMARK_CHANNEL = "cfbenchmarks_value";
 const KALSHI_FILL_CHANNEL = "fill";
-const KALSHI_WS_CHANNELS = [
-  "ticker",
-  "orderbook_delta",
-  "trade",
-  KALSHI_CF_BENCHMARK_CHANNEL,
-  KALSHI_FILL_CHANNEL,
-];
+const KALSHI_WS_CHANNELS = ["ticker", "orderbook_delta", "trade", KALSHI_CF_BENCHMARK_CHANNEL, KALSHI_FILL_CHANNEL];
 const PRIVATE_FILL_BUFFER_LIMIT = 512;
 const PRIVATE_FILL_WAITER_LIMIT = 256;
 const PRIVATE_FILL_MAX_WAIT_MS = 30_000;
 const PRIVATE_FILL_RETENTION_MS = 5 * 60_000;
 
-export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Partial<
-  Record<MarketAsset, KalshiCfBenchmarkIndexId>
-> = {
+export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Partial<Record<MarketAsset, KalshiCfBenchmarkIndexId>> = {
   btc: "BRTI",
   eth: "ETHUSD_RTI",
   sol: "SOLUSD_RTI",
@@ -99,6 +85,31 @@ export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Partial<
 };
 
 type LevelMap = Map<string, number>;
+
+type WsLevel = [string, string] | { price: string; size: string };
+
+type WsPayload = Record<string, unknown> & {
+  seq?: string | number;
+  payload?: WsPayload;
+  msg?: WsPayload;
+  message?: WsPayload;
+  data?: WsPayload;
+  price_changes?: WsPayload[];
+  bids?: Array<{ price: string; size: string }>;
+  asks?: Array<{ price: string; size: string }>;
+  orderbook_fp?: WsPayload;
+  orderbook?: WsPayload;
+  yes_dollars_fp?: WsLevel[];
+  yes_dollars?: WsLevel[];
+  yes?: WsLevel[];
+  orderbook_yes?: WsLevel[];
+  yes_book?: WsLevel[];
+  no_dollars_fp?: WsLevel[];
+  no_dollars?: WsLevel[];
+  no?: WsLevel[];
+  orderbook_no?: WsLevel[];
+  no_book?: WsLevel[];
+};
 
 type PolymarketBookState = {
   tokenId: string;
@@ -133,7 +144,11 @@ function emptySubscriptions(channels: string[], source: FeedSource): VenueSubscr
   }));
 }
 
-export function computeFeedStatus(lastMessageAt: number | null, dataReady: boolean, now: number): {
+export function computeFeedStatus(
+  lastMessageAt: number | null,
+  dataReady: boolean,
+  now: number,
+): {
   status: ReadinessStatus;
   stalenessMs: number | null;
 } {
@@ -154,7 +169,11 @@ export function computeFeedStatus(lastMessageAt: number | null, dataReady: boole
   return { status: "blocked", stalenessMs };
 }
 
-export function chooseFeedSource(lastWsMessageAt: number | null, lastRestSyncAt: number | null, now: number): FeedSource {
+export function chooseFeedSource(
+  lastWsMessageAt: number | null,
+  lastRestSyncAt: number | null,
+  now: number,
+): FeedSource {
   const wsFresh = lastWsMessageAt !== null && now - lastWsMessageAt <= FEED_BLOCKED_MS;
   const restFresh = lastRestSyncAt !== null && now - lastRestSyncAt <= FEED_BLOCKED_MS;
 
@@ -230,7 +249,7 @@ function replaceLevelMap(levels: LevelMap, next: Array<[string, string]>) {
   }
 }
 
-export function applyLevelDelta(levels: LevelMap, price: string | number, size: string | number) {
+export function applyLevelDelta(levels: LevelMap, price: unknown, size: unknown) {
   const normalizedPrice = String(price);
   const parsedSize = Number(size);
   if (!Number.isFinite(parsedSize) || parsedSize <= 0) {
@@ -300,10 +319,7 @@ function parseKalshiCfBenchmarkWindow(value: unknown): KalshiCfBenchmarkWindow |
   };
 }
 
-export function parseKalshiCfBenchmarksValue(
-  value: unknown,
-  capturedAt: number,
-): KalshiCfBenchmarkState | null {
+export function parseKalshiCfBenchmarksValue(value: unknown, capturedAt: number): KalshiCfBenchmarkState | null {
   if (!value || typeof value !== "object") {
     return null;
   }
@@ -335,9 +351,7 @@ export function parseKalshiCfBenchmarksValue(
 
   const finalMinuteValue = message.last_60s_windowed_average_15min;
   const finalMinuteAverage15m =
-    finalMinuteValue === undefined || finalMinuteValue === null
-      ? null
-      : parseKalshiCfBenchmarkWindow(finalMinuteValue);
+    finalMinuteValue === undefined || finalMinuteValue === null ? null : parseKalshiCfBenchmarkWindow(finalMinuteValue);
   if (finalMinuteValue !== undefined && finalMinuteValue !== null && !finalMinuteAverage15m) {
     return null;
   }
@@ -441,15 +455,7 @@ export function parseKalshiPrivateFill(value: unknown, capturedAt: number): Real
     parseFillTimestamp(message.ts) ??
     parseFillTimestamp(message.created_time) ??
     capturedAt;
-  if (
-    !venueOrderId ||
-    !tradeId ||
-    size === null ||
-    size <= 0 ||
-    price === null ||
-    price < 0 ||
-    price > 1
-  ) {
+  if (!venueOrderId || !tradeId || size === null || size <= 0 || price === null || price < 0 || price > 1) {
     return null;
   }
 
@@ -464,8 +470,7 @@ export function parseKalshiPrivateFill(value: unknown, capturedAt: number): Real
     outcome,
     price,
     size,
-    liquidity:
-      typeof message.is_taker === "boolean" ? (message.is_taker ? "TAKER" : "MAKER") : null,
+    liquidity: typeof message.is_taker === "boolean" ? (message.is_taker ? "TAKER" : "MAKER") : null,
     status: asNonEmptyString(message.status),
     filledAt,
     capturedAt,
@@ -499,9 +504,7 @@ function parsePolymarketTradeEvent(event: Record<string, unknown>, capturedAt: n
   const marketRef = asNonEmptyString(event.market ?? event.condition_id);
   const traderSide = String(event.trader_side ?? "").toUpperCase();
   const authenticatedOwnerIds = new Set(
-    [event.owner, event.trade_owner]
-      .map(normalizeIdentifier)
-      .filter((ownerId): ownerId is string => ownerId !== null),
+    [event.owner, event.trade_owner].map(normalizeIdentifier).filter((ownerId): ownerId is string => ownerId !== null),
   );
   const fills: RealtimeOrderFill[] = [];
 
@@ -519,14 +522,7 @@ function parsePolymarketTradeEvent(event: Record<string, unknown>, capturedAt: n
     const venueOrderId = asNonEmptyString(input.orderId);
     const size = parseNumeric(input.size);
     const price = parseNumeric(input.price);
-    if (
-      !venueOrderId ||
-      size === null ||
-      size <= 0 ||
-      price === null ||
-      price < 0 ||
-      price > 1
-    ) {
+    if (!venueOrderId || size === null || size <= 0 || price === null || price < 0 || price > 1) {
       return;
     }
     fills.push({
@@ -570,10 +566,7 @@ function parsePolymarketTradeEvent(event: Record<string, unknown>, capturedAt: n
       }
       const makerOrder = makerValue as Record<string, unknown>;
       const makerOwnerId = normalizeIdentifier(makerOrder.owner);
-      if (
-        authenticatedOwnerIds.size > 0 &&
-        (!makerOwnerId || !authenticatedOwnerIds.has(makerOwnerId))
-      ) {
+      if (authenticatedOwnerIds.size > 0 && (!makerOwnerId || !authenticatedOwnerIds.has(makerOwnerId))) {
         continue;
       }
       pushFill({
@@ -731,10 +724,7 @@ class RealtimeOrderFillTracker {
     waiter.resolve(fill);
   }
 
-  private matches(
-    fill: RealtimeOrderFill,
-    request: ReadRecentOrderFillsRequest | WaitForOrderFillRequest,
-  ) {
+  private matches(fill: RealtimeOrderFill, request: ReadRecentOrderFillsRequest | WaitForOrderFillRequest) {
     if (request.venue && fill.venue !== request.venue) {
       return false;
     }
@@ -833,14 +823,7 @@ class PolymarketRealtimeFeed {
 
     if (!this.market || !this.tokenIds) {
       await this.bootstrap(slot, now);
-    } else if (
-      shouldRestResync(
-        this.lastRestSyncAt,
-        this.lastWsMessageAt,
-        now,
-        POLYMARKET_REST_FALLBACK_RESYNC_MS,
-      )
-    ) {
+    } else if (shouldRestResync(this.lastRestSyncAt, this.lastWsMessageAt, now, POLYMARKET_REST_FALLBACK_RESYNC_MS)) {
       void this.resync(slot, now);
     }
 
@@ -864,7 +847,8 @@ class PolymarketRealtimeFeed {
 
     const upBook = this.books.get(this.tokenIds.up);
     const downBook = this.books.get(this.tokenIds.down);
-    const lastMessageAt = [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
+    const lastMessageAt =
+      [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
     const feedHealth = buildFeedHealth({
       asset: slot.asset,
       venue: "polymarket",
@@ -886,28 +870,26 @@ class PolymarketRealtimeFeed {
 
     const upBookSnapshot = upBook ? serializePolymarketBook(upBook) : null;
     const downBookSnapshot = downBook ? serializePolymarketBook(downBook) : null;
-    const upOutcome =
-      upBook
-        ? buildPolymarketOutcomeQuoteFromBook(
-            "UP",
-            upBookSnapshot!,
-            feedHealth.source,
-            upBook.lastUpdatedAt,
-            upBook.lastTradePrice,
-            this.clobMarketInfo,
-          )
-        : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.up;
-    const downOutcome =
-      downBook
-        ? buildPolymarketOutcomeQuoteFromBook(
-            "DOWN",
-            downBookSnapshot!,
-            feedHealth.source,
-            downBook.lastUpdatedAt,
-            downBook.lastTradePrice,
-            this.clobMarketInfo,
-          )
-        : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.down;
+    const upOutcome = upBook
+      ? buildPolymarketOutcomeQuoteFromBook(
+          "UP",
+          upBookSnapshot!,
+          feedHealth.source,
+          upBook.lastUpdatedAt,
+          upBook.lastTradePrice,
+          this.clobMarketInfo,
+        )
+      : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.up;
+    const downOutcome = downBook
+      ? buildPolymarketOutcomeQuoteFromBook(
+          "DOWN",
+          downBookSnapshot!,
+          feedHealth.source,
+          downBook.lastUpdatedAt,
+          downBook.lastTradePrice,
+          this.clobMarketInfo,
+        )
+      : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.down;
 
     const quote: PolymarketQuote = {
       ref: {
@@ -1043,7 +1025,7 @@ class PolymarketRealtimeFeed {
     }
   }
 
-  private connectMarketWs(now: number) {
+  private connectMarketWs(_now: number) {
     if (this.ws || !this.tokenIds) {
       return;
     }
@@ -1411,13 +1393,7 @@ class PolymarketRealtimeFeed {
         return;
       }
       const now = Date.now();
-      if (
-        isChainlinkPriceStreamSilent(
-          this.lastPriceMessageAt,
-          this.priceWsConnectedAt,
-          now,
-        )
-      ) {
+      if (isChainlinkPriceStreamSilent(this.lastPriceMessageAt, this.priceWsConnectedAt, now)) {
         const referenceAt = latestTimestamp(this.lastPriceMessageAt, this.priceWsConnectedAt) ?? now;
         this.lastChainlinkError = `Chainlink RTDS sans nouveau prix depuis ${now - referenceAt}ms`;
         this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
@@ -1473,7 +1449,7 @@ class PolymarketRealtimeFeed {
     }, delay);
   }
 
-  private applyPriceEvent(event: any, now: number) {
+  private applyPriceEvent(event: WsPayload, now: number) {
     const payload = event?.payload ?? event;
     const symbol = String(payload?.symbol ?? "").toLowerCase();
     const expectedSymbol = getMarketCatalogEntry(this.marketAsset()).polymarketChainlinkSymbol.toLowerCase();
@@ -1500,7 +1476,7 @@ class PolymarketRealtimeFeed {
     });
   }
 
-  private applyMarketEvent(event: any, now: number) {
+  private applyMarketEvent(event: WsPayload, now: number) {
     const eventType = String(event.event_type ?? event.type ?? "");
 
     if (eventType === "book") {
@@ -1530,7 +1506,8 @@ class PolymarketRealtimeFeed {
         }
 
         const side = String(change.side ?? event.side ?? "").toLowerCase();
-        const price = change.price ?? change.level ?? change.changed_price ?? event.price ?? event.level ?? event.changed_price;
+        const price =
+          change.price ?? change.level ?? change.changed_price ?? event.price ?? event.level ?? event.changed_price;
         const size = change.size ?? change.remaining_size ?? change.new_size ?? change.quantity ?? event.size ?? 0;
         if (side === "buy" || side === "bid") {
           applyLevelDelta(bookState.bids, price, size);
@@ -1738,12 +1715,7 @@ class KalshiRealtimeFeed {
       }
       await this.bootstrap(slot, now);
     } else if (
-      shouldRestResync(
-        this.lastRestSyncAt,
-        this.lastWsMessageAt,
-        now,
-        KALSHI_REST_FALLBACK_RESYNC_MS,
-      ) &&
+      shouldRestResync(this.lastRestSyncAt, this.lastWsMessageAt, now, KALSHI_REST_FALLBACK_RESYNC_MS) &&
       !this.isRestBackoffActive("resync", now)
     ) {
       void this.resync(now);
@@ -1753,7 +1725,8 @@ class KalshiRealtimeFeed {
   }
 
   buildState(slot: MarketSlot, now = Date.now()): LiveMarketState<KalshiQuote> {
-    const lastMessageAt = [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
+    const lastMessageAt =
+      [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
     const feedHealth = buildFeedHealth({
       asset: slot.asset,
       venue: "kalshi",
@@ -1798,11 +1771,8 @@ class KalshiRealtimeFeed {
           no_dollars: serializeLevelMap(this.orderbook.no, "desc"),
         })
       : null;
-    const activeQuotes = this.hasFreshOrderbook(now) ? orderbookQuotes ?? marketQuotes : marketQuotes;
-    const tradePrices = extractKalshiLastTradePrices(
-      this.trades,
-      parseNumeric(this.market.last_price_dollars) ?? null,
-    );
+    const activeQuotes = this.hasFreshOrderbook(now) ? (orderbookQuotes ?? marketQuotes) : marketQuotes;
+    const tradePrices = extractKalshiLastTradePrices(this.trades, parseNumeric(this.market.last_price_dollars) ?? null);
 
     const quote: KalshiQuote = {
       ref: {
@@ -2102,10 +2072,7 @@ class KalshiRealtimeFeed {
             now - this.lastWsMessageAt > KALSHI_WS_HEARTBEAT_TIMEOUT_MS
           ) {
             rotateEndpoint();
-            this.failWsSession(
-              ws,
-              `Kalshi WS heartbeat timeout after ${now - this.lastWsMessageAt}ms`,
-            );
+            this.failWsSession(ws, `Kalshi WS heartbeat timeout after ${now - this.lastWsMessageAt}ms`);
             return;
           }
           ws.ping("warbitrer");
@@ -2188,10 +2155,7 @@ class KalshiRealtimeFeed {
       this.cfBenchmarks = null;
       this.onPrivateFeedReset("kalshi", marketTicker);
       if (this.lastWsMessageAt !== null) {
-        this.lastWsMessageAt = Math.min(
-          this.lastWsMessageAt,
-          Date.now() - FEED_BLOCKED_MS - 1,
-        );
+        this.lastWsMessageAt = Math.min(this.lastWsMessageAt, Date.now() - FEED_BLOCKED_MS - 1);
       }
       this.nextSubscriptionId = 1;
       this.subscriptionCommands.clear();
@@ -2228,7 +2192,7 @@ class KalshiRealtimeFeed {
     });
   }
 
-  private applyWsPayload(payload: any, now: number) {
+  private applyWsPayload(payload: WsPayload, now: number) {
     const type = String(payload.type ?? payload.event_type ?? payload.cmd ?? "");
     const message = payload.msg ?? payload.message ?? payload.data ?? payload;
 
@@ -2253,7 +2217,7 @@ class KalshiRealtimeFeed {
     if (type === "subscribed") {
       const commandId = parseNumeric(payload.id);
       const channel = String(
-        message.channel ?? (commandId === null ? "" : this.subscriptionCommands.get(commandId) ?? ""),
+        message.channel ?? (commandId === null ? "" : (this.subscriptionCommands.get(commandId) ?? "")),
       );
       if (commandId !== null) {
         this.subscriptionCommands.delete(commandId);
@@ -2289,9 +2253,7 @@ class KalshiRealtimeFeed {
           this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
             status: "subscribed",
             source: "ws",
-            details: parsed
-              ? `ignored unexpected index ${parsed.indexId}`
-              : "malformed CF Benchmarks value ignored",
+            details: parsed ? `ignored unexpected index ${parsed.indexId}` : "malformed CF Benchmarks value ignored",
           });
         }
         return false;
@@ -2315,9 +2277,7 @@ class KalshiRealtimeFeed {
     if (type === KALSHI_FILL_CHANNEL) {
       const parsed = parseKalshiPrivateFill(payload, now);
       const currentMarketTicker = this.market?.ticker ?? null;
-      const index = this.subscriptions.findIndex(
-        (subscription) => subscription.channel === KALSHI_FILL_CHANNEL,
-      );
+      const index = this.subscriptions.findIndex((subscription) => subscription.channel === KALSHI_FILL_CHANNEL);
       if (!parsed || (parsed.marketRef && currentMarketTicker && parsed.marketRef !== currentMarketTicker)) {
         if (index >= 0) {
           this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
@@ -2355,18 +2315,22 @@ class KalshiRealtimeFeed {
         const hasFreshNoSide = noBidMessage !== undefined || noAskMessage !== undefined;
         const yesBid = String(
           hasFreshNoSide && !hasFreshYesSide
-            ? deriveComplementPrice(noAskMessage ?? this.market.no_ask_dollars) ?? this.market.yes_bid_dollars
-            : yesBidMessage ?? this.market.yes_bid_dollars,
+            ? (deriveComplementPrice(noAskMessage ?? this.market.no_ask_dollars) ?? this.market.yes_bid_dollars)
+            : (yesBidMessage ?? this.market.yes_bid_dollars),
         );
         const yesAsk = String(
           hasFreshNoSide && !hasFreshYesSide
-            ? deriveComplementPrice(noBidMessage ?? this.market.no_bid_dollars) ?? this.market.yes_ask_dollars
-            : yesAskMessage ?? this.market.yes_ask_dollars,
+            ? (deriveComplementPrice(noBidMessage ?? this.market.no_bid_dollars) ?? this.market.yes_ask_dollars)
+            : (yesAskMessage ?? this.market.yes_ask_dollars),
         );
         const derivedNoBid = deriveComplementPrice(yesAsk);
         const derivedNoAsk = deriveComplementPrice(yesBid);
-        const noBid = String(hasFreshYesSide ? derivedNoBid ?? this.market.no_bid_dollars : noBidMessage ?? this.market.no_bid_dollars);
-        const noAsk = String(hasFreshYesSide ? derivedNoAsk ?? this.market.no_ask_dollars : noAskMessage ?? this.market.no_ask_dollars);
+        const noBid = String(
+          hasFreshYesSide ? (derivedNoBid ?? this.market.no_bid_dollars) : (noBidMessage ?? this.market.no_bid_dollars),
+        );
+        const noAsk = String(
+          hasFreshYesSide ? (derivedNoAsk ?? this.market.no_ask_dollars) : (noAskMessage ?? this.market.no_ask_dollars),
+        );
         const updatedTime =
           parseTimestamp(message.updated_time ?? message.created_time ?? message.ts ?? message.timestamp) ?? now;
         this.market = {
@@ -2375,7 +2339,13 @@ class KalshiRealtimeFeed {
           yes_ask_dollars: yesAsk,
           no_bid_dollars: noBid,
           no_ask_dollars: noAsk,
-          last_price_dollars: String(message.last_price_dollars ?? message.last_price ?? message.price_dollars ?? this.market.last_price_dollars ?? ""),
+          last_price_dollars: String(
+            message.last_price_dollars ??
+              message.last_price ??
+              message.price_dollars ??
+              this.market.last_price_dollars ??
+              "",
+          ),
           yes_bid_size_fp: String(message.yes_bid_size_fp ?? this.market.yes_bid_size_fp),
           yes_ask_size_fp: String(message.yes_ask_size_fp ?? this.market.yes_ask_size_fp),
           no_bid_size_fp: String(message.no_bid_size_fp ?? message.yes_ask_size_fp ?? this.market.no_bid_size_fp),
@@ -2464,7 +2434,7 @@ class KalshiRealtimeFeed {
     return false;
   }
 
-  private applyKalshiDelta(message: any, now: number) {
+  private applyKalshiDelta(message: WsPayload, now: number) {
     if (!this.orderbook || !this.wsOrderbookReady) {
       this.orderbookInSync = false;
       this.lastError = "Kalshi WS delta received before orderbook snapshot";
@@ -2488,7 +2458,9 @@ class KalshiRealtimeFeed {
 
     const side = String(message.side ?? message.book_side ?? "").toLowerCase();
     const price = message.price_dollars ?? message.price ?? message.level;
-    const delta = parseNumeric(message.delta_fp ?? message.delta ?? message.size ?? message.count ?? message.quantity ?? message.remaining);
+    const delta = parseNumeric(
+      message.delta_fp ?? message.delta ?? message.size ?? message.count ?? message.quantity ?? message.remaining,
+    );
     if ((side !== "yes" && side !== "no") || parseNumeric(price) === null || delta === null) {
       this.orderbookInSync = false;
       this.lastError = "Kalshi WS orderbook delta malformed";
@@ -2523,14 +2495,14 @@ class KalshiRealtimeFeed {
             index_ids: cfBenchmarkIndexId ? [cfBenchmarkIndexId] : [],
           }
         : channel === "ticker"
-        ? {
-            channels: [channel],
-            market_ticker: marketTicker,
-          }
-        : {
-            channels: [channel],
-            market_tickers: [marketTicker],
-          };
+          ? {
+              channels: [channel],
+              market_ticker: marketTicker,
+            }
+          : {
+              channels: [channel],
+              market_tickers: [marketTicker],
+            };
 
     const commandId = this.nextSubscriptionId++;
     this.subscriptionCommands.set(commandId, channel);
@@ -2555,16 +2527,16 @@ class KalshiRealtimeFeed {
     return channel === KALSHI_CF_BENCHMARK_CHANNEL || channel === KALSHI_FILL_CHANNEL;
   }
 
-  private optionalSubscriptionChannel(payload: any) {
+  private optionalSubscriptionChannel(payload: WsPayload) {
     const message = payload?.msg ?? payload?.message ?? payload?.data ?? payload;
     const commandId = parseNumeric(payload?.id);
     const channel = String(
-      message?.channel ?? (commandId === null ? "" : this.subscriptionCommands.get(commandId) ?? ""),
+      message?.channel ?? (commandId === null ? "" : (this.subscriptionCommands.get(commandId) ?? "")),
     );
     return this.isOptionalSubscriptionChannel(channel) ? channel : null;
   }
 
-  private markOptionalSubscriptionFailure(payload: any, channel: string, details: string) {
+  private markOptionalSubscriptionFailure(payload: WsPayload, channel: string, details: string) {
     const commandId = parseNumeric(payload?.id);
     if (commandId !== null) {
       this.subscriptionCommands.delete(commandId);
@@ -2574,9 +2546,7 @@ class KalshiRealtimeFeed {
     } else if (channel === KALSHI_FILL_CHANNEL) {
       this.onPrivateFeedReset("kalshi", this.market?.ticker ?? null);
     }
-    const index = this.subscriptions.findIndex(
-      (subscription) => subscription.channel === channel,
-    );
+    const index = this.subscriptions.findIndex((subscription) => subscription.channel === channel);
     if (index >= 0) {
       this.subscriptions[index] = toSubscriptionState(this.subscriptions[index], {
         status: "error",
@@ -2594,7 +2564,7 @@ class KalshiRealtimeFeed {
     });
   }
 
-  private isCurrentKalshiMarketMessage(message: any) {
+  private isCurrentKalshiMarketMessage(message: WsPayload) {
     const marketTicker = message?.market_ticker;
     return !marketTicker || !this.market || marketTicker === this.market.ticker;
   }
@@ -2735,7 +2705,9 @@ class KalshiRealtimeFeed {
     for (const subscription of this.subscriptions) {
       const age =
         subscription.lastMessageAt === null ? "no-data" : `${Math.max(0, now - subscription.lastMessageAt)}ms`;
-      details.push(`${subscription.channel}: ${subscription.status} · ${subscription.source} · ${age} · ${subscription.details ?? "--"}`);
+      details.push(
+        `${subscription.channel}: ${subscription.status} · ${subscription.source} · ${age} · ${subscription.details ?? "--"}`,
+      );
     }
 
     return details;
@@ -2780,10 +2752,7 @@ export class MarketDataSupervisor {
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
     const feeds = this.feeds[slot.asset];
-    await Promise.allSettled([
-      feeds.polymarket.ensureSlot(slot, now),
-      feeds.kalshi.ensureSlot(slot, now),
-    ]);
+    await Promise.allSettled([feeds.polymarket.ensureSlot(slot, now), feeds.kalshi.ensureSlot(slot, now)]);
   }
 
   async readSlotState(slot: MarketSlot, now = Date.now()) {
@@ -2845,17 +2814,11 @@ function serializePolymarketBook(state: PolymarketBookState) {
     .filter(([price]) => state.bestAskPrice === null || Math.abs(Number(price) - state.bestAskPrice) > 1e-9);
 
   if (state.bestBidPrice !== null) {
-    bids.unshift([
-      String(round4(state.bestBidPrice)),
-      String(state.bestBidSize ?? highestKnownSize(state.bids)),
-    ]);
+    bids.unshift([String(round4(state.bestBidPrice)), String(state.bestBidSize ?? highestKnownSize(state.bids))]);
   }
 
   if (state.bestAskPrice !== null) {
-    asks.unshift([
-      String(round4(state.bestAskPrice)),
-      String(state.bestAskSize ?? highestKnownSize(state.asks)),
-    ]);
+    asks.unshift([String(round4(state.bestAskPrice)), String(state.bestAskSize ?? highestKnownSize(state.asks))]);
   }
 
   return {
@@ -2917,12 +2880,8 @@ function createKalshiBookState(orderbook: KalshiOrderbook, now: number): KalshiB
   return state;
 }
 
-function normalizeKalshiWsOrderbook(message: any): KalshiOrderbook | null {
-  const candidates = [
-    message.orderbook_fp,
-    message.orderbook,
-    message,
-  ];
+function normalizeKalshiWsOrderbook(message: WsPayload): KalshiOrderbook | null {
+  const candidates = [message.orderbook_fp, message.orderbook, message];
 
   for (const candidate of candidates) {
     if (!candidate) {
@@ -2936,11 +2895,7 @@ function normalizeKalshiWsOrderbook(message: any): KalshiOrderbook | null {
       candidate.orderbook_yes ??
       candidate.yes_book;
     const no =
-      candidate.no_dollars_fp ??
-      candidate.no_dollars ??
-      candidate.no ??
-      candidate.orderbook_no ??
-      candidate.no_book;
+      candidate.no_dollars_fp ?? candidate.no_dollars ?? candidate.no ?? candidate.orderbook_no ?? candidate.no_book;
 
     if (Array.isArray(yes) && Array.isArray(no)) {
       return {
@@ -2957,7 +2912,9 @@ function normalizeKalshiWsOrderbook(message: any): KalshiOrderbook | null {
 function normalizeWsLevelPairs(levels: Array<[string, string] | { price: string; size: string }>) {
   return levels
     .map((level) =>
-      Array.isArray(level) ? [String(level[0]), String(level[1])] as [string, string] : [String(level.price), String(level.size)] as [string, string],
+      Array.isArray(level)
+        ? ([String(level[0]), String(level[1])] as [string, string])
+        : ([String(level.price), String(level.size)] as [string, string]),
     )
     .filter((level) => parseNumeric(level[0]) !== null && parseNumeric(level[1]) !== null);
 }
@@ -3062,7 +3019,7 @@ function round4(value: number) {
   return Math.round(value * 10_000) / 10_000;
 }
 
-function applyKalshiDeltaLevel(levels: LevelMap, price: string | number, deltaFp: number) {
+function applyKalshiDeltaLevel(levels: LevelMap, price: unknown, deltaFp: number) {
   const normalizedPrice = String(price);
   const current = levels.get(normalizedPrice) ?? 0;
   const next = round4(current + deltaFp);
@@ -3075,7 +3032,7 @@ function applyKalshiDeltaLevel(levels: LevelMap, price: string | number, deltaFp
   levels.set(normalizedPrice, next);
 }
 
-function deriveComplementPrice(value: string | number | null) {
+function deriveComplementPrice(value: unknown) {
   const numeric = typeof value === "string" || typeof value === "number" ? Number(value) : NaN;
   if (!Number.isFinite(numeric)) {
     return null;

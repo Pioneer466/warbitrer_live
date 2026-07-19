@@ -164,3 +164,12 @@ The shadow executor was audited after analyzing `warbitrer-mismatch-20260717T170
 - Pending-only trade observations now preserve any established stored order status, while still retaining pending trade evidence in `raw_json`; authoritative open-order observations keep their existing reconciliation behavior.
 - A regression test covers live, partial, filled, canceled, rejected, expired, and already-pending statuses.
 - Production must remain scan-only with the global manual breaker active while the affected historical rows are repaired and the reconciler is reintroduced.
+
+## 2026-07-19 - Versioned Postgres migration foundation
+
+- Runtime storage access no longer executes schema DDL. It checks the exact known `schema_migrations` history and fails closed when the table is missing, a migration is pending/unknown/renamed, or a checksum differs.
+- `npm run db:migrate` applies forward-only migrations in one transaction on the same `PoolClient` that owns the advisory lock; `npm run db:status` is read-only and exits non-zero unless the schema is compatible.
+- Migration 1 is an additive snapshot of the former legacy bootstrap. Defaults and asset seeds are frozen, and a unit test binds its recorded SHA-256 checksum to the exact immutable source block.
+- `PG_POOL_MAX` now rejects values below 2. With eight split production processes and the default value 3, budget up to 24 application connections plus capacity for migrations, backups, and operator sessions.
+- VPS service templates run `db:status` before starting. Deployment documentation requires a verified backup, stopped services, `db:migrate`, and successful `db:status` before restart. Production has not been migrated or deployed by this code change.
+- Verification: targeted unit tests passed; Postgres 18 integration tests passed for fresh migration, idempotent rerun/data preservation, legacy upgrade, concurrent runners, transactional rollback, checksum mismatch, and read-only status; full suite passed 41 files/478 tests; typecheck, Next build, and worker build passed. The temporary Docker test container was removed.

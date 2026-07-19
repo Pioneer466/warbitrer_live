@@ -11,6 +11,7 @@ WorkingDirectory=/opt/warbitrer-live/app
 Environment=NODE_ENV=production
 Environment=PORT=3000
 EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStartPre=/usr/bin/npm run db:status
 ExecStart=/usr/bin/npm run start:web
 Restart=always
 RestartSec=5

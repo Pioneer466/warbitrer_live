@@ -13,8 +13,117 @@ import {
   parsePolymarketUserFills,
   shouldRestResync,
 } from "@/lib/market-data";
-import type { MarketAsset, MarketSlot } from "@/lib/types";
+import type {
+  KalshiQuote,
+  LiveMarketState,
+  MarketAsset,
+  MarketSlot,
+  PolymarketQuote,
+  VenueSubscriptionState,
+} from "@/lib/types";
 import { afterEach, vi } from "vitest";
+
+type PolymarketBookTestState = {
+  tokenId: string;
+  bids: Map<string, number>;
+  asks: Map<string, number>;
+  tickSize: number | null;
+  minOrderSize: number | null;
+  bestBidPrice: number | null;
+  bestBidSize: number | null;
+  bestAskPrice: number | null;
+  bestAskSize: number | null;
+  lastTradePrice: number | null;
+  lastUpdatedAt: number | null;
+};
+
+type KalshiBookTestState = {
+  yes: Map<string, number>;
+  no: Map<string, number>;
+  seq: number | null;
+  lastUpdatedAt: number | null;
+};
+
+type FeedTestDouble = {
+  ensureSlot: (slot: MarketSlot, now?: number) => unknown;
+  buildState: (slot: MarketSlot, now?: number) => unknown;
+};
+
+type PolymarketFeedTestHarness = {
+  slotKey: string | null;
+  slotStartTs: number | null;
+  market: Record<string, unknown> & { slug: string };
+  tokenIds: { up: string; down: string } | null;
+  books: Map<string, PolymarketBookTestState>;
+  ws: unknown;
+  marketReconnectTimer: ReturnType<typeof setTimeout> | null;
+  resyncPromise: Promise<void> | null;
+  lastRestSyncAt: number | null;
+  lastWsMessageAt: number | null;
+  lastError: string | null;
+  subscriptions: VenueSubscriptionState[];
+  ensureSlot: (slot: MarketSlot, now?: number) => Promise<void>;
+  ensureWs: (now?: number) => void;
+  connectMarketWs: (now: number) => void;
+  handleMarketWsClose: (ws: unknown) => void;
+  scheduleMarketReconnect: () => void;
+  applyUserEvent: (event: unknown, now: number) => void;
+  applyMarketEvent: (event: unknown, now: number) => void;
+  applyPriceEvent: (event: unknown, now: number) => void;
+  onPrivateFeedReset: (venue: "polymarket" | "kalshi", marketRef: string | null) => void;
+  buildState: (slot: MarketSlot, now?: number) => LiveMarketState<PolymarketQuote>;
+};
+
+type KalshiFeedTestHarness = {
+  asset: MarketAsset | null;
+  slotKey: string | null;
+  series: Record<string, unknown>;
+  market: Record<string, unknown> & { ticker: string };
+  orderbook: KalshiBookTestState | null;
+  orderbookInSync: boolean;
+  trades: unknown[];
+  ws: unknown;
+  wsOrderbookReady: boolean;
+  lastRestSyncAt: number | null;
+  lastWsMessageAt: number | null;
+  lastError: string | null;
+  subscriptions: VenueSubscriptionState[];
+  subscriptionCommands: Map<number, string>;
+  ensureSlot: (slot: MarketSlot, now?: number) => Promise<void>;
+  ensureWs: () => void;
+  resync: (now: number) => Promise<void> | null;
+  subscribe: (ws: unknown, channel: string, marketTicker: string, cfBenchmarkIndexId?: string) => void;
+  applyWsPayload: (payload: unknown, now: number) => boolean;
+  buildState: (slot: MarketSlot, now?: number) => LiveMarketState<KalshiQuote>;
+};
+
+type MarketDataSupervisorTestHarness = Pick<
+  MarketDataSupervisor,
+  "readRecentOrderFills" | "readSlotState" | "waitForOrderFill"
+> & {
+  feeds: Record<
+    MarketAsset,
+    {
+      polymarket: FeedTestDouble;
+      kalshi: FeedTestDouble;
+    }
+  >;
+  fillTracker: {
+    waiters: Map<number, unknown>;
+  };
+};
+
+function inspectSupervisor(supervisor = new MarketDataSupervisor()) {
+  return supervisor as unknown as MarketDataSupervisorTestHarness;
+}
+
+function inspectPolymarketFeed(supervisor: MarketDataSupervisorTestHarness, asset: MarketAsset = "btc") {
+  return supervisor.feeds[asset].polymarket as unknown as PolymarketFeedTestHarness;
+}
+
+function inspectKalshiFeed(supervisor: MarketDataSupervisorTestHarness, asset: MarketAsset = "btc") {
+  return supervisor.feeds[asset].kalshi as unknown as KalshiFeedTestHarness;
+}
 
 function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
   return {
@@ -30,7 +139,7 @@ function buildSlot(asset: MarketAsset = "btc"): MarketSlot {
   };
 }
 
-function primeKalshiFeed(feed: any, slot: MarketSlot, now: number) {
+function primeKalshiFeed(feed: KalshiFeedTestHarness, slot: MarketSlot, now: number) {
   feed.slotKey = slot.key;
   feed.series = {
     ticker: MARKET_CATALOG[slot.asset].kalshiSeriesTicker,
@@ -111,8 +220,8 @@ describe("market data helpers", () => {
 
   it("ignores stale Polymarket market socket closes and deduplicates reconnect timers", async () => {
     vi.useFakeTimers();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
     const staleSocket = {};
     const currentSocket = {};
     feed.slotKey = "btc:1770000000000";
@@ -179,7 +288,7 @@ describe("market data helpers", () => {
   it("keeps producing slot state when one venue bootstrap fails", async () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
+    const supervisor = inspectSupervisor();
     const polymarketState = { venue: "polymarket", quote: { ref: { id: "poly" } } };
     const kalshiState = { venue: "kalshi", quote: { ref: { id: "kalshi" } } };
     const polyEnsureSlot = vi.fn().mockResolvedValue(undefined);
@@ -214,10 +323,10 @@ describe("market data helpers", () => {
       text: async () => '{"error":{"code":"too_many_requests","message":"too many requests"}}',
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock);
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     feed.ensureWs = vi.fn();
 
     await expect(feed.ensureSlot(slot, 1_000)).rejects.toThrow(/HTTP 429/);
@@ -234,8 +343,8 @@ describe("market data helpers", () => {
   it("requires a Kalshi orderbook snapshot before marking the quote source as websocket", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const tickerFeed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const tickerFeed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(tickerFeed, slot, slot.startTs + 1_000);
 
     tickerFeed.applyWsPayload(
@@ -253,8 +362,8 @@ describe("market data helpers", () => {
 
     expect(tickerFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("rest-bootstrap");
 
-    const snapshotFeed = new MarketDataSupervisor() as any;
-    const orderbookFeed = snapshotFeed.feeds.btc.kalshi as any;
+    const snapshotFeed = inspectSupervisor();
+    const orderbookFeed = inspectKalshiFeed(snapshotFeed);
     primeKalshiFeed(orderbookFeed, slot, slot.startTs + 1_000);
     orderbookFeed.applyWsPayload(
       {
@@ -270,14 +379,14 @@ describe("market data helpers", () => {
     );
 
     expect(orderbookFeed.buildState(slot, slot.startTs + 2_500).quote.feedHealth.source).toBe("ws");
-    expect(orderbookFeed.orderbook.seq).toBe(12);
+    expect(orderbookFeed.orderbook?.seq).toBe(12);
   });
 
   it("closes a Kalshi websocket session after a protocol error instead of staying on REST bootstrap", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     const ws = {
       readyState: 1,
@@ -298,7 +407,7 @@ describe("market data helpers", () => {
     );
 
     expect(feed.lastError).toContain("protocol error 16 on command 3: Market not found");
-    expect(feed.subscriptions.every((subscription: any) => subscription.status === "error")).toBe(true);
+    expect(feed.subscriptions.every((subscription) => subscription.status === "error")).toBe(true);
     expect(ws.close).toHaveBeenCalledWith(1011, "Kalshi WS session failed");
     expect(warn).toHaveBeenCalledWith(
       "[kalshi-ws] session-failed",
@@ -319,8 +428,8 @@ describe("market data helpers", () => {
   it("subscribes to the mapped CF Benchmarks index without a market ticker", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     const slot = buildSlot("eth");
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.eth.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor, "eth");
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     feed.asset = "eth";
     const ws = { send: vi.fn() };
@@ -341,8 +450,8 @@ describe("market data helpers", () => {
   it("subscribes to authenticated Kalshi fills for the current market", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     const ws = { send: vi.fn() };
 
@@ -405,8 +514,8 @@ describe("market data helpers", () => {
     });
 
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     feed.asset = "btc";
 
@@ -430,8 +539,8 @@ describe("market data helpers", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.spyOn(console, "info").mockImplementation(() => {});
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     const ws = {
       readyState: 1,
@@ -457,7 +566,7 @@ describe("market data helpers", () => {
     );
 
     expect(feed.lastError).toBeNull();
-    expect(feed.subscriptions.slice(0, 3).every((subscription: any) => subscription.status === "subscribed")).toBe(true);
+    expect(feed.subscriptions.slice(0, 3).every((subscription) => subscription.status === "subscribed")).toBe(true);
     expect(feed.subscriptions[3]).toEqual(
       expect.objectContaining({
         status: "error",
@@ -658,8 +767,8 @@ describe("market data helpers", () => {
     vi.spyOn(console, "info").mockImplementation(() => {});
     const now = Date.now();
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, now - 1_000);
 
     const waiting = supervisor.waitForOrderFill({
@@ -685,9 +794,7 @@ describe("market data helpers", () => {
     };
 
     expect(feed.applyWsPayload(event, now)).toBe(false);
-    await expect(waiting).resolves.toEqual(
-      expect.objectContaining({ venueOrderId: "order-kalshi-live", size: 4 }),
-    );
+    await expect(waiting).resolves.toEqual(expect.objectContaining({ venueOrderId: "order-kalshi-live", size: 4 }));
     feed.applyWsPayload(event, now + 1);
 
     expect(supervisor.readRecentOrderFills({ venue: "kalshi" })).toHaveLength(1);
@@ -713,8 +820,8 @@ describe("market data helpers", () => {
 
   it("wakes a Polymarket waiter from the authenticated user channel", async () => {
     const now = Date.now();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
     const waiting = supervisor.waitForOrderFill({
       venue: "polymarket",
       venueOrderId: "order-poly-live",
@@ -753,7 +860,7 @@ describe("market data helpers", () => {
 
   it("bounds fill waits and clears them on timeout or private-feed reconnect", async () => {
     vi.useFakeTimers();
-    const supervisor = new MarketDataSupervisor() as any;
+    const supervisor = inspectSupervisor();
     const timedOut = supervisor.waitForOrderFill({
       venue: "kalshi",
       venueOrderId: "missing-order",
@@ -772,7 +879,7 @@ describe("market data helpers", () => {
       marketRef: "condition-1",
       timeoutMs: 5_000,
     });
-    supervisor.feeds.btc.polymarket.onPrivateFeedReset("polymarket", "condition-1");
+    inspectPolymarketFeed(supervisor).onPrivateFeedReset("polymarket", "condition-1");
 
     await expect(disconnected).resolves.toBeNull();
     expect(supervisor.fillTracker.waiters.size).toBe(0);
@@ -781,8 +888,8 @@ describe("market data helpers", () => {
   it("isolates a denied Kalshi fill subscription from CF and orderbook channels", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 1_000);
     const ws = { readyState: 1, close: vi.fn() };
     feed.ws = ws;
@@ -814,8 +921,8 @@ describe("market data helpers", () => {
 
   it("falls Kalshi source back to REST and then blocks after websocket and REST go stale", () => {
     const slot = buildSlot();
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
     primeKalshiFeed(feed, slot, slot.startTs + 11_000);
     feed.lastWsMessageAt = slot.startTs + 1_000;
     feed.subscriptions[0].lastMessageAt = slot.startTs + 1_000;
@@ -832,7 +939,7 @@ describe("market data helpers", () => {
   });
 
   it("keeps separate feed instances per asset across all markets", async () => {
-    const supervisor = new MarketDataSupervisor() as any;
+    const supervisor = inspectSupervisor();
     const slots = MARKET_ASSETS.map((asset) => buildSlot(asset));
 
     for (const asset of MARKET_ASSETS) {
@@ -851,10 +958,7 @@ describe("market data helpers", () => {
     }
 
     for (const [index, slot] of slots.entries()) {
-      expect(supervisor.feeds[slot.asset].polymarket.ensureSlot).toHaveBeenCalledWith(
-        slot,
-        1770000005000 + index,
-      );
+      expect(supervisor.feeds[slot.asset].polymarket.ensureSlot).toHaveBeenCalledWith(slot, 1770000005000 + index);
     }
     expect(supervisor.feeds.btc.polymarket).not.toBe(supervisor.feeds.eth.polymarket);
     expect(supervisor.feeds.sol.polymarket).not.toBe(supervisor.feeds.xrp.polymarket);
@@ -865,8 +969,8 @@ describe("market data helpers", () => {
   it("uses nested Polymarket price_change payloads to keep the top of book aligned", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.market = {
       id: "market-1",
@@ -885,7 +989,10 @@ describe("market data helpers", () => {
     feed.books.set("asset-up", {
       tokenId: "asset-up",
       bids: new Map([["0.49", 100]]),
-      asks: new Map([["0.90", 50], ["0.53", 80]]),
+      asks: new Map([
+        ["0.90", 50],
+        ["0.53", 80],
+      ]),
       tickSize: 0.001,
       minOrderSize: 1,
       bestBidPrice: 0.49,
@@ -937,8 +1044,8 @@ describe("market data helpers", () => {
   it("exposes Chainlink RTDS prices in the Polymarket quote and captures the slot open snapshot", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.slotStartTs = slot.startTs;
@@ -1007,8 +1114,8 @@ describe("market data helpers", () => {
   it("only captures the observed slot open price inside the configured open window", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.slotStartTs = slot.startTs;
@@ -1076,8 +1183,8 @@ describe("market data helpers", () => {
   it("keeps the captured slot open price closest to the slot boundary", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.slotStartTs = slot.startTs;
@@ -1156,8 +1263,8 @@ describe("market data helpers", () => {
 
     MARKET_CATALOG.btc.polymarketChainlinkSymbol = "BTC/USD";
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.slotStartTs = slot.startTs;
@@ -1223,8 +1330,8 @@ describe("market data helpers", () => {
   it("parses the Kalshi floor strike into targetPriceUsd in slot state", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.series = {
@@ -1269,8 +1376,8 @@ describe("market data helpers", () => {
 
     vi.spyOn(polymarketLib, "fetchPolymarketBook").mockRejectedValue(new Error("HTTP 502 on Polymarket book"));
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.polymarket as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.market = {
@@ -1330,8 +1437,8 @@ describe("market data helpers", () => {
   it("blocks Kalshi feed readiness during an orderbook seq-gap resync", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.series = {
@@ -1364,7 +1471,7 @@ describe("market data helpers", () => {
       lastUpdatedAt: slot.startTs + 5_000,
     };
     feed.lastRestSyncAt = slot.startTs + 5_000;
-    feed.resync = vi.fn(() => new Promise(() => {}));
+    feed.resync = vi.fn(() => new Promise<void>(() => {}));
 
     feed.wsOrderbookReady = true;
     feed.applyWsPayload(
@@ -1390,8 +1497,8 @@ describe("market data helpers", () => {
   it("keeps Kalshi ticker YES and NO prices coherent when the websocket payload mixes stale fields", () => {
     const slot = buildSlot();
 
-    const supervisor = new MarketDataSupervisor() as any;
-    const feed = supervisor.feeds.btc.kalshi as any;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
 
     feed.slotKey = slot.key;
     feed.series = {

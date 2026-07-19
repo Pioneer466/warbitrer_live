@@ -9,7 +9,13 @@ import {
   classifyPolymarketRelayerTerminalState,
   resolvePolymarketConversionFinality,
 } from "@/lib/recovery";
+import type { LiveEnv } from "@/lib/env";
 import type { PositionSnapshot } from "@/lib/types";
+
+const PROXY_RECOVERY_ENV: LiveEnv = {
+  DATABASE_URL: "postgres://unused",
+  POLY_SIGNATURE_TYPE: "POLY_PROXY",
+};
 
 describe("recovery helpers", () => {
   it("encodes redeemPositions for binary CTF markets", () => {
@@ -23,7 +29,7 @@ describe("recovery helpers", () => {
     expect(decoded.collateralToken).toBe(POLY_PUSD_ADDRESS);
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "12".repeat(32));
-    expect(decoded.indexSets.map((value: any) => Number(value))).toEqual([1, 2]);
+    expect(decoded.indexSets.map((value: unknown) => Number(value))).toEqual([1, 2]);
   });
 
   it("can encode redeemPositions with legacy USDC.e collateral", () => {
@@ -41,11 +47,7 @@ describe("recovery helpers", () => {
   it("encodes the Polymarket collateral onramp wrap call", () => {
     const iface = new utils.Interface(["function wrap(address _asset, address _to, uint256 _amount)"]);
     const recipient = "0x8f74fdd17f086bacfba844b420b6e34cf99a38bd";
-    const txData = buildCollateralWrapTxData(
-      POLY_USDCE_ADDRESS,
-      recipient,
-      "7000000",
-    );
+    const txData = buildCollateralWrapTxData(POLY_USDCE_ADDRESS, recipient, "7000000");
     const decoded = iface.decodeFunctionData("wrap", txData);
 
     expect(decoded._asset).toBe(POLY_USDCE_ADDRESS);
@@ -102,7 +104,7 @@ describe("recovery helpers", () => {
     expect(decoded.collateralToken).toBe(POLY_PUSD_ADDRESS);
     expect(decoded.parentCollectionId).toBe(ethersConstants.HashZero);
     expect(decoded.conditionId).toBe("0x" + "34".repeat(32));
-    expect(decoded.partition.map((value: any) => Number(value))).toEqual([1, 2]);
+    expect(decoded.partition.map((value: unknown) => Number(value))).toEqual([1, 2]);
     expect(decoded.amount.toString()).toBe("1234500");
   });
 
@@ -130,7 +132,7 @@ describe("recovery helpers", () => {
       },
     ];
 
-    expect(buildRecoveryMarkets(positions, { POLY_SIGNATURE_TYPE: "POLY_PROXY" } as any, true)).toEqual([]);
+    expect(buildRecoveryMarkets(positions, PROXY_RECOVERY_ENV, true)).toEqual([]);
   });
 
   it("keeps redeemable markets actionable when there is positive redeemable size", () => {
@@ -157,7 +159,7 @@ describe("recovery helpers", () => {
       },
     ];
 
-    expect(buildRecoveryMarkets(positions, { POLY_SIGNATURE_TYPE: "POLY_PROXY" } as any, true)).toMatchObject([
+    expect(buildRecoveryMarkets(positions, PROXY_RECOVERY_ENV, true)).toMatchObject([
       {
         marketRef: "0xredeemable",
         redeemable: true,

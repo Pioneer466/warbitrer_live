@@ -9,11 +9,16 @@ import {
 } from "@/lib/oracle-history";
 import {
   buildBootstrapStrategyConfigs,
+  areFillsEconomicallyIdentical,
   findOrderAttemptById,
   getGlobalRiskConfig,
   insertOracleSlotSample,
+  listOrderAttemptsForIntent,
   listPendingSlotResolutions,
   listRecentOrderIntents,
+  mergeOrderAttemptEvidence,
+  mergeVenueOrderEvidence,
+  PersistenceIdentityConflictError,
   runDatabaseMaintenance,
   updateGlobalRiskConfig,
   upsertOrderIntent,
@@ -21,7 +26,7 @@ import {
 } from "@/lib/postgres-db";
 import { DEFAULT_GLOBAL_RISK_CONFIG } from "@/lib/risk-settings";
 import { normalizeSettings } from "@/lib/settings-schema";
-import type { OrderIntent } from "@/lib/types";
+import type { LiveFill, LiveOrder, OrderAttempt, OrderIntent } from "@/lib/types";
 
 function createMockPool(rows: unknown[] = []) {
   const query = vi.fn().mockResolvedValue({ rows, rowCount: rows.length });
@@ -97,6 +102,165 @@ describe("postgres bootstrap strategy configs", () => {
     expect(configs.btc.dailyLossCapEnabled).toBe(true);
     expect(configs.btc.dailyLossHardCapUsd).toBe(20);
     expect(configs.btc.minimumEntryDepthCoverageRatio).toBe(0.5);
+  });
+});
+
+describe("postgres order-truth evidence merging", () => {
+  it("keeps increasing fill evidence when an older writer arrives later", () => {
+    const initial = buildLiveOrder({
+      filledSize: 2,
+      averageFillPrice: 0.44,
+      feeUsd: 0.02,
+      status: "partially_filled",
+      updatedAt: 200,
+      raw: { observation: "initial" },
+    });
+    const progressed = mergeVenueOrderEvidence(
+      initial,
+      buildLiveOrder({
+        filledSize: 5,
+        averageFillPrice: 0.46,
+        feeUsd: 0.05,
+        status: "partially_filled",
+        updatedAt: 300,
+        raw: { observation: "progressed" },
+      }),
+    );
+    const afterStaleWriter = mergeVenueOrderEvidence(
+      progressed,
+      buildLiveOrder({
+        filledSize: 1,
+        averageFillPrice: 0.41,
+        feeUsd: 0.01,
+        status: "live",
+        updatedAt: 100,
+        raw: { observation: "stale" },
+      }),
+    );
+
+    expect(afterStaleWriter).toMatchObject({
+      filledSize: 5,
+      averageFillPrice: 0.46,
+      feeUsd: 0.05,
+      status: "partially_filled",
+      updatedAt: 300,
+      raw: { observation: "progressed" },
+    });
+  });
+
+  it("never reopens a terminal venue order", () => {
+    const terminal = buildLiveOrder({ status: "canceled", updatedAt: 200, raw: { terminal: true } });
+    const reopened = mergeVenueOrderEvidence(
+      terminal,
+      buildLiveOrder({ status: "live", updatedAt: 300, raw: { terminal: false } }),
+    );
+
+    expect(reopened.status).toBe("canceled");
+    expect(reopened.raw).toEqual({ terminal: true });
+  });
+
+  it("does not oscillate terminal no-fill statuses and validates immutable order identity", () => {
+    const canceled = buildLiveOrder({ status: "canceled", updatedAt: 200, raw: { status: "canceled" } });
+    const merged = mergeVenueOrderEvidence(
+      canceled,
+      buildLiveOrder({ status: "rejected", updatedAt: 300, raw: { status: "rejected" } }),
+    );
+
+    expect(merged.status).toBe("canceled");
+    expect(merged.raw).toEqual({ status: "canceled" });
+    expect(() => mergeVenueOrderEvidence(canceled, buildLiveOrder({ venueOrderId: "different-order" }))).toThrow(
+      PersistenceIdentityConflictError,
+    );
+  });
+
+  it("does not replace a confirmed attempt with a stale failure", () => {
+    const confirmed = buildOrderAttempt({
+      status: "confirmed",
+      truthStatus: "filled",
+      result: { filledSize: 5 },
+      updatedAt: 300,
+    });
+    const merged = mergeOrderAttemptEvidence(
+      confirmed,
+      buildOrderAttempt({
+        status: "failed",
+        truthStatus: "not_submitted",
+        result: null,
+        error: "stale failure",
+        updatedAt: 100,
+      }),
+    );
+
+    expect(merged).toMatchObject({
+      status: "confirmed",
+      truthStatus: "filled",
+      result: { filledSize: 5 },
+      error: null,
+      updatedAt: 300,
+    });
+  });
+
+  it("allows a newer retry to replace failed/not_submitted with truth_pending", () => {
+    const failed = buildOrderAttempt({
+      status: "failed",
+      truthStatus: "not_submitted",
+      error: "definitive zero fill",
+      updatedAt: 200,
+    });
+    const retried = mergeOrderAttemptEvidence(
+      failed,
+      buildOrderAttempt({
+        status: "truth_pending",
+        truthStatus: "submission_unknown",
+        error: "timeout",
+        updatedAt: 300,
+      }),
+    );
+
+    expect(retried).toMatchObject({
+      status: "truth_pending",
+      truthStatus: "submission_unknown",
+      error: "timeout",
+      updatedAt: 300,
+    });
+  });
+
+  it("does not let a stale failure replace truth_pending", () => {
+    const truthPending = buildOrderAttempt({
+      status: "truth_pending",
+      truthStatus: "submission_unknown",
+      error: "timeout",
+      updatedAt: 300,
+    });
+    const merged = mergeOrderAttemptEvidence(
+      truthPending,
+      buildOrderAttempt({
+        status: "failed",
+        truthStatus: "not_submitted",
+        error: "stale failure",
+        updatedAt: 200,
+      }),
+    );
+
+    expect(merged).toMatchObject({
+      status: "truth_pending",
+      truthStatus: "submission_unknown",
+      error: "timeout",
+      updatedAt: 300,
+    });
+  });
+
+  it("rejects an attempt identity change before merging evidence", () => {
+    expect(() => mergeOrderAttemptEvidence(buildOrderAttempt(), buildOrderAttempt({ stage: "hedge" }))).toThrow(
+      PersistenceIdentityConflictError,
+    );
+  });
+
+  it("treats raw-only fill differences as idempotent but rejects economic differences", () => {
+    const fill = buildLiveFill();
+
+    expect(areFillsEconomicallyIdentical(fill, { ...fill, id: "alternate-id", raw: { replay: true } })).toBe(true);
+    expect(areFillsEconomicallyIdentical(fill, { ...fill, feeUsd: fill.feeUsd + 0.01 })).toBe(false);
   });
 });
 
@@ -405,6 +569,42 @@ describe("postgres mismatch-risk persistence", () => {
     expect(query).toHaveBeenCalledWith("SELECT * FROM order_attempts WHERE id = $1 LIMIT 1", ["attempt-1"]);
   });
 
+  it("loads every attempt for an intent without a recency limit", async () => {
+    const row = {
+      id: "attempt-1",
+      asset: "btc",
+      shadow: false,
+      intent_id: "intent-1",
+      leg_id: "leg-1",
+      stage: "primary",
+      venue: "polymarket",
+      side: "BUY",
+      order_type: "FOK",
+      client_order_id: "client-1",
+      venue_order_id: null,
+      status: "truth_pending",
+      truth_status: "submission_unknown",
+      request_json: {},
+      result_json: null,
+      error: "connection reset",
+      created_at: 1_000,
+      updated_at: 1_100,
+    };
+    const { pool, query } = createMockPool([row]);
+
+    await expect(listOrderAttemptsForIntent(pool, "intent-1")).resolves.toMatchObject([
+      {
+        id: "attempt-1",
+        status: "truth_pending",
+        truthStatus: "submission_unknown",
+      },
+    ]);
+    expect(query).toHaveBeenCalledWith(
+      "SELECT * FROM order_attempts WHERE intent_id = $1 ORDER BY created_at ASC, id ASC",
+      ["intent-1"],
+    );
+  });
+
   it("applies the oracle and resolution retention windows during maintenance", async () => {
     const { pool, query } = createMockPool();
     query.mockResolvedValue({ rows: [], rowCount: 1 });
@@ -414,16 +614,86 @@ describe("postgres mismatch-risk persistence", () => {
 
     expect(summary.deleted.oracleSamples).toBe(1);
     expect(summary.deleted.slotResolutions).toBe(1);
-    const oracleDelete = query.mock.calls.find(([sql]) =>
-      String(sql).includes("DELETE FROM oracle_slot_samples"),
-    );
-    const resolutionDelete = query.mock.calls.find(([sql]) =>
-      String(sql).includes("DELETE FROM slot_resolutions"),
-    );
+    const oracleDelete = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM oracle_slot_samples"));
+    const resolutionDelete = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM slot_resolutions"));
     expect(oracleDelete?.[1]).toEqual([now - ORACLE_SAMPLE_RETENTION_MS]);
     expect(resolutionDelete?.[1]).toEqual([now - SLOT_RESOLUTION_RETENTION_MS]);
   });
 });
+
+function buildLiveOrder(overrides: Partial<LiveOrder> = {}): LiveOrder {
+  return {
+    id: "order-1",
+    asset: "btc",
+    shadow: false,
+    intentId: "intent-1",
+    venue: "polymarket",
+    venueOrderId: "venue-order-1",
+    clientOrderId: "client-order-1",
+    marketRef: "market-1",
+    tokenId: "token-1",
+    side: "BUY",
+    outcome: "UP",
+    orderType: "FOK",
+    requestedPrice: 0.5,
+    requestedSize: 10,
+    filledSize: 0,
+    averageFillPrice: null,
+    feeUsd: null,
+    status: "pending",
+    createdAt: 100,
+    updatedAt: 100,
+    raw: {},
+    ...overrides,
+  };
+}
+
+function buildOrderAttempt(overrides: Partial<OrderAttempt> = {}): OrderAttempt {
+  return {
+    id: "attempt-1",
+    asset: "btc",
+    shadow: false,
+    intentId: "intent-1",
+    legId: "leg-1",
+    stage: "primary",
+    venue: "polymarket",
+    side: "BUY",
+    orderType: "FOK",
+    clientOrderId: "client-order-1",
+    venueOrderId: "venue-order-1",
+    status: "planned",
+    truthStatus: null,
+    request: { size: 10 },
+    result: null,
+    error: null,
+    createdAt: 100,
+    updatedAt: 100,
+    ...overrides,
+  };
+}
+
+function buildLiveFill(overrides: Partial<LiveFill> = {}): LiveFill {
+  return {
+    id: "fill-1",
+    asset: "btc",
+    shadow: false,
+    intentId: "intent-1",
+    venue: "polymarket",
+    venueOrderId: "venue-order-1",
+    tradeId: "trade-1",
+    marketRef: "market-1",
+    tokenId: "token-1",
+    side: "BUY",
+    outcome: "UP",
+    price: 0.45,
+    size: 5,
+    feeUsd: 0.02,
+    liquidity: "MAKER",
+    filledAt: 200,
+    raw: { source: "fixture" },
+    ...overrides,
+  };
+}
 
 function buildOrderIntent(): OrderIntent {
   const baseLeg = {

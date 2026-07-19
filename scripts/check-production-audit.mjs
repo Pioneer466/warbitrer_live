@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
 
-const acceptedHighRiskPackages = new Set(["@polymarket/builder-relayer-client", "axios"]);
-
 const result = spawnSync("npm", ["audit", "--omit=dev", "--json"], {
   encoding: "utf8",
   maxBuffer: 20 * 1024 * 1024,
@@ -17,22 +15,11 @@ try {
 
 const vulnerabilities = Object.entries(report.vulnerabilities ?? {});
 const critical = vulnerabilities.filter(([, finding]) => finding.severity === "critical");
-const unacceptedHigh = vulnerabilities.filter(
-  ([name, finding]) => finding.severity === "high" && !acceptedHighRiskPackages.has(name),
-);
-const acceptedHigh = vulnerabilities.filter(
-  ([name, finding]) => finding.severity === "high" && acceptedHighRiskPackages.has(name),
-);
+const high = vulnerabilities.filter(([, finding]) => finding.severity === "high");
 
-if (acceptedHigh.length > 0) {
+if (critical.length > 0 || high.length > 0) {
   process.stderr.write(
-    `Known unresolved production audit exceptions: ${acceptedHigh.map(([name]) => name).join(", ")}\n`,
-  );
-}
-
-if (critical.length > 0 || unacceptedHigh.length > 0) {
-  process.stderr.write(
-    `Blocking production vulnerabilities: ${[...critical, ...unacceptedHigh]
+    `Blocking production vulnerabilities: ${[...critical, ...high]
       .map(([name, finding]) => `${name}:${finding.severity}`)
       .join(", ")}\n`,
   );

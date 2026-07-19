@@ -1,4 +1,4 @@
-import { Side } from "@polymarket/clob-client-v2";
+import { Side, type Trade } from "@polymarket/clob-client-v2";
 
 import {
   buildPolymarketClobOrderPlan,
@@ -14,6 +14,7 @@ import {
   fetchFinalizedPolymarketResolutionObservation,
   extractPolymarketResolution,
   extractPolymarketTradesForOrder,
+  getPolymarketTradeOrderMappingIssue,
   getPolymarketSoftNoFillMessage,
   isConfirmedPolymarketTrade,
   isPendingPolymarketTrade,
@@ -21,6 +22,7 @@ import {
   mapPolymarketTradeToFill,
   microUsdcToUsd,
   resolvePolymarketOrderTruth,
+  shouldAcceptPolymarketTerminalZeroFill,
   shouldTreatPolymarketTerminalOrderAsPending,
   summarizePolymarketTradeLifecycle,
   summarizePolymarketTrades,
@@ -164,7 +166,7 @@ describe("Polymarket helpers", () => {
       throw new Error(`Unexpected fetch url: ${url}`);
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await expect(
       fetchPolymarketResolution(
@@ -197,28 +199,28 @@ describe("Polymarket helpers", () => {
   it("rejects a closed Polymarket outcome until UMA reports it resolved", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
-      json: async () => [{
-        id: "market-1",
-        conditionId: "condition-1",
-        question: "BTC Up or Down",
-        slug: "btc-updown-15m-1",
-        endDate: "2026-01-01T00:15:00Z",
-        startDate: "2026-01-01T00:00:00Z",
-        outcomes: '["Up","Down"]',
-        clobTokenIds: '["up","down"]',
-        feeType: "crypto_fees_v2",
-        active: false,
-        closed: true,
-        enableOrderBook: true,
-        outcomePrices: '["1","0"]',
-        umaResolutionStatus: "proposed",
-      }],
+      json: async () => [
+        {
+          id: "market-1",
+          conditionId: "condition-1",
+          question: "BTC Up or Down",
+          slug: "btc-updown-15m-1",
+          endDate: "2026-01-01T00:15:00Z",
+          startDate: "2026-01-01T00:00:00Z",
+          outcomes: '["Up","Down"]',
+          clobTokenIds: '["up","down"]',
+          feeType: "crypto_fees_v2",
+          active: false,
+          closed: true,
+          enableOrderBook: true,
+          outcomePrices: '["1","0"]',
+          umaResolutionStatus: "proposed",
+        },
+      ],
     });
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    await expect(
-      fetchFinalizedPolymarketResolution("btc-updown-15m-1", "condition-1"),
-    ).resolves.toBeNull();
+    await expect(fetchFinalizedPolymarketResolution("btc-updown-15m-1", "condition-1")).resolves.toBeNull();
   });
 
   it("keeps coherent Gamma terminal metadata as optional calibration telemetry", async () => {
@@ -257,14 +259,9 @@ describe("Polymarket helpers", () => {
               ],
       };
     });
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    await expect(
-      fetchFinalizedPolymarketResolutionObservation(
-        "btc-updown-15m-1",
-        "condition-1",
-      ),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1")).resolves.toEqual({
       resolution: "DOWN",
       benchmarkValueUsd: 99,
       benchmarkSource: "polymarket-gamma-event-final-price",
@@ -301,14 +298,9 @@ describe("Polymarket helpers", () => {
               },
             ],
     }));
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    await expect(
-      fetchFinalizedPolymarketResolutionObservation(
-        "btc-updown-15m-1",
-        "condition-1",
-      ),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1")).resolves.toEqual({
       resolution: "DOWN",
       benchmarkValueUsd: null,
       benchmarkSource: null,
@@ -345,13 +337,10 @@ describe("Polymarket helpers", () => {
               },
             ],
     }));
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await expect(
-      fetchFinalizedPolymarketResolutionObservation(
-        "btc-updown-15m-1",
-        "condition-1",
-      ),
+      fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1"),
     ).resolves.toMatchObject({ resolution: "UP", benchmarkValueUsd: 100 });
   });
 
@@ -362,25 +351,27 @@ describe("Polymarket helpers", () => {
         ok: true,
         json: async () =>
           String(input).includes("/events?")
-            ? [{
-                id: "event-1",
-                slug: "btc-updown-15m-1",
-                markets: [{ id: "market-1", conditionId: "condition-1", slug: "btc-updown-15m-1" }],
-              }]
-            : [{
-                id: "market-1",
-                conditionId: "condition-1",
-                slug: "btc-updown-15m-1",
-                closed: true,
-                outcomePrices: '["1","0"]',
-                umaResolutionStatus: "resolved",
-              }],
-      })) as any,
+            ? [
+                {
+                  id: "event-1",
+                  slug: "btc-updown-15m-1",
+                  markets: [{ id: "market-1", conditionId: "condition-1", slug: "btc-updown-15m-1" }],
+                },
+              ]
+            : [
+                {
+                  id: "market-1",
+                  conditionId: "condition-1",
+                  slug: "btc-updown-15m-1",
+                  closed: true,
+                  outcomePrices: '["1","0"]',
+                  umaResolutionStatus: "resolved",
+                },
+              ],
+      })) as unknown as typeof fetch,
     );
 
-    await expect(
-      fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1"),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedPolymarketResolutionObservation("btc-updown-15m-1", "condition-1")).resolves.toEqual({
       resolution: "UP",
       benchmarkValueUsd: null,
       benchmarkSource: null,
@@ -465,8 +456,7 @@ describe("Polymarket helpers", () => {
     expect(
       extractPolymarketCollateralAllowanceInfo(
         {
-          allowance:
-            "115792089237316195423570985008687907853269984665640564039457584007913129639935",
+          allowance: "115792089237316195423570985008687907853269984665640564039457584007913129639935",
         },
         "EOA",
       ),
@@ -485,7 +475,7 @@ describe("Polymarket helpers", () => {
   });
 
   it("aggregates matched trades for a specific order", () => {
-    const trades = [
+    const trades: Trade[] = [
       {
         id: "trade-1",
         taker_order_id: "order-1",
@@ -512,9 +502,9 @@ describe("Polymarket helpers", () => {
         market: "market-1",
         asset_id: "asset-1",
         side: Side.BUY,
-        size: "5",
-        fee_rate_bps: "50",
-        price: "0.5",
+        size: "20",
+        fee_rate_bps: "100",
+        price: "0.44",
         status: "MATCHED",
         match_time: new Date(11).toISOString(),
         last_update: new Date(11).toISOString(),
@@ -522,19 +512,171 @@ describe("Polymarket helpers", () => {
         bucket_index: 0,
         owner: "owner",
         maker_address: "maker",
-        maker_orders: [{ order_id: "order-1", owner: "maker", maker_address: "maker", matched_amount: "5", price: "0.5", fee_rate_bps: "50", asset_id: "asset-1", outcome: "UP", side: Side.SELL }],
+        maker_orders: [
+          {
+            order_id: "order-1",
+            owner: "maker",
+            maker_address: "maker",
+            matched_amount: "5",
+            price: "0.5",
+            fee_rate_bps: "50",
+            asset_id: "asset-1",
+            outcome: "UP",
+            side: Side.SELL,
+          },
+        ],
         transaction_hash: "0x2",
         trader_side: "MAKER" as const,
       },
     ];
 
     const matching = extractPolymarketTradesForOrder(trades, "order-1");
-    const summary = summarizePolymarketTrades(matching);
+    const summary = summarizePolymarketTrades(matching, "order-1");
+    const truth = resolvePolymarketOrderTruth({
+      orderId: "order-1",
+      order: null,
+      trades,
+      expectedSize: 15,
+      expectedSizeIsExact: true,
+      orderType: "FOK",
+    });
+    const makerFill = mapPolymarketTradeToFill(trades[1]!, "intent-1", {
+      asset: "eth",
+      venueOrderId: "order-1",
+    });
 
     expect(matching).toHaveLength(2);
     expect(summary.filledSize).toBe(15);
     expect(summary.averageFillPrice).toBeCloseTo(0.4333, 4);
     expect(summary.feeUsd).toBeCloseTo(0.0525, 4);
+    expect(truth).toMatchObject({
+      effectiveFilledSize: 15,
+      pendingFilledSize: 15,
+      averageFillPrice: 0.4333,
+      feeUsd: 0.0525,
+    });
+    expect(makerFill).toMatchObject({
+      id: "polymarket-fill:trade-2:order-1",
+      asset: "eth",
+      venueOrderId: "order-1",
+      tokenId: "asset-1",
+      side: "SELL",
+      outcome: "UP",
+      price: 0.5,
+      size: 5,
+      feeUsd: 0.0125,
+      liquidity: "MAKER",
+    });
+  });
+
+  it.each(["eth", "sol", "xrp", "doge", "bnb", "hype"] as const)(
+    "uses authoritative %s context for opaque Polymarket trade market ids",
+    (asset) => {
+      const fill = mapPolymarketTradeToFill(
+        {
+          id: `trade-${asset}`,
+          taker_order_id: `order-${asset}`,
+          market: "0xopaque-condition-id",
+          asset_id: `token-${asset}`,
+          side: Side.BUY,
+          size: "2",
+          fee_rate_bps: "0",
+          price: "0.4",
+          status: "CONFIRMED",
+          match_time: new Date(10).toISOString(),
+          last_update: new Date(10).toISOString(),
+          outcome: "UP",
+          bucket_index: 0,
+          owner: "owner",
+          maker_address: "maker",
+          maker_orders: [],
+          transaction_hash: "0x1",
+          trader_side: "TAKER",
+        },
+        `intent-${asset}`,
+        {
+          asset,
+          venueOrderId: `order-${asset}`,
+        },
+      );
+
+      expect(fill.asset).toBe(asset);
+    },
+  );
+
+  it("skips a maker match instead of borrowing the taker side when maker side is absent", () => {
+    const trade = {
+      id: "trade-missing-maker-side",
+      taker_order_id: "taker-order",
+      market: "market-1",
+      asset_id: "taker-asset",
+      side: Side.BUY,
+      size: "10",
+      fee_rate_bps: "100",
+      price: "0.4",
+      status: "CONFIRMED",
+      match_time: new Date(10).toISOString(),
+      last_update: new Date(10).toISOString(),
+      outcome: "UP",
+      bucket_index: 0,
+      owner: "owner",
+      maker_address: "maker",
+      maker_orders: [
+        {
+          order_id: "maker-order",
+          owner: "maker",
+          maker_address: "maker",
+          matched_amount: "5",
+          price: "0.6",
+          fee_rate_bps: "50",
+          asset_id: "maker-asset",
+          outcome: "DOWN",
+        },
+      ],
+      transaction_hash: "0xmissing-side",
+      trader_side: "MAKER" as const,
+    };
+
+    expect(getPolymarketTradeOrderMappingIssue(trade, "maker-order")).toBe("maker_side_missing");
+    expect(summarizePolymarketTrades([trade], "maker-order")).toEqual({
+      filledSize: 0,
+      averageFillPrice: null,
+      feeUsd: 0,
+    });
+    expect(() => mapPolymarketTradeToFill(trade, "intent-1", "maker-order")).toThrow("Polymarket maker side missing");
+    expect(() =>
+      resolvePolymarketOrderTruth({
+        orderId: "maker-order",
+        order: null,
+        trades: [trade],
+      }),
+    ).toThrow("Polymarket maker side missing");
+  });
+
+  it("uses authoritative asset context when mapping an opaque Polymarket order", () => {
+    const order = mapPolymarketOrder(
+      {
+        id: "order-sol",
+        status: "LIVE",
+        market: "0xopaque-condition-id",
+        asset_id: "token-sol",
+        side: "BUY",
+        original_size: "2",
+        size_matched: "0",
+        price: "0.4",
+        outcome: "Up",
+        order_type: "FOK",
+        maker_address: "0xabc",
+        owner: "owner",
+        expiration: "0",
+        associate_trades: [],
+        created_at: 1775513261,
+      },
+      "intent-sol",
+      { asset: "sol" },
+    );
+
+    expect(order.asset).toBe("sol");
   });
 
   it("separates confirmed polymarket trades from pending settlement trades", () => {
@@ -584,7 +726,7 @@ describe("Polymarket helpers", () => {
     expect(isConfirmedPolymarketTrade(trades[0]!)).toBe(true);
     expect(isPendingPolymarketTrade(trades[1]!)).toBe(true);
 
-    const lifecycle = summarizePolymarketTradeLifecycle(trades as any);
+    const lifecycle = summarizePolymarketTradeLifecycle(trades);
     expect(lifecycle.confirmedTrades).toHaveLength(1);
     expect(lifecycle.pendingTrades).toHaveLength(1);
     expect(summarizePolymarketTrades(lifecycle.confirmedTrades).filledSize).toBe(10);
@@ -608,7 +750,7 @@ describe("Polymarket helpers", () => {
         expiration: "0",
         associate_trades: ["trade-1"],
         created_at: 1775513261,
-      } as any,
+      },
       "intent-1",
     );
 
@@ -638,7 +780,7 @@ describe("Polymarket helpers", () => {
         expiration: "0",
         associate_trades: [],
         created_at: 1775513261,
-      } as any,
+      },
       trades: [],
       expectedSize: 10,
       expectedSizeIsExact: true,
@@ -677,7 +819,7 @@ describe("Polymarket helpers", () => {
           transaction_hash: "0x2",
           trader_side: "TAKER" as const,
         },
-      ] as any,
+      ],
       expectedSize: 10,
       expectedSizeIsExact: true,
       orderType: "FOK",
@@ -708,7 +850,7 @@ describe("Polymarket helpers", () => {
         expiration: "0",
         associate_trades: [],
         created_at: 1775513261,
-      } as any,
+      },
       trades: [],
       expectedSize: 10,
       expectedSizeIsExact: true,
@@ -718,6 +860,18 @@ describe("Polymarket helpers", () => {
     expect(truth.effectiveFilledSize).toBe(0);
     expect(truth.terminalZeroFill).toBe(true);
     expect(truth.status).toBe("canceled");
+    expect(
+      shouldAcceptPolymarketTerminalZeroFill(truth, {
+        order: { ok: true, error: null },
+        trades: { ok: true, error: null },
+      }),
+    ).toBe(true);
+    expect(
+      shouldAcceptPolymarketTerminalZeroFill(truth, {
+        order: { ok: true, error: null },
+        trades: { ok: false, error: "trades unavailable" },
+      }),
+    ).toBe(false);
   });
 
   it("treats terminal orders with only pending trades as still pending", () => {
@@ -747,11 +901,12 @@ describe("Polymarket helpers", () => {
         maker_orders: [],
         transaction_hash: "0x1",
         trader_side: "TAKER" as const,
-      } as any,
+      },
       "intent-1",
       "order-1",
     );
 
     expect(fill.filledAt).toBe(1775513261000);
+    expect(fill.asset).toBe("btc");
   });
 });

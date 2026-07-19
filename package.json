@@ -30,6 +30,8 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "audit:prod": "node scripts/check-production-audit.mjs",
+    "db:migrate": "tsx scripts/db-migrate.ts",
+    "db:status": "tsx scripts/db-status.ts",
     "verify": "npm run audit:prod && npm run lint && npm run typecheck && npm test && npm run build && npm run build:worker",
     "poly:derive-api-key": "tsx scripts/polymarket-derive-api-key.ts",
     "incident:report": "node --import tsx ./scripts/incident-report.ts",
@@ -69,7 +71,7 @@
     "concurrently": "9.1.2",
     "eslint": "^9.39.5",
     "eslint-config-next": "^15.5.20",
-    "postcss": "8.5.3",
+    "postcss": "8.5.20",
     "prettier": "^3.9.5",
     "tailwindcss": "3.4.17",
     "tsx": "4.19.4",
@@ -77,7 +79,10 @@
     "vitest": "3.1.2"
   },
   "overrides": {
+    "axios": "1.18.1",
+    "follow-redirects": "1.16.0",
     "form-data": "4.0.6",
+    "postcss": "$postcss",
     "ws": "$ws"
   }
 }

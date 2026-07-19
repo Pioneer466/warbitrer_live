@@ -41,9 +41,10 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
    - `/etc/warbitrer/warbitrer.env`
    - `/etc/warbitrer/kalshi-private-key.pem`
    - `/etc/warbitrer/polymarket-private-key.txt`
-6. Installer les dépendances et builder:
-   `cd /opt/warbitrer-live/app && npm ci && npm run build && npm run build:worker`
-7. Copier les services:
+6. Installer les dépendances et builder en tant que `warbitrer`:
+   `cd /opt/warbitrer-live/app && sudo -u warbitrer -H npm ci && sudo -u warbitrer -H npm run build && sudo -u warbitrer -H npm run build:worker`
+7. Après un backup vérifié, charger `/etc/warbitrer/warbitrer.env` sans afficher son contenu, puis exécuter `npm run db:migrate` et `npm run db:status` en tant que `warbitrer` comme décrit dans `docs/codex/deployment.md`.
+8. Copier les services:
    - `sudo cp deploy/vps/warbitrer-web.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-worker.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-asset@.service /etc/systemd/system/`
@@ -51,18 +52,21 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
    - `sudo cp deploy/vps/warbitrer-notifier.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.timer /etc/systemd/system/`
-8. Recharger et activer:
+9. Recharger et activer:
    - `sudo systemctl daemon-reload`
    - `sudo systemctl enable --now warbitrer-web`
    - `sudo systemctl enable --now warbitrer-asset@btc warbitrer-asset@eth warbitrer-asset@sol warbitrer-asset@xrp warbitrer-asset@doge`
    - `sudo systemctl enable --now warbitrer-reconciler warbitrer-notifier`
    - `sudo systemctl enable --now warbitrer-postgres-backup.timer`
-9. Configurer Caddy avec `deploy/vps/Caddyfile`
-10. Générer le mot de passe Caddy:
-   - `caddy hash-password --plaintext 'CHANGE_ME'`
-11. Remplacer le domaine `warbitrer.example.com` et le hash dans `/etc/caddy/Caddyfile`
-12. Ouvrir `80/tcp` et `443/tcp`, puis:
-   - `sudo systemctl reload caddy`
+10. Configurer Caddy avec `deploy/vps/Caddyfile`
+11. Générer le mot de passe Caddy:
+
+- `caddy hash-password --plaintext 'CHANGE_ME'`
+
+12. Remplacer le domaine `warbitrer.example.com` et le hash dans `/etc/caddy/Caddyfile`
+13. Ouvrir `80/tcp` et `443/tcp`, puis:
+
+- `sudo systemctl reload caddy`
 
 ## Exposition directe par IP publique
 

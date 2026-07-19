@@ -10,6 +10,7 @@ Group=warbitrer
 WorkingDirectory=/opt/warbitrer-live/app
 Environment=NODE_ENV=production
 EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStartPre=/usr/bin/npm run db:status
 ExecStart=/usr/bin/npm run start:worker
 Restart=always
 RestartSec=5

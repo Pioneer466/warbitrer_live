@@ -31,6 +31,8 @@ There is no Docker deployment.
 - Polymarket key: `/etc/warbitrer/polymarket-private-key.txt`
 - Backups: `/opt/warbitrer-live/backups/postgres` by default
 
+`PG_POOL_MAX` must be at least 2 because advisory-lock callbacks can need a second application connection. The default split topology has eight app processes, so `PG_POOL_MAX=3` budgets up to 24 app connections; leave additional Postgres capacity for migrations, backups, and operator sessions. Never run the legacy worker alongside the split topology.
+
 Run `git` and `npm` as `warbitrer`. Running them as root creates ownership failures in `.git`, `node_modules`, `.next`, and `dist`.
 
 ## Current deployment caveat
@@ -53,6 +55,31 @@ sudo -u warbitrer -H npm run build:worker
 ```
 
 Do not continue after a failed or killed command.
+
+Before restarting services, confirm a fresh readable Postgres backup, stop all Warbitrer web/worker units, then apply and verify migrations using the same protected environment file as systemd:
+
+```bash
+sudo systemctl stop \
+  warbitrer-web \
+  warbitrer-asset@btc \
+  warbitrer-asset@eth \
+  warbitrer-asset@sol \
+  warbitrer-asset@xrp \
+  warbitrer-asset@doge \
+  warbitrer-reconciler \
+  warbitrer-notifier
+
+sudo bash -c '
+  set -a
+  . /etc/warbitrer/warbitrer.env
+  set +a
+  cd /opt/warbitrer-live/app
+  runuser -u warbitrer --preserve-environment -- npm run db:migrate
+  runuser -u warbitrer --preserve-environment -- npm run db:status
+'
+```
+
+Do not restart against a pending or incompatible schema. Migration 1 is an additive legacy upgrade, but it can still take locks while adding/backfilling columns, so keep services stopped until `db:status` is ready.
 
 Restart the current topology:
 

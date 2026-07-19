@@ -17,6 +17,21 @@ describe("application Basic Auth middleware", () => {
     expect(response.status).toBe(503);
   });
 
+  it("allows only the exact liveness path without credentials", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("APP_BASIC_AUTH_USER", "");
+    vi.stubEnv("APP_BASIC_AUTH_PASSWORD", "");
+
+    const liveness = middleware(new NextRequest("https://warbitrer.test/api/liveness"));
+    const nested = middleware(new NextRequest("https://warbitrer.test/api/liveness/extra"));
+    const readiness = middleware(new NextRequest("https://warbitrer.test/api/health"));
+
+    expect(liveness.status).toBe(200);
+    expect(liveness.headers.get("x-middleware-next")).toBe("1");
+    expect(nested.status).toBe(503);
+    expect(readiness.status).toBe(503);
+  });
+
   it("fails closed when only one credential is configured", () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("APP_BASIC_AUTH_USER", "ops");

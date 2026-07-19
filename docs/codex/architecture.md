@@ -74,7 +74,7 @@ It is the largest and highest-risk module. Prefer extracting deterministic calcu
 - `src/lib/storage.ts`: application-facing storage facade
 - `src/lib/postgres-db.ts`: pool, schema bootstrap, SQL, and response assembly
 
-Every process has its own Postgres pool. Schema creation/alteration is serialized with a Postgres advisory lock. There is currently no migration version table or rollback migration mechanism.
+Every process has its own Postgres pool. Schema changes are applied explicitly through checksummed, forward-only migrations serialized on one `PoolClient` with a Postgres advisory lock. Runtime processes only verify the exact compatible `schema_migrations` history and never replay DDL.
 
 ## Data flow
 
@@ -101,7 +101,7 @@ Every process has its own Postgres pool. Schema creation/alteration is serialize
 ## Known structural risks
 
 - `engine.ts` is approximately 10k lines and has a large regression surface.
-- Database migrations are embedded in startup SQL rather than versioned.
+- The initial versioned migration remains large because it snapshots the former runtime bootstrap; future schema changes must be smaller additive migrations.
 - API routes and middleware have no dedicated automated test suite.
 - BNB/HYPE UI/config support does not match the active worker set.
 - Kalshi WS error/sequence diagnostics are incomplete.

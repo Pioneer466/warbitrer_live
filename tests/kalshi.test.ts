@@ -1,13 +1,18 @@
+import { generateKeyPairSync } from "node:crypto";
+
 import {
   deriveKalshiBalanceSummary,
   buildKalshiSigningPath,
+  createKalshiAdapter,
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarket,
+  fetchKalshiFills,
   fetchKalshiResolution,
   fetchFinalizedKalshiResolution,
   fetchFinalizedKalshiResolutionObservation,
   fetchKalshiMarkets,
   fetchKalshiMarketsForSlot,
+  fetchKalshiOrders,
   getKalshiFillFeeUsd,
   getKalshiFillPriceUsd,
   getKalshiWsUrls,
@@ -23,6 +28,64 @@ import {
 } from "@/lib/kalshi";
 import type { MarketSlot } from "@/lib/types";
 import { vi } from "vitest";
+
+const TEST_KALSHI_PRIVATE_KEY_PEM = generateKeyPairSync("rsa", {
+  modulusLength: 2_048,
+  privateKeyEncoding: {
+    type: "pkcs8",
+    format: "pem",
+  },
+  publicKeyEncoding: {
+    type: "spki",
+    format: "pem",
+  },
+}).privateKey;
+
+function enableAuthenticatedKalshiRequests() {
+  process.env.KALSHI_API_KEY_ID = "test-api-key";
+  process.env.KALSHI_PRIVATE_KEY_PEM = TEST_KALSHI_PRIVATE_KEY_PEM;
+  delete process.env.KALSHI_PRIVATE_KEY_PATH;
+}
+
+function createKalshiPositionFixture(ticker: string) {
+  return {
+    ticker,
+    position_fp: "1.00",
+    total_traded_dollars: "0.4000",
+    market_exposure_dollars: "0.5000",
+    realized_pnl_dollars: "0.0000",
+    fees_paid_dollars: "0.0100",
+    last_updated_ts: "2026-07-19T10:00:00.000Z",
+  };
+}
+
+function createKalshiOrderFixture(orderId: string) {
+  return {
+    order_id: orderId,
+    client_order_id: `client-${orderId}`,
+    ticker: "KXBTC15M-TEST",
+    side: "yes" as const,
+    action: "buy" as const,
+    status: "executed",
+    yes_price_dollars: "0.4000",
+    fill_count_fp: "1.00",
+    remaining_count_fp: "0.00",
+    initial_count_fp: "1.00",
+  };
+}
+
+function createKalshiFillFixture(tradeId: string) {
+  return {
+    trade_id: tradeId,
+    order_id: `order-${tradeId}`,
+    market_ticker: "KXBTC15M-TEST",
+    is_taker: true,
+    side: "yes" as const,
+    action: "buy" as const,
+    yes_price_dollars: "0.4000",
+    count_fp: "1.00",
+  };
+}
 
 describe("Kalshi quote derivation", () => {
   const originalEnv = process.env;
@@ -215,10 +278,18 @@ describe("Kalshi quote derivation", () => {
         fees_paid_dollars: "0.20",
       }),
     ).toBe(0.2);
+
+    expect(
+      getKalshiFillFeeUsd({
+        fee_cost: "0.31",
+        fees_paid_dollars: "0.20",
+      }),
+    ).toBe(0.31);
   });
 
   it("paginates Kalshi markets so the current slot is not lost after the first page", async () => {
-    const fetchMock = vi.fn()
+    const fetchMock = vi
+      .fn()
       .mockResolvedValueOnce({
         ok: true,
         json: async () => ({
@@ -268,16 +339,132 @@ describe("Kalshi quote derivation", () => {
         }),
       });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     const response = await fetchKalshiMarkets("btc");
 
-    expect(response.markets.map((market) => market.ticker)).toEqual([
-      "KXBTC15M-PAGE-1",
-      "KXBTC15M-PAGE-2",
-    ]);
+    expect(response.markets.map((market) => market.ticker)).toEqual(["KXBTC15M-PAGE-1", "KXBTC15M-PAGE-2"]);
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=next-page");
+  });
+
+  it("paginates all Kalshi portfolio positions", async () => {
+    enableAuthenticatedKalshiRequests();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market_positions: [createKalshiPositionFixture("KXBTC15M-PAGE-1")],
+          cursor: "positions-next",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          market_positions: [createKalshiPositionFixture("KXETH15M-PAGE-2")],
+          cursor: "",
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const positions = await createKalshiAdapter().getPositions(1_784_454_400_000);
+
+    expect(positions.map((position) => position.marketRef)).toEqual(["KXBTC15M-PAGE-1", "KXETH15M-PAGE-2"]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/portfolio/positions?limit=1000");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=positions-next");
+  });
+
+  it("paginates all Kalshi orders while preserving the status filter", async () => {
+    enableAuthenticatedKalshiRequests();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          orders: [createKalshiOrderFixture("order-page-1")],
+          cursor: "orders-next",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          orders: [createKalshiOrderFixture("order-page-2")],
+          cursor: null,
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const orders = await fetchKalshiOrders("executed");
+
+    expect(orders.map((order) => order.order_id)).toEqual(["order-page-1", "order-page-2"]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("status=executed");
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("limit=1000");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("status=executed");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=orders-next");
+  });
+
+  it("paginates all Kalshi fills", async () => {
+    enableAuthenticatedKalshiRequests();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          fills: [createKalshiFillFixture("trade-page-1")],
+          cursor: "fills-next",
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          fills: [createKalshiFillFixture("trade-page-2")],
+          cursor: undefined,
+        }),
+      });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    const fills = await fetchKalshiFills();
+
+    expect(fills.map((fill) => fill.trade_id)).toEqual(["trade-page-1", "trade-page-2"]);
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain("/portfolio/fills?limit=1000");
+    expect(String(fetchMock.mock.calls[1]?.[0])).toContain("cursor=fills-next");
+  });
+
+  it("fails instead of returning partial Kalshi data when a cursor repeats", async () => {
+    enableAuthenticatedKalshiRequests();
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        orders: [createKalshiOrderFixture("order-loop")],
+        cursor: "repeated-cursor",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await expect(fetchKalshiOrders()).rejects.toThrow(
+      "Kalshi pagination returned a repeated cursor for /portfolio/orders",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds Kalshi pagination when unique cursors never terminate", async () => {
+    enableAuthenticatedKalshiRequests();
+    let page = 0;
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      page += 1;
+      return {
+        ok: true,
+        json: async () => ({
+          fills: [createKalshiFillFixture(`trade-${page}`)],
+          cursor: `cursor-${page}`,
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await expect(fetchKalshiFills()).rejects.toThrow("Kalshi pagination exceeded 100 pages for /portfolio/fills");
+    expect(fetchMock).toHaveBeenCalledTimes(100);
   });
 
   it("queries the current Kalshi slot with close timestamp filters before broad pagination", async () => {
@@ -317,7 +504,7 @@ describe("Kalshi quote derivation", () => {
       }),
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     const response = await fetchKalshiMarketsForSlot(slot);
     const requestUrl = String(fetchMock.mock.calls[0]?.[0]);
@@ -340,7 +527,7 @@ describe("Kalshi quote derivation", () => {
       }),
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await fetchKalshiMarkets("eth");
 
@@ -356,7 +543,7 @@ describe("Kalshi quote derivation", () => {
       }),
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await fetchKalshiMarkets("sol");
 
@@ -372,7 +559,7 @@ describe("Kalshi quote derivation", () => {
       }),
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await fetchKalshiMarkets("xrp");
 
@@ -388,7 +575,7 @@ describe("Kalshi quote derivation", () => {
       }),
     });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await fetchKalshiMarkets("doge");
     await fetchKalshiMarkets("bnb");
@@ -423,7 +610,7 @@ describe("Kalshi quote derivation", () => {
         }),
       });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await expect(fetchKalshiResolution("KXETH15M-DETERMINED")).resolves.toBe("YES");
     await expect(fetchKalshiResolution("KXETH15M-SETTLED")).resolves.toBe("NO");
@@ -463,7 +650,7 @@ describe("Kalshi quote derivation", () => {
         }),
       });
 
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
     await expect(fetchFinalizedKalshiResolution("KXETH15M-DETERMINED")).resolves.toBeNull();
     await expect(fetchFinalizedKalshiResolution("KXETH15M-FINALIZED")).resolves.toBe("NO");
@@ -485,12 +672,10 @@ describe("Kalshi quote derivation", () => {
             expiration_value: "64669.86",
           },
         }),
-      }) as any,
+      }) as unknown as typeof fetch,
     );
 
-    await expect(
-      fetchFinalizedKalshiResolutionObservation("KXBTC15M-FINALIZED"),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedKalshiResolutionObservation("KXBTC15M-FINALIZED")).resolves.toEqual({
       resolution: "YES",
       benchmarkValueUsd: 64669.86,
       benchmarkSource: "kalshi-expiration-value",
@@ -526,14 +711,13 @@ describe("Kalshi quote derivation", () => {
           },
         }),
       });
-    vi.stubGlobal("fetch", fetchMock as any);
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
-    await expect(
-      fetchFinalizedKalshiResolutionObservation("KXBTC15M-EQUAL"),
-    ).resolves.toMatchObject({ resolution: "NO", benchmarkValueUsd: 100 });
-    await expect(
-      fetchFinalizedKalshiResolutionObservation("KXBTC15M-INCONSISTENT"),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedKalshiResolutionObservation("KXBTC15M-EQUAL")).resolves.toMatchObject({
+      resolution: "NO",
+      benchmarkValueUsd: 100,
+    });
+    await expect(fetchFinalizedKalshiResolutionObservation("KXBTC15M-INCONSISTENT")).resolves.toEqual({
       resolution: "NO",
       benchmarkValueUsd: null,
       benchmarkSource: null,
@@ -555,12 +739,10 @@ describe("Kalshi quote derivation", () => {
             expiration_value: "not-a-number",
           },
         }),
-      }) as any,
+      }) as unknown as typeof fetch,
     );
 
-    await expect(
-      fetchFinalizedKalshiResolutionObservation("KXBTC15M-MALFORMED"),
-    ).resolves.toEqual({
+    await expect(fetchFinalizedKalshiResolutionObservation("KXBTC15M-MALFORMED")).resolves.toEqual({
       resolution: "YES",
       benchmarkValueUsd: null,
       benchmarkSource: null,
@@ -568,19 +750,13 @@ describe("Kalshi quote derivation", () => {
   });
 
   it("signs Kalshi authenticated requests with the full trade-api path", () => {
-    expect(
-      buildKalshiSigningPath(
-        "https://external-api.kalshi.com/trade-api/v2",
-        "/portfolio/balance",
-      ),
-    ).toBe("/trade-api/v2/portfolio/balance");
+    expect(buildKalshiSigningPath("https://external-api.kalshi.com/trade-api/v2", "/portfolio/balance")).toBe(
+      "/trade-api/v2/portfolio/balance",
+    );
 
-    expect(
-      buildKalshiSigningPath(
-        "https://demo-api.kalshi.co/trade-api/v2",
-        "/portfolio/orders",
-      ),
-    ).toBe("/trade-api/v2/portfolio/orders");
+    expect(buildKalshiSigningPath("https://demo-api.kalshi.co/trade-api/v2", "/portfolio/orders")).toBe(
+      "/trade-api/v2/portfolio/orders",
+    );
   });
 
   it("falls back to cash when Kalshi reports a portfolio_value below available balance", () => {
@@ -670,6 +846,12 @@ describe("Kalshi quote derivation", () => {
     ).toContain("FOK orders are fully filled or killed");
 
     expect(getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 401: authentication_error"))).toBeNull();
+    expect(
+      getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 500: internal error while handling a fill_or_kill order")),
+    ).toBeNull();
+    expect(
+      getKalshiSoftNoFillMessage(new Error("Kalshi HTTP 422: time_in_force must be fill_or_kill for this request")),
+    ).toBeNull();
   });
 
   it("maps Kalshi order prices on the correct YES/NO side", () => {

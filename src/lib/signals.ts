@@ -21,7 +21,6 @@ import type {
   PolymarketQuote,
   MismatchRiskEstimate,
   StrategyConfig,
-  Venue,
   VenueBalance,
 } from "@/lib/types";
 
@@ -263,27 +262,24 @@ function buildSignal({
   );
   const polyBalance = balances.find((balance) => balance.venue === "polymarket");
   const kalshiBalance = balances.find((balance) => balance.venue === "kalshi");
-  const polyAskLevels = (
-    polyOutcome === "UP"
-      ? polymarket.orderbookLevels?.upAsks
-      : polymarket.orderbookLevels?.downAsks
-  )?.map(([price, size]) => ({ price, size })) ?? [];
-  const kalshiBuyLevels = deriveKalshiBuyPriceLevels(
-    kalshi.orderbookLevels,
-    kalshiOutcome,
-  ).map(([price, size]) => ({ price, size }));
+  const polyAskLevels =
+    (polyOutcome === "UP" ? polymarket.orderbookLevels?.upAsks : polymarket.orderbookLevels?.downAsks)?.map(
+      ([price, size]) => ({ price, size }),
+    ) ?? [];
+  const kalshiBuyLevels = deriveKalshiBuyPriceLevels(kalshi.orderbookLevels, kalshiOutcome).map(([price, size]) => ({
+    price,
+    size,
+  }));
   const useMultiLevelSizing = polyAskLevels.length > 0 && kalshiBuyLevels.length > 0;
   const enforceMismatchRisk = settings.mismatchRiskMode === "enforce";
-  const usableMismatchRisk =
-    mismatchRiskEstimate?.available === true &&
-    mismatchRiskEstimate.pFatalUpper95 !== null;
+  const usableMismatchRisk = mismatchRiskEstimate?.available === true && mismatchRiskEstimate.pFatalUpper95 !== null;
   const enforceUsableMismatchRisk =
     usableMismatchRisk &&
     mismatchRiskEstimate.executionUsable !== false &&
     !mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated");
   const sizingFatalProbability = enforceMismatchRisk
     ? enforceUsableMismatchRisk
-      ? mismatchRiskEstimate.pFatalUpper95 ?? 1
+      ? (mismatchRiskEstimate.pFatalUpper95 ?? 1)
       : 1
     : 0;
   const multiLevelSizing = useMultiLevelSizing
@@ -298,11 +294,9 @@ function buildSignal({
         fatalMismatchProbabilityUpper: sizingFatalProbability,
         maxFatalProbabilityShareOfBreakEven: 0.5,
         maxProbabilityWeightedFatalLossUsd: enforceMismatchRisk
-          ? riskBudget?.remainingExpectedFatalLossUsd ?? 0
+          ? (riskBudget?.remainingExpectedFatalLossUsd ?? 0)
           : null,
-        maxAbsoluteFatalLossUsd: enforceMismatchRisk
-          ? riskBudget?.remainingAbsoluteFatalLossUsd ?? 0
-          : null,
+        maxAbsoluteFatalLossUsd: enforceMismatchRisk ? (riskBudget?.remainingAbsoluteFatalLossUsd ?? 0) : null,
         polymarket: {
           levels: polyAskLevels,
           maxPrice: settings.maxLegPrice,
@@ -351,28 +345,30 @@ function buildSignal({
   const estimatedFees = multiLevelSizing
     ? multiLevelSizing.polymarket.feeUsd + multiLevelSizing.kalshi.feeUsd
     : balancedSizing.polyFeeUsd + balancedSizing.kalshiFeeUsd;
-  const grossCost = multiLevelSizing && multiLevelSizing.commonSize > 0
-    ? round4((multiLevelSizing.polymarket.notionalUsd + multiLevelSizing.kalshi.notionalUsd) / multiLevelSizing.commonSize)
-    : polyPrice !== null && kalshiPrice !== null
-      ? round4(polyPrice + kalshiPrice)
-      : null;
-  const projectedNetProfitUsd = grossCost === null
-    ? null
-    : multiLevelSizing?.projectedNetProfitUsd ?? balancedSizing.projectedNetProfitUsd;
-  const projectedNetReturn = grossCost === null
-    ? null
-    : multiLevelSizing?.projectedNetReturn ?? balancedSizing.projectedNetReturn;
+  const grossCost =
+    multiLevelSizing && multiLevelSizing.commonSize > 0
+      ? round4(
+          (multiLevelSizing.polymarket.notionalUsd + multiLevelSizing.kalshi.notionalUsd) / multiLevelSizing.commonSize,
+        )
+      : polyPrice !== null && kalshiPrice !== null
+        ? round4(polyPrice + kalshiPrice)
+        : null;
+  const projectedNetProfitUsd =
+    grossCost === null ? null : (multiLevelSizing?.projectedNetProfitUsd ?? balancedSizing.projectedNetProfitUsd);
+  const projectedNetReturn =
+    grossCost === null ? null : (multiLevelSizing?.projectedNetReturn ?? balancedSizing.projectedNetReturn);
   const totalCostUsd = multiLevelSizing?.totalCostUsd ?? balancedSizing.totalCostUsd;
   const worstFillCostUsd = multiLevelSizing?.worstFillCostUsd ?? totalCostUsd;
   const fatalMismatchPnlUsd = Math.min(polyUnits, kalshiUnits) > 0 ? round4(-worstFillCostUsd) : null;
   const conservativeExpectedPnlUsd = enforceMismatchRisk
-    ? multiLevelSizing?.conservativeNetProfitUsd ?? mismatchRiskEstimate?.conservativePnlUsd ?? null
+    ? (multiLevelSizing?.conservativeNetProfitUsd ?? mismatchRiskEstimate?.conservativePnlUsd ?? null)
     : mismatchRiskEstimate?.available
       ? mismatchRiskEstimate.conservativePnlUsd
       : projectedNetProfitUsd;
-  const worstCaseProfitUsd = Math.min(polyUnits, kalshiUnits) > 0
-    ? round4(Math.min(polyUnits, kalshiUnits) - worstFillCostUsd)
-    : projectedNetProfitUsd;
+  const worstCaseProfitUsd =
+    Math.min(polyUnits, kalshiUnits) > 0
+      ? round4(Math.min(polyUnits, kalshiUnits) - worstFillCostUsd)
+      : projectedNetProfitUsd;
 
   if (grossCost !== null && grossCost > settings.grossEntryThreshold) {
     reasons.push("Seuil brut non atteint");
@@ -381,19 +377,19 @@ function buildSignal({
     projectedNetProfitUsd !== null &&
     projectedNetProfitUsd + ORDER_SIZE_TOLERANCE < settings.minProjectedNetProfitUsd
   ) {
-    reasons.push(`Profit net projeté trop faible (${projectedNetProfitUsd.toFixed(2)} < ${settings.minProjectedNetProfitUsd.toFixed(2)})`);
+    reasons.push(
+      `Profit net projeté trop faible (${projectedNetProfitUsd.toFixed(2)} < ${settings.minProjectedNetProfitUsd.toFixed(2)})`,
+    );
   }
-  if (
-    projectedNetReturn !== null &&
-    projectedNetReturn + ORDER_SIZE_TOLERANCE < settings.minProjectedNetReturn
-  ) {
-    reasons.push(`ROI net projeté trop faible (${(projectedNetReturn * 100).toFixed(2)}% < ${(settings.minProjectedNetReturn * 100).toFixed(2)}%)`);
+  if (projectedNetReturn !== null && projectedNetReturn + ORDER_SIZE_TOLERANCE < settings.minProjectedNetReturn) {
+    reasons.push(
+      `ROI net projeté trop faible (${(projectedNetReturn * 100).toFixed(2)}% < ${(settings.minProjectedNetReturn * 100).toFixed(2)}%)`,
+    );
   }
-  if (
-    worstCaseProfitUsd !== null &&
-    worstCaseProfitUsd + ORDER_SIZE_TOLERANCE < settings.minWorstCaseProfitUsd
-  ) {
-    reasons.push(`Profit worst-case trop faible (${worstCaseProfitUsd.toFixed(2)} < ${settings.minWorstCaseProfitUsd.toFixed(2)})`);
+  if (worstCaseProfitUsd !== null && worstCaseProfitUsd + ORDER_SIZE_TOLERANCE < settings.minWorstCaseProfitUsd) {
+    reasons.push(
+      `Profit worst-case trop faible (${worstCaseProfitUsd.toFixed(2)} < ${settings.minWorstCaseProfitUsd.toFixed(2)})`,
+    );
   }
   if (
     Math.min(polyUnits, kalshiUnits) > 0 &&
@@ -447,7 +443,7 @@ function buildSignal({
 
   if (settings.mismatchRiskMode === "enforce" && !enforceUsableMismatchRisk) {
     reasons.push(
-      `Modèle mismatch indisponible (${mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated") ? "non calibré" : mismatchRiskEstimate?.reason ?? "non initialisé"})`,
+      `Modèle mismatch indisponible (${mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated") ? "non calibré" : (mismatchRiskEstimate?.reason ?? "non initialisé")})`,
     );
   }
   if (
@@ -474,11 +470,7 @@ function buildSignal({
   const previousCost = lastEntryCosts[combination];
   const improvementFromLastEntry =
     grossCost === null || previousCost === undefined ? null : round4(previousCost - grossCost);
-  if (
-    grossCost !== null &&
-    previousCost !== undefined &&
-    grossCost > previousCost - settings.reentryImprovement
-  ) {
+  if (grossCost !== null && previousCost !== undefined && grossCost > previousCost - settings.reentryImprovement) {
     reasons.push("Pas d'amélioration suffisante");
   }
 
@@ -591,22 +583,15 @@ function computeMismatchGuardBase(
     mismatchGuardMaxVenueDisagreementPct,
   } = settings;
   const mismatchPhase: MismatchGuardPhase =
-    secondsElapsed !== null && secondsElapsed >= mismatchGuardPhase2StartSeconds
-      ? "late"
-      : "standard";
-  const activeMinMoveBps =
-    mismatchPhase === "late" ? mismatchGuardPhase2MinMoveBps : mismatchGuardMinMoveBps;
+    secondsElapsed !== null && secondsElapsed >= mismatchGuardPhase2StartSeconds ? "late" : "standard";
+  const activeMinMoveBps = mismatchPhase === "late" ? mismatchGuardPhase2MinMoveBps : mismatchGuardMinMoveBps;
 
   const tooEarly = secondsElapsed !== null && secondsElapsed < mismatchGuardMinElapsedSeconds;
-  const disagreementHigh =
-    venueDisagreementPct !== null && venueDisagreementPct > mismatchGuardMaxVenueDisagreementPct;
+  const disagreementHigh = venueDisagreementPct !== null && venueDisagreementPct > mismatchGuardMaxVenueDisagreementPct;
   const disagreementMedium =
-    venueDisagreementPct !== null &&
-    venueDisagreementPct > mismatchGuardMaxVenueDisagreementPct * 0.6;
+    venueDisagreementPct !== null && venueDisagreementPct > mismatchGuardMaxVenueDisagreementPct * 0.6;
   const missingReferenceSignal =
-    chainlinkLivePriceUsd === null ||
-    observedSlotOpenPriceUsd === null ||
-    kalshiTargetPriceUsd === null;
+    chainlinkLivePriceUsd === null || observedSlotOpenPriceUsd === null || kalshiTargetPriceUsd === null;
   const hasAnyMismatchSignal =
     secondsElapsed !== null ||
     venueDisagreementPct !== null ||
@@ -676,13 +661,7 @@ function computeMismatchGuard(
   }
 
   const mismatchRisk: LiveOpportunity["mismatchRisk"] =
-    action === "block"
-      ? "high"
-      : action === "reduce_size"
-        ? "medium"
-        : base.hasAnyMismatchSignal
-          ? "low"
-          : null;
+    action === "block" ? "high" : action === "reduce_size" ? "medium" : base.hasAnyMismatchSignal ? "low" : null;
 
   return {
     mismatchGuardAction: action,
@@ -702,10 +681,7 @@ function computeMismatchGuard(
   };
 }
 
-function computeMismatchSizeMultiplierCap(
-  base: MismatchGuardBaseMetrics,
-  deadZoneDistanceBps: number | null,
-) {
+function computeMismatchSizeMultiplierCap(base: MismatchGuardBaseMetrics, deadZoneDistanceBps: number | null) {
   let multiplierCap = 1;
 
   if (deadZoneDistanceBps !== null && base.activeMinMoveBps > 0) {
@@ -747,12 +723,7 @@ function computeDeadZoneMetrics({
     };
   }
 
-  const referencePayoutCount = countReferencePayouts(
-    combination,
-    livePrice,
-    observedSlotOpenPrice,
-    kalshiTargetPrice,
-  );
+  const referencePayoutCount = countReferencePayouts(combination, livePrice, observedSlotOpenPrice, kalshiTargetPrice);
   const deadZoneBounds = getDeadZoneBounds(combination, observedSlotOpenPrice, kalshiTargetPrice);
   if (!deadZoneBounds) {
     return {
@@ -788,22 +759,14 @@ function countReferencePayouts(
   kalshiTargetPrice: number,
 ) {
   const polymarketWins =
-    combination === "POLY_UP_KALSHI_NO"
-      ? livePrice > observedSlotOpenPrice
-      : livePrice < observedSlotOpenPrice;
+    combination === "POLY_UP_KALSHI_NO" ? livePrice > observedSlotOpenPrice : livePrice < observedSlotOpenPrice;
   const kalshiWins =
-    combination === "POLY_UP_KALSHI_NO"
-      ? livePrice <= kalshiTargetPrice
-      : livePrice > kalshiTargetPrice;
+    combination === "POLY_UP_KALSHI_NO" ? livePrice <= kalshiTargetPrice : livePrice > kalshiTargetPrice;
 
   return Number(polymarketWins) + Number(kalshiWins);
 }
 
-function getDeadZoneBounds(
-  combination: PairCombination,
-  observedSlotOpenPrice: number,
-  kalshiTargetPrice: number,
-) {
+function getDeadZoneBounds(combination: PairCombination, observedSlotOpenPrice: number, kalshiTargetPrice: number) {
   if (combination === "POLY_UP_KALSHI_NO" && kalshiTargetPrice < observedSlotOpenPrice) {
     return {
       lower: kalshiTargetPrice,
@@ -834,11 +797,7 @@ function getMarketAlignmentReason(polymarket: PolymarketQuote, kalshi: KalshiQuo
     return kalshi.availabilityReason ?? "Marché Kalshi du créneau courant indisponible";
   }
 
-  if (
-    polymarket.ref.slotKey &&
-    kalshi.ref.slotKey &&
-    polymarket.ref.slotKey !== kalshi.ref.slotKey
-  ) {
+  if (polymarket.ref.slotKey && kalshi.ref.slotKey && polymarket.ref.slotKey !== kalshi.ref.slotKey) {
     return "Marchés non alignés sur le même créneau";
   }
 

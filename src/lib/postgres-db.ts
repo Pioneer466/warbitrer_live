@@ -1,17 +1,19 @@
 import { Pool, PoolClient, types } from "pg";
 
-import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import {
+  assertDatabaseSchemaCompatible,
+  getDatabaseMigrationStatus,
+  runDatabaseMigrations,
+  type DatabaseMigration,
+  type PgQueryable,
+} from "@/lib/db-migrations";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import type { DatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import { enrichPnlSnapshot } from "@/lib/pnl";
 import { isRiskActivePosition } from "@/lib/positions";
 import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
-import { DEFAULT_GLOBAL_RISK_CONFIG, normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
-import {
-  SLOT_RESOLUTION_RETENTION_MS,
-  type OracleSlotSample,
-  type SlotResolutionRecord,
-} from "@/lib/oracle-history";
+import { normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
+import { SLOT_RESOLUTION_RETENTION_MS, type OracleSlotSample, type SlotResolutionRecord } from "@/lib/oracle-history";
 import type {
   MarketAsset,
   DatabaseMaintenanceSummary,
@@ -31,6 +33,7 @@ import type {
   NotificationDelivery,
   OrderAttempt,
   OrderIntent,
+  OpportunitySnapshot,
   PairCombination,
   PnlSnapshot,
   FillQualitySummary,
@@ -50,12 +53,256 @@ import type {
 
 types.setTypeParser(20, (value) => Number(value));
 
+type NotificationDeliveryRow = {
+  id: number;
+  asset: MarketAsset | null;
+  channel: NotificationDelivery["channel"];
+  kind: NotificationDelivery["kind"];
+  dedupe_key: string;
+  message: string;
+  payload_json: NotificationDelivery["payload"];
+  status: NotificationDelivery["status"];
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+  sent_at: number | null;
+};
+
+type OpportunitySnapshotRow = {
+  id: number;
+  asset: MarketAsset;
+  slot_key: string;
+  slot_start_ts: number;
+  slot_end_ts: number;
+  captured_at: number;
+  polymarket_json: OpportunitySnapshot["polymarket"];
+  kalshi_json: OpportunitySnapshot["kalshi"];
+  opportunities_json: OpportunitySnapshot["opportunities"] | null;
+};
+
+type SlotResolutionRow = {
+  asset: SlotResolutionRecord["asset"];
+  slot_key: string;
+  slot_start_ts: number;
+  slot_end_ts: number;
+  polymarket_slug: string;
+  polymarket_market_ref: string | null;
+  kalshi_market_ref: string | null;
+  polymarket_resolution: SlotResolutionRecord["polymarketResolution"];
+  kalshi_resolution: SlotResolutionRecord["kalshiResolution"];
+  polymarket_settlement_value_usd: number | null;
+  kalshi_settlement_value_usd: number | null;
+  first_observed_at: number;
+  updated_at: number;
+  resolved_at: number | null;
+  source: string;
+  raw_json: Record<string, unknown> | null;
+};
+
+type OrderIntentRow = {
+  id: string;
+  asset: MarketAsset;
+  shadow: boolean;
+  slot_key: string;
+  slot_start_ts: number;
+  slot_end_ts: number;
+  combination: OrderIntent["combination"];
+  status: OrderIntent["status"];
+  created_at: number;
+  updated_at: number;
+  resolved_at: number | null;
+  primary_venue: OrderIntent["primaryVenue"];
+  hedge_venue: OrderIntent["hedgeVenue"];
+  gross_cost: number;
+  target_notional_usd: number;
+  entry_sizing_reason: string | null;
+  max_slippage_bps: number;
+  failure_reason: string | null;
+  projected_net_profit_usd: number | null;
+  mismatch_p_fatal: number | null;
+  mismatch_p_fatal_upper: number | null;
+  mismatch_model_version: string | null;
+  fatal_mismatch_pnl_usd: number | null;
+  conservative_expected_pnl_usd: number | null;
+  fatal_loss_exposure_usd: number | null;
+  mismatch_risk_audit_json: OrderIntent["mismatchRiskAudit"];
+  shadow_execution_json: OrderIntent["shadowExecution"];
+  realized_pnl_usd: number | null;
+  roi: number | null;
+  poly_resolution: OrderIntent["polyResolution"];
+  kalshi_resolution: OrderIntent["kalshiResolution"];
+  legs_json: OrderIntent["legs"];
+};
+
+type VenueOrderRow = {
+  id: string;
+  asset: MarketAsset;
+  shadow: boolean;
+  intent_id: string;
+  venue: LiveOrder["venue"];
+  venue_order_id: string;
+  client_order_id: string | null;
+  market_ref: string;
+  token_id: string | null;
+  side: LiveOrder["side"];
+  outcome: LiveOrder["outcome"];
+  order_type: string;
+  requested_price: number | null;
+  requested_size: number;
+  filled_size: number;
+  average_fill_price: number | null;
+  fee_usd: number | null;
+  status: LiveOrder["status"];
+  created_at: number;
+  updated_at: number;
+  raw_json: Record<string, unknown> | null;
+};
+
+type OrderAttemptRow = {
+  id: string;
+  asset: MarketAsset;
+  shadow: boolean;
+  intent_id: string;
+  leg_id: string;
+  stage: string;
+  venue: OrderAttempt["venue"];
+  side: OrderAttempt["side"];
+  order_type: string;
+  client_order_id: string;
+  venue_order_id: string | null;
+  status: OrderAttempt["status"];
+  truth_status: string | null;
+  request_json: Record<string, unknown> | null;
+  result_json: Record<string, unknown> | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+type FillRow = {
+  id: string;
+  asset: MarketAsset;
+  shadow: boolean;
+  intent_id: string;
+  venue: LiveFill["venue"];
+  venue_order_id: string;
+  trade_id: string;
+  market_ref: string;
+  token_id: string | null;
+  side: LiveFill["side"];
+  outcome: LiveFill["outcome"];
+  price: number;
+  size: number;
+  fee_usd: number;
+  liquidity: LiveFill["liquidity"];
+  filled_at: number;
+  raw_json: Record<string, unknown> | null;
+};
+
+type PositionRow = {
+  id: string;
+  asset: MarketAsset;
+  venue: PositionSnapshot["venue"];
+  market_ref: string;
+  outcome: PositionSnapshot["outcome"];
+  size: number;
+  average_price: number | null;
+  current_price: number | null;
+  current_value_usd: number;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  redeemable: boolean;
+  mergeable: boolean;
+  updated_at: number;
+  raw_json: Record<string, unknown> | null;
+};
+
+type PnlSnapshotRow = {
+  id: number;
+  captured_at: number;
+  equity_usd: number;
+  cash_usd: number;
+  positions_value_usd: number;
+  realized_pnl_usd: number;
+  unrealized_pnl_usd: number;
+  fees_usd: number;
+  venue_breakdown_json: PnlSnapshot["venueBreakdown"];
+};
+
+type StablePnlChangeRow = {
+  intent_id: string;
+  asset: MarketAsset;
+  combination: PairCombination;
+  changed_at: number;
+  realized_pnl_usd: unknown;
+  equity_usd: unknown;
+  cash_usd: unknown;
+  positions_value_usd: unknown;
+  strategy_pnl_usd: unknown;
+  account_delta_usd: unknown;
+  baseline_equity_usd: unknown;
+  peak_equity_usd: unknown;
+  drawdown_usd: unknown;
+  roi: unknown;
+  target_notional_usd: unknown;
+  stability_json: Record<string, unknown> | null;
+};
+
+type MarketFillQualityEventRow = {
+  id: string;
+  asset: MarketAsset;
+  slot_key: string;
+  intent_id: string | null;
+  combination: PairCombination | null;
+  primary_venue: Venue | null;
+  hedge_venue: Venue | null;
+  outcome: MarketFillQualityEvent["outcome"];
+  stage: string;
+  slippage_bps: unknown;
+  payload_json: Record<string, unknown> | null;
+  created_at: number;
+};
+
+type BridgeTransferRow = {
+  id: string;
+  venue: BridgeTransfer["venue"];
+  status: BridgeTransfer["status"];
+  created_at: number;
+  updated_at: number;
+  quote_id: string | null;
+  source_chain: string | null;
+  source_asset: string | null;
+  target_asset: string;
+  amount_in_usd: number | null;
+  amount_out_usd: number | null;
+  tx_hash: string | null;
+  deposit_addresses_json: BridgeTransfer["depositAddresses"];
+  raw_json: Record<string, unknown> | null;
+};
+
 let poolSingleton: Pool | null = null;
-let bootstrapPromise: Promise<void> | null = null;
-const BOOTSTRAP_LOCK_NAMESPACE = 4_298;
-const BOOTSTRAP_LOCK_KEY = 1;
+let schemaCompatibilityPromise: Promise<void> | null = null;
 const LIVE_EXECUTION_LOCK_NAMESPACE = 4_298;
 const LIVE_EXECUTION_LOCK_KEY = 2;
+
+// SHA-256 of the immutable block delimited by migration-checksum markers below.
+const LEGACY_SCHEMA_BASELINE_CHECKSUM = "b9059dd24e724ac105f13482bc09495738664645af3b0cc1ade80d66626c1b18";
+const ORDER_TRUTH_REVISION_CHECKSUM = "406db20ffc6f352abead966d06d4811b6531771ef6665616fd3c334bb35e8310";
+
+export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
+  {
+    version: 1,
+    name: "legacy_schema_baseline",
+    checksum: LEGACY_SCHEMA_BASELINE_CHECKSUM,
+    up: applyLegacySchemaBaselineMigration,
+  },
+  {
+    version: 2,
+    name: "order_truth_revision",
+    checksum: ORDER_TRUTH_REVISION_CHECKSUM,
+    up: applyOrderTruthRevisionMigration,
+  },
+];
 
 export async function getPgDb() {
   if (!process.env.DATABASE_URL) {
@@ -71,36 +318,121 @@ export async function getPgDb() {
     });
   }
 
-  if (!bootstrapPromise) {
-    bootstrapPromise = bootstrapDatabase(poolSingleton).catch((error) => {
-      bootstrapPromise = null;
-      throw error;
-    });
+  if (!schemaCompatibilityPromise) {
+    schemaCompatibilityPromise = assertDatabaseSchemaCompatible(poolSingleton, DATABASE_MIGRATIONS)
+      .then(() => undefined)
+      .catch((error) => {
+        schemaCompatibilityPromise = null;
+        throw error;
+      });
   }
 
-  await bootstrapPromise;
+  await schemaCompatibilityPromise;
   return poolSingleton;
 }
 
-function resolvePgPoolMax() {
-  const raw = process.env.PG_POOL_MAX;
+export function resolvePgPoolMax(raw = process.env.PG_POOL_MAX) {
   if (!raw) {
     return 3;
   }
 
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed)) {
-    return 3;
+  if (!Number.isSafeInteger(parsed)) {
+    throw new Error(`PG_POOL_MAX doit etre un entier, valeur recue: ${raw}`);
   }
 
-  return Math.min(50, Math.max(1, Math.floor(parsed)));
+  if (parsed < 2) {
+    throw new Error("PG_POOL_MAX doit etre superieur ou egal a 2 pour eviter un deadlock des advisory locks");
+  }
+
+  return Math.min(50, parsed);
 }
 
-async function bootstrapDatabase(pool: Pool) {
-  await withBootstrapLock(pool, async () => {
-    const now = Date.now();
+export async function migratePostgresDatabase(pool: Pool) {
+  return runDatabaseMigrations(pool, DATABASE_MIGRATIONS);
+}
 
-    await pool.query(`
+export async function getPostgresMigrationStatus(pool: Pool) {
+  return getDatabaseMigrationStatus(pool, DATABASE_MIGRATIONS);
+}
+
+/* migration-checksum:start:1 */
+const MIGRATION_V1_MARKET_ASSETS = ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"] as const;
+
+const MIGRATION_V1_DEFAULT_GLOBAL_RISK_CONFIG: GlobalRiskConfig = {
+  clusterExpectedFatalLossShare: 0.05,
+  clusterExpectedFatalLossCapUsd: 25,
+  clusterAbsoluteFatalLossShare: 0.15,
+  clusterAbsoluteFatalLossCapUsd: 75,
+  balanceMaxAgeMs: 10_000,
+  oracleMaxAgeMs: 2_500,
+};
+
+const MIGRATION_V1_DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
+  enableTrading: false,
+  shadowMode: true,
+  maxPairNotionalUsd: 50,
+  maxLegCapitalShare: 0.7,
+  maxSignalAgeMs: 1_000,
+  grossEntryThreshold: 0.93,
+  minProjectedNetProfitUsd: 0.25,
+  minProjectedNetReturn: 0.02,
+  minWorstCaseProfitUsd: 0.25,
+  maxLegPrice: 0.49,
+  reentryImprovement: 0.01,
+  pollingIntervalMs: 1_000,
+  minOrderSize: 5,
+  maxSlippageBps: 30,
+  primarySelectionMode: "shadow",
+  minimumEntryDepthCoverageRatio: 0.5,
+  adaptiveSlippageTightBps: 15,
+  adaptiveSlippageDefaultBps: 30,
+  adaptiveSlippageThinBps: 60,
+  dailyLossCapEnabled: true,
+  dailyLossHardCapUsd: 20,
+  immediateOrderConfirmationTimeoutMs: 8_000,
+  executionPriceBuffer: 0.01,
+  kalshiDepthHeadroomContracts: 2,
+  kalshiPrimaryDepthSafetyFactor: 0.7,
+  kalshiPrimaryPriceTicksSlippage: 2,
+  kalshiPrimaryProbeClipContracts: 5,
+  kalshiPrimaryMaxClipContracts: 10,
+  kalshiPrimaryMaxClips: 4,
+  polymarketHedgeDepthSafetyFactor: 0.8,
+  polymarketHedgeHeadroomShares: 1,
+  polymarketHedgeBookMaxAgeMs: 500,
+  primaryRetryAttempts: 2,
+  primaryRetryDelayMs: 200,
+  hedgeRetryAttempts: 3,
+  hedgeRetryDelayMs: 350,
+  hedgeRescueEnabled: true,
+  hedgeRescueMaxAttempts: 3,
+  hedgeRescueDelayMs: 150,
+  hedgeRescueMaxLossUsd: 1,
+  hedgeRescueMinAdvantageUsd: 0.05,
+  hedgeRescueAllowPartial: true,
+  forcedUnwindEnabled: true,
+  forcedUnwindMaxAttempts: 3,
+  forcedUnwindTickLadder: [1, 3, 6],
+  forcedUnwindMaxLossUsd: 2,
+  forcedUnwindHoldSecondsToSettlement: 45,
+  entryCutoffSeconds: 180,
+  maxOpenIntentsPerSlot: 1,
+  maxVenueExposureUsd: 1_000,
+  polyBridgeLowWaterUsdc: 250,
+  mismatchGuardEnabled: true,
+  mismatchGuardMinElapsedSeconds: 60,
+  mismatchGuardMinMoveBps: 5,
+  mismatchGuardPhase2StartSeconds: 480,
+  mismatchGuardPhase2MinMoveBps: 10,
+  mismatchGuardMaxVenueDisagreementPct: 0.12,
+  mismatchRiskMode: "shadow",
+};
+
+async function applyLegacySchemaBaselineMigration(pool: PgQueryable) {
+  const now = Date.now();
+
+  await pool.query(`
     CREATE TABLE IF NOT EXISTS strategy_config (
       id INTEGER PRIMARY KEY,
       payload JSONB NOT NULL,
@@ -507,36 +839,36 @@ async function bootstrapDatabase(pool: Pool) {
       ON execution_candidates(expires_at DESC, projected_net_profit_usd DESC);
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE oracle_slot_samples
     ADD COLUMN IF NOT EXISTS chainlink_start_captured_at BIGINT
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE worker_states
     ADD COLUMN IF NOT EXISTS loop_health_json JSONB NOT NULL DEFAULT '{}'::jsonb
   `);
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       INSERT INTO global_risk_config (id, payload, updated_at)
       VALUES (1, $1::jsonb, $2)
       ON CONFLICT (id) DO NOTHING
     `,
-      [JSON.stringify(DEFAULT_GLOBAL_RISK_CONFIG), now],
-    );
+    [JSON.stringify(MIGRATION_V1_DEFAULT_GLOBAL_RISK_CONFIG), now],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       INSERT INTO strategy_config (id, payload, updated_at)
       VALUES (1, $1::jsonb, $2)
       ON CONFLICT (id) DO NOTHING
     `,
-      [JSON.stringify(DEFAULT_STRATEGY_CONFIG), now],
-    );
+    [JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG), now],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       INSERT INTO worker_state (
         id, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
         last_error, readiness_status, readiness_json
@@ -544,154 +876,154 @@ async function bootstrapDatabase(pool: Pool) {
       VALUES (1, 'idle', NULL, NULL, NULL, NULL, NULL, 'blocked', '[]'::jsonb)
       ON CONFLICT (id) DO NOTHING
     `,
-    );
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
       VALUES ('global', false, NULL, NULL, NULL)
       ON CONFLICT (key) DO NOTHING
     `,
-    );
+  );
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE opportunity_snapshots
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE opportunity_snapshots
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE opportunity_snapshots
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS opportunity_snapshots_asset_slot_idx
     ON opportunity_snapshots(asset, slot_key, captured_at DESC)
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE order_intents
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE order_intents
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS order_intents_asset_slot_idx
     ON order_intents(asset, slot_key, created_at DESC)
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS order_intents_open_asset_updated_idx
     ON order_intents(asset, updated_at DESC)
     WHERE status NOT IN ('settled', 'failed', 'skipped', 'canceled', 'unwound')
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE venue_orders
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE venue_orders
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE venue_orders
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS venue_orders_asset_updated_idx
     ON venue_orders(asset, updated_at DESC)
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS venue_orders_open_asset_updated_idx
     ON venue_orders(asset, updated_at DESC)
     WHERE status IN ('pending', 'live', 'partially_filled')
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE fills
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE fills
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE fills
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS fills_asset_filled_idx
     ON fills(asset, filled_at DESC)
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE positions
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE positions
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE positions
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS positions_venue_asset_idx
     ON positions(venue, asset, updated_at DESC)
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE settlements
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     UPDATE settlements
     SET asset = 'btc'
     WHERE asset IS NULL
   `);
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE settlements
     ALTER COLUMN asset SET NOT NULL
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS settlements_asset_settled_idx
     ON settlements(asset, settled_at DESC)
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE run_events
     ADD COLUMN IF NOT EXISTS asset TEXT
   `);
-    await pool.query(`
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS run_events_asset_created_idx
     ON run_events(asset, created_at DESC)
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE order_intents
     ADD COLUMN IF NOT EXISTS entry_sizing_reason TEXT
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE order_intents
       ADD COLUMN IF NOT EXISTS mismatch_p_fatal DOUBLE PRECISION,
       ADD COLUMN IF NOT EXISTS mismatch_p_fatal_upper DOUBLE PRECISION,
@@ -703,168 +1035,169 @@ async function bootstrapDatabase(pool: Pool) {
       ADD COLUMN IF NOT EXISTS shadow_execution_json JSONB
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE venue_orders
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-    await pool.query(`
+  await pool.query(`
     ALTER TABLE fills
     ADD COLUMN IF NOT EXISTS shadow BOOLEAN NOT NULL DEFAULT false
   `);
 
-    const legacyStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
-      "SELECT payload FROM strategy_config WHERE id = 1 LIMIT 1",
-    );
-    const legacyStrategyPayload = normalizeSettings(
-      legacyStrategyConfig.rows[0]?.payload ?? DEFAULT_STRATEGY_CONFIG,
-    );
-    const seededEthStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
-      "SELECT payload FROM strategy_configs WHERE asset = 'eth' LIMIT 1",
-    );
-    const nextStrategyConfigs = buildBootstrapStrategyConfigs(
-      legacyStrategyPayload,
-      seededEthStrategyConfig.rows[0]?.payload,
-    );
+  const legacyStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
+    "SELECT payload FROM strategy_config WHERE id = 1 LIMIT 1",
+  );
+  const legacyStrategyPayload = {
+    ...MIGRATION_V1_DEFAULT_STRATEGY_CONFIG,
+    ...(legacyStrategyConfig.rows[0]?.payload ?? {}),
+  };
+  const seededEthStrategyConfig = await pool.query<{ payload: Partial<StrategyConfig> }>(
+    "SELECT payload FROM strategy_configs WHERE asset = 'eth' LIMIT 1",
+  );
+  const nextStrategyConfigs = buildMigrationV1StrategyConfigs(
+    legacyStrategyPayload,
+    seededEthStrategyConfig.rows[0]?.payload,
+  );
 
-    for (const asset of MARKET_ASSETS) {
-      await pool.query(
-        `
+  for (const asset of MIGRATION_V1_MARKET_ASSETS) {
+    await pool.query(
+      `
         INSERT INTO strategy_configs (asset, payload, updated_at)
         VALUES ($1, $2::jsonb, $3)
         ON CONFLICT (asset) DO NOTHING
       `,
-        [asset, JSON.stringify(nextStrategyConfigs[asset]), now],
-      );
-    }
+      [asset, JSON.stringify(nextStrategyConfigs[asset]), now],
+    );
+  }
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       UPDATE strategy_configs
       SET
         payload = jsonb_set(payload, '{mismatchGuardEnabled}', 'true'::jsonb, true),
         updated_at = $1
       WHERE NOT (payload ? 'mismatchGuardEnabled')
     `,
-      [now],
-    );
+    [now],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       UPDATE strategy_configs
       SET
         payload = jsonb_set(payload, '{kalshiPrimaryDepthSafetyFactor}', $2::jsonb, true),
         updated_at = $1
       WHERE NOT (payload ? 'kalshiPrimaryDepthSafetyFactor')
     `,
-      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.kalshiPrimaryDepthSafetyFactor)],
-    );
+    [now, JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG.kalshiPrimaryDepthSafetyFactor)],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       UPDATE strategy_configs
       SET
         payload = jsonb_set(payload, '{kalshiPrimaryProbeClipContracts}', $2::jsonb, true),
         updated_at = $1
       WHERE NOT (payload ? 'kalshiPrimaryProbeClipContracts')
     `,
-      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.kalshiPrimaryProbeClipContracts)],
-    );
+    [now, JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG.kalshiPrimaryProbeClipContracts)],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       UPDATE strategy_configs
       SET
         payload = jsonb_set(payload, '{maxLegCapitalShare}', $2::jsonb, true),
         updated_at = $1
       WHERE NOT (payload ? 'maxLegCapitalShare')
     `,
-      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare)],
-    );
+    [now, JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare)],
+  );
 
-    await pool.query(
-      `
+  await pool.query(
+    `
       UPDATE strategy_configs
       SET
         payload = jsonb_set(payload, '{maxSignalAgeMs}', $2::jsonb, true),
         updated_at = $1
       WHERE NOT (payload ? 'maxSignalAgeMs')
     `,
-      [now, JSON.stringify(DEFAULT_STRATEGY_CONFIG.maxSignalAgeMs)],
-    );
+    [now, JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG.maxSignalAgeMs)],
+  );
 
-    for (const key of [
-      "forcedUnwindEnabled",
-      "forcedUnwindMaxAttempts",
-      "forcedUnwindTickLadder",
-      "forcedUnwindMaxLossUsd",
-      "forcedUnwindHoldSecondsToSettlement",
-      "polymarketHedgeDepthSafetyFactor",
-      "polymarketHedgeHeadroomShares",
-      "polymarketHedgeBookMaxAgeMs",
-      "hedgeRescueEnabled",
-      "hedgeRescueMaxAttempts",
-      "hedgeRescueDelayMs",
-      "hedgeRescueMaxLossUsd",
-      "hedgeRescueMinAdvantageUsd",
-      "hedgeRescueAllowPartial",
-      "primarySelectionMode",
-      "minimumEntryDepthCoverageRatio",
-      "adaptiveSlippageTightBps",
-      "adaptiveSlippageDefaultBps",
-      "adaptiveSlippageThinBps",
-      "dailyLossCapEnabled",
-      "dailyLossHardCapUsd",
-      "mismatchRiskMode",
-    ] as const) {
-      await pool.query(
-        `
+  for (const key of [
+    "forcedUnwindEnabled",
+    "forcedUnwindMaxAttempts",
+    "forcedUnwindTickLadder",
+    "forcedUnwindMaxLossUsd",
+    "forcedUnwindHoldSecondsToSettlement",
+    "polymarketHedgeDepthSafetyFactor",
+    "polymarketHedgeHeadroomShares",
+    "polymarketHedgeBookMaxAgeMs",
+    "hedgeRescueEnabled",
+    "hedgeRescueMaxAttempts",
+    "hedgeRescueDelayMs",
+    "hedgeRescueMaxLossUsd",
+    "hedgeRescueMinAdvantageUsd",
+    "hedgeRescueAllowPartial",
+    "primarySelectionMode",
+    "minimumEntryDepthCoverageRatio",
+    "adaptiveSlippageTightBps",
+    "adaptiveSlippageDefaultBps",
+    "adaptiveSlippageThinBps",
+    "dailyLossCapEnabled",
+    "dailyLossHardCapUsd",
+    "mismatchRiskMode",
+  ] as const) {
+    await pool.query(
+      `
         UPDATE strategy_configs
         SET
           payload = jsonb_set(payload, $2::text[], $3::jsonb, true),
           updated_at = $1
         WHERE NOT (payload ? $4)
       `,
-        [now, [key], JSON.stringify(DEFAULT_STRATEGY_CONFIG[key]), key],
-      );
-    }
+      [now, [key], JSON.stringify(MIGRATION_V1_DEFAULT_STRATEGY_CONFIG[key]), key],
+    );
+  }
 
-    const legacyWorkerState = await pool.query<{
-      phase: WorkerState["phase"];
-      current_slot_key: string | null;
-      last_scan_at: number | null;
-      last_execute_at: number | null;
-      last_reconcile_at: number | null;
-      last_error: string | null;
-      readiness_status: WorkerState["readinessStatus"];
-      readiness_json: WorkerState["readiness"];
-    }>(
-      `
+  const legacyWorkerState = await pool.query<{
+    phase: WorkerState["phase"];
+    current_slot_key: string | null;
+    last_scan_at: number | null;
+    last_execute_at: number | null;
+    last_reconcile_at: number | null;
+    last_error: string | null;
+    readiness_status: WorkerState["readinessStatus"];
+    readiness_json: WorkerState["readiness"];
+  }>(
+    `
       SELECT phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
         last_error, readiness_status, readiness_json
       FROM worker_state
       WHERE id = 1
       LIMIT 1
     `,
-    );
+  );
 
-    for (const asset of MARKET_ASSETS) {
-      const fallbackState =
-        asset === "btc" && legacyWorkerState.rows[0]
-          ? legacyWorkerState.rows[0]
-          : {
-              phase: "idle" as const,
-              current_slot_key: null,
-              last_scan_at: null,
-              last_execute_at: null,
-              last_reconcile_at: null,
-              last_error: null,
-              readiness_status: "blocked" as const,
-              readiness_json: [],
-            };
+  for (const asset of MIGRATION_V1_MARKET_ASSETS) {
+    const fallbackState =
+      asset === "btc" && legacyWorkerState.rows[0]
+        ? legacyWorkerState.rows[0]
+        : {
+            phase: "idle" as const,
+            current_slot_key: null,
+            last_scan_at: null,
+            last_execute_at: null,
+            last_reconcile_at: null,
+            last_error: null,
+            readiness_status: "blocked" as const,
+            readiness_json: [],
+          };
 
-      await pool.query(
-        `
+    await pool.query(
+      `
         INSERT INTO worker_states (
           asset, phase, current_slot_key, last_scan_at, last_execute_at, last_reconcile_at,
           last_error, readiness_status, readiness_json
@@ -872,56 +1205,97 @@ async function bootstrapDatabase(pool: Pool) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
         ON CONFLICT (asset) DO NOTHING
       `,
-        [
-          asset,
-          fallbackState.phase,
-          fallbackState.current_slot_key,
-          fallbackState.last_scan_at,
-          fallbackState.last_execute_at,
-          fallbackState.last_reconcile_at,
-          fallbackState.last_error,
-          fallbackState.readiness_status,
-          JSON.stringify(fallbackState.readiness_json ?? []),
-        ],
-      );
-    }
+      [
+        asset,
+        fallbackState.phase,
+        fallbackState.current_slot_key,
+        fallbackState.last_scan_at,
+        fallbackState.last_execute_at,
+        fallbackState.last_reconcile_at,
+        fallbackState.last_error,
+        fallbackState.readiness_status,
+        JSON.stringify(fallbackState.readiness_json ?? []),
+      ],
+    );
+  }
 
-    for (const asset of MARKET_ASSETS) {
-      await pool.query(
-        `
+  for (const asset of MIGRATION_V1_MARKET_ASSETS) {
+    await pool.query(
+      `
         INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
         VALUES ($1, false, NULL, NULL, NULL)
         ON CONFLICT (key) DO NOTHING
       `,
-        [`asset:${asset}`],
-      );
-    }
-  });
-}
-
-async function withBootstrapLock<T>(pool: Pool, work: () => Promise<T>): Promise<T> {
-  const client = await pool.connect();
-
-  try {
-    await acquireBootstrapLock(client);
-    return await work();
-  } finally {
-    await releaseBootstrapLock(client);
-    client.release();
+      [`asset:${asset}`],
+    );
   }
 }
 
-async function acquireBootstrapLock(client: PoolClient) {
-  await client.query("SELECT pg_advisory_lock($1, $2)", [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_KEY]);
-}
+function buildMigrationV1StrategyConfigs(
+  legacyStrategyPayload: StrategyConfig,
+  existingEthStrategyPayload?: Partial<StrategyConfig> | null,
+): StrategyConfigMap {
+  const ethStrategyPayload: StrategyConfig = existingEthStrategyPayload
+    ? { ...MIGRATION_V1_DEFAULT_STRATEGY_CONFIG, ...existingEthStrategyPayload }
+    : {
+        ...legacyStrategyPayload,
+        enableTrading: false,
+        shadowMode: true,
+      };
 
-async function releaseBootstrapLock(client: PoolClient) {
-  try {
-    await client.query("SELECT pg_advisory_unlock($1, $2)", [BOOTSTRAP_LOCK_NAMESPACE, BOOTSTRAP_LOCK_KEY]);
-  } catch {
-    // Ignore unlock failures during shutdown/error paths.
-  }
+  return {
+    btc: legacyStrategyPayload,
+    eth: ethStrategyPayload,
+    sol: { ...ethStrategyPayload, enableTrading: true, shadowMode: true },
+    xrp: { ...ethStrategyPayload, enableTrading: true, shadowMode: true },
+    doge: { ...ethStrategyPayload, enableTrading: true, shadowMode: true },
+    bnb: { ...ethStrategyPayload, enableTrading: true, shadowMode: true },
+    hype: { ...ethStrategyPayload, enableTrading: true, shadowMode: true },
+  };
 }
+/* migration-checksum:end:1 */
+
+/* migration-checksum:start:2 */
+async function applyOrderTruthRevisionMigration(db: PgQueryable) {
+  const duplicateFill = await db.query<{
+    venue: string;
+    venue_order_id: string;
+    trade_id: string;
+    duplicate_count: number;
+  }>(`
+    SELECT venue, venue_order_id, trade_id, count(*)::integer AS duplicate_count
+    FROM fills
+    GROUP BY venue, venue_order_id, trade_id
+    HAVING count(*) > 1
+    LIMIT 1
+  `);
+
+  if (duplicateFill.rows[0]) {
+    const conflict = duplicateFill.rows[0];
+    throw new Error(
+      `Migration 2 refused: duplicate fill identity for ${conflict.venue}/${conflict.venue_order_id}/${conflict.trade_id} (${conflict.duplicate_count} rows)`,
+    );
+  }
+
+  await db.query(`
+    ALTER TABLE order_intents
+    ADD COLUMN revision BIGINT NOT NULL DEFAULT 0
+  `);
+  await db.query(`
+    ALTER TABLE venue_orders
+    ADD COLUMN revision BIGINT NOT NULL DEFAULT 0
+  `);
+  await db.query(`
+    ALTER TABLE order_attempts
+    ADD COLUMN revision BIGINT NOT NULL DEFAULT 0
+  `);
+  await db.query(`DROP INDEX IF EXISTS fills_exchange_trade_idx`);
+  await db.query(`
+    CREATE UNIQUE INDEX fills_exchange_order_trade_idx
+    ON fills(venue, venue_order_id, trade_id)
+  `);
+}
+/* migration-checksum:end:2 */
 
 export function buildBootstrapStrategyConfigs(
   legacyStrategyPayload: StrategyConfig,
@@ -1131,7 +1505,7 @@ export async function updateWorkerState(pool: Pool, asset: MarketAsset, state: P
 }
 
 function normalizeWorkerLoopHealth(value: unknown): WorkerLoopHealth {
-  const input = value && typeof value === "object" ? value as Partial<WorkerLoopHealth> : {};
+  const input = value && typeof value === "object" ? (value as Partial<WorkerLoopHealth>) : {};
   return {
     lastScanDurationMs: normalizeNullableNumber(input.lastScanDurationMs),
     lastExecutionDurationMs: normalizeNullableNumber(input.lastExecutionDurationMs),
@@ -1557,7 +1931,11 @@ export async function listRecentOrderIntents(pool: Pool, limit = 50, asset?: Mar
   return result.rows.map(mapOrderIntentRow);
 }
 
-export async function listRecentSettledOrderIntents(pool: Pool, limit = 200, asset?: MarketAsset): Promise<OrderIntent[]> {
+export async function listRecentSettledOrderIntents(
+  pool: Pool,
+  limit = 200,
+  asset?: MarketAsset,
+): Promise<OrderIntent[]> {
   const result = await pool.query(
     `
       SELECT *
@@ -1589,94 +1967,323 @@ export async function getLiveRealizedPnlUsd(pool: Pool) {
   return Number(result.rows[0]?.realized_pnl_usd ?? 0);
 }
 
+const TERMINAL_VENUE_ORDER_STATUSES = new Set<LiveOrder["status"]>(["filled", "canceled", "rejected", "expired"]);
+const NON_FILLED_TERMINAL_VENUE_ORDER_STATUSES = new Set<LiveOrder["status"]>(["canceled", "rejected", "expired"]);
+
+export class PersistenceIdentityConflictError extends Error {
+  constructor(entity: "venue_order" | "order_attempt", id: string, fields: string[]) {
+    super(`Immutable ${entity} identity conflict for ${id}: ${fields.join(", ")}`);
+    this.name = "PersistenceIdentityConflictError";
+  }
+}
+
+function venueOrderParams(order: LiveOrder) {
+  return [
+    order.id,
+    order.asset,
+    order.shadow,
+    order.intentId,
+    order.venue,
+    order.venueOrderId,
+    order.clientOrderId,
+    order.marketRef,
+    order.tokenId ?? null,
+    order.side,
+    order.outcome,
+    order.orderType,
+    order.requestedPrice,
+    order.requestedSize,
+    order.filledSize,
+    order.averageFillPrice,
+    order.feeUsd,
+    order.status,
+    order.createdAt,
+    order.updatedAt,
+    JSON.stringify(order.raw),
+  ];
+}
+
+function orderAttemptParams(attempt: OrderAttempt) {
+  return [
+    attempt.id,
+    attempt.asset,
+    attempt.shadow,
+    attempt.intentId,
+    attempt.legId,
+    attempt.stage,
+    attempt.venue,
+    attempt.side,
+    attempt.orderType,
+    attempt.clientOrderId,
+    attempt.venueOrderId,
+    attempt.status,
+    attempt.truthStatus,
+    JSON.stringify(attempt.request),
+    attempt.result === null ? null : JSON.stringify(attempt.result),
+    attempt.error,
+    attempt.createdAt,
+    attempt.updatedAt,
+  ];
+}
+
+function orderAttemptNonTerminalRank(status: OrderAttempt["status"]) {
+  switch (status) {
+    case "planned":
+      return 0;
+    case "submitted":
+      return 1;
+    case "truth_pending":
+      return 2;
+    case "confirmed":
+    case "failed":
+      return 3;
+  }
+}
+
+export function mergeVenueOrderEvidence(existing: LiveOrder, incoming: LiveOrder): LiveOrder {
+  assertVenueOrderIdentity(existing, incoming);
+  const existingTerminal = TERMINAL_VENUE_ORDER_STATUSES.has(existing.status);
+  const incomingTerminal = TERMINAL_VENUE_ORDER_STATUSES.has(incoming.status);
+  const incomingHasMoreFill = incoming.filledSize > existing.filledSize;
+  const fillIsEqual = incoming.filledSize === existing.filledSize;
+  const incomingProvesFilled = incoming.status === "filled" && incoming.filledSize > 0 && existing.status !== "filled";
+  const incomingIsAtLeastAsComplete =
+    incomingHasMoreFill ||
+    incomingProvesFilled ||
+    (fillIsEqual && !existingTerminal && incomingTerminal) ||
+    (fillIsEqual && !existingTerminal && !incomingTerminal && incoming.updatedAt >= existing.updatedAt) ||
+    (fillIsEqual && existing.status === incoming.status && incoming.updatedAt >= existing.updatedAt);
+
+  let status = existing.status;
+  if (incoming.status === "filled" && incoming.filledSize > 0) {
+    status = "filled";
+  } else if (existing.status === "filled") {
+    status = "filled";
+  } else if (NON_FILLED_TERMINAL_VENUE_ORDER_STATUSES.has(existing.status)) {
+    status = existing.status;
+  } else if (existingTerminal && !incomingTerminal) {
+    status = existing.status;
+  } else if (incomingHasMoreFill || (fillIsEqual && incoming.updatedAt >= existing.updatedAt)) {
+    status = incoming.status;
+  }
+
+  return {
+    ...existing,
+    clientOrderId: existing.clientOrderId ?? incoming.clientOrderId,
+    filledSize: Math.max(existing.filledSize, incoming.filledSize),
+    averageFillPrice: incomingIsAtLeastAsComplete
+      ? (incoming.averageFillPrice ?? existing.averageFillPrice)
+      : existing.averageFillPrice,
+    feeUsd: incomingIsAtLeastAsComplete ? (incoming.feeUsd ?? existing.feeUsd) : existing.feeUsd,
+    status,
+    updatedAt: Math.max(existing.updatedAt, incoming.updatedAt),
+    raw: incomingIsAtLeastAsComplete ? incoming.raw : existing.raw,
+  };
+}
+
+export function mergeOrderAttemptEvidence(existing: OrderAttempt, incoming: OrderAttempt): OrderAttempt {
+  assertOrderAttemptIdentity(existing, incoming);
+  const existingNonTerminalRank = orderAttemptNonTerminalRank(existing.status);
+  const incomingNonTerminalRank = orderAttemptNonTerminalRank(incoming.status);
+
+  let acceptIncomingEvidence = false;
+  let status = existing.status;
+  if (incoming.status === "confirmed") {
+    acceptIncomingEvidence = true;
+    status = "confirmed";
+  } else if (existing.status === "confirmed") {
+    status = "confirmed";
+  } else if (
+    existing.status === "failed" &&
+    (incoming.status === "submitted" || incoming.status === "truth_pending") &&
+    incoming.updatedAt > existing.updatedAt
+  ) {
+    acceptIncomingEvidence = true;
+    status = incoming.status;
+  } else if (existing.status === "failed") {
+    status = "failed";
+  } else if (incoming.status === "failed") {
+    acceptIncomingEvidence = incoming.updatedAt >= existing.updatedAt;
+    status = acceptIncomingEvidence ? incoming.status : existing.status;
+  } else if (incomingNonTerminalRank >= existingNonTerminalRank && incoming.updatedAt >= existing.updatedAt) {
+    acceptIncomingEvidence = true;
+    status = incoming.status;
+  }
+
+  return {
+    ...existing,
+    venueOrderId: incoming.venueOrderId ?? existing.venueOrderId,
+    status,
+    truthStatus: acceptIncomingEvidence ? (incoming.truthStatus ?? existing.truthStatus) : existing.truthStatus,
+    result: acceptIncomingEvidence ? (incoming.result ?? existing.result) : existing.result,
+    error: acceptIncomingEvidence ? incoming.error : existing.error,
+    updatedAt: Math.max(existing.updatedAt, incoming.updatedAt),
+  };
+}
+
+function assertVenueOrderIdentity(existing: LiveOrder, incoming: LiveOrder) {
+  const conflicts = collectIdentityConflicts([
+    ["id", existing.id, incoming.id],
+    ["asset", existing.asset, incoming.asset],
+    ["shadow", existing.shadow, incoming.shadow],
+    ["intentId", existing.intentId, incoming.intentId],
+    ["venue", existing.venue, incoming.venue],
+    ["venueOrderId", existing.venueOrderId, incoming.venueOrderId],
+    ["marketRef", existing.marketRef, incoming.marketRef],
+    ["tokenId", existing.tokenId ?? null, incoming.tokenId ?? null],
+    ["side", existing.side, incoming.side],
+    ["outcome", existing.outcome, incoming.outcome],
+    ["orderType", existing.orderType, incoming.orderType],
+    ["requestedPrice", existing.requestedPrice, incoming.requestedPrice],
+    ["requestedSize", existing.requestedSize, incoming.requestedSize],
+  ]);
+  if (
+    existing.clientOrderId !== null &&
+    incoming.clientOrderId !== null &&
+    existing.clientOrderId !== incoming.clientOrderId
+  ) {
+    conflicts.push("clientOrderId");
+  }
+  if (conflicts.length > 0) {
+    throw new PersistenceIdentityConflictError("venue_order", existing.id, conflicts);
+  }
+}
+
+function assertOrderAttemptIdentity(existing: OrderAttempt, incoming: OrderAttempt) {
+  const conflicts = collectIdentityConflicts([
+    ["id", existing.id, incoming.id],
+    ["asset", existing.asset, incoming.asset],
+    ["shadow", existing.shadow, incoming.shadow],
+    ["intentId", existing.intentId, incoming.intentId],
+    ["legId", existing.legId, incoming.legId],
+    ["stage", existing.stage, incoming.stage],
+    ["venue", existing.venue, incoming.venue],
+    ["side", existing.side, incoming.side],
+    ["orderType", existing.orderType, incoming.orderType],
+    ["clientOrderId", existing.clientOrderId, incoming.clientOrderId],
+  ]);
+  if (
+    existing.venueOrderId !== null &&
+    incoming.venueOrderId !== null &&
+    existing.venueOrderId !== incoming.venueOrderId
+  ) {
+    conflicts.push("venueOrderId");
+  }
+  if (conflicts.length > 0) {
+    throw new PersistenceIdentityConflictError("order_attempt", existing.id, conflicts);
+  }
+}
+
+function collectIdentityConflicts(fields: Array<[string, unknown, unknown]>) {
+  return fields.filter(([, existing, incoming]) => existing !== incoming).map(([field]) => field);
+}
+
 export async function upsertVenueOrder(pool: Pool, order: LiveOrder) {
-  await pool.query(
-    `
-      INSERT INTO venue_orders (
-        id, asset, shadow, intent_id, venue, venue_order_id, client_order_id, market_ref, token_id, side, outcome,
-        order_type, requested_price, requested_size, filled_size, average_fill_price, fee_usd,
-        status, created_at, updated_at, raw_json
-      )
-      VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-        $12, $13, $14, $15, $16, $17,
-        $18, $19, $20, $21::jsonb
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        asset = EXCLUDED.asset,
-        filled_size = EXCLUDED.filled_size,
-        average_fill_price = EXCLUDED.average_fill_price,
-        fee_usd = EXCLUDED.fee_usd,
-        status = EXCLUDED.status,
-        updated_at = EXCLUDED.updated_at,
-        raw_json = EXCLUDED.raw_json
-    `,
-    [
-      order.id,
-      order.asset,
-      order.shadow,
-      order.intentId,
-      order.venue,
-      order.venueOrderId,
-      order.clientOrderId,
-      order.marketRef,
-      order.tokenId,
-      order.side,
-      order.outcome,
-      order.orderType,
-      order.requestedPrice,
-      order.requestedSize,
-      order.filledSize,
-      order.averageFillPrice,
-      order.feeUsd,
-      order.status,
-      order.createdAt,
-      order.updatedAt,
-      JSON.stringify(order.raw),
-    ],
-  );
+  await withRowLockTransaction(pool, async (client) => {
+    const inserted = await client.query(
+      `
+        INSERT INTO venue_orders (
+          id, asset, shadow, intent_id, venue, venue_order_id, client_order_id, market_ref, token_id, side, outcome,
+          order_type, requested_price, requested_size, filled_size, average_fill_price, fee_usd,
+          status, created_at, updated_at, raw_json
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+          $12, $13, $14, $15, $16, $17,
+          $18, $19, $20, $21::jsonb
+        )
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id
+      `,
+      venueOrderParams(order),
+    );
+    if (inserted.rowCount === 1) {
+      return;
+    }
+
+    const locked = await client.query("SELECT * FROM venue_orders WHERE id = $1 FOR UPDATE", [order.id]);
+    if (!locked.rows[0]) {
+      throw new Error(`Venue order ${order.id} conflicted without a row that can be reconciled`);
+    }
+
+    const merged = mergeVenueOrderEvidence(mapVenueOrderRow(locked.rows[0]), order);
+    await client.query(
+      `
+        UPDATE venue_orders
+        SET client_order_id = $2,
+            filled_size = $3,
+            average_fill_price = $4,
+            fee_usd = $5,
+            status = $6,
+            updated_at = $7,
+            raw_json = $8::jsonb,
+            revision = revision + 1
+        WHERE id = $1
+      `,
+      [
+        merged.id,
+        merged.clientOrderId,
+        merged.filledSize,
+        merged.averageFillPrice,
+        merged.feeUsd,
+        merged.status,
+        merged.updatedAt,
+        JSON.stringify(merged.raw),
+      ],
+    );
+  });
 }
 
 export async function upsertOrderAttempt(pool: Pool, attempt: OrderAttempt) {
-  await pool.query(
-    `
-      INSERT INTO order_attempts (
-        id, asset, shadow, intent_id, leg_id, stage, venue, side, order_type, client_order_id,
-        venue_order_id, status, truth_status, request_json, result_json, error, created_at, updated_at
-      )
-      VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14::jsonb, $15::jsonb, $16, $17, $18
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        venue_order_id = EXCLUDED.venue_order_id,
-        status = EXCLUDED.status,
-        truth_status = EXCLUDED.truth_status,
-        result_json = EXCLUDED.result_json,
-        error = EXCLUDED.error,
-        updated_at = EXCLUDED.updated_at
-    `,
-    [
-      attempt.id,
-      attempt.asset,
-      attempt.shadow,
-      attempt.intentId,
-      attempt.legId,
-      attempt.stage,
-      attempt.venue,
-      attempt.side,
-      attempt.orderType,
-      attempt.clientOrderId,
-      attempt.venueOrderId,
-      attempt.status,
-      attempt.truthStatus,
-      JSON.stringify(attempt.request),
-      attempt.result === null ? null : JSON.stringify(attempt.result),
-      attempt.error,
-      attempt.createdAt,
-      attempt.updatedAt,
-    ],
-  );
+  await withRowLockTransaction(pool, async (client) => {
+    const inserted = await client.query(
+      `
+        INSERT INTO order_attempts (
+          id, asset, shadow, intent_id, leg_id, stage, venue, side, order_type, client_order_id,
+          venue_order_id, status, truth_status, request_json, result_json, error, created_at, updated_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+          $11, $12, $13, $14::jsonb, $15::jsonb, $16, $17, $18
+        )
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id
+      `,
+      orderAttemptParams(attempt),
+    );
+    if (inserted.rowCount === 1) {
+      return;
+    }
+
+    const locked = await client.query("SELECT * FROM order_attempts WHERE id = $1 FOR UPDATE", [attempt.id]);
+    if (!locked.rows[0]) {
+      throw new Error(`Order attempt ${attempt.id} conflicted without a row that can be reconciled`);
+    }
+
+    const merged = mergeOrderAttemptEvidence(mapOrderAttemptRow(locked.rows[0]), attempt);
+    await client.query(
+      `
+        UPDATE order_attempts
+        SET venue_order_id = $2,
+            status = $3,
+            truth_status = $4,
+            result_json = $5::jsonb,
+            error = $6,
+            updated_at = $7,
+            revision = revision + 1
+        WHERE id = $1
+      `,
+      [
+        merged.id,
+        merged.venueOrderId,
+        merged.status,
+        merged.truthStatus,
+        merged.result === null ? null : JSON.stringify(merged.result),
+        merged.error,
+        merged.updatedAt,
+      ],
+    );
+  });
 }
 
 export async function listRecentOrderAttempts(pool: Pool, limit = 100, asset?: MarketAsset): Promise<OrderAttempt[]> {
@@ -1696,6 +2303,13 @@ export async function listRecentOrderAttempts(pool: Pool, limit = 100, asset?: M
 export async function findOrderAttemptById(pool: Pool, attemptId: string): Promise<OrderAttempt | null> {
   const result = await pool.query("SELECT * FROM order_attempts WHERE id = $1 LIMIT 1", [attemptId]);
   return result.rows[0] ? mapOrderAttemptRow(result.rows[0]) : null;
+}
+
+export async function listOrderAttemptsForIntent(pool: Pool, intentId: string): Promise<OrderAttempt[]> {
+  const result = await pool.query("SELECT * FROM order_attempts WHERE intent_id = $1 ORDER BY created_at ASC, id ASC", [
+    intentId,
+  ]);
+  return result.rows.map(mapOrderAttemptRow);
 }
 
 export async function listRecentVenueOrders(pool: Pool, limit = 50, asset?: MarketAsset): Promise<LiveOrder[]> {
@@ -1757,42 +2371,122 @@ export async function findVenueOrderByExchangeId(pool: Pool, venue: string, venu
   return result.rows[0] ? mapVenueOrderRow(result.rows[0]) : null;
 }
 
-export async function upsertFill(pool: Pool, fill: LiveFill) {
-  await pool.query(
-    `
-      INSERT INTO fills (
-        id, asset, shadow, intent_id, venue, venue_order_id, trade_id, market_ref, token_id, side,
-        outcome, price, size, fee_usd, liquidity, filled_at, raw_json
-      )
-      VALUES (
-        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-        $11, $12, $13, $14, $15, $16, $17::jsonb
-      )
-      ON CONFLICT (id) DO UPDATE SET
-        asset = EXCLUDED.asset,
-        fee_usd = EXCLUDED.fee_usd,
-        raw_json = EXCLUDED.raw_json
-    `,
-    [
-      fill.id,
-      fill.asset,
-      fill.shadow,
-      fill.intentId,
-      fill.venue,
-      fill.venueOrderId,
-      fill.tradeId,
-      fill.marketRef,
-      fill.tokenId,
-      fill.side,
-      fill.outcome,
-      fill.price,
-      fill.size,
-      fill.feeUsd,
-      fill.liquidity,
-      fill.filledAt,
-      JSON.stringify(fill.raw),
-    ],
+export class ImmutableFillConflictError extends Error {
+  constructor(fill: LiveFill, conflict: "id" | "logical_key" | "multiple_rows") {
+    const identity =
+      conflict === "id"
+        ? `id ${fill.id}`
+        : conflict === "logical_key"
+          ? `logical key ${fill.venue}/${fill.venueOrderId}/${fill.tradeId}`
+          : `id and logical key for ${fill.id}`;
+    super(`Immutable fill conflict on ${identity}`);
+    this.name = "ImmutableFillConflictError";
+  }
+}
+
+function fillParams(fill: LiveFill) {
+  return [
+    fill.id,
+    fill.asset,
+    fill.shadow,
+    fill.intentId,
+    fill.venue,
+    fill.venueOrderId,
+    fill.tradeId,
+    fill.marketRef,
+    fill.tokenId ?? null,
+    fill.side,
+    fill.outcome,
+    fill.price,
+    fill.size,
+    fill.feeUsd,
+    fill.liquidity,
+    fill.filledAt,
+    JSON.stringify(fill.raw),
+  ];
+}
+
+export function areFillsEconomicallyIdentical(existing: LiveFill, incoming: LiveFill) {
+  return (
+    existing.asset === incoming.asset &&
+    existing.shadow === incoming.shadow &&
+    existing.intentId === incoming.intentId &&
+    existing.venue === incoming.venue &&
+    existing.venueOrderId === incoming.venueOrderId &&
+    existing.tradeId === incoming.tradeId &&
+    existing.marketRef === incoming.marketRef &&
+    (existing.tokenId ?? null) === (incoming.tokenId ?? null) &&
+    existing.side === incoming.side &&
+    existing.outcome === incoming.outcome &&
+    existing.price === incoming.price &&
+    existing.size === incoming.size &&
+    existing.feeUsd === incoming.feeUsd &&
+    existing.liquidity === incoming.liquidity &&
+    existing.filledAt === incoming.filledAt
   );
+}
+
+export async function upsertFill(pool: Pool, fill: LiveFill) {
+  await withRowLockTransaction(pool, async (client) => {
+    const inserted = await client.query(
+      `
+        INSERT INTO fills (
+          id, asset, shadow, intent_id, venue, venue_order_id, trade_id, market_ref, token_id, side,
+          outcome, price, size, fee_usd, liquidity, filled_at, raw_json
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+          $11, $12, $13, $14, $15, $16, $17::jsonb
+        )
+        ON CONFLICT DO NOTHING
+        RETURNING id
+      `,
+      fillParams(fill),
+    );
+    if (inserted.rowCount === 1) {
+      return;
+    }
+
+    const conflicts = await client.query(
+      `
+        SELECT *
+        FROM fills
+        WHERE id = $1
+           OR (venue = $2 AND venue_order_id = $3 AND trade_id = $4)
+        FOR UPDATE
+      `,
+      [fill.id, fill.venue, fill.venueOrderId, fill.tradeId],
+    );
+    if (conflicts.rows.length !== 1) {
+      throw new ImmutableFillConflictError(fill, "multiple_rows");
+    }
+
+    const existing = mapFillRow(conflicts.rows[0]);
+    if (areFillsEconomicallyIdentical(existing, fill)) {
+      return;
+    }
+
+    throw new ImmutableFillConflictError(fill, existing.id === fill.id ? "id" : "logical_key");
+  });
+}
+
+async function withRowLockTransaction<T>(pool: Pool, work: (client: PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      // Preserve the original persistence error; pg discards broken connections.
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function listRecentFills(pool: Pool, limit = 100, asset?: MarketAsset): Promise<LiveFill[]> {
@@ -1914,18 +2608,21 @@ export async function listPositions(pool: Pool, asset?: MarketAsset): Promise<Po
   return result.rows.map(mapPositionRow);
 }
 
-export async function upsertSettlement(pool: Pool, settlement: {
-  id: string;
-  asset: MarketAsset;
-  intentId: string;
-  venue: string;
-  marketRef: string;
-  outcome: string;
-  resolvedOutcome: string | null;
-  payoutUsd: number;
-  settledAt: number;
-  raw: Record<string, unknown>;
-}) {
+export async function upsertSettlement(
+  pool: Pool,
+  settlement: {
+    id: string;
+    asset: MarketAsset;
+    intentId: string;
+    venue: string;
+    marketRef: string;
+    outcome: string;
+    resolvedOutcome: string | null;
+    payoutUsd: number;
+    settledAt: number;
+    raw: Record<string, unknown>;
+  },
+) {
   await pool.query(
     `
       INSERT INTO settlements (
@@ -2193,11 +2890,7 @@ export async function updateStablePnlChangeFromIntent(pool: Pool, intent: OrderI
   return (result.rowCount ?? 0) > 0;
 }
 
-export async function listStablePnlChanges(
-  pool: Pool,
-  limit = 5,
-  asset?: MarketAsset,
-): Promise<StablePnlChange[]> {
+export async function listStablePnlChanges(pool: Pool, limit = 5, asset?: MarketAsset): Promise<StablePnlChange[]> {
   const result = await pool.query(
     `
       SELECT
@@ -2412,57 +3105,107 @@ export async function runDatabaseMaintenance(
     bridgeTransfers: 0,
   };
 
-  deleted.fills = await deleteBefore(pool, config.retention.fillsMs, now, `
+  deleted.fills = await deleteBefore(
+    pool,
+    config.retention.fillsMs,
+    now,
+    `
     DELETE FROM fills
     WHERE filled_at < $1
-  `);
+  `,
+  );
 
-  deleted.venueOrders = await deleteBefore(pool, config.retention.venueOrdersMs, now, `
+  deleted.venueOrders = await deleteBefore(
+    pool,
+    config.retention.venueOrdersMs,
+    now,
+    `
     DELETE FROM venue_orders
     WHERE status IN ('filled', 'canceled', 'rejected', 'expired')
       AND updated_at < $1
-  `);
+  `,
+  );
 
-  deleted.closedIntents = await deleteBefore(pool, config.retention.closedIntentsMs, now, `
+  deleted.closedIntents = await deleteBefore(
+    pool,
+    config.retention.closedIntentsMs,
+    now,
+    `
     DELETE FROM order_intents
     WHERE status IN ('settled', 'failed', 'skipped', 'canceled', 'unwound')
       AND COALESCE(resolved_at, updated_at, created_at) < $1
-  `);
+  `,
+  );
 
-  deleted.settlements = await deleteBefore(pool, config.retention.settlementsMs, now, `
+  deleted.settlements = await deleteBefore(
+    pool,
+    config.retention.settlementsMs,
+    now,
+    `
     DELETE FROM settlements
     WHERE settled_at < $1
-  `);
+  `,
+  );
 
-  deleted.bridgeTransfers = await deleteBefore(pool, config.retention.bridgeTransfersMs, now, `
+  deleted.bridgeTransfers = await deleteBefore(
+    pool,
+    config.retention.bridgeTransfersMs,
+    now,
+    `
     DELETE FROM bridge_transfers
     WHERE updated_at < $1
-  `);
+  `,
+  );
 
-  deleted.runEvents = await deleteBefore(pool, config.retention.runEventsMs, now, `
+  deleted.runEvents = await deleteBefore(
+    pool,
+    config.retention.runEventsMs,
+    now,
+    `
     DELETE FROM run_events
     WHERE created_at < $1
-  `);
+  `,
+  );
 
-  deleted.pnlSnapshots = await deleteBefore(pool, config.retention.pnlSnapshotsMs, now, `
+  deleted.pnlSnapshots = await deleteBefore(
+    pool,
+    config.retention.pnlSnapshotsMs,
+    now,
+    `
     DELETE FROM pnl_snapshots
     WHERE captured_at < $1
-  `);
+  `,
+  );
 
-  deleted.snapshots = await deleteBefore(pool, config.retention.snapshotsMs, now, `
+  deleted.snapshots = await deleteBefore(
+    pool,
+    config.retention.snapshotsMs,
+    now,
+    `
     DELETE FROM opportunity_snapshots
     WHERE captured_at < $1
-  `);
+  `,
+  );
 
-  deleted.oracleSamples = await deleteBefore(pool, config.retention.oracleSamplesMs, now, `
+  deleted.oracleSamples = await deleteBefore(
+    pool,
+    config.retention.oracleSamplesMs,
+    now,
+    `
     DELETE FROM oracle_slot_samples
     WHERE captured_at < $1
-  `);
+  `,
+  );
 
-  deleted.slotResolutions = await deleteBefore(pool, config.retention.slotResolutionsMs, now, `
+  deleted.slotResolutions = await deleteBefore(
+    pool,
+    config.retention.slotResolutionsMs,
+    now,
+    `
     DELETE FROM slot_resolutions
     WHERE slot_end_ts < $1
-  `);
+  `,
+  );
 
   return {
     startedAt,
@@ -2490,14 +3233,7 @@ export async function insertRunEvent(pool: Pool, event: RunEvent) {
       INSERT INTO run_events (asset, level, event_type, message, payload_json, created_at)
       VALUES ($1, $2, $3, $4, $5::jsonb, $6)
     `,
-    [
-      event.asset ?? null,
-      event.level,
-      event.eventType,
-      event.message,
-      JSON.stringify(event.payload),
-      event.createdAt,
-    ],
+    [event.asset ?? null, event.level, event.eventType, event.message, JSON.stringify(event.payload), event.createdAt],
   );
 }
 
@@ -2506,13 +3242,7 @@ export async function listRecentRunEvents(pool: Pool, limit = 20, asset?: Market
     `
       SELECT *
       FROM run_events
-      ${
-        asset === undefined
-          ? ""
-          : asset === null
-            ? "WHERE asset IS NULL"
-            : "WHERE asset = $2 OR asset IS NULL"
-      }
+      ${asset === undefined ? "" : asset === null ? "WHERE asset IS NULL" : "WHERE asset = $2 OR asset IS NULL"}
       ORDER BY created_at DESC
       LIMIT $1
     `,
@@ -2529,7 +3259,7 @@ export async function listRecentRunEvents(pool: Pool, limit = 20, asset?: Market
   }));
 }
 
-function mapNotificationDeliveryRow(row: any): NotificationDelivery {
+function mapNotificationDeliveryRow(row: NotificationDeliveryRow): NotificationDelivery {
   return {
     id: row.id,
     asset: row.asset,
@@ -2625,13 +3355,7 @@ export async function upsertCircuitBreaker(pool: Pool, breaker: CircuitBreaker) 
         triggered_at = EXCLUDED.triggered_at,
         payload_json = EXCLUDED.payload_json
     `,
-    [
-      breaker.key,
-      breaker.active,
-      breaker.reason,
-      breaker.triggeredAt,
-      JSON.stringify(breaker.payload),
-    ],
+    [breaker.key, breaker.active, breaker.reason, breaker.triggeredAt, JSON.stringify(breaker.payload)],
   );
 }
 
@@ -2725,10 +3449,10 @@ export async function tryWithGlobalLiveExecutionLock<T>(
   const client = await pool.connect();
   let acquired = false;
   try {
-    const result = await client.query<{ locked: boolean }>(
-      "SELECT pg_try_advisory_lock($1, $2) AS locked",
-      [LIVE_EXECUTION_LOCK_NAMESPACE, LIVE_EXECUTION_LOCK_KEY],
-    );
+    const result = await client.query<{ locked: boolean }>("SELECT pg_try_advisory_lock($1, $2) AS locked", [
+      LIVE_EXECUTION_LOCK_NAMESPACE,
+      LIVE_EXECUTION_LOCK_KEY,
+    ]);
     acquired = Boolean(result.rows[0]?.locked);
     if (!acquired) {
       return { acquired: false, value: null };
@@ -2738,10 +3462,7 @@ export async function tryWithGlobalLiveExecutionLock<T>(
     return { acquired: true, value: await fn() };
   } finally {
     if (acquired) {
-      await client.query("SELECT pg_advisory_unlock($1, $2)", [
-        LIVE_EXECUTION_LOCK_NAMESPACE,
-        LIVE_EXECUTION_LOCK_KEY,
-      ]);
+      await client.query("SELECT pg_advisory_unlock($1, $2)", [LIVE_EXECUTION_LOCK_NAMESPACE, LIVE_EXECUTION_LOCK_KEY]);
     }
     client.release();
   }
@@ -2761,7 +3482,10 @@ function reconcileCircuitBreakerReadiness(
   const nonBreakerReadiness = workerState.readiness.filter((check) => !CIRCUIT_BREAKER_READINESS_KEYS.has(check.key));
   const readiness = [
     ...nonBreakerReadiness,
-    ...buildCircuitBreakerReadinessChecks(relevantBreakers.filter((breaker) => breaker.active), now),
+    ...buildCircuitBreakerReadinessChecks(
+      relevantBreakers.filter((breaker) => breaker.active),
+      now,
+    ),
   ];
 
   return {
@@ -2772,9 +3496,15 @@ function reconcileCircuitBreakerReadiness(
 }
 
 function buildCircuitBreakerReadinessChecks(activeBreakers: CircuitBreaker[], now: number): ReadinessCheck[] {
-  const blockingBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "blocked");
-  const cooldownBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "cooldown");
-  const degradedBreakers = activeBreakers.filter((breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "degraded");
+  const blockingBreakers = activeBreakers.filter(
+    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "blocked",
+  );
+  const cooldownBreakers = activeBreakers.filter(
+    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "cooldown",
+  );
+  const degradedBreakers = activeBreakers.filter(
+    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "degraded",
+  );
   const checks: ReadinessCheck[] = [];
 
   if (blockingBreakers.length > 0) {
@@ -2871,7 +3601,11 @@ function getPayloadNumber(payload: Record<string, unknown> | null, key: string) 
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-async function buildFillQualitySummary(pool: Pool, now: number, breakers: CircuitBreaker[]): Promise<FillQualitySummary> {
+async function buildFillQualitySummary(
+  pool: Pool,
+  now: number,
+  breakers: CircuitBreaker[],
+): Promise<FillQualitySummary> {
   const since = now - 24 * 60 * 60 * 1000;
   const events = await listRecentMarketFillQualityEvents(pool, since);
   const blacklisted = breakers
@@ -2984,7 +3718,10 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   };
 }
 
-export async function buildPortfolioDashboardResponse(pool: Pool, slots: MarketSlot[]): Promise<PortfolioDashboardResponse> {
+export async function buildPortfolioDashboardResponse(
+  pool: Pool,
+  slots: MarketSlot[],
+): Promise<PortfolioDashboardResponse> {
   const pnl = await getLatestPnlSnapshot(pool);
   const [baselineEquityUsd, peakEquityUsd] = pnl
     ? await Promise.all([getFirstTrackedEquityUsd(pool), getPeakTrackedEquityUsd(pool)])
@@ -3069,14 +3806,13 @@ export async function buildHistoryPoints(pool: Pool, slot: MarketSlot): Promise<
       polyDownBuy: snapshot.polymarket.outcomes.down.chart.price,
       kalshiYesLast: snapshot.kalshi.outcomes.yes.chart.price,
       kalshiNoLast: snapshot.kalshi.outcomes.no.chart.price,
-      grossCostUpNo: first?.combination === "POLY_UP_KALSHI_NO" ? first.grossCost : second?.grossCost ?? null,
-      grossCostDownYes:
-        first?.combination === "POLY_DOWN_KALSHI_YES" ? first.grossCost : second?.grossCost ?? null,
+      grossCostUpNo: first?.combination === "POLY_UP_KALSHI_NO" ? first.grossCost : (second?.grossCost ?? null),
+      grossCostDownYes: first?.combination === "POLY_DOWN_KALSHI_YES" ? first.grossCost : (second?.grossCost ?? null),
     };
   });
 }
 
-function mapOpportunitySnapshotRow(row: any) {
+function mapOpportunitySnapshotRow(row: OpportunitySnapshotRow): OpportunitySnapshot {
   return {
     id: row.id,
     asset: row.asset,
@@ -3090,7 +3826,7 @@ function mapOpportunitySnapshotRow(row: any) {
   };
 }
 
-function mapSlotResolutionRow(row: any): SlotResolutionRecord {
+function mapSlotResolutionRow(row: SlotResolutionRow): SlotResolutionRecord {
   return {
     asset: row.asset,
     slotKey: row.slot_key,
@@ -3111,7 +3847,7 @@ function mapSlotResolutionRow(row: any): SlotResolutionRecord {
   };
 }
 
-function mapOrderIntentRow(row: any): OrderIntent {
+function mapOrderIntentRow(row: OrderIntentRow): OrderIntent {
   return {
     id: row.id,
     asset: row.asset,
@@ -3148,7 +3884,7 @@ function mapOrderIntentRow(row: any): OrderIntent {
   };
 }
 
-function mapVenueOrderRow(row: any): LiveOrder {
+function mapVenueOrderRow(row: VenueOrderRow): LiveOrder {
   return {
     id: row.id,
     asset: row.asset,
@@ -3158,7 +3894,7 @@ function mapVenueOrderRow(row: any): LiveOrder {
     venueOrderId: row.venue_order_id,
     clientOrderId: row.client_order_id,
     marketRef: row.market_ref,
-    tokenId: row.token_id,
+    tokenId: row.token_id ?? undefined,
     side: row.side,
     outcome: row.outcome,
     orderType: row.order_type,
@@ -3174,7 +3910,7 @@ function mapVenueOrderRow(row: any): LiveOrder {
   };
 }
 
-function mapOrderAttemptRow(row: any): OrderAttempt {
+function mapOrderAttemptRow(row: OrderAttemptRow): OrderAttempt {
   return {
     id: row.id,
     asset: row.asset,
@@ -3197,7 +3933,7 @@ function mapOrderAttemptRow(row: any): OrderAttempt {
   };
 }
 
-function mapFillRow(row: any): LiveFill {
+function mapFillRow(row: FillRow): LiveFill {
   return {
     id: row.id,
     asset: row.asset,
@@ -3207,7 +3943,7 @@ function mapFillRow(row: any): LiveFill {
     venueOrderId: row.venue_order_id,
     tradeId: row.trade_id,
     marketRef: row.market_ref,
-    tokenId: row.token_id,
+    tokenId: row.token_id ?? undefined,
     side: row.side,
     outcome: row.outcome,
     price: row.price,
@@ -3219,7 +3955,7 @@ function mapFillRow(row: any): LiveFill {
   };
 }
 
-function mapPositionRow(row: any): PositionSnapshot {
+function mapPositionRow(row: PositionRow): PositionSnapshot {
   return {
     id: row.id,
     asset: row.asset,
@@ -3239,7 +3975,7 @@ function mapPositionRow(row: any): PositionSnapshot {
   };
 }
 
-function mapPnlSnapshotRow(row: any): PnlSnapshot {
+function mapPnlSnapshotRow(row: PnlSnapshotRow): PnlSnapshot {
   return enrichPnlSnapshot({
     id: row.id,
     capturedAt: row.captured_at,
@@ -3253,7 +3989,7 @@ function mapPnlSnapshotRow(row: any): PnlSnapshot {
   });
 }
 
-function mapStablePnlChangeRow(row: any): StablePnlChange {
+function mapStablePnlChangeRow(row: StablePnlChangeRow): StablePnlChange {
   return {
     intentId: row.intent_id,
     asset: row.asset,
@@ -3270,9 +4006,7 @@ function mapStablePnlChangeRow(row: any): StablePnlChange {
         ? null
         : Number(row.baseline_equity_usd),
     peakEquityUsd:
-      row.peak_equity_usd === null || row.peak_equity_usd === undefined
-        ? null
-        : Number(row.peak_equity_usd),
+      row.peak_equity_usd === null || row.peak_equity_usd === undefined ? null : Number(row.peak_equity_usd),
     drawdownUsd: Number(row.drawdown_usd),
     roi: row.roi === null || row.roi === undefined ? null : Number(row.roi),
     targetNotionalUsd: Number(row.target_notional_usd),
@@ -3280,7 +4014,7 @@ function mapStablePnlChangeRow(row: any): StablePnlChange {
   };
 }
 
-function mapMarketFillQualityEventRow(row: any): MarketFillQualityEvent {
+function mapMarketFillQualityEventRow(row: MarketFillQualityEventRow): MarketFillQualityEvent {
   return {
     id: row.id,
     asset: row.asset,
@@ -3300,18 +4034,18 @@ function mapMarketFillQualityEventRow(row: any): MarketFillQualityEvent {
 function getBreakerAsset(key: CircuitBreaker["key"]): MarketAsset | null {
   if (key.startsWith("asset:")) {
     const asset = key.slice("asset:".length);
-    return MARKET_ASSETS.includes(asset as MarketAsset) ? asset as MarketAsset : null;
+    return MARKET_ASSETS.includes(asset as MarketAsset) ? (asset as MarketAsset) : null;
   }
 
   if (key.startsWith("slot:")) {
     const asset = key.slice("slot:".length).split(":")[0];
-    return MARKET_ASSETS.includes(asset as MarketAsset) ? asset as MarketAsset : null;
+    return MARKET_ASSETS.includes(asset as MarketAsset) ? (asset as MarketAsset) : null;
   }
 
   return null;
 }
 
-function mapBridgeTransferRow(row: any): BridgeTransfer {
+function mapBridgeTransferRow(row: BridgeTransferRow): BridgeTransfer {
   return {
     id: row.id,
     venue: row.venue,
@@ -3330,12 +4064,7 @@ function mapBridgeTransferRow(row: any): BridgeTransfer {
   };
 }
 
-async function deleteBefore(
-  pool: Pool,
-  retentionMs: number | null,
-  now: number,
-  sql: string,
-) {
+async function deleteBefore(pool: Pool, retentionMs: number | null, now: number, sql: string) {
   if (retentionMs === null) {
     return 0;
   }

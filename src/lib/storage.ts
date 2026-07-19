@@ -13,6 +13,7 @@ import type {
   DashboardResponse,
   HistoryPoint,
   LiveFill,
+  LiveOpportunity,
   LiveOrder,
   MarketSlot,
   MarketFillQualityEvent,
@@ -80,7 +81,7 @@ export async function writeSnapshot(snapshot: {
   capturedAt: number;
   polymarket: unknown;
   kalshi: unknown;
-  opportunities: any[];
+  opportunities: LiveOpportunity[];
 }) {
   return postgres.insertOpportunitySnapshot(await db(), snapshot);
 }
@@ -149,6 +150,10 @@ export async function findOrderAttemptById(attemptId: string) {
   return postgres.findOrderAttemptById(await db(), attemptId);
 }
 
+export async function readOrderAttemptsForIntent(intentId: string) {
+  return postgres.listOrderAttemptsForIntent(await db(), intentId);
+}
+
 export async function writeMarketFillQualityEvent(event: MarketFillQualityEvent) {
   return postgres.insertMarketFillQualityEvent(await db(), event);
 }
@@ -213,11 +218,7 @@ export async function readPolymarketCashAdjustmentObservation(intentId: string) 
   return postgres.getPolymarketCashAdjustmentObservation(await db(), intentId);
 }
 
-export async function writeStablePnlChange(
-  intent: OrderIntent,
-  changedAt: number,
-  stability: Record<string, unknown>,
-) {
+export async function writeStablePnlChange(intent: OrderIntent, changedAt: number, stability: Record<string, unknown>) {
   return postgres.insertStablePnlChange(await db(), intent, changedAt, stability);
 }
 
@@ -339,9 +340,7 @@ async function inferRunEventAsset(event: RunEvent): Promise<MarketAsset | null> 
   }
 
   const intentId =
-    event.payload &&
-    typeof event.payload === "object" &&
-    typeof event.payload.intentId === "string"
+    event.payload && typeof event.payload === "object" && typeof event.payload.intentId === "string"
       ? event.payload.intentId
       : null;
 

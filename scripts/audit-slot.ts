@@ -22,7 +22,42 @@ type IntentRow = {
   realized_pnl_usd: number | null;
   roi: number | null;
   failure_reason: string | null;
-  legs_json: any[];
+  legs_json: IntentLegRow[];
+};
+
+type IntentLegRow = {
+  venue: string;
+  outcome: string;
+  requestedSize: number | string | null;
+  filledSize: number | string | null;
+  filledPrice: number | string | null;
+  feeUsd: number | string | null;
+};
+
+type PnlSnapshotRow = {
+  captured_at: number;
+  equity_usd: number | string;
+  cash_usd: number | string;
+  positions_value_usd: number | string;
+  realized_pnl_usd: number | string;
+  unrealized_pnl_usd: number | string;
+  fees_usd: number | string;
+};
+
+type HumanAuditReport = {
+  fromIso: string;
+  toIso: string;
+  summary: {
+    intents: number;
+    orders: number;
+    fills: number;
+    settlements: number;
+    feesUsd: number;
+    settlementPayoutUsd: number;
+    realizedPnlUsd: number;
+    pnlDelta: ReturnType<typeof summarizePnlDelta>;
+  };
+  intentLines: Array<ReturnType<typeof summarizeIntent>>;
 };
 
 async function main() {
@@ -52,24 +87,28 @@ async function main() {
     queryByWindowOrIntent(pool, "venue_orders", "created_at", "updated_at", intentIds, from, to),
     queryByWindowOrIntent(pool, "fills", "filled_at", null, intentIds, from, to),
     queryByWindowOrIntent(pool, "settlements", "settled_at", null, intentIds, from, to),
-    pool.query(
-      `
+    pool
+      .query(
+        `
         SELECT *
         FROM run_events
         WHERE created_at BETWEEN $1 AND $2
         ORDER BY created_at ASC, id ASC
       `,
-      [from, to],
-    ).then((result) => result.rows),
-    pool.query(
-      `
+        [from, to],
+      )
+      .then((result) => result.rows),
+    pool
+      .query<PnlSnapshotRow>(
+        `
         SELECT *
         FROM pnl_snapshots
         WHERE captured_at BETWEEN $1 AND $2
         ORDER BY captured_at ASC, id ASC
       `,
-      [from, to],
-    ).then((result) => result.rows),
+        [from, to],
+      )
+      .then((result) => result.rows),
     readPositions(),
     readVenueBalances(),
   ]);
@@ -170,7 +209,7 @@ function summarizeIntent(intent: IntentRow) {
   };
 }
 
-function summarizePnlDelta(rows: any[]) {
+function summarizePnlDelta(rows: PnlSnapshotRow[]) {
   if (rows.length < 2) {
     return null;
   }
@@ -188,7 +227,7 @@ function summarizePnlDelta(rows: any[]) {
   };
 }
 
-function printHumanReport(report: any) {
+function printHumanReport(report: HumanAuditReport) {
   console.log(`Audit créneau ${report.fromIso} -> ${report.toIso}`);
   console.log(
     `Intents ${report.summary.intents} · orders ${report.summary.orders} · fills ${report.summary.fills} · settlements ${report.summary.settlements}`,
@@ -236,11 +275,18 @@ function readCliFlag(flag: string) {
   return value && !value.startsWith("--") ? value : null;
 }
 
-function sumNumbers(rows: any[], key: string) {
-  return rows.reduce((sum, row) => {
-    const value = Number(row[key]);
+function sumNumbers(rows: unknown[], key: string) {
+  return rows.reduce<number>((sum, row) => {
+    const value = Number(readObjectProperty(row, key));
     return Number.isFinite(value) ? sum + value : sum;
   }, 0);
+}
+
+function readObjectProperty(value: unknown, key: string) {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  return (value as Record<string, unknown>)[key];
 }
 
 function formatSignedUsd(value: number | null) {
@@ -287,10 +333,7 @@ function loadEnvFile(path: string) {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     env[key] = value;

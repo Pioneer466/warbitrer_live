@@ -1,13 +1,13 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
-const STATIC_PATHS = ["/_next", "/favicon.ico"];
+const LIVENESS_PATH = "/api/liveness";
 
 export function middleware(request: NextRequest) {
   const user = process.env.APP_BASIC_AUTH_USER;
   const password = process.env.APP_BASIC_AUTH_PASSWORD;
 
-  if (STATIC_PATHS.some((path) => request.nextUrl.pathname.startsWith(path))) {
+  if (request.nextUrl.pathname === LIVENESS_PATH) {
     return NextResponse.next();
   }
 

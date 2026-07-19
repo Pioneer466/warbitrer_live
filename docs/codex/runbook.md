@@ -8,7 +8,7 @@
 - TypeScript worker processes
 - Postgres
 
-There is no Docker, Docker Compose, Python, SQLite, Redis, or separate migration CLI in this repository.
+There is no Docker, Docker Compose, Python, SQLite, or Redis runtime. Postgres schema changes use the repository migration CLI.
 
 ## First checks
 
@@ -34,7 +34,18 @@ Use `npm ci` for reproducibility. On a memory-constrained VPS, a killed install 
 
 Postgres is mandatory. Create a local database/user by your normal Postgres method and set a matching `DATABASE_URL` based on `.env.example`.
 
-The first process that accesses storage runs the idempotent schema bootstrap in `src/lib/postgres-db.ts`. There is no separate migration command.
+Apply migrations explicitly before starting any web or worker process:
+
+```bash
+node --env-file=.env.local --import tsx scripts/db-migrate.ts
+node --env-file=.env.local --import tsx scripts/db-status.ts
+```
+
+`db:migrate` serializes migration work with a Postgres advisory lock and records the version and SHA-256 checksum in `schema_migrations`. The runtime only checks for the exact compatible migration history; it does not execute DDL. A missing, pending, unknown, renamed, or checksum-mismatched migration fails closed.
+
+`PG_POOL_MAX` must be an integer of at least 2. Each process owns a separate pool, so budget total Postgres connections as `process count x PG_POOL_MAX`, plus capacity for migrations, backups, and operator sessions.
+
+The version 1 migration is an immutable snapshot of the former idempotent bootstrap. It upgrades an existing legacy database without dropping tables or replacing existing business rows. Never edit an applied migration; add the next version instead.
 
 Do not point local development at production Postgres.
 

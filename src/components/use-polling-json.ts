@@ -2,13 +2,20 @@
 
 import { startTransition, useEffect, useRef, useState } from "react";
 
-type PollingState<T> = {
+export type PollingState<T> = {
   data: T | null;
   error: string | null;
   loading: boolean;
 };
 
-export function usePollingJson<T>(url: string, intervalMs: number) {
+export type PollingJsonOptions = {
+  parseJsonOnNonOk?: boolean;
+  clearDataOnError?: boolean;
+};
+
+export function usePollingJson<T>(url: string, intervalMs: number, options: PollingJsonOptions = {}) {
+  const parseJsonOnNonOk = options.parseJsonOnNonOk === true;
+  const clearDataOnError = options.clearDataOnError === true;
   const [state, setState] = useState<PollingState<T>>({
     data: null,
     error: null,
@@ -37,17 +44,14 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
         const response = await fetch(url, {
           cache: "no-store",
         });
-        if (!response.ok) {
-          throw new Error(await readResponseError(response));
-        }
-        const payload = (await response.json()) as T;
+        const result = await parsePollingJsonResponse<T>(response, { parseJsonOnNonOk });
         if (!mountedRef.current) {
           return;
         }
         startTransition(() => {
           setState({
-            data: payload,
-            error: null,
+            data: result.data,
+            error: result.error,
             loading: false,
           });
         });
@@ -56,11 +60,7 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
           return;
         }
         startTransition(() => {
-          setState((current) => ({
-            data: current.data,
-            error: error instanceof Error ? error.message : "Erreur de chargement",
-            loading: false,
-          }));
+          setState((current) => buildPollingErrorState(current, error, clearDataOnError));
         });
       } finally {
         requestInFlight = false;
@@ -94,33 +94,59 @@ export function usePollingJson<T>(url: string, intervalMs: number) {
         clearTimeout(timeoutId);
       }
     };
-  }, [intervalMs, url]);
+  }, [clearDataOnError, intervalMs, parseJsonOnNonOk, url]);
 
   return state;
 }
 
-async function readResponseError(response: Response) {
+export async function parsePollingJsonResponse<T>(
+  response: Response,
+  options: Pick<PollingJsonOptions, "parseJsonOnNonOk"> = {},
+) {
+  const raw = await response.text();
+  let payload: unknown;
+
   try {
-    const payload = (await response.json()) as {
-      error?: string;
-      message?: string;
-    };
-
-    if (payload.error) {
-      return payload.error;
-    }
-
-    if (payload.message) {
-      return payload.message;
-    }
+    payload = JSON.parse(raw) as unknown;
   } catch {
-    try {
-      const text = await response.text();
-      if (text) {
-        return text;
-      }
-    } catch {}
+    const message = raw.trim() || `HTTP ${response.status}`;
+    throw new Error(response.ok ? `Réponse JSON invalide: ${message}` : message);
   }
 
-  return `HTTP ${response.status}`;
+  const responseError = readPayloadError(payload) ?? `HTTP ${response.status}`;
+  if (!response.ok && options.parseJsonOnNonOk !== true) {
+    throw new Error(responseError);
+  }
+
+  return {
+    data: payload as T,
+    error: response.ok ? null : responseError,
+  };
+}
+
+export function buildPollingErrorState<T>(
+  current: PollingState<T>,
+  error: unknown,
+  clearDataOnError: boolean,
+): PollingState<T> {
+  return {
+    data: clearDataOnError ? null : current.data,
+    error: error instanceof Error ? error.message : "Erreur de chargement",
+    loading: false,
+  };
+}
+
+function readPayloadError(payload: unknown) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const record = payload as Record<string, unknown>;
+  if (typeof record.error === "string" && record.error.length > 0) {
+    return record.error;
+  }
+  if (typeof record.message === "string" && record.message.length > 0) {
+    return record.message;
+  }
+  return null;
 }

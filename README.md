@@ -69,10 +69,11 @@ Champs importants:
 1. `npm install`
 2. créer `.env.local`
 3. démarrer Postgres
-4. `npm run dev:all`
-5. ouvrir `http://localhost:3000`
+4. `node --env-file=.env.local --import tsx scripts/db-migrate.ts`
+5. `npm run dev:all`
+6. ouvrir `http://localhost:3000`
 
-Le web et le worker tournent ensemble. Le worker crée automatiquement le schéma Postgres au premier démarrage.
+Le web et le worker tournent ensemble. Le runtime vérifie le schéma Postgres en lecture seule et refuse de démarrer si `db:migrate` n'a pas appliqué la version attendue.
 
 ## Vérification
 

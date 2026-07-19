@@ -24,21 +24,8 @@ export type OrderIntentStatus =
   | "failed"
   | "skipped"
   | "canceled";
-export type VenueOrderStatus =
-  | "pending"
-  | "live"
-  | "partially_filled"
-  | "filled"
-  | "canceled"
-  | "rejected"
-  | "expired";
-export type ExecutionLegStatus =
-  | "pending"
-  | "submitted"
-  | "filled"
-  | "hedged"
-  | "unwound"
-  | "failed";
+export type VenueOrderStatus = "pending" | "live" | "partially_filled" | "filled" | "canceled" | "rejected" | "expired";
+export type ExecutionLegStatus = "pending" | "submitted" | "filled" | "hedged" | "unwound" | "failed";
 export type CircuitBreakerKey = "global" | `asset:${MarketAsset}` | `slot:${MarketAsset}:${string}`;
 export type CircuitBreakerReason =
   | "manual"
@@ -174,12 +161,7 @@ export type PolymarketQuote = {
   negRisk: boolean;
 };
 
-export type KalshiCfBenchmarkIndexId =
-  | "BRTI"
-  | "ETHUSD_RTI"
-  | "SOLUSD_RTI"
-  | "XRPUSD_RTI"
-  | "DOGEUSD_RTI";
+export type KalshiCfBenchmarkIndexId = "BRTI" | "ETHUSD_RTI" | "SOLUSD_RTI" | "XRPUSD_RTI" | "DOGEUSD_RTI";
 
 export type KalshiCfBenchmarkWindow = {
   valueUsd: number;
@@ -364,12 +346,7 @@ export type LiveOpportunity = {
 export type MismatchEconomicsBasis = "executable" | "reference" | "unavailable";
 
 export type MismatchRiskCounterfactualDecision =
-  | "would_allow"
-  | "would_block"
-  | "would_allow_fail_open"
-  | "reference_allow"
-  | "reference_block"
-  | "unavailable";
+  "would_allow" | "would_block" | "would_allow_fail_open" | "reference_allow" | "reference_block" | "unavailable";
 
 export type MismatchRiskAudit = {
   evaluatedAt: number;
@@ -568,7 +545,7 @@ export type LiveOrder = {
   raw: Record<string, unknown>;
 };
 
-export type OrderAttemptStatus = "planned" | "submitted" | "confirmed" | "failed";
+export type OrderAttemptStatus = "planned" | "submitted" | "truth_pending" | "confirmed" | "failed";
 
 export type OrderAttempt = {
   id: string;
@@ -711,12 +688,7 @@ export type VenueCashAdjustmentObservation = {
 };
 
 export type MarketFillQualityOutcome =
-  | "full_fill"
-  | "partial_fill"
-  | "no_fill"
-  | "rescue"
-  | "unwind"
-  | "manual_required";
+  "full_fill" | "partial_fill" | "no_fill" | "rescue" | "unwind" | "manual_required";
 
 export type MarketFillQualityEvent = {
   id: string;
@@ -1009,26 +981,85 @@ export type RecoveryResponse = {
   kalshiSettlementMode: "automatic";
 };
 
-export type HealthResponse = {
-  ok: boolean;
+export type HealthIssueCode =
+  | "circuit_breaker_active"
+  | "feed_not_ready"
+  | "feed_timestamp_missing"
+  | "feed_stale"
+  | "live_execution_blocked"
+  | "snapshot_missing"
+  | "snapshot_stale"
+  | "worker_execute_missing"
+  | "worker_execute_stale"
+  | "worker_heartbeat_missing"
+  | "worker_heartbeat_stale"
+  | "worker_not_ready"
+  | "worker_scan_missing"
+  | "worker_scan_stale"
+  | "worker_slot_mismatch";
+
+export type HealthIssue = {
+  asset: MarketAsset;
+  code: HealthIssueCode;
+  details: string;
+};
+
+export type HealthAssetStatus = {
+  asset: MarketAsset;
+  phase: WorkerPhase;
+  readinessStatus: ReadinessStatus;
+  tradingEnabled: boolean;
+  shadowMode: boolean;
+  healthy: boolean;
+  reasons: HealthIssue[];
+  workerHeartbeatAgeMs: number | null;
+  lastScanAgeMs: number | null;
+  lastExecuteAgeMs: number | null;
+  snapshotAgeMs: number | null;
+  feedHealth: VenueFeedHealth[];
+};
+
+type HealthReadinessPayload = {
   timestamp: number;
   storageMode: "postgres";
+  reasons: HealthIssue[];
+  thresholds: {
+    workerMaxAgeMs: number;
+    executeMaxAgeMs: number;
+    snapshotMaxAgeMs: number;
+    feedMaxAgeMs: number;
+  };
   liveExecutionAllowed: boolean;
   liveExecutionGateEnabled: boolean;
   kalshiEnvironment: "prod" | "demo" | "missing" | "invalid";
   liveExecutionBlockReasons: Array<"environment_gate_disabled" | "kalshi_not_production">;
   activeBreakers: number;
   tradingEnabledAssets: MarketAsset[];
-  assets: Array<{
-    asset: MarketAsset;
-    phase: WorkerPhase;
-    readinessStatus: ReadinessStatus;
-    tradingEnabled: boolean;
-    shadowMode: boolean;
-    feedHealth: VenueFeedHealth[];
-  }>;
+  assets: HealthAssetStatus[];
   database: DatabaseMetrics | null;
 };
+
+export type HealthReadinessResponse = HealthReadinessPayload &
+  (
+    | {
+        status: "healthy";
+        ok: true;
+      }
+    | {
+        status: "unhealthy";
+        ok: false;
+      }
+  );
+
+export type HealthErrorResponse = {
+  status: "error";
+  ok: false;
+  error: "health_check_failed";
+  timestamp: number;
+  liveExecutionAllowed: false;
+};
+
+export type HealthResponse = HealthReadinessResponse | HealthErrorResponse;
 
 export type VenueOrderRequest = {
   marketRef: string;

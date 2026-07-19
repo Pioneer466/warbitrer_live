@@ -10,6 +10,7 @@ Group=warbitrer
 WorkingDirectory=/opt/warbitrer-live/app
 Environment=NODE_ENV=production
 EnvironmentFile=/etc/warbitrer/warbitrer.env
+ExecStartPre=/usr/bin/npm run db:status
 ExecStart=/usr/bin/node /opt/warbitrer-live/app/dist/worker/index.mjs --role asset-live --asset %i
 Restart=always
 RestartSec=5

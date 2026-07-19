@@ -7,7 +7,10 @@ import type { HealthResponse, MarketAsset, MismatchRiskMode, StrategyConfig } fr
 
 export function TradingToggle({ asset }: { asset: MarketAsset }) {
   const settings = usePollingJson<StrategyConfig>(`/api/settings/${asset}`, 2_000);
-  const health = usePollingJson<HealthResponse>("/api/health", 5_000);
+  const health = usePollingJson<HealthResponse>("/api/health", 5_000, {
+    parseJsonOnNonOk: true,
+    clearDataOnError: true,
+  });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +25,8 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
   const currentSettings = settings.data;
   const { enableTrading, shadowMode } = currentSettings;
   const mode = !enableTrading ? "off" : shadowMode ? "shadow" : "live";
-  const liveExecutionAllowed = health.data?.liveExecutionAllowed === true;
+  const liveExecutionAllowed =
+    health.error === null && health.data?.status === "healthy" && health.data.liveExecutionAllowed === true;
 
   async function writeSettings(nextSettings: StrategyConfig) {
     setBusy(true);

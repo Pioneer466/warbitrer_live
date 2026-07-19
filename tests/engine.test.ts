@@ -1,5 +1,7 @@
 import {
+  buildStableClientOrderId,
   buildVenueOrderRequest,
+  captureVenueReconcileFetch,
   countRecentKalshiSoftHedgeNoFillEvents,
   countRecentKalshiSoftPrimaryNoFillEvents,
   deriveFastKalshiPrimaryClipIntent,
@@ -19,14 +21,20 @@ import {
   getMismatchEstimationSettings,
   getPolymarketHedgeMinNotionalViolation,
   getPolymarketHedgeSubmissionBlock,
+  hasUnresolvedHedgeSubmissionAttempt,
+  hasUnresolvedPrimarySubmissionAttempt,
   hasKalshiHedgeRetryCapacity,
+  holdAcknowledgedOrderPendingAfterConfirmationFailure,
   isFeedHealthBreaker,
   isHedgedPairEconomicsWithinLossCap,
   isBreakerRelevantToSlot,
   isOpportunitySnapshotFresh,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
+  isOrderAttemptTruthUnresolved,
   isRetryablePolymarketInventorySyncError,
+  isTerminalPrimaryOrderWithNoObservedFill,
+  isVenueReconcileTruthFresh,
   mergePolymarketTradeObservationStatus,
   immediatePartialOrderType,
   isPrimaryFillSizeHedgable,
@@ -37,6 +45,7 @@ import {
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
   shouldHoldHedgeRescueOrderPendingTruth,
+  shouldHoldDestructiveReconcileForVenueTruth,
   shouldHoldPolymarketHedgeFailurePendingTruth,
   shouldFailClosedOnSubmissionError,
   shouldKeepSlotExecutionBreakerActive,
@@ -59,7 +68,22 @@ import {
   validateFinalWsEntryDepthCoverage,
   validateFinalWsEntrySnapshot,
 } from "@/lib/engine";
-import type { CircuitBreaker, ExecutionCandidate, LiveFill, LiveOpportunity, LiveOrder, OrderIntent, PositionSnapshot, RunEvent, VenueBalance } from "@/lib/types";
+import type { VenueReconcileFetchStates } from "@/lib/engine";
+import type {
+  CircuitBreaker,
+  ExecutionCandidate,
+  KalshiQuote,
+  LiveFill,
+  LiveOpportunity,
+  LiveOrder,
+  MarketSlot,
+  OutcomeQuote,
+  OrderIntent,
+  PolymarketQuote,
+  PositionSnapshot,
+  RunEvent,
+  VenueBalance,
+} from "@/lib/types";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { deriveHedgedPairEconomics } from "@/lib/settlement";
 
@@ -157,9 +181,223 @@ describe("mismatch estimation bootstrap", () => {
 });
 
 describe("ambiguous submission safety", () => {
-  it("fails closed for Polymarket transport errors without doing so for recoverable Kalshi ids", () => {
+  it("fails closed for transport errors on both venues until venue truth is authoritative", () => {
     expect(shouldFailClosedOnSubmissionError({ venue: "polymarket" })).toBe(true);
-    expect(shouldFailClosedOnSubmissionError({ venue: "kalshi" })).toBe(false);
+    expect(shouldFailClosedOnSubmissionError({ venue: "kalshi" })).toBe(true);
+  });
+
+  it("keeps an intent open when its primary attempt may have reached the venue", () => {
+    const attempt = {
+      legId: "leg-primary",
+      stage: "primary",
+      status: "planned" as const,
+      truthStatus: null,
+    };
+
+    expect(isOrderAttemptTruthUnresolved(attempt)).toBe(true);
+    expect(hasUnresolvedPrimarySubmissionAttempt([attempt], "leg-primary")).toBe(true);
+    expect(
+      hasUnresolvedPrimarySubmissionAttempt(
+        [{ ...attempt, status: "confirmed", truthStatus: "filled" }],
+        "leg-primary",
+      ),
+    ).toBe(false);
+    expect(
+      hasUnresolvedPrimarySubmissionAttempt(
+        [{ ...attempt, status: "failed", truthStatus: "not_submitted" }],
+        "leg-primary",
+      ),
+    ).toBe(false);
+  });
+
+  it("does not confuse hedge or unwind attempts with a missing primary entry", () => {
+    const base = {
+      legId: "leg-primary",
+      status: "truth_pending" as const,
+      truthStatus: "submission_unknown",
+    };
+
+    expect(
+      hasUnresolvedPrimarySubmissionAttempt(
+        [
+          { ...base, stage: "hedge" },
+          { ...base, stage: "primary_unwind" },
+        ],
+        "leg-primary",
+      ),
+    ).toBe(false);
+    expect(hasUnresolvedPrimarySubmissionAttempt([{ ...base, stage: "primary_retry:1" }], "leg-primary")).toBe(true);
+  });
+
+  it("recognizes every unresolved hedge entry stage without matching unrelated attempts", () => {
+    const base = {
+      legId: "leg-hedge",
+      status: "truth_pending" as const,
+      truthStatus: "submission_unknown",
+    };
+
+    for (const stage of ["hedge", "incremental_hedge:1", "hedge_retry:1", "hedge_rescue:1"]) {
+      expect(hasUnresolvedHedgeSubmissionAttempt([{ ...base, stage }], "leg-hedge")).toBe(true);
+    }
+
+    expect(
+      hasUnresolvedHedgeSubmissionAttempt(
+        [
+          { ...base, stage: "primary" },
+          { ...base, stage: "primary_unwind:1" },
+          { ...base, stage: "hedge", status: "confirmed", truthStatus: "filled" },
+          { ...base, stage: "hedge_retry:1", status: "failed", truthStatus: "not_submitted" },
+        ],
+        "leg-hedge",
+      ),
+    ).toBe(false);
+    expect(hasUnresolvedHedgeSubmissionAttempt([{ ...base, stage: "hedge" }], "another-leg")).toBe(false);
+  });
+
+  it("keeps the client order id stable when volatile execution terms change", () => {
+    const intent = buildIntent();
+    const leg = intent.legs[1];
+    const request = {
+      marketRef: leg.marketRef,
+      outcome: leg.outcome,
+      side: "BUY" as const,
+      size: 10,
+      price: 0.45,
+      maxCostUsd: 4.5,
+      orderType: "IOC",
+      buyMode: "shares" as const,
+      clientOrderId: "ignored",
+    };
+
+    const first = buildStableClientOrderId({ intent, leg, request, stage: "hedge_retry:1" });
+    const repriced = buildStableClientOrderId({
+      intent,
+      leg,
+      stage: "hedge_retry:1",
+      request: {
+        ...request,
+        size: 8,
+        price: 0.51,
+        maxCostUsd: 4.08,
+        buyMode: "amount",
+      },
+    });
+
+    expect(repriced).toBe(first);
+    expect(buildStableClientOrderId({ intent, leg, request, stage: "hedge_retry:2" })).not.toBe(first);
+  });
+
+  it("only closes a terminal primary when venue truth shows zero fill", () => {
+    expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "canceled", filledSize: 0 })).toBe(true);
+    expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "canceled", filledSize: 0.5 })).toBe(false);
+    expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "filled", filledSize: 10 })).toBe(false);
+  });
+});
+
+describe("venue reconciliation source truth", () => {
+  const freshStates: VenueReconcileFetchStates = {
+    polymarketOrders: { ok: true, error: null },
+    polymarketFills: { ok: true, error: null },
+    kalshiOrders: { ok: true, error: null },
+    kalshiFills: { ok: true, error: null },
+  };
+
+  it("preserves the difference between a successful empty response and a failed fetch", async () => {
+    const emptyResponse = await captureVenueReconcileFetch(async () => [] as string[], ["fallback"]);
+    const failedResponse = await captureVenueReconcileFetch(async () => {
+      throw new Error("venue unavailable");
+    }, [] as string[]);
+
+    expect(emptyResponse).toEqual({
+      value: [],
+      state: { ok: true, error: null },
+    });
+    expect(failedResponse).toEqual({
+      value: [],
+      state: { ok: false, error: "venue unavailable" },
+    });
+  });
+
+  it("requires successful order and fill fetches before destructive reconciliation", () => {
+    const failedKalshiStates: VenueReconcileFetchStates = {
+      ...freshStates,
+      kalshiOrders: { ok: false, error: "orders unavailable" },
+    };
+    const failedPolymarketFillStates: VenueReconcileFetchStates = {
+      ...freshStates,
+      polymarketFills: { ok: false, error: "fills unavailable" },
+    };
+
+    expect(isVenueReconcileTruthFresh("kalshi", freshStates)).toBe(true);
+    expect(isVenueReconcileTruthFresh("kalshi", failedKalshiStates)).toBe(false);
+    expect(isVenueReconcileTruthFresh("polymarket", failedPolymarketFillStates)).toBe(false);
+    expect(
+      shouldHoldDestructiveReconcileForVenueTruth({
+        venue: "kalshi",
+        fetchStates: freshStates,
+      }),
+    ).toBe(false);
+    expect(
+      shouldHoldDestructiveReconcileForVenueTruth({
+        venue: "kalshi",
+        fetchStates: undefined,
+      }),
+    ).toBe(true);
+    expect(
+      shouldHoldDestructiveReconcileForVenueTruth({
+        venue: "kalshi",
+        fetchStates: failedKalshiStates,
+      }),
+    ).toBe(true);
+    expect(
+      shouldHoldDestructiveReconcileForVenueTruth({
+        venue: "polymarket",
+        fetchStates: failedPolymarketFillStates,
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("acknowledged order confirmation failures", () => {
+  it("keeps a terminal zero-fill acknowledgement pending until confirmation truth is available", () => {
+    const held = holdAcknowledgedOrderPendingAfterConfirmationFailure(
+      {
+        venue: "polymarket",
+        venueOrderId: "order-1",
+        status: "canceled",
+        filledSize: 0,
+        averageFillPrice: null,
+        feeUsd: 0,
+        raw: { acknowledged: true },
+      },
+      "maker side missing",
+    );
+
+    expect(held.status).toBe("pending");
+    expect(held.raw).toMatchObject({
+      acknowledgedStatus: "canceled",
+      confirmationTruthPending: true,
+      confirmationError: "maker side missing",
+    });
+  });
+
+  it("preserves positive-fill acknowledgement state while recording confirmation ambiguity", () => {
+    const held = holdAcknowledgedOrderPendingAfterConfirmationFailure(
+      {
+        venue: "polymarket",
+        venueOrderId: "order-1",
+        status: "filled",
+        filledSize: 2,
+        averageFillPrice: 0.5,
+        feeUsd: 0,
+        raw: {},
+      },
+      "trades unavailable",
+    );
+
+    expect(held.status).toBe("filled");
+    expect(held.filledSize).toBe(2);
+    expect(held.raw.confirmationTruthPending).toBe(true);
   });
 });
 
@@ -370,9 +608,7 @@ describe("worst-fill execution caps", () => {
     expect(
       validate({
         balances: readyBalances.map((balance) =>
-          balance.venue === "kalshi"
-            ? { ...balance, availableBalanceUsd: 4.59 }
-            : balance,
+          balance.venue === "kalshi" ? { ...balance, availableBalanceUsd: 4.59 } : balance,
         ),
       }),
     ).toContain("exceeds available balance");
@@ -389,9 +625,7 @@ describe("worst-fill execution caps", () => {
       validate({
         intent,
         balances: readyBalances.map((balance) =>
-          balance.venue === "polymarket"
-            ? { ...balance, availableBalanceUsd: 6 }
-            : balance,
+          balance.venue === "polymarket" ? { ...balance, availableBalanceUsd: 6 } : balance,
         ),
       }),
     ).toContain("polymarket requirement");
@@ -411,43 +645,137 @@ describe("worst-fill execution caps", () => {
 });
 
 describe("final WS entry snapshot", () => {
-  const slot = {
+  type TestPolymarketQuote = PolymarketQuote & {
+    orderbookLevels: NonNullable<PolymarketQuote["orderbookLevels"]>;
+  };
+  type TestKalshiQuote = KalshiQuote & {
+    orderbookLevels: NonNullable<KalshiQuote["orderbookLevels"]>;
+  };
+
+  const slot: MarketSlot = {
     asset: "btc",
     key: "btc:slot-1",
     startTs: 0,
     endTs: 10_000,
-  } as any;
+    startIso: new Date(0).toISOString(),
+    endIso: new Date(10_000).toISOString(),
+    label: "BTC test slot",
+    polymarketSlug: "btc-test-slot",
+    secondsRemaining: 10,
+  };
   const intent = buildIntent({
     status: "pending",
     failureReason: null,
     slotKey: slot.key,
   });
-  const buildQuote = (venue: "polymarket" | "kalshi") => {
-    const outcome = (name: "UP" | "DOWN" | "YES" | "NO") => ({
+  const outcome = (name: OutcomeQuote["outcome"]): OutcomeQuote => {
+    const execution = {
+      buyPrice: 0.5,
+      sellPrice: 0.49,
+      midPrice: 0.495,
+      bestBid: 0.49,
+      bestAsk: 0.5,
+      depth: 100,
+      tickSize: 0.01,
+      minOrderSize: 1,
+      feeRateBps: 0,
+    };
+    return {
       outcome: name,
+      ...execution,
+      execution,
       chart: {
+        label: "best_ask_live",
+        price: 0.5,
         source: "ws",
         lastUpdatedAt: 1_000,
       },
-    });
+    };
+  };
+  const buildPolymarketQuote = (): TestPolymarketQuote => {
     return {
+      ref: {
+        asset: "btc",
+        venue: "polymarket",
+        id: "poly-market",
+        title: "BTC test market",
+        url: "https://polymarket.com/event/btc-test-slot",
+        startTime: slot.startIso,
+        endTime: slot.endIso,
+        slotKey: slot.key,
+      },
+      conditionId: "poly-market",
+      status: "open",
       slotAligned: true,
-      ref: { slotKey: slot.key },
-      feedHealth: { feedStatus: "ready" },
+      availabilityReason: null,
+      feedHealth: {
+        asset: "btc",
+        venue: "polymarket",
+        feedStatus: "ready",
+        source: "ws",
+        lastMessageAt: 1_000,
+        stalenessMs: 0,
+        details: [],
+        subscriptions: [],
+      },
+      lastMessageAt: 1_000,
       source: "ws",
       stalenessMs: 0,
-      orderbookLevels: venue === "polymarket"
-        ? { upBids: [], upAsks: [], downBids: [], downAsks: [] }
-        : { yesBids: [], noBids: [] },
-      outcomes: venue === "polymarket"
-        ? { up: outcome("UP"), down: outcome("DOWN") }
-        : { yes: outcome("YES"), no: outcome("NO") },
-    } as any;
+      orderbookLevels: { upBids: [], upAsks: [], downBids: [], downAsks: [] },
+      outcomes: { up: outcome("UP"), down: outcome("DOWN") },
+      resolution: null,
+      tokenIds: { up: "poly-up", down: "poly-down" },
+      chainlinkLivePriceUsd: null,
+      chainlinkLivePriceCapturedAt: null,
+      observedSlotOpenPriceUsd: null,
+      observedSlotOpenCapturedAt: null,
+      feeRateBps: 0,
+      negRisk: false,
+    };
+  };
+  const buildKalshiQuote = (): TestKalshiQuote => {
+    return {
+      ref: {
+        asset: "btc",
+        venue: "kalshi",
+        id: "KXBTC15M-TEST",
+        ticker: "KXBTC15M-TEST",
+        title: "BTC test market",
+        url: "https://kalshi.com/markets/test",
+        startTime: slot.startIso,
+        endTime: slot.endIso,
+        slotKey: slot.key,
+      },
+      status: "active",
+      slotAligned: true,
+      availabilityReason: null,
+      feedHealth: {
+        asset: "btc",
+        venue: "kalshi",
+        feedStatus: "ready",
+        source: "ws",
+        lastMessageAt: 1_000,
+        stalenessMs: 0,
+        details: [],
+        subscriptions: [],
+      },
+      lastMessageAt: 1_000,
+      source: "ws",
+      stalenessMs: 0,
+      orderbookLevels: { yesBids: [], noBids: [] },
+      outcomes: { yes: outcome("YES"), no: outcome("NO") },
+      targetPriceUsd: null,
+      resolution: null,
+      feeMultiplier: 0,
+      feeType: "quadratic",
+      lastTradeYesPrice: null,
+      lastTradeNoPrice: null,
+    };
   };
 
   it("accepts only a fresh aligned WS snapshot", () => {
-    const polymarket = buildQuote("polymarket");
-    const kalshi = buildQuote("kalshi");
+    const polymarket = buildPolymarketQuote();
+    const kalshi = buildKalshiQuote();
     expect(
       validateFinalWsEntrySnapshot(
         slot,
@@ -475,8 +803,8 @@ describe("final WS entry snapshot", () => {
   });
 
   it("rejects stale books and slot changes", () => {
-    const polymarket = buildQuote("polymarket");
-    const kalshi = buildQuote("kalshi");
+    const polymarket = buildPolymarketQuote();
+    const kalshi = buildKalshiQuote();
     polymarket.outcomes.down.chart.lastUpdatedAt = 0;
     expect(
       validateFinalWsEntrySnapshot(
@@ -506,8 +834,8 @@ describe("final WS entry snapshot", () => {
   });
 
   it("requires executable depth on both legs at the final submission boundary", () => {
-    const polymarket = buildQuote("polymarket");
-    const kalshi = buildQuote("kalshi");
+    const polymarket = buildPolymarketQuote();
+    const kalshi = buildKalshiQuote();
     polymarket.orderbookLevels.downAsks = [[0.45, 100]];
     kalshi.orderbookLevels.noBids = [[0.55, 100]];
 
@@ -1279,12 +1607,7 @@ describe("Kalshi primary IOC handling", () => {
       status: "pending" as const,
     };
 
-    expect(
-      shouldTreatPrimaryOrderAsFilled(
-        { primaryVenue: "polymarket" },
-        pendingFullOrder,
-      ),
-    ).toBe(true);
+    expect(shouldTreatPrimaryOrderAsFilled({ primaryVenue: "polymarket" }, pendingFullOrder)).toBe(true);
     expect(
       shouldTreatPrimaryExecutionAsFilled(
         { primaryVenue: "polymarket" },
@@ -1308,24 +1631,9 @@ describe("Kalshi primary IOC handling", () => {
   });
 
   it("requires a complete Polymarket primary fill before resume can hedge it", () => {
-    expect(
-      isPrimaryFillSizeHedgable(
-        { primaryVenue: "polymarket" },
-        { filledSize: 9, requestedSize: 10 },
-      ),
-    ).toBe(false);
-    expect(
-      isPrimaryFillSizeHedgable(
-        { primaryVenue: "polymarket" },
-        { filledSize: 10, requestedSize: 10 },
-      ),
-    ).toBe(true);
-    expect(
-      isPrimaryFillSizeHedgable(
-        { primaryVenue: "kalshi" },
-        { filledSize: 1, requestedSize: 10 },
-      ),
-    ).toBe(true);
+    expect(isPrimaryFillSizeHedgable({ primaryVenue: "polymarket" }, { filledSize: 9, requestedSize: 10 })).toBe(false);
+    expect(isPrimaryFillSizeHedgable({ primaryVenue: "polymarket" }, { filledSize: 10, requestedSize: 10 })).toBe(true);
+    expect(isPrimaryFillSizeHedgable({ primaryVenue: "kalshi" }, { filledSize: 1, requestedSize: 10 })).toBe(true);
   });
 
   it("requires a Polymarket hedge to cover the requested size before marking it complete", () => {
@@ -1382,12 +1690,9 @@ describe("Kalshi primary IOC handling", () => {
   });
 
   it("rejects small hedge overfills when the actual pair is not economically covered", () => {
-    const evaluation = evaluateBenignHedgeOverfill(
-      buildKalshiPrimaryPolymarketHedgeIntent({ kalshiPrice: 0.49 }),
-      {
-        minWorstCaseProfitUsd: 0.25,
-      },
-    );
+    const evaluation = evaluateBenignHedgeOverfill(buildKalshiPrimaryPolymarketHedgeIntent({ kalshiPrice: 0.49 }), {
+      minWorstCaseProfitUsd: 0.25,
+    });
 
     expect(evaluation.overfillNotionalUsd).toBeCloseTo(0.098, 6);
     expect(evaluation.economicallyCovered).toBe(false);
@@ -1444,7 +1749,7 @@ describe("Kalshi primary IOC handling", () => {
     ).toBe(false);
   });
 
-  it("holds soft Polymarket hedge no-fills only until the truth-pending age expires", () => {
+  it("keeps soft Polymarket hedge no-fills pending regardless of age until truth is authoritative", () => {
     const now = 1774899060000;
     const hedgeLeg = { venue: "polymarket" as const, side: "BUY" as const };
     const softNoFillOrder = {
@@ -1483,7 +1788,7 @@ describe("Kalshi primary IOC handling", () => {
         softNoFillOrder,
         now,
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   it("keeps holding when Polymarket reports pending exposure truth", () => {
@@ -1596,16 +1901,12 @@ describe("Polymarket reconciliation status monotonicity", () => {
   it.each(["live", "partially_filled", "filled", "canceled", "rejected", "expired"] as const)(
     "does not downgrade an existing %s order when venue trades are only pending",
     (status) => {
-      expect(
-        mergePolymarketTradeObservationStatus(status, "pending"),
-      ).toBe(status);
+      expect(mergePolymarketTradeObservationStatus(status, "pending")).toBe(status);
     },
   );
 
   it("keeps an already pending order pending", () => {
-    expect(
-      mergePolymarketTradeObservationStatus("pending", "pending"),
-    ).toBe("pending");
+    expect(mergePolymarketTradeObservationStatus("pending", "pending")).toBe("pending");
   });
 
   it("accepts a non-pending trade observation", () => {
@@ -1662,7 +1963,9 @@ describe("slot execution breakers", () => {
       },
     };
 
-    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set(["btc:slot-1"]))).toBe(true);
+    expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set(["btc:slot-1"]))).toBe(
+      true,
+    );
     expect(shouldKeepSlotExecutionBreakerActive(breaker, 100, new Set(["btc:slot-1"]), new Set())).toBe(false);
   });
 
@@ -2163,7 +2466,9 @@ describe("polymarket closed orderbook errors", () => {
   it("detects when a token orderbook has disappeared", () => {
     expect(
       isPolymarketOrderbookUnavailableError(
-        new Error("the orderbook 110016697850489733765199292378131676749047131268297622626845863046634270666333 does not exist"),
+        new Error(
+          "the orderbook 110016697850489733765199292378131676749047131268297622626845863046634270666333 does not exist",
+        ),
       ),
     ).toBe(true);
     expect(isPolymarketOrderbookUnavailableError(new Error("market not found"))).toBe(false);

@@ -136,6 +136,7 @@ export type KalshiPosition = {
 
 type KalshiPositionsResponse = {
   market_positions: KalshiPosition[];
+  cursor?: string | null;
 };
 
 type KalshiOrderResponse = {
@@ -158,11 +159,42 @@ type KalshiOrderResponse = {
   };
 };
 
+type KalshiOrdersResponse = {
+  orders: KalshiOrderResponse["order"][];
+  cursor?: string | null;
+};
+
+type KalshiFillRecord = {
+  fill_id?: string;
+  trade_id: string;
+  order_id: string;
+  market_ticker: string;
+  is_taker: boolean;
+  side: "yes" | "no";
+  action: "buy" | "sell";
+  yes_price_dollars?: string;
+  no_price_dollars?: string;
+  count_fp: string;
+  fee_cost?: string;
+  taker_fees_dollars?: string;
+  maker_fees_dollars?: string;
+  fees_paid_dollars?: string;
+  created_time?: string;
+  ts?: number;
+};
+
+type KalshiFillsResponse = {
+  fills: KalshiFillRecord[];
+  cursor?: string | null;
+};
+
 const SLOT_TOLERANCE_MS = 60_000;
 const KALSHI_SLOT_PREFETCH_MS = 15 * 60 * 1_000;
 const KALSHI_CURRENT_MARKETS_LIMIT = 100;
 const KALSHI_MARKETS_PAGE_LIMIT = 1_000;
 const KALSHI_MARKETS_MAX_PAGES = 10;
+const KALSHI_PORTFOLIO_PAGE_LIMIT = 1_000;
+const KALSHI_PORTFOLIO_MAX_PAGES = 100;
 
 export function getKalshiBaseUrl() {
   const env = readEnv();
@@ -191,18 +223,11 @@ export function getKalshiWsUrls() {
 
 export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   const marketConfig = getMarketCatalogEntry(slot.asset);
-  const [list, series] = await Promise.all([
-    fetchKalshiMarketsForSlot(slot),
-    fetchKalshiSeries(slot.asset),
-  ]);
+  const [list, series] = await Promise.all([fetchKalshiMarketsForSlot(slot), fetchKalshiSeries(slot.asset)]);
 
   const market = resolveKalshiMarketForSlot(list.markets, slot);
   if (!market) {
-    return createUnavailableKalshiQuote(
-      slot,
-      series.series,
-      "Marché Kalshi du créneau courant indisponible",
-    );
+    return createUnavailableKalshiQuote(slot, series.series, "Marché Kalshi du créneau courant indisponible");
   }
 
   const freshMarketResponse = await fetchJson<KalshiMarketResponse>(
@@ -251,10 +276,7 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
   };
 }
 
-export function resolveKalshiMarketForSlot(
-  markets: KalshiMarketSummary[],
-  slot: MarketSlot,
-) {
+export function resolveKalshiMarketForSlot(markets: KalshiMarketSummary[], slot: MarketSlot) {
   return (
     [...markets]
       .filter(
@@ -304,9 +326,7 @@ export async function fetchFinalizedKalshiResolution(ticker: string) {
 export async function fetchFinalizedKalshiResolutionObservation(
   ticker: string,
 ): Promise<FinalizedKalshiResolutionObservation | null> {
-  const response = await fetchJson<KalshiMarketResponse>(
-    `${getKalshiMarketDataBaseUrl()}/markets/${ticker}`,
-  );
+  const response = await fetchJson<KalshiMarketResponse>(`${getKalshiMarketDataBaseUrl()}/markets/${ticker}`);
   const market = response.market;
   const status = market.status?.toLowerCase?.() ?? "";
   const result = market.result?.toLowerCase?.() ?? "";
@@ -329,8 +349,7 @@ export async function fetchFinalizedKalshiResolutionObservation(
   return {
     resolution,
     benchmarkValueUsd,
-    benchmarkSource:
-      benchmarkValueUsd === null ? null : "kalshi-expiration-value",
+    benchmarkSource: benchmarkValueUsd === null ? null : "kalshi-expiration-value",
   };
 }
 
@@ -365,9 +384,7 @@ function readPositiveFiniteMarketNumber(value: unknown) {
 
 export async function fetchKalshiSeries(asset: MarketSlot["asset"]) {
   const marketConfig = getMarketCatalogEntry(asset);
-  return fetchJson<KalshiSeriesResponse>(
-    `${getKalshiMarketDataBaseUrl()}/series/${marketConfig.kalshiSeriesTicker}`,
-  );
+  return fetchJson<KalshiSeriesResponse>(`${getKalshiMarketDataBaseUrl()}/series/${marketConfig.kalshiSeriesTicker}`);
 }
 
 export async function fetchKalshiMarketsForSlot(slot: MarketSlot) {
@@ -458,8 +475,7 @@ export function deriveKalshiOutcomeQuotesFromMarketWithSource(
   const noBid = parseMarketPrice(market.no_bid_dollars);
   const noAsk = parseMarketPrice(market.no_ask_dollars);
   const updatedAt =
-    lastUpdatedAtOverride ??
-    (market.updated_time ? Date.parse(market.updated_time) || Date.now() : Date.now());
+    lastUpdatedAtOverride ?? (market.updated_time ? Date.parse(market.updated_time) || Date.now() : Date.now());
 
   const yesOutcome = createOutcomeQuote({
     outcome: "YES",
@@ -622,12 +638,8 @@ export function isTrackedKalshiPosition(position: PositionSnapshot) {
   );
 }
 
-export function extractKalshiLastTradePrices(
-  trades: KalshiTrade[],
-  fallbackLastPrice?: number | null,
-) {
-  const latestTrade = [...trades]
-    .sort((left, right) => getTradeTimestamp(right) - getTradeTimestamp(left))[0];
+export function extractKalshiLastTradePrices(trades: KalshiTrade[], fallbackLastPrice?: number | null) {
+  const latestTrade = [...trades].sort((left, right) => getTradeTimestamp(right) - getTradeTimestamp(left))[0];
 
   if (!latestTrade) {
     return {
@@ -639,7 +651,9 @@ export function extractKalshiLastTradePrices(
 
   const yesPrice =
     parseMarketPrice(latestTrade.yes_price_dollars) ??
-    (parseMarketPrice(latestTrade.price_dollars) ?? fallbackLastPrice ?? null);
+    parseMarketPrice(latestTrade.price_dollars) ??
+    fallbackLastPrice ??
+    null;
 
   return {
     yes: yesPrice,
@@ -675,10 +689,11 @@ export function createKalshiAdapter(): VenueAdapter {
         return [];
       }
 
-      const response = await kalshiFetch<KalshiPositionsResponse>("/portfolio/positions");
-      return response.market_positions
-        .map((position) => mapKalshiPosition(position, now))
-        .filter(isTrackedKalshiPosition);
+      const positions = await fetchKalshiCursorPages<KalshiPosition, KalshiPositionsResponse>({
+        endpoint: "/portfolio/positions",
+        selectItems: (response) => response.market_positions,
+      });
+      return positions.map((position) => mapKalshiPosition(position, now)).filter(isTrackedKalshiPosition);
     },
     async placeOrder(order) {
       assertProductionVenueEnvironment();
@@ -730,11 +745,11 @@ export async function fetchKalshiOrders(status?: string) {
     params.set("status", status);
   }
 
-  const response = await kalshiFetch<{ orders: KalshiOrderResponse["order"][] }>(
-    `/portfolio/orders${params.size > 0 ? `?${params.toString()}` : ""}`,
-  );
-
-  return response.orders;
+  return fetchKalshiCursorPages<KalshiOrderResponse["order"], KalshiOrdersResponse>({
+    endpoint: "/portfolio/orders",
+    params,
+    selectItems: (response) => response.orders,
+  });
 }
 
 export async function fetchKalshiFills() {
@@ -742,26 +757,47 @@ export async function fetchKalshiFills() {
     return [];
   }
 
-  const response = await kalshiFetch<{
-    fills: Array<{
-      trade_id: string;
-      order_id: string;
-      market_ticker: string;
-      is_taker: boolean;
-      side: "yes" | "no";
-      action: "buy" | "sell";
-      yes_price_dollars?: string;
-      no_price_dollars?: string;
-      count_fp: string;
-      taker_fees_dollars?: string;
-      maker_fees_dollars?: string;
-      fees_paid_dollars?: string;
-      created_time?: string;
-      ts?: number;
-    }>;
-  }>("/portfolio/fills");
+  return fetchKalshiCursorPages<KalshiFillRecord, KalshiFillsResponse>({
+    endpoint: "/portfolio/fills",
+    selectItems: (response) => response.fills,
+  });
+}
 
-  return response.fills;
+async function fetchKalshiCursorPages<TItem, TResponse extends { cursor?: string | null }>(input: {
+  endpoint: string;
+  params?: URLSearchParams;
+  selectItems: (response: TResponse) => TItem[];
+}) {
+  const items: TItem[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | null = null;
+
+  for (let pageNumber = 1; pageNumber <= KALSHI_PORTFOLIO_MAX_PAGES; pageNumber += 1) {
+    const params = new URLSearchParams(input.params);
+    params.set("limit", String(KALSHI_PORTFOLIO_PAGE_LIMIT));
+    if (cursor) {
+      params.set("cursor", cursor);
+    }
+
+    const response = await kalshiFetch<TResponse>(`${input.endpoint}?${params.toString()}`);
+    items.push(...input.selectItems(response));
+
+    const nextCursor = response.cursor?.trim() || null;
+    if (!nextCursor) {
+      return items;
+    }
+    if (seenCursors.has(nextCursor)) {
+      throw new Error(`Kalshi pagination returned a repeated cursor for ${input.endpoint}`);
+    }
+    if (pageNumber === KALSHI_PORTFOLIO_MAX_PAGES) {
+      throw new Error(`Kalshi pagination exceeded ${KALSHI_PORTFOLIO_MAX_PAGES} pages for ${input.endpoint}`);
+    }
+
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+
+  throw new Error(`Kalshi pagination failed to terminate for ${input.endpoint}`);
 }
 
 export function getKalshiFillPriceUsd(fill: {
@@ -803,11 +839,12 @@ export function getKalshiOrderPriceUsd(
 }
 
 export function getKalshiFillFeeUsd(fill: {
+  fee_cost?: string;
   taker_fees_dollars?: string;
   maker_fees_dollars?: string;
   fees_paid_dollars?: string;
 }) {
-  return Number(fill.fees_paid_dollars ?? fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
+  return Number(fill.fee_cost ?? fill.fees_paid_dollars ?? fill.taker_fees_dollars ?? fill.maker_fees_dollars ?? 0);
 }
 
 export function mapKalshiFillToLiveFill(
@@ -821,6 +858,7 @@ export function mapKalshiFillToLiveFill(
     yes_price_dollars?: string;
     no_price_dollars?: string;
     count_fp: string;
+    fee_cost?: string;
     taker_fees_dollars?: string;
     maker_fees_dollars?: string;
     fees_paid_dollars?: string;
@@ -969,10 +1007,7 @@ export function deriveKalshiBalanceSummary(response: KalshiBalanceResponse): Kal
   };
 }
 
-export function mapKalshiBalance(
-  response: KalshiBalanceResponse,
-  capturedAt = Date.now(),
-): VenueBalance {
+export function mapKalshiBalance(response: KalshiBalanceResponse, capturedAt = Date.now()): VenueBalance {
   const summary = deriveKalshiBalanceSummary(response);
 
   return {
@@ -1267,8 +1302,7 @@ export function getKalshiSoftNoFillMessage(error: unknown) {
   if (
     normalized.includes("order couldn't be fully filled") ||
     normalized.includes("order could not be fully filled") ||
-    normalized.includes("fok orders are fully filled or killed") ||
-    normalized.includes("fill_or_kill")
+    normalized.includes("fok orders are fully filled or killed")
   ) {
     return message;
   }
