@@ -5,7 +5,7 @@
 - Le `curl` de breaker global écrit bien `active:false`, mais l’UI peut encore afficher un breaker si un `slot:*` reste actif, si le `workerState` n’a pas encore été rafraîchi, ou si un nouvel incident réarme `global`.
   Commande de vérification immédiate :
   ```bash
-  curl -fsS -u 'ethan:lechatestnoir' http://localhost:3000/api/circuit-breakers | jq '.[] | select(.active)'
+  curl -fsS -u "$WARBITRER_BASIC_AUTH" http://localhost:3000/api/circuit-breakers | jq '.[] | select(.active)'
   ```
 
 - Le SOL `filled 6.09` pour `req 6.00` vient du mode Polymarket BUY en dollars : si le prix réel est meilleur que le prix limite, l’ordre achète plus de shares que prévu. C’est la cause directe du `overfilled by 0.085713`.
