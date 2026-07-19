@@ -21,6 +21,7 @@ describe("env parsing", () => {
     process.env.TELEGRAM_ENABLED = "";
     process.env.TELEGRAM_BOT_TOKEN = "";
     process.env.TELEGRAM_CHAT_ID = "";
+    process.env.LIVE_EXECUTION_ALLOWED = "";
     process.env.POLY_PRIVATE_KEY_PATH = "";
     process.env.POLY_API_KEY = "";
     process.env.POLY_API_SECRET = "";
@@ -38,6 +39,7 @@ describe("env parsing", () => {
     expect(env.TELEGRAM_ENABLED).toBeUndefined();
     expect(env.TELEGRAM_BOT_TOKEN).toBeUndefined();
     expect(env.TELEGRAM_CHAT_ID).toBeUndefined();
+    expect(env.LIVE_EXECUTION_ALLOWED).toBeUndefined();
     expect(env.POLY_PRIVATE_KEY_PATH).toBeUndefined();
     expect(env.POLY_API_KEY).toBeUndefined();
     expect(env.POLY_API_SECRET).toBeUndefined();

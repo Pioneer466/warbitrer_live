@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { getLiveSettingsBlockReasons } from "@/lib/execution-safety";
 import { isMarketAsset } from "@/lib/market-catalog";
 import { settingsSchema } from "@/lib/settings-schema";
 import { readSettings, writeSettings } from "@/lib/storage";
@@ -41,6 +42,17 @@ export async function PUT(request: Request, context: { params: Promise<{ asset: 
           error: parsed.error.flatten(),
         },
         { status: 400 },
+      );
+    }
+
+    const liveBlockReasons = getLiveSettingsBlockReasons(asset, parsed.data);
+    if (liveBlockReasons.length > 0) {
+      return NextResponse.json(
+        {
+          error: "live_execution_blocked",
+          reasons: liveBlockReasons,
+        },
+        { status: 409 },
       );
     }
 

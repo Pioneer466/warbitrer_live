@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { getLiveSettingsBlockReasons } from "@/lib/execution-safety";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import { settingsMapSchema } from "@/lib/settings-schema";
 import { readSettingsMap, writeSettings } from "@/lib/storage";
@@ -34,9 +35,21 @@ export async function PUT(request: Request) {
       );
     }
 
-    await Promise.all(
-      MARKET_ASSETS.map((asset) => writeSettings(asset, parsed.data[asset])),
-    );
+    const blockedAssets = MARKET_ASSETS.flatMap((asset) => {
+      const reasons = getLiveSettingsBlockReasons(asset, parsed.data[asset]);
+      return reasons.length > 0 ? [{ asset, reasons }] : [];
+    });
+    if (blockedAssets.length > 0) {
+      return NextResponse.json(
+        {
+          error: "live_execution_blocked",
+          assets: blockedAssets,
+        },
+        { status: 409 },
+      );
+    }
+
+    await Promise.all(MARKET_ASSETS.map((asset) => writeSettings(asset, parsed.data[asset])));
     return NextResponse.json(parsed.data);
   } catch (error) {
     return createApiErrorResponse(error);

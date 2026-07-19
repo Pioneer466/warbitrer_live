@@ -1013,6 +1013,10 @@ export type HealthResponse = {
   ok: boolean;
   timestamp: number;
   storageMode: "postgres";
+  liveExecutionAllowed: boolean;
+  liveExecutionGateEnabled: boolean;
+  kalshiEnvironment: "prod" | "demo" | "missing" | "invalid";
+  liveExecutionBlockReasons: Array<"environment_gate_disabled" | "kalshi_not_production">;
   activeBreakers: number;
   tradingEnabledAssets: MarketAsset[];
   assets: Array<{

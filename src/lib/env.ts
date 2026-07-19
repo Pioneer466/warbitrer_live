@@ -8,6 +8,7 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
   APP_BASIC_AUTH_USER: z.string().min(1).optional(),
   APP_BASIC_AUTH_PASSWORD: z.string().min(1).optional(),
+  LIVE_EXECUTION_ALLOWED: z.string().optional(),
   TELEGRAM_ENABLED: z.string().optional(),
   TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),
   TELEGRAM_CHAT_ID: z.string().min(1).optional(),

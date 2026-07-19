@@ -23,8 +23,14 @@
     "start:worker:legacy": "tsx src/worker/index.ts --role legacy",
     "start:all": "concurrently -k -n web,worker -c cyan,magenta \"npm run start:web\" \"npm run start:worker\"",
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "audit:prod": "node scripts/check-production-audit.mjs",
+    "verify": "npm run audit:prod && npm run lint && npm run typecheck && npm test && npm run build && npm run build:worker",
     "poly:derive-api-key": "tsx scripts/polymarket-derive-api-key.ts",
     "incident:report": "node --import tsx ./scripts/incident-report.ts",
     "logs:events": "node --import tsx ./scripts/run-events.ts",
@@ -42,15 +48,15 @@
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""
   },
   "dependencies": {
-    "@polymarket/builder-relayer-client": "^0.0.8",
-    "@polymarket/clob-client-v2": "^1.0.2",
+    "@polymarket/builder-relayer-client": "^0.0.10",
+    "@polymarket/clob-client-v2": "^1.1.0",
     "ethers": "^5.8.0",
-    "next": "^15.3.8",
-    "pg": "8.16.0",
+    "next": "^15.5.20",
+    "pg": "^8.22.0",
     "react": "19.0.0",
     "react-dom": "19.0.0",
-    "viem": "^2.47.10",
-    "ws": "^8.20.0",
+    "viem": "^2.55.4",
+    "ws": "^8.21.1",
     "zod": "3.24.4"
   },
   "devDependencies": {
@@ -58,12 +64,20 @@
     "@types/pg": "8.15.2",
     "@types/react": "19.0.12",
     "@types/react-dom": "19.0.4",
+    "@vitest/coverage-v8": "^3.1.2",
     "autoprefixer": "10.4.21",
     "concurrently": "9.1.2",
+    "eslint": "^9.39.5",
+    "eslint-config-next": "^15.5.20",
     "postcss": "8.5.3",
+    "prettier": "^3.9.5",
     "tailwindcss": "3.4.17",
     "tsx": "4.19.4",
     "typescript": "5.8.3",
     "vitest": "3.1.2"
+  },
+  "overrides": {
+    "form-data": "4.0.6",
+    "ws": "$ws"
   }
 }

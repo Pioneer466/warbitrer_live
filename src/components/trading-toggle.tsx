@@ -3,10 +3,11 @@
 import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
-import type { MarketAsset, MismatchRiskMode, StrategyConfig } from "@/lib/types";
+import type { HealthResponse, MarketAsset, MismatchRiskMode, StrategyConfig } from "@/lib/types";
 
 export function TradingToggle({ asset }: { asset: MarketAsset }) {
   const settings = usePollingJson<StrategyConfig>(`/api/settings/${asset}`, 2_000);
+  const health = usePollingJson<HealthResponse>("/api/health", 5_000);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -21,6 +22,7 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
   const currentSettings = settings.data;
   const { enableTrading, shadowMode } = currentSettings;
   const mode = !enableTrading ? "off" : shadowMode ? "shadow" : "live";
+  const liveExecutionAllowed = health.data?.liveExecutionAllowed === true;
 
   async function writeSettings(nextSettings: StrategyConfig) {
     setBusy(true);
@@ -48,6 +50,16 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
 
   function updateTrading(nextMode: "off" | "shadow" | "live") {
     if (busy || nextMode === mode) {
+      return;
+    }
+
+    if (
+      nextMode === "live" &&
+      (!liveExecutionAllowed ||
+        !window.confirm(
+          `Activer le trading LIVE pour ${asset.toUpperCase()} ? Des ordres réels pourront être soumis immédiatement.`,
+        ))
+    ) {
       return;
     }
 
@@ -117,6 +129,7 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
           label={`${asset.toUpperCase()} Live`}
           tone="emerald"
           onClick={() => updateTrading("live")}
+          disabled={!liveExecutionAllowed}
         />
       </div>
 
@@ -146,6 +159,11 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
       </div>
 
       {error ? <div className="max-w-[360px] text-[10px] text-[var(--wa-rose)]">{error}</div> : null}
+      {mode === "live" && !liveExecutionAllowed ? (
+        <div className="max-w-[360px] text-[10px] text-[var(--wa-rose)]">
+          Configuration live bloquée par le serveur.
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -156,6 +174,7 @@ function ModeButton({
   label,
   tone,
   onClick,
+  disabled = false,
   bordered = false,
 }: {
   active: boolean;
@@ -163,6 +182,7 @@ function ModeButton({
   label: string;
   tone: "amber" | "indigo" | "emerald" | "rose";
   onClick: () => void;
+  disabled?: boolean;
   bordered?: boolean;
 }) {
   const activeClass = {
@@ -176,7 +196,7 @@ function ModeButton({
     <button
       type="button"
       onClick={onClick}
-      disabled={busy}
+      disabled={busy || disabled}
       aria-pressed={active}
       className={`${bordered ? "border-x border-[var(--wa-gold-border)]" : ""} min-w-0 whitespace-nowrap px-3 py-2 font-mono text-[9px] uppercase tracking-[0.12em] transition disabled:opacity-50 ${
         active ? activeClass : "text-[var(--wa-dim)] hover:text-[var(--wa-ivory)]"

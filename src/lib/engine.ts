@@ -1,5 +1,9 @@
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
 import {
+  assertNewLiveExecutionAllowed,
+  isLiveExecutionAllowed,
+} from "@/lib/execution-safety";
+import {
   applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateKalshiFee,
@@ -1870,6 +1874,11 @@ export function createExecutionCoordinator(
             now,
           )),
         ];
+
+        if (!settings.shadowMode && !isLiveExecutionAllowed()) {
+          return resumed;
+        }
+
         const openIntents = await readOpenOrderIntents();
         const assetOpenIntents = openIntents.filter((intent) => intent.asset === slot.asset);
 
@@ -1916,6 +1925,15 @@ export function createExecutionCoordinator(
             (breaker) => shouldPauseExecutionForBreaker(breaker, now, slot.asset, slot.key),
           );
           if (currentBreakers.length > 0) {
+            break;
+          }
+
+          const currentSettings = await readSettings(slot.asset);
+          if (
+            !currentSettings.enableTrading ||
+            currentSettings.shadowMode !== settings.shadowMode ||
+            (!settings.shadowMode && !isLiveExecutionAllowed())
+          ) {
             break;
           }
 
@@ -3013,6 +3031,31 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       { issue: finalEntryIssue },
     );
   }
+
+  const latestSettings = await readSettings(slot.asset);
+  if (!latestSettings.enableTrading || latestSettings.shadowMode || !isLiveExecutionAllowed()) {
+    const disabledAt = Date.now();
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "skipped",
+      disabledAt,
+      "Live execution was disabled before primary submission",
+    );
+    await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: "info",
+      eventType: "intent.skipped.live_execution_disabled",
+      message: `Intent ${currentIntent.id} skipped because live execution was disabled before primary submission`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+      },
+      createdAt: disabledAt,
+    });
+    return currentIntent;
+  }
+  assertNewLiveExecutionAllowed();
 
   const executionPrimaryLeg = primaryLeg;
   const primaryRequest = buildVenueOrderRequest(executionPrimaryLeg, primaryMaxSlippageBps, primaryImmediateOrderType(executionPrimaryLeg.venue), false, {

@@ -9,6 +9,7 @@ import {
   KALSHI_WS_PROD_FALLBACK_BASE,
 } from "@/lib/constants";
 import { hasKalshiCredentials, readEnv, readSecretValue } from "@/lib/env";
+import { assertProductionVenueEnvironment } from "@/lib/execution-safety";
 import { fetchJson } from "@/lib/fetch-json";
 import { getMarketCatalogEntry, inferKalshiAsset } from "@/lib/market-catalog";
 import type {
@@ -680,6 +681,7 @@ export function createKalshiAdapter(): VenueAdapter {
         .filter(isTrackedKalshiPosition);
     },
     async placeOrder(order) {
+      assertProductionVenueEnvironment();
       try {
         const response = await createKalshiOrder(order);
         return mapKalshiOrderResult(response.order);

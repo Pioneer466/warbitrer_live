@@ -10,7 +10,6 @@ import {
   Chip,
   formatV2Countdown,
   formatV2Usd,
-  MetricCell,
   PageSection,
   SectionLabel,
   Surface,
@@ -26,7 +25,7 @@ import {
   isMismatchBlockingDecision,
 } from "@/lib/mismatch-risk-display";
 import type { GlobalRiskConfig } from "@/lib/risk-settings";
-import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MarketAsset, MismatchRiskCounterfactualDecision, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MismatchRiskCounterfactualDecision, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
@@ -288,7 +287,7 @@ function ManualInterventionList({
             Intervention manuelle requise
           </div>
           <div className="mt-1 text-sm text-[var(--wa-mist)]">
-            Vérifie que l'exposition a été traitée avant de lever le blocage.
+            Vérifie que l&apos;exposition a été traitée avant de lever le blocage.
           </div>
         </div>
         <Chip tone="rose">{intents.length} intent(s)</Chip>

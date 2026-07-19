@@ -7,26 +7,48 @@ export function middleware(request: NextRequest) {
   const user = process.env.APP_BASIC_AUTH_USER;
   const password = process.env.APP_BASIC_AUTH_PASSWORD;
 
-  if (!user || !password || STATIC_PATHS.some((path) => request.nextUrl.pathname.startsWith(path))) {
+  if (STATIC_PATHS.some((path) => request.nextUrl.pathname.startsWith(path))) {
     return NextResponse.next();
   }
 
-  const authorization = request.headers.get("authorization");
-  if (!authorization?.startsWith("Basic ")) {
+  if (!user || !password) {
+    if (process.env.NODE_ENV === "production" || user || password) {
+      return authenticationNotConfigured();
+    }
+    return NextResponse.next();
+  }
+
+  const credentials = parseBasicAuthorization(request.headers.get("authorization"));
+  if (!credentials) {
     return unauthorized();
   }
 
-  const encoded = authorization.slice("Basic ".length).trim();
-  const decoded = atob(encoded);
-  const separator = decoded.indexOf(":");
-  const providedUser = separator >= 0 ? decoded.slice(0, separator) : decoded;
-  const providedPassword = separator >= 0 ? decoded.slice(separator + 1) : "";
-
-  if (providedUser !== user || providedPassword !== password) {
+  if (credentials.user !== user || credentials.password !== password) {
     return unauthorized();
   }
 
   return NextResponse.next();
+}
+
+export function parseBasicAuthorization(authorization: string | null) {
+  if (!authorization?.match(/^Basic\s+/i)) {
+    return null;
+  }
+
+  try {
+    const encoded = authorization.replace(/^Basic\s+/i, "").trim();
+    const decoded = atob(encoded);
+    const separator = decoded.indexOf(":");
+    if (separator < 0) {
+      return null;
+    }
+    return {
+      user: decoded.slice(0, separator),
+      password: decoded.slice(separator + 1),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export const config = {
@@ -38,6 +60,15 @@ function unauthorized() {
     status: 401,
     headers: {
       "WWW-Authenticate": 'Basic realm="warbitrer"',
+    },
+  });
+}
+
+function authenticationNotConfigured() {
+  return new NextResponse("Authentication is not configured", {
+    status: 503,
+    headers: {
+      "Cache-Control": "no-store",
     },
   });
 }
