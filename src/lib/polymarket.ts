@@ -275,12 +275,7 @@ export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityR
 }
 
 export async function fetchPolymarketResolution(slug: string, conditionId?: string) {
-  const market = await fetchPolymarketMarket(slug, conditionId);
-  if (!market || !market.closed) {
-    return null;
-  }
-
-  return extractPolymarketResolution(market.outcomePrices);
+  return fetchFinalizedPolymarketResolution(slug, conditionId);
 }
 
 export async function fetchFinalizedPolymarketResolution(slug: string, conditionId?: string) {
@@ -935,11 +930,8 @@ export async function fetchPolymarketMarket(slug: string, conditionId?: string) 
 }
 
 function selectGammaMarket(markets: GammaMarket[], slug: string, conditionId?: string) {
-  if (conditionId) {
-    const byConditionId = markets.find((market) => (market.conditionId ?? market.id) === conditionId);
-    if (byConditionId) {
-      return byConditionId;
-    }
+  if (conditionId !== undefined) {
+    return markets.find((market) => (market.conditionId ?? market.id) === conditionId) ?? null;
   }
 
   return markets.find((market) => market.slug === slug) ?? null;

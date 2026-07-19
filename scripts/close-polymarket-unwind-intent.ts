@@ -49,7 +49,8 @@ async function main() {
 
   const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
   const slotSlug = slot.polymarketSlug;
-  const polyResolution = intent.polyResolution ?? (await fetchPolymarketResolution(slotSlug).catch(() => null));
+  const polyResolution =
+    intent.polyResolution ?? (await fetchPolymarketResolution(slotSlug, primaryLeg.marketRef).catch(() => null));
   if (polyResolution === null) {
     throw new Error(
       `Resolution Polymarket introuvable pour ${slotSlug}. Attends la resolution ou passe par /api/recovery.`,

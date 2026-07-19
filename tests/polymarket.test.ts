@@ -220,7 +220,39 @@ describe("Polymarket helpers", () => {
     });
     vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
 
+    await expect(fetchPolymarketResolution("btc-updown-15m-1", "condition-1")).resolves.toBeNull();
     await expect(fetchFinalizedPolymarketResolution("btc-updown-15m-1", "condition-1")).resolves.toBeNull();
+  });
+
+  it("does not fall back to a matching slug when the requested condition is absent", async () => {
+    const wrongConditionMarket = {
+      id: "market-other",
+      conditionId: "condition-other",
+      question: "BTC Up or Down",
+      slug: "btc-updown-15m-1",
+      endDate: "2026-01-01T00:15:00Z",
+      startDate: "2026-01-01T00:00:00Z",
+      outcomes: '["Up","Down"]',
+      clobTokenIds: '["up","down"]',
+      feeType: "crypto_fees_v2",
+      active: false,
+      closed: true,
+      enableOrderBook: true,
+      outcomePrices: '["1","0"]',
+      umaResolutionStatus: "resolved",
+    };
+    const fetchMock = vi.fn().mockImplementation(async (input: RequestInfo | URL) => ({
+      ok: true,
+      json: async () =>
+        String(input).includes("/events?")
+          ? [{ id: "event-1", slug: "btc-updown-15m-1", markets: [wrongConditionMarket] }]
+          : [wrongConditionMarket],
+    }));
+    vi.stubGlobal("fetch", fetchMock as unknown as typeof fetch);
+
+    await expect(fetchPolymarketMarket("btc-updown-15m-1", "condition-missing")).resolves.toBeNull();
+    await expect(fetchPolymarketResolution("btc-updown-15m-1", "condition-missing")).resolves.toBeNull();
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/events?slug=btc-updown-15m-1"))).toBe(true);
   });
 
   it("keeps coherent Gamma terminal metadata as optional calibration telemetry", async () => {
