@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
-import { globalRiskConfigSchema } from "@/lib/risk-settings";
-import { readGlobalRiskConfig, writeGlobalRiskConfig, writeRunEvent } from "@/lib/storage";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
+import { createConfigurationConflictResponse } from "@/lib/configuration-api";
+import { globalRiskConfigUpdateSchema } from "@/lib/risk-settings";
+import { readGlobalRiskConfig, writeGlobalRiskConfig } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -19,23 +21,17 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
-    const parsed = globalRiskConfigSchema.safeParse(await request.json());
+    const mutation = authenticateApiMutation(request);
+    const parsed = globalRiskConfigUpdateSchema.safeParse(await request.json());
     if (!parsed.success) {
       return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
-    const previous = await readGlobalRiskConfig();
-    const updated = await writeGlobalRiskConfig(parsed.data);
-    await writeRunEvent({
-      level: "warn",
-      eventType: "risk.global_config.updated",
-      message: "Global mismatch risk configuration updated",
-      payload: { previous, updated },
-      createdAt: Date.now(),
-    }).catch((error) => {
-      console.error("[risk] failed to persist global risk configuration audit event", error);
-    });
-    return NextResponse.json(updated);
+    return NextResponse.json(await writeGlobalRiskConfig(parsed.data, mutation));
   } catch (error) {
+    const conflict = createConfigurationConflictResponse(error);
+    if (conflict) {
+      return conflict;
+    }
     return createApiErrorResponse(error);
   }
 }

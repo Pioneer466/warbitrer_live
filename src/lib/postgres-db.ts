@@ -20,6 +20,8 @@ import type {
   DatabaseMetrics,
   BridgeTransfer,
   CircuitBreaker,
+  ConfigurationMutationContext,
+  ConfigurationRevisionConflict,
   DashboardResponse,
   ExecutionCandidate,
   PortfolioDashboardResponse,
@@ -43,12 +45,17 @@ import type {
   StablePnlChange,
   StrategyConfig,
   StrategyConfigMap,
+  StrategyConfigMapUpdate,
+  StrategyConfigUpdate,
   TradesResponse,
   Venue,
   VenueBalance,
   VenueCashAdjustmentObservation,
   WorkerLoopHealth,
   WorkerState,
+  VersionedConfiguration,
+  VersionedStrategyConfig,
+  VersionedStrategyConfigMap,
 } from "@/lib/types";
 
 types.setTypeParser(20, (value) => Number(value));
@@ -281,6 +288,19 @@ type BridgeTransferRow = {
   raw_json: Record<string, unknown> | null;
 };
 
+type StrategyConfigRow = {
+  asset: MarketAsset;
+  payload: Partial<StrategyConfig>;
+  revision: number;
+  updated_at: number;
+};
+
+type GlobalRiskConfigRow = {
+  payload: Partial<GlobalRiskConfig>;
+  revision: number;
+  updated_at: number;
+};
+
 let poolSingleton: Pool | null = null;
 let schemaCompatibilityPromise: Promise<void> | null = null;
 const LIVE_EXECUTION_LOCK_NAMESPACE = 4_298;
@@ -290,6 +310,7 @@ const SHADOW_EXECUTION_LOCK_NAMESPACE = 4_299;
 // SHA-256 of the immutable block delimited by migration-checksum markers below.
 const LEGACY_SCHEMA_BASELINE_CHECKSUM = "b9059dd24e724ac105f13482bc09495738664645af3b0cc1ade80d66626c1b18";
 const ORDER_TRUTH_REVISION_CHECKSUM = "406db20ffc6f352abead966d06d4811b6531771ef6665616fd3c334bb35e8310";
+const CONFIGURATION_REVISION_AUDIT_CHECKSUM = "50852234994334108ce1a8ed4808e94fb34417fe94bebe270c732cefe6f76ca1";
 
 export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   {
@@ -303,6 +324,12 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     name: "order_truth_revision",
     checksum: ORDER_TRUTH_REVISION_CHECKSUM,
     up: applyOrderTruthRevisionMigration,
+  },
+  {
+    version: 3,
+    name: "configuration_revision_audit",
+    checksum: CONFIGURATION_REVISION_AUDIT_CHECKSUM,
+    up: applyConfigurationRevisionAuditMigration,
   },
 ];
 
@@ -1299,6 +1326,85 @@ async function applyOrderTruthRevisionMigration(db: PgQueryable) {
 }
 /* migration-checksum:end:2 */
 
+/* migration-checksum:start:3 */
+const MIGRATION_V3_MARKET_ASSETS = ["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"] as const;
+
+async function applyConfigurationRevisionAuditMigration(db: PgQueryable) {
+  await db.query(`
+    ALTER TABLE strategy_configs
+    ADD COLUMN revision BIGINT NOT NULL DEFAULT 0;
+
+    ALTER TABLE strategy_configs
+    ADD CONSTRAINT strategy_configs_revision_nonnegative CHECK (revision >= 0);
+
+    ALTER TABLE strategy_configs
+    ADD CONSTRAINT strategy_configs_asset_known CHECK (
+      asset IN ('btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype')
+    );
+
+    ALTER TABLE global_risk_config
+    ADD COLUMN revision BIGINT NOT NULL DEFAULT 0;
+
+    ALTER TABLE global_risk_config
+    ADD CONSTRAINT global_risk_config_revision_nonnegative CHECK (revision >= 0);
+
+    CREATE TABLE configuration_audit_events (
+      id BIGSERIAL PRIMARY KEY,
+      configuration_type TEXT NOT NULL CHECK (configuration_type IN ('strategy', 'global_risk')),
+      configuration_key TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK (operation IN ('update', 'bulk_update')),
+      actor TEXT NOT NULL CHECK (length(btrim(actor)) > 0),
+      request_id UUID NOT NULL,
+      previous_revision BIGINT NOT NULL CHECK (previous_revision >= 0),
+      next_revision BIGINT NOT NULL CHECK (next_revision = previous_revision + 1),
+      previous_payload JSONB NOT NULL CHECK (jsonb_typeof(previous_payload) = 'object'),
+      next_payload JSONB NOT NULL CHECK (jsonb_typeof(next_payload) = 'object'),
+      created_at BIGINT NOT NULL,
+      CHECK (
+        (configuration_type = 'global_risk' AND configuration_key = 'global') OR
+        (configuration_type = 'strategy' AND configuration_key IN ('btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype'))
+      )
+    );
+
+    CREATE INDEX configuration_audit_events_key_created_idx
+      ON configuration_audit_events(configuration_type, configuration_key, created_at DESC, id DESC);
+    CREATE INDEX configuration_audit_events_request_idx
+      ON configuration_audit_events(request_id, id ASC);
+    CREATE UNIQUE INDEX configuration_audit_events_request_configuration_uidx
+      ON configuration_audit_events(request_id, configuration_type, configuration_key);
+
+    CREATE FUNCTION reject_configuration_audit_event_mutation()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    BEGIN
+      RAISE EXCEPTION 'configuration_audit_events is append-only' USING ERRCODE = '55000';
+    END;
+    $migration$;
+
+    CREATE TRIGGER configuration_audit_events_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON configuration_audit_events
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_configuration_audit_event_mutation();
+  `);
+
+  const strategyRows = await db.query<{ asset: string }>("SELECT asset FROM strategy_configs ORDER BY asset ASC");
+  const actualAssets = strategyRows.rows.map((row) => row.asset);
+  if (
+    actualAssets.length !== MIGRATION_V3_MARKET_ASSETS.length ||
+    actualAssets.some((asset, index) => asset !== [...MIGRATION_V3_MARKET_ASSETS].sort()[index])
+  ) {
+    throw new Error(
+      `Migration 3 refused: strategy_configs must contain exactly ${MIGRATION_V3_MARKET_ASSETS.join(",")}`,
+    );
+  }
+
+  const globalRiskRows = await db.query<{ id: number }>("SELECT id FROM global_risk_config ORDER BY id ASC");
+  if (globalRiskRows.rows.length !== 1 || Number(globalRiskRows.rows[0]?.id) !== 1) {
+    throw new Error("Migration 3 refused: global_risk_config must contain exactly id=1");
+  }
+}
+/* migration-checksum:end:3 */
+
 export function buildBootstrapStrategyConfigs(
   legacyStrategyPayload: StrategyConfig,
   existingEthStrategyPayload?: Partial<StrategyConfig> | null,
@@ -1342,56 +1448,505 @@ export function buildBootstrapStrategyConfigs(
   });
 }
 
-export async function getStrategyConfig(pool: Pool, asset: MarketAsset): Promise<StrategyConfig> {
-  const result = await pool.query("SELECT payload FROM strategy_configs WHERE asset = $1 LIMIT 1", [asset]);
-  return normalizeSettings(result.rows[0]?.payload as Partial<StrategyConfig>);
+export class ConfigurationRevisionConflictError extends Error {
+  constructor(public readonly conflicts: ConfigurationRevisionConflict[]) {
+    super(
+      conflicts
+        .map(
+          (conflict) =>
+            `${conflict.configurationType}:${conflict.key} expected revision ${conflict.expectedRevision}, found ${conflict.actualRevision}`,
+        )
+        .join(" | "),
+    );
+    this.name = "ConfigurationRevisionConflictError";
+  }
 }
 
-export async function listStrategyConfigs(pool: Pool): Promise<StrategyConfigMap> {
-  const result = await pool.query<{ asset: MarketAsset; payload: Partial<StrategyConfig> }>(
-    "SELECT asset, payload FROM strategy_configs ORDER BY asset ASC",
+export async function getStrategyConfig(pool: Pool, asset: MarketAsset): Promise<VersionedStrategyConfig> {
+  const result = await pool.query<StrategyConfigRow>(
+    "SELECT asset, payload, revision, updated_at FROM strategy_configs WHERE asset = $1 LIMIT 1",
+    [asset],
   );
-
-  const map = result.rows.reduce<Partial<StrategyConfigMap>>((accumulator, row) => {
-    accumulator[row.asset] = normalizeSettings(row.payload);
-    return accumulator;
-  }, {});
-
-  return normalizeSettingsMap(map);
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Missing strategy configuration for ${asset}`);
+  }
+  return mapStrategyConfigRow(row);
 }
 
-export async function updateStrategyConfig(pool: Pool, asset: MarketAsset, payload: StrategyConfig) {
-  await pool.query(
+export async function listStrategyConfigs(pool: Pool): Promise<VersionedStrategyConfigMap> {
+  const result = await pool.query<StrategyConfigRow>(
+    "SELECT asset, payload, revision, updated_at FROM strategy_configs ORDER BY asset ASC",
+  );
+  return mapStrictStrategyConfigRows(result.rows);
+}
+
+export async function getExecutionConfiguration(
+  pool: Pool,
+  asset: MarketAsset,
+): Promise<{
+  strategy: VersionedStrategyConfig;
+  globalRisk: VersionedConfiguration<GlobalRiskConfig>;
+}> {
+  const result = await pool.query<
+    StrategyConfigRow & {
+      global_payload: Partial<GlobalRiskConfig>;
+      global_revision: number;
+      global_updated_at: number;
+    }
+  >(
     `
-      INSERT INTO strategy_configs (asset, payload, updated_at)
-      VALUES ($1, $2::jsonb, $3)
-      ON CONFLICT (asset) DO UPDATE SET
-        payload = EXCLUDED.payload,
-        updated_at = EXCLUDED.updated_at
+      SELECT
+        strategy.asset,
+        strategy.payload,
+        strategy.revision,
+        strategy.updated_at,
+        global_risk.payload AS global_payload,
+        global_risk.revision AS global_revision,
+        global_risk.updated_at AS global_updated_at
+      FROM strategy_configs strategy
+      CROSS JOIN global_risk_config global_risk
+      WHERE strategy.asset = $1
+        AND global_risk.id = 1
+      LIMIT 1
     `,
-    [asset, JSON.stringify(payload), Date.now()],
+    [asset],
   );
-  return payload;
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Missing execution configuration for ${asset}`);
+  }
+  return {
+    strategy: mapStrategyConfigRow(row),
+    globalRisk: mapGlobalRiskConfigRow({
+      payload: row.global_payload,
+      revision: row.global_revision,
+      updated_at: row.global_updated_at,
+    }),
+  };
 }
 
-export async function getGlobalRiskConfig(pool: Pool): Promise<GlobalRiskConfig> {
-  const result = await pool.query("SELECT payload FROM global_risk_config WHERE id = 1 LIMIT 1");
-  return normalizeGlobalRiskConfig(result.rows[0]?.payload as Partial<GlobalRiskConfig> | undefined);
+export async function updateStrategyConfig(
+  pool: Pool,
+  asset: MarketAsset,
+  update: StrategyConfigUpdate,
+  context: ConfigurationMutationContext,
+) {
+  return withConfigurationTransaction(pool, async (client) => {
+    assertConfigurationMutationContext(context);
+    assertExpectedConfigurationRevision(update.expectedRevision, "strategy", asset);
+    const current = await lockStrategyConfig(client, asset);
+    assertExpectedConfigurationRevisions([
+      buildConfigurationRevisionConflict("strategy", asset, update.expectedRevision, current.revision),
+    ]);
+
+    const nextConfig = normalizeSettings(update.config);
+    if (configurationsEqual(current.config, nextConfig)) {
+      return current;
+    }
+
+    const changedAt = Math.max(Date.now(), current.updatedAt + 1);
+    const result = await client.query<StrategyConfigRow>(
+      `
+        UPDATE strategy_configs
+        SET payload = $2::jsonb,
+            revision = revision + 1,
+            updated_at = $3
+        WHERE asset = $1
+          AND revision = $4
+        RETURNING asset, payload, revision, updated_at
+      `,
+      [asset, JSON.stringify(nextConfig), changedAt, update.expectedRevision],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new ConfigurationRevisionConflictError([
+        buildConfigurationRevisionConflict("strategy", asset, update.expectedRevision, current.revision),
+      ]);
+    }
+    const updated = mapStrategyConfigRow(row);
+    await insertConfigurationAuditEvent(client, {
+      configurationType: "strategy",
+      configurationKey: asset,
+      operation: "update",
+      context,
+      previousRevision: current.revision,
+      nextRevision: updated.revision,
+      previousPayload: current.config,
+      nextPayload: updated.config,
+      createdAt: changedAt,
+    });
+    return updated;
+  });
 }
 
-export async function updateGlobalRiskConfig(pool: Pool, payload: GlobalRiskConfig) {
-  const normalized = normalizeGlobalRiskConfig(payload);
-  await pool.query(
+export async function updateStrategyConfigs(
+  pool: Pool,
+  updates: StrategyConfigMapUpdate,
+  context: ConfigurationMutationContext,
+) {
+  return withConfigurationTransaction(pool, async (client) => {
+    assertConfigurationMutationContext(context);
+    assertCompleteStrategyConfigUpdate(updates);
+    for (const asset of MARKET_ASSETS) {
+      assertExpectedConfigurationRevision(updates[asset].expectedRevision, "strategy", asset);
+    }
+    const result = await client.query<StrategyConfigRow>(
+      `
+        SELECT asset, payload, revision, updated_at
+        FROM strategy_configs
+        ORDER BY asset ASC
+        FOR UPDATE
+      `,
+    );
+    const current = mapStrictStrategyConfigRows(result.rows);
+    const conflicts = MARKET_ASSETS.map((asset) =>
+      buildConfigurationRevisionConflict("strategy", asset, updates[asset].expectedRevision, current[asset].revision),
+    );
+    assertExpectedConfigurationRevisions(conflicts);
+
+    const changedAt = Math.max(Date.now(), ...MARKET_ASSETS.map((asset) => current[asset].updatedAt + 1));
+    const next = { ...current } as VersionedStrategyConfigMap;
+    for (const asset of MARKET_ASSETS) {
+      const nextConfig = normalizeSettings(updates[asset].config);
+      if (configurationsEqual(current[asset].config, nextConfig)) {
+        continue;
+      }
+
+      const updatedResult = await client.query<StrategyConfigRow>(
+        `
+          UPDATE strategy_configs
+          SET payload = $2::jsonb,
+              revision = revision + 1,
+              updated_at = $3
+          WHERE asset = $1
+            AND revision = $4
+          RETURNING asset, payload, revision, updated_at
+        `,
+        [asset, JSON.stringify(nextConfig), changedAt, updates[asset].expectedRevision],
+      );
+      const updatedRow = updatedResult.rows[0];
+      if (!updatedRow) {
+        throw new ConfigurationRevisionConflictError([
+          buildConfigurationRevisionConflict(
+            "strategy",
+            asset,
+            updates[asset].expectedRevision,
+            current[asset].revision,
+          ),
+        ]);
+      }
+      const updated = mapStrategyConfigRow(updatedRow);
+      next[asset] = updated;
+      await insertConfigurationAuditEvent(client, {
+        configurationType: "strategy",
+        configurationKey: asset,
+        operation: "bulk_update",
+        context,
+        previousRevision: current[asset].revision,
+        nextRevision: updated.revision,
+        previousPayload: current[asset].config,
+        nextPayload: updated.config,
+        createdAt: changedAt,
+      });
+    }
+    return next;
+  });
+}
+
+export async function getGlobalRiskConfig(pool: Pool): Promise<VersionedConfiguration<GlobalRiskConfig>> {
+  const result = await pool.query<GlobalRiskConfigRow>(
+    "SELECT payload, revision, updated_at FROM global_risk_config WHERE id = 1 LIMIT 1",
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error("Missing global risk configuration");
+  }
+  return mapGlobalRiskConfigRow(row);
+}
+
+export async function updateGlobalRiskConfig(
+  pool: Pool,
+  update: { config: GlobalRiskConfig; expectedRevision: number },
+  context: ConfigurationMutationContext,
+) {
+  return withConfigurationTransaction(pool, async (client) => {
+    assertConfigurationMutationContext(context);
+    assertExpectedConfigurationRevision(update.expectedRevision, "global_risk", "global");
+    const current = await lockGlobalRiskConfig(client);
+    assertExpectedConfigurationRevisions([
+      buildConfigurationRevisionConflict("global_risk", "global", update.expectedRevision, current.revision),
+    ]);
+
+    const nextConfig = normalizeGlobalRiskConfig(update.config);
+    if (configurationsEqual(current.config, nextConfig)) {
+      return current;
+    }
+
+    const changedAt = Math.max(Date.now(), current.updatedAt + 1);
+    const result = await client.query<GlobalRiskConfigRow>(
+      `
+        UPDATE global_risk_config
+        SET payload = $1::jsonb,
+            revision = revision + 1,
+            updated_at = $2
+        WHERE id = 1
+          AND revision = $3
+        RETURNING payload, revision, updated_at
+      `,
+      [JSON.stringify(nextConfig), changedAt, update.expectedRevision],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      throw new ConfigurationRevisionConflictError([
+        buildConfigurationRevisionConflict("global_risk", "global", update.expectedRevision, current.revision),
+      ]);
+    }
+    const updated = mapGlobalRiskConfigRow(row);
+    await insertConfigurationAuditEvent(client, {
+      configurationType: "global_risk",
+      configurationKey: "global",
+      operation: "update",
+      context,
+      previousRevision: current.revision,
+      nextRevision: updated.revision,
+      previousPayload: current.config,
+      nextPayload: updated.config,
+      createdAt: changedAt,
+    });
+    await insertGlobalRiskConfigurationRunEvent(client, {
+      context,
+      previous: current,
+      updated,
+      createdAt: changedAt,
+    });
+    return updated;
+  });
+}
+
+function mapStrategyConfigRow(row: StrategyConfigRow): VersionedStrategyConfig {
+  const revision = Number(row.revision);
+  const updatedAt = Number(row.updated_at);
+  assertStoredConfigurationRevision("strategy", row.asset, revision);
+  assertStoredConfigurationTimestamp("strategy", row.asset, updatedAt);
+  return {
+    asset: row.asset,
+    config: normalizeSettings(row.payload),
+    revision,
+    updatedAt,
+  };
+}
+
+function mapGlobalRiskConfigRow(row: GlobalRiskConfigRow): VersionedConfiguration<GlobalRiskConfig> {
+  const revision = Number(row.revision);
+  const updatedAt = Number(row.updated_at);
+  assertStoredConfigurationRevision("global_risk", "global", revision);
+  assertStoredConfigurationTimestamp("global_risk", "global", updatedAt);
+  return {
+    config: normalizeGlobalRiskConfig(row.payload),
+    revision,
+    updatedAt,
+  };
+}
+
+function mapStrictStrategyConfigRows(rows: StrategyConfigRow[]): VersionedStrategyConfigMap {
+  const byAsset = new Map(rows.map((row) => [row.asset, row]));
+  const unknownAssets = rows.map((row) => row.asset).filter((asset) => !MARKET_ASSETS.includes(asset));
+  const missingAssets = MARKET_ASSETS.filter((asset) => !byAsset.has(asset));
+  if (rows.length !== MARKET_ASSETS.length || unknownAssets.length > 0 || missingAssets.length > 0) {
+    throw new Error(
+      `Invalid strategy configuration set (missing=${missingAssets.join(",") || "none"}, unknown=${unknownAssets.join(",") || "none"})`,
+    );
+  }
+
+  return Object.fromEntries(
+    MARKET_ASSETS.map((asset) => {
+      const row = byAsset.get(asset);
+      if (!row) {
+        throw new Error(`Missing strategy configuration for ${asset}`);
+      }
+      return [asset, mapStrategyConfigRow(row)];
+    }),
+  ) as VersionedStrategyConfigMap;
+}
+
+async function lockStrategyConfig(client: PoolClient, asset: MarketAsset) {
+  const result = await client.query<StrategyConfigRow>(
     `
-      INSERT INTO global_risk_config (id, payload, updated_at)
-      VALUES (1, $1::jsonb, $2)
-      ON CONFLICT (id) DO UPDATE SET
-        payload = EXCLUDED.payload,
-        updated_at = EXCLUDED.updated_at
+      SELECT asset, payload, revision, updated_at
+      FROM strategy_configs
+      WHERE asset = $1
+      FOR UPDATE
     `,
-    [JSON.stringify(normalized), Date.now()],
+    [asset],
   );
-  return normalized;
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error(`Missing strategy configuration for ${asset}`);
+  }
+  return mapStrategyConfigRow(row);
+}
+
+async function lockGlobalRiskConfig(client: PoolClient) {
+  const result = await client.query<GlobalRiskConfigRow>(
+    `
+      SELECT payload, revision, updated_at
+      FROM global_risk_config
+      WHERE id = 1
+      FOR UPDATE
+    `,
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error("Missing global risk configuration");
+  }
+  return mapGlobalRiskConfigRow(row);
+}
+
+function buildConfigurationRevisionConflict(
+  configurationType: ConfigurationRevisionConflict["configurationType"],
+  key: string,
+  expectedRevision: number,
+  actualRevision: number,
+): ConfigurationRevisionConflict {
+  return { configurationType, key, expectedRevision, actualRevision };
+}
+
+function assertExpectedConfigurationRevisions(conflicts: ConfigurationRevisionConflict[]) {
+  const mismatches = conflicts.filter((conflict) => conflict.expectedRevision !== conflict.actualRevision);
+  if (mismatches.length > 0) {
+    throw new ConfigurationRevisionConflictError(mismatches);
+  }
+}
+
+function assertStoredConfigurationRevision(configurationType: string, key: string, revision: number) {
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error(`Invalid stored ${configurationType} configuration revision for ${key}: ${revision}`);
+  }
+}
+
+function assertStoredConfigurationTimestamp(configurationType: string, key: string, updatedAt: number) {
+  if (!Number.isSafeInteger(updatedAt) || updatedAt < 0) {
+    throw new Error(`Invalid stored ${configurationType} configuration timestamp for ${key}: ${updatedAt}`);
+  }
+}
+
+function assertExpectedConfigurationRevision(revision: number, configurationType: string, key: string) {
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error(`Invalid expected ${configurationType} configuration revision for ${key}: ${revision}`);
+  }
+}
+
+function assertCompleteStrategyConfigUpdate(updates: StrategyConfigMapUpdate) {
+  const keys = Object.keys(updates).sort();
+  const expected = [...MARKET_ASSETS].sort();
+  if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
+    throw new Error(`Bulk strategy update must contain exactly ${expected.join(",")}`);
+  }
+}
+
+function assertConfigurationMutationContext(context: ConfigurationMutationContext) {
+  if (!context.actor.trim() || !UUID_PATTERN.test(context.requestId)) {
+    throw new Error("Configuration mutation actor and requestId are required");
+  }
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function configurationsEqual(left: object, right: object) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function insertConfigurationAuditEvent(
+  client: PoolClient,
+  input: {
+    configurationType: ConfigurationRevisionConflict["configurationType"];
+    configurationKey: string;
+    operation: "update" | "bulk_update";
+    context: ConfigurationMutationContext;
+    previousRevision: number;
+    nextRevision: number;
+    previousPayload: object;
+    nextPayload: object;
+    createdAt: number;
+  },
+) {
+  assertConfigurationMutationContext(input.context);
+  await client.query(
+    `
+      INSERT INTO configuration_audit_events (
+        configuration_type, configuration_key, operation, actor, request_id,
+        previous_revision, next_revision, previous_payload, next_payload, created_at
+      )
+      VALUES ($1, $2, $3, $4, $5::uuid, $6, $7, $8::jsonb, $9::jsonb, $10)
+    `,
+    [
+      input.configurationType,
+      input.configurationKey,
+      input.operation,
+      input.context.actor,
+      input.context.requestId,
+      input.previousRevision,
+      input.nextRevision,
+      JSON.stringify(input.previousPayload),
+      JSON.stringify(input.nextPayload),
+      input.createdAt,
+    ],
+  );
+}
+
+async function insertGlobalRiskConfigurationRunEvent(
+  client: PoolClient,
+  input: {
+    context: ConfigurationMutationContext;
+    previous: VersionedConfiguration<GlobalRiskConfig>;
+    updated: VersionedConfiguration<GlobalRiskConfig>;
+    createdAt: number;
+  },
+) {
+  const payload = {
+    requestId: input.context.requestId,
+    actor: input.context.actor,
+    previousRevision: input.previous.revision,
+    nextRevision: input.updated.revision,
+    previous: input.previous.config,
+    updated: input.updated.config,
+  };
+  await client.query(
+    `
+      INSERT INTO run_events (asset, level, event_type, message, payload_json, created_at)
+      SELECT NULL, 'warn', 'risk.global_config.updated',
+        'Global mismatch risk configuration updated', $1::jsonb, $2
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM run_events
+        WHERE event_type = 'risk.global_config.updated'
+          AND payload_json->>'requestId' = $3
+      )
+    `,
+    [JSON.stringify(payload), input.createdAt, input.context.requestId],
+  );
+}
+
+async function withConfigurationTransaction<T>(pool: Pool, run: (client: PoolClient) => Promise<T>) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    try {
+      await client.query("SELECT pg_advisory_xact_lock($1, $2)", [
+        LIVE_EXECUTION_LOCK_NAMESPACE,
+        LIVE_EXECUTION_LOCK_KEY,
+      ]);
+      const value = await run(client);
+      await client.query("COMMIT");
+      return value;
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    }
+  } finally {
+    client.release();
+  }
 }
 
 export async function getWorkerState(pool: Pool, asset: MarketAsset): Promise<WorkerState> {
@@ -3895,7 +4450,7 @@ export async function buildDashboardResponse(pool: Pool, slot: MarketSlot): Prom
   return {
     fetchedAt: Date.now(),
     slot,
-    config: await getStrategyConfig(pool, slot.asset),
+    config: (await getStrategyConfig(pool, slot.asset)).config,
     workerState: reconcileCircuitBreakerReadiness(workerState, relevantBreakers, Date.now()),
     latestSnapshot,
     feedHealth: latestSnapshot ? [latestSnapshot.polymarket.feedHealth, latestSnapshot.kalshi.feedHealth] : [],
@@ -3950,7 +4505,7 @@ export async function buildPortfolioDashboardResponse(
       return {
         asset: slot.asset,
         slot,
-        config: configs[slot.asset],
+        config: configs[slot.asset].config,
         workerState: reconcileCircuitBreakerReadiness(workerStates[slot.asset], relevantBreakers, now),
         latestSnapshot,
         bestOpportunity:

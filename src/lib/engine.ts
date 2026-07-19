@@ -97,6 +97,7 @@ import {
   findVenueOrder,
   insertOrderIntent,
   readCircuitBreakers,
+  readExecutionConfiguration,
   readExecutionCandidates,
   readFillsForIntentVenue,
   readLastEntryCosts,
@@ -164,6 +165,9 @@ import type {
   Venue,
   VenueOrderRequest,
   VenueOrderResult,
+  VersionedConfiguration,
+  VersionedStrategyConfig,
+  VersionedStrategyConfigMap,
   WorkerState,
 } from "@/lib/types";
 
@@ -234,7 +238,7 @@ const lastStaleSignalLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastExecutionLockBusyLogAtByAsset: Partial<Record<MarketAsset, number>> = {};
 const lastReconcileCadenceAtByAsset: Partial<Record<MarketAsset, Partial<Record<ReconcileCadenceKey, number>>>> = {};
 const loopHealthByAsset: Partial<Record<MarketAsset, WorkerState["loopHealth"]>> = {};
-const settingsCacheByAsset: Partial<Record<MarketAsset, { value: StrategyConfig; capturedAt: number }>> = {};
+const settingsCacheByAsset: Partial<Record<MarketAsset, { value: VersionedStrategyConfig; capturedAt: number }>> = {};
 const kalshiFeeMultiplierCacheByAsset: Partial<Record<MarketAsset, { value: number; capturedAt: number }>> = {};
 let venueBalancesCache: { value: VenueBalance[]; capturedAt: number } | null = null;
 let openIntentsCache: { value: OrderIntent[]; capturedAt: number } | null = null;
@@ -247,13 +251,19 @@ const observedResolutionSlots = new Map<string, string>();
 const oraclePersistenceInFlightByAsset: Partial<Record<MarketAsset, Promise<void>>> = {};
 let observedSlotResolutionReconcileInFlight = false;
 const mismatchRiskRuntime = new MismatchRiskRuntime();
-let globalRiskConfigCache: { value: GlobalRiskConfig; capturedAt: number } | null = null;
+let globalRiskConfigCache: { value: VersionedConfiguration<GlobalRiskConfig>; capturedAt: number } | null = null;
+
+export type ExecutionConfigurationSnapshot = {
+  strategyRevision: number;
+  globalRisk: VersionedConfiguration<GlobalRiskConfig>;
+};
 
 type RealtimeScanState = {
   sequence: number;
   asset: MarketAsset;
   slot: MarketSlot;
   settings: StrategyConfig;
+  executionConfiguration: ExecutionConfigurationSnapshot;
   snapshot: OpportunitySnapshot;
   capturedAt: number;
   scanDurationMs: number;
@@ -391,6 +401,7 @@ type TickSharedContext = {
     kalshiFills: Awaited<ReturnType<typeof fetchKalshiFills>>;
     fetchStates: VenueReconcileFetchStates;
   };
+  executionConfiguration?: ExecutionConfigurationSnapshot;
 };
 
 export async function processTick(now = new Date()) {
@@ -404,9 +415,12 @@ export async function processScanTick(now = new Date()) {
   const scanStartedAt = Date.now();
   const errors: string[] = [];
   const snapshots: OpportunitySnapshot[] = [];
-  const settingsMap = await readCachedSettingsMap(nowTs);
-  const sharedVenueBalances = await readCachedVenueBalances(nowTs);
-  const sharedOpenIntents = await readCachedOpenIntents(nowTs);
+  const [settingsMap, globalRisk, sharedVenueBalances, sharedOpenIntents] = await Promise.all([
+    readCachedSettingsMap(nowTs),
+    getCachedGlobalRiskConfig(nowTs),
+    readCachedVenueBalances(nowTs),
+    readCachedOpenIntents(nowTs),
+  ]);
 
   await Promise.all(
     ACTIVE_MARKET_ASSETS.map(async (asset) => {
@@ -414,7 +428,7 @@ export async function processScanTick(now = new Date()) {
       const slot = getCurrentSlot(asset, now);
 
       try {
-        const snapshot = await scanAsset(asset, slot, settings, nowTs, {
+        const snapshot = await scanAsset(asset, slot, settings, globalRisk, nowTs, {
           venueBalances: sharedVenueBalances,
           openIntents: sharedOpenIntents,
           lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
@@ -452,9 +466,12 @@ export async function processScanTick(now = new Date()) {
 export async function processAssetScanTick(asset: MarketAsset, now = new Date()) {
   const nowTs = now.getTime();
   const slot = getCurrentSlot(asset, now);
-  const settings = await readCachedSettings(asset, nowTs);
+  const [settings, globalRisk] = await Promise.all([
+    readCachedSettings(asset, nowTs),
+    getCachedGlobalRiskConfig(nowTs),
+  ]);
   try {
-    return await scanAsset(asset, slot, settings, nowTs, {
+    return await scanAsset(asset, slot, settings, globalRisk, nowTs, {
       venueBalances: await readCachedVenueBalances(nowTs),
       openIntents: await readCachedOpenIntents(nowTs),
       lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
@@ -478,11 +495,20 @@ export async function processAssetScanTick(asset: MarketAsset, now = new Date())
 async function scanAsset(
   asset: MarketAsset,
   slot: MarketSlot,
-  settings: StrategyConfig,
+  settingsRecord: VersionedStrategyConfig,
+  globalRisk: VersionedConfiguration<GlobalRiskConfig>,
   nowTs: number,
   sharedContext: TickSharedContext,
 ) {
-  const coordinator = createExecutionCoordinator(asset, settings, sharedContext);
+  const settings = settingsRecord.config;
+  const executionConfiguration = {
+    strategyRevision: settingsRecord.revision,
+    globalRisk,
+  };
+  const coordinator = createExecutionCoordinator(asset, settings, {
+    ...sharedContext,
+    executionConfiguration,
+  });
   const assetScanStartedAt = Date.now();
   const persistSnapshot = shouldPersistScanSnapshot(asset, nowTs);
   const snapshot = await coordinator.scan(slot, nowTs, { persistSnapshot });
@@ -495,6 +521,7 @@ async function scanAsset(
     asset,
     slot,
     settings,
+    executionConfiguration,
     snapshot,
     capturedAt: snapshot.capturedAt,
     scanDurationMs: Date.now() - assetScanStartedAt,
@@ -691,7 +718,9 @@ async function executeScanState(scanState: RealtimeScanState, nowTs: number) {
     );
   }
 
-  const coordinator = createExecutionCoordinator(scanState.asset, settings);
+  const coordinator = createExecutionCoordinator(scanState.asset, settings, {
+    executionConfiguration: scanState.executionConfiguration,
+  });
   const assetCreated = await coordinator.execute(scanState.slot, nowTs, scanState.snapshot);
   created.push(...assetCreated);
   await persistExecutionTickState(scanState, nowTs, executeStartedAt);
@@ -752,7 +781,7 @@ export async function processReconcileTick(now = new Date()) {
     ]);
 
   for (const asset of ACTIVE_MARKET_ASSETS) {
-    const settings = settingsMap[asset];
+    const settings = settingsMap[asset].config;
     const slot = getCurrentSlot(asset, now);
     const coordinator = createExecutionCoordinator(asset, settings, {
       venueBalances: sharedVenueBalances,
@@ -950,12 +979,15 @@ function serializePositionSignature(positions: PositionSnapshot[]) {
   );
 }
 
-async function getCachedGlobalRiskConfig(now: number, failClosed = false): Promise<GlobalRiskConfig> {
+async function getCachedGlobalRiskConfig(
+  now: number,
+  failClosed = false,
+): Promise<VersionedConfiguration<GlobalRiskConfig>> {
   if (globalRiskConfigCache && now - globalRiskConfigCache.capturedAt <= SETTINGS_CACHE_TTL_MS) {
     return globalRiskConfigCache.value;
   }
 
-  let value: GlobalRiskConfig;
+  let value: VersionedConfiguration<GlobalRiskConfig>;
   try {
     value = await readGlobalRiskConfig();
   } catch (error) {
@@ -963,7 +995,11 @@ async function getCachedGlobalRiskConfig(now: number, failClosed = false): Promi
       throw error;
     }
     console.warn(`[risk] global config unavailable, using defaults for diagnostics: ${toErrorMessage(error)}`);
-    return { ...DEFAULT_GLOBAL_RISK_CONFIG };
+    return {
+      config: { ...DEFAULT_GLOBAL_RISK_CONFIG },
+      revision: -1,
+      updatedAt: 0,
+    };
   }
   globalRiskConfigCache = { value, capturedAt: now };
   return value;
@@ -1128,6 +1164,7 @@ async function recheckMismatchRiskForExecution(input: {
   openIntents: OrderIntent[];
   venueExposureUsd: Record<Venue, number>;
   now: number;
+  globalRiskConfig?: GlobalRiskConfig;
 }): Promise<
   | { allowed: true; opportunity: LiveOpportunity }
   | {
@@ -1137,15 +1174,17 @@ async function recheckMismatchRiskForExecution(input: {
       opportunity?: LiveOpportunity;
     }
 > {
-  let config: GlobalRiskConfig;
-  try {
-    config = await getCachedGlobalRiskConfig(input.now, input.settings.mismatchRiskMode === "enforce");
-  } catch (error) {
-    return {
-      allowed: false,
-      reason: `Global risk configuration unavailable: ${toErrorMessage(error)}`,
-      estimate: null,
-    };
+  let config = input.globalRiskConfig;
+  if (!config) {
+    try {
+      config = (await getCachedGlobalRiskConfig(input.now, input.settings.mismatchRiskMode === "enforce")).config;
+    } catch (error) {
+      return {
+        allowed: false,
+        reason: `Global risk configuration unavailable: ${toErrorMessage(error)}`,
+        estimate: null,
+      };
+    }
   }
   const [{ polymarket, kalshi }, balances] = await Promise.all([
     marketDataSupervisor.readSlotState(input.slot, input.now),
@@ -1711,7 +1750,8 @@ export function createExecutionCoordinator(
         ...signalInput,
         settings: getMismatchEstimationSettings(settings),
       });
-      const globalRiskConfig = await getCachedGlobalRiskConfig(now);
+      const globalRiskConfig =
+        sharedContext.executionConfiguration?.globalRisk.config ?? (await getCachedGlobalRiskConfig(now)).config;
       const mismatchRiskEstimates = estimateMismatchRiskByCombination({
         asset: slot.asset,
         slotStartTs: slot.startTs,
@@ -1835,37 +1875,25 @@ export function createExecutionCoordinator(
         false,
       );
 
-      if (!settings.enableTrading || (!settings.shadowMode && pausingBreakers.length > 0)) {
-        return [];
-      }
-
-      if (!settings.shadowMode && readiness.state.readinessStatus !== "ready") {
-        return [];
-      }
-
-      if (!snapshot) {
-        return [];
-      }
-
-      if (!isOpportunitySnapshotFresh(snapshot, now, settings.maxSignalAgeMs)) {
+      const snapshotFresh = snapshot ? isOpportunitySnapshotFresh(snapshot, now, settings.maxSignalAgeMs) : false;
+      if (snapshot && !snapshotFresh) {
         await maybeWriteStaleSignalRunEvent(slot.asset, snapshot, settings, now);
-        return [];
       }
-
-      const eligible = snapshot.opportunities.filter((opportunity) => opportunity.eligible);
-      if (!settings.shadowMode && eligible.length === 0) {
-        return [];
-      }
+      const eligible = snapshotFresh
+        ? (snapshot?.opportunities.filter((opportunity) => opportunity.eligible) ?? [])
+        : [];
 
       const executeWithinLock = async () => {
         const initialOpenIntents = await readOpenOrderIntents(slot.asset);
         const activeSlotIntents = initialOpenIntents.filter((intent) => intent.slotEndTs + RESOLUTION_GRACE_MS > now);
         const resumed = [
-          ...(await resumeShadowIntents(
-            initialOpenIntents.filter((intent) => intent.shadow),
-            snapshot,
-            settings,
-          )),
+          ...(snapshot
+            ? await resumeShadowIntents(
+                initialOpenIntents.filter((intent) => intent.shadow),
+                snapshot,
+                settings,
+              )
+            : []),
           ...(await resumeInFlightIntents(
             activeSlotIntents.filter((intent) => !intent.shadow),
             slot,
@@ -1874,7 +1902,33 @@ export function createExecutionCoordinator(
           )),
         ];
 
-        if (!settings.shadowMode && !isLiveExecutionAllowed()) {
+        const expectedConfiguration = sharedContext.executionConfiguration;
+        if (!expectedConfiguration) {
+          return resumed;
+        }
+        const currentConfiguration = await readExecutionConfiguration(slot.asset);
+        if (!executionConfigurationMatches(expectedConfiguration, currentConfiguration)) {
+          await writeConfigurationRevisionChangedEvent({
+            asset: slot.asset,
+            slotKey: slot.key,
+            stage: "under_execution_lock",
+            expected: expectedConfiguration,
+            actual: currentConfiguration,
+            now: Date.now(),
+          });
+          return resumed;
+        }
+
+        if (
+          !settings.enableTrading ||
+          !currentConfiguration.strategy.config.enableTrading ||
+          currentConfiguration.strategy.config.shadowMode !== settings.shadowMode ||
+          (!settings.shadowMode &&
+            (pausingBreakers.length > 0 || readiness.state.readinessStatus !== "ready" || !isLiveExecutionAllowed())) ||
+          !snapshotFresh ||
+          !snapshot ||
+          (!settings.shadowMode && eligible.length === 0)
+        ) {
           return resumed;
         }
 
@@ -1922,12 +1976,7 @@ export function createExecutionCoordinator(
             break;
           }
 
-          const currentSettings = await readSettings(slot.asset);
-          if (
-            !currentSettings.enableTrading ||
-            currentSettings.shadowMode !== settings.shadowMode ||
-            (!settings.shadowMode && !isLiveExecutionAllowed())
-          ) {
+          if (!settings.shadowMode && !isLiveExecutionAllowed()) {
             break;
           }
 
@@ -1986,6 +2035,7 @@ export function createExecutionCoordinator(
             openIntents: currentOpenIntents,
             venueExposureUsd: exposureUsd,
             now: mismatchRecheckAt,
+            globalRiskConfig: currentConfiguration.globalRisk.config,
           });
           if (!mismatchRecheck.allowed) {
             await writeRunEvent({
@@ -2042,7 +2092,7 @@ export function createExecutionCoordinator(
 
           const executed = settings.shadowMode
             ? await executeShadowIntent(intent, snapshot, settings, Date.now())
-            : await executeIntent(intent, slot, settings, now);
+            : await executeIntent(intent, slot, settings, now, expectedConfiguration);
           created.push(executed);
           createdCount += 1;
         }
@@ -2210,6 +2260,43 @@ export async function tryWithExecutionLock<T>(
     return acquireShadow(asset, slotKey, `shadow:${asset}:${slotKey}`, callback);
   }
   return acquireLive(`live:${asset}:${slotKey}`, callback);
+}
+
+export function executionConfigurationMatches(
+  expected: ExecutionConfigurationSnapshot,
+  actual: Awaited<ReturnType<typeof readExecutionConfiguration>>,
+) {
+  return (
+    expected.strategyRevision === actual.strategy.revision &&
+    expected.globalRisk.revision === actual.globalRisk.revision
+  );
+}
+
+async function writeConfigurationRevisionChangedEvent(input: {
+  asset: MarketAsset;
+  slotKey: string;
+  intentId?: string;
+  stage: "under_execution_lock" | "before_primary_submission";
+  expected: ExecutionConfigurationSnapshot;
+  actual: Awaited<ReturnType<typeof readExecutionConfiguration>>;
+  now: number;
+}) {
+  await writeRunEvent({
+    asset: input.asset,
+    level: "info",
+    eventType: "execution.skipped.configuration_revision_changed",
+    message: `New entry skipped because configuration changed (${input.stage})`,
+    payload: {
+      intentId: input.intentId ?? null,
+      slotKey: input.slotKey,
+      stage: input.stage,
+      expectedStrategyRevision: input.expected.strategyRevision,
+      actualStrategyRevision: input.actual.strategy.revision,
+      expectedGlobalRiskRevision: input.expected.globalRisk.revision,
+      actualGlobalRiskRevision: input.actual.globalRisk.revision,
+    },
+    createdAt: input.now,
+  });
 }
 
 export function getMismatchEstimationSettings(settings: StrategyConfig): StrategyConfig {
@@ -2482,11 +2569,11 @@ async function readCachedSettings(asset: MarketAsset, now: number) {
   return value;
 }
 
-async function readCachedSettingsMap(now: number) {
+async function readCachedSettingsMap(now: number): Promise<VersionedStrategyConfigMap> {
   const entries = await Promise.all(
     ACTIVE_MARKET_ASSETS.map(async (asset) => [asset, await readCachedSettings(asset, now)] as const),
   );
-  return Object.fromEntries(entries) as Record<MarketAsset, StrategyConfig>;
+  return Object.fromEntries(entries) as VersionedStrategyConfigMap;
 }
 
 async function readCachedVenueBalances(now: number) {
@@ -2709,8 +2796,8 @@ async function refreshVenuePositions(): Promise<{
   }
 }
 
-function getGlobalPolyBridgeLowWaterUsdc(settingsMap: Record<MarketAsset, StrategyConfig>) {
-  return Math.max(...ACTIVE_MARKET_ASSETS.map((asset) => settingsMap[asset].polyBridgeLowWaterUsdc));
+function getGlobalPolyBridgeLowWaterUsdc(settingsMap: VersionedStrategyConfigMap) {
+  return Math.max(...ACTIVE_MARKET_ASSETS.map((asset) => settingsMap[asset].config.polyBridgeLowWaterUsdc));
 }
 
 async function computeReadiness(
@@ -2905,7 +2992,13 @@ async function persistFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeed
   });
 }
 
-async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: StrategyConfig, now: number) {
+async function executeIntent(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  settings: StrategyConfig,
+  now: number,
+  expectedConfiguration: ExecutionConfigurationSnapshot,
+) {
   let primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   let hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {
@@ -2942,6 +3035,7 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
       finalOpenIntents.filter((candidate) => candidate.id !== currentIntent.id),
     ),
     now: finalRiskCheckAt,
+    globalRiskConfig: expectedConfiguration.globalRisk.config,
   });
   if (!finalRiskCheck.allowed) {
     if (finalRiskCheck.opportunity) {
@@ -3001,8 +3095,58 @@ async function executeIntent(intent: OrderIntent, slot: MarketSlot, settings: St
     );
   }
 
-  const latestSettings = await readSettings(slot.asset);
-  if (!latestSettings.enableTrading || latestSettings.shadowMode || !isLiveExecutionAllowed()) {
+  let latestConfiguration: Awaited<ReturnType<typeof readExecutionConfiguration>>;
+  try {
+    latestConfiguration = await readExecutionConfiguration(slot.asset);
+  } catch (error) {
+    const unavailableAt = Date.now();
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "skipped",
+      unavailableAt,
+      `Configuration unavailable before primary submission: ${toErrorMessage(error)}`,
+    );
+    currentIntent = await writeOrderIntent(currentIntent);
+    await writeRunEvent({
+      asset: currentIntent.asset,
+      level: "warn",
+      eventType: "execution.skipped.configuration_unavailable",
+      message: `Intent ${currentIntent.id} skipped because execution configuration could not be revalidated`,
+      payload: {
+        intentId: currentIntent.id,
+        slotKey: currentIntent.slotKey,
+        stage: "before_primary_submission",
+        error: toErrorMessage(error),
+      },
+      createdAt: unavailableAt,
+    });
+    return currentIntent;
+  }
+  if (!executionConfigurationMatches(expectedConfiguration, latestConfiguration)) {
+    const changedAt = Date.now();
+    currentIntent = markIntentStatus(
+      currentIntent,
+      "skipped",
+      changedAt,
+      "Configuration revision changed before primary submission",
+    );
+    currentIntent = await writeOrderIntent(currentIntent);
+    await writeConfigurationRevisionChangedEvent({
+      asset: currentIntent.asset,
+      slotKey: currentIntent.slotKey,
+      intentId: currentIntent.id,
+      stage: "before_primary_submission",
+      expected: expectedConfiguration,
+      actual: latestConfiguration,
+      now: changedAt,
+    });
+    return currentIntent;
+  }
+  if (
+    !latestConfiguration.strategy.config.enableTrading ||
+    latestConfiguration.strategy.config.shadowMode ||
+    !isLiveExecutionAllowed()
+  ) {
     const disabledAt = Date.now();
     currentIntent = markIntentStatus(
       currentIntent,
@@ -8811,11 +8955,11 @@ async function syncActiveSlotExecutionBreakers(now: number, sharedContext: TickS
 
 async function enforceDailyLossCap(now: number) {
   const settingsMap = await readCachedSettingsMap(now);
-  const enabled = Object.values(settingsMap).some((settings) => settings.dailyLossCapEnabled);
+  const enabled = Object.values(settingsMap).some((settings) => settings.config.dailyLossCapEnabled);
   if (!enabled) {
     return;
   }
-  const capUsd = Math.min(...Object.values(settingsMap).map((settings) => settings.dailyLossHardCapUsd));
+  const capUsd = Math.min(...Object.values(settingsMap).map((settings) => settings.config.dailyLossHardCapUsd));
   const dayStart = startOfUtcDay(now);
   const dayEnd = dayStart + 24 * 60 * 60 * 1000;
   const realizedToday = await readStableRealizedPnlSince(dayStart, dayEnd);

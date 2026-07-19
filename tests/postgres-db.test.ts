@@ -269,28 +269,67 @@ describe("postgres order-truth evidence merging", () => {
 
 describe("postgres mismatch-risk persistence", () => {
   it("normalizes partial global risk payloads read from Postgres", async () => {
-    const { pool } = createMockPool([{ payload: { oracleMaxAgeMs: 4_000 } }]);
+    const { pool } = createMockPool([{ payload: { oracleMaxAgeMs: 4_000 }, revision: 3, updated_at: 123 }]);
 
     await expect(getGlobalRiskConfig(pool)).resolves.toEqual({
-      ...DEFAULT_GLOBAL_RISK_CONFIG,
-      oracleMaxAgeMs: 4_000,
+      config: {
+        ...DEFAULT_GLOBAL_RISK_CONFIG,
+        oracleMaxAgeMs: 4_000,
+      },
+      revision: 3,
+      updatedAt: 123,
     });
   });
 
-  it("validates and stores a normalized global risk payload", async () => {
-    const { pool, query } = createMockPool();
+  it("validates and stores a normalized global risk payload with CAS and audit context", async () => {
     const payload = {
       ...DEFAULT_GLOBAL_RISK_CONFIG,
       clusterExpectedFatalLossCapUsd: 30,
       clusterAbsoluteFatalLossCapUsd: 90,
     };
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({
+        rows: [{ payload: DEFAULT_GLOBAL_RISK_CONFIG, revision: 0, updated_at: 123 }],
+        rowCount: 1,
+      })
+      .mockResolvedValueOnce({ rows: [{ payload, revision: 1, updated_at: 456 }], rowCount: 1 })
+      .mockResolvedValue({ rows: [], rowCount: 0 });
+    const release = vi.fn();
+    const pool = {
+      connect: vi.fn().mockResolvedValue({ query, release }),
+    } as unknown as Pool;
 
-    await expect(updateGlobalRiskConfig(pool, payload)).resolves.toEqual(payload);
+    await expect(
+      updateGlobalRiskConfig(
+        pool,
+        { config: payload, expectedRevision: 0 },
+        { actor: "unit-test", requestId: "00000000-0000-4000-8000-000000000001" },
+      ),
+    ).resolves.toEqual({ config: payload, revision: 1, updatedAt: 456 });
 
-    const [, params] = query.mock.calls[0] as [string, unknown[]];
-    expect(params).toHaveLength(2);
+    expect(query.mock.calls[1]).toEqual(["SELECT pg_advisory_xact_lock($1, $2)", [4_298, 2]]);
+    const [, params] = query.mock.calls[3] as [string, unknown[]];
+    expect(params).toHaveLength(3);
     expect(JSON.parse(params[0] as string)).toEqual(payload);
     expect(params[1]).toEqual(expect.any(Number));
+    expect(params[2]).toBe(0);
+    expect(String(query.mock.calls[4]?.[0])).toContain("INSERT INTO configuration_audit_events");
+    const [runEventSql, runEventParams] = query.mock.calls[5] as [string, unknown[]];
+    expect(runEventSql).toContain("risk.global_config.updated");
+    expect(runEventSql).toContain("payload_json->>'requestId' = $3");
+    expect(JSON.parse(runEventParams[0] as string)).toMatchObject({
+      requestId: "00000000-0000-4000-8000-000000000001",
+      actor: "unit-test",
+      previousRevision: 0,
+      nextRevision: 1,
+      previous: DEFAULT_GLOBAL_RISK_CONFIG,
+      updated: payload,
+    });
+    expect(runEventParams[2]).toBe("00000000-0000-4000-8000-000000000001");
+    expect(release).toHaveBeenCalledOnce();
   });
 
   it("binds every oracle sample column in the expected order", async () => {

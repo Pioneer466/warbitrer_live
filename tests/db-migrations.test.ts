@@ -47,6 +47,11 @@ describe("database migration status", () => {
     expect(migrationSourceChecksum(source, 2)).toBe(DATABASE_MIGRATIONS[1]?.checksum);
   });
 
+  it("binds the configuration revision migration checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    expect(migrationSourceChecksum(source, 3)).toBe(DATABASE_MIGRATIONS[2]?.checksum);
+  });
+
   it("reports an uninitialized database as pending and incompatible", async () => {
     const db = {
       query: vi.fn().mockResolvedValue(queryResult([{ table_name: null }])),

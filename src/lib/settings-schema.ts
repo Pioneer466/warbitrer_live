@@ -54,52 +54,19 @@ export const settingsSchema = z
     maxLegCapitalShare: z.number().min(0.5).max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare),
     maxSignalAgeMs: z.number().int().min(250).max(5_000).default(DEFAULT_MAX_SIGNAL_AGE_MS),
     grossEntryThreshold: z.number().positive().max(1),
-    minProjectedNetProfitUsd: z
-      .number()
-      .nonnegative()
-      .max(10_000)
-      .default(DEFAULT_MIN_PROJECTED_NET_PROFIT_USD),
-    minProjectedNetReturn: z
-      .number()
-      .nonnegative()
-      .max(1)
-      .default(DEFAULT_MIN_PROJECTED_NET_RETURN),
-    minWorstCaseProfitUsd: z
-      .number()
-      .nonnegative()
-      .max(10_000)
-      .default(DEFAULT_MIN_WORST_CASE_PROFIT_USD),
+    minProjectedNetProfitUsd: z.number().nonnegative().max(10_000).default(DEFAULT_MIN_PROJECTED_NET_PROFIT_USD),
+    minProjectedNetReturn: z.number().nonnegative().max(1).default(DEFAULT_MIN_PROJECTED_NET_RETURN),
+    minWorstCaseProfitUsd: z.number().nonnegative().max(10_000).default(DEFAULT_MIN_WORST_CASE_PROFIT_USD),
     maxLegPrice: z.number().positive().max(1).default(DEFAULT_STRATEGY_CONFIG.maxLegPrice),
     reentryImprovement: z.number().nonnegative().max(0.25),
     pollingIntervalMs: z.number().int().min(250).max(10_000),
     minOrderSize: z.number().positive().max(10_000),
     maxSlippageBps: z.number().int().min(1).max(2_000),
-    primarySelectionMode: z
-      .enum(["kalshi_only", "shadow", "dynamic"])
-      .default(DEFAULT_PRIMARY_SELECTION_MODE),
-    minimumEntryDepthCoverageRatio: z
-      .number()
-      .positive()
-      .max(1)
-      .default(DEFAULT_MINIMUM_ENTRY_DEPTH_COVERAGE_RATIO),
-    adaptiveSlippageTightBps: z
-      .number()
-      .int()
-      .min(1)
-      .max(2_000)
-      .default(DEFAULT_ADAPTIVE_SLIPPAGE_TIGHT_BPS),
-    adaptiveSlippageDefaultBps: z
-      .number()
-      .int()
-      .min(1)
-      .max(2_000)
-      .default(DEFAULT_ADAPTIVE_SLIPPAGE_DEFAULT_BPS),
-    adaptiveSlippageThinBps: z
-      .number()
-      .int()
-      .min(1)
-      .max(2_000)
-      .default(DEFAULT_ADAPTIVE_SLIPPAGE_THIN_BPS),
+    primarySelectionMode: z.enum(["kalshi_only", "shadow", "dynamic"]).default(DEFAULT_PRIMARY_SELECTION_MODE),
+    minimumEntryDepthCoverageRatio: z.number().positive().max(1).default(DEFAULT_MINIMUM_ENTRY_DEPTH_COVERAGE_RATIO),
+    adaptiveSlippageTightBps: z.number().int().min(1).max(2_000).default(DEFAULT_ADAPTIVE_SLIPPAGE_TIGHT_BPS),
+    adaptiveSlippageDefaultBps: z.number().int().min(1).max(2_000).default(DEFAULT_ADAPTIVE_SLIPPAGE_DEFAULT_BPS),
+    adaptiveSlippageThinBps: z.number().int().min(1).max(2_000).default(DEFAULT_ADAPTIVE_SLIPPAGE_THIN_BPS),
     dailyLossCapEnabled: z.boolean().default(DEFAULT_DAILY_LOSS_CAP_ENABLED),
     dailyLossHardCapUsd: z.number().positive().max(1_000_000).default(DEFAULT_DAILY_LOSS_HARD_CAP_USD),
     immediateOrderConfirmationTimeoutMs: z.number().int().min(1_000).max(30_000),
@@ -110,11 +77,7 @@ export const settingsSchema = z
       .nonnegative()
       .max(1_000)
       .default(DEFAULT_KALSHI_DEPTH_HEADROOM_CONTRACTS),
-    kalshiPrimaryDepthSafetyFactor: z
-      .number()
-      .positive()
-      .max(1)
-      .default(DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR),
+    kalshiPrimaryDepthSafetyFactor: z.number().positive().max(1).default(DEFAULT_KALSHI_PRIMARY_DEPTH_SAFETY_FACTOR),
     kalshiPrimaryPriceTicksSlippage: z
       .number()
       .int()
@@ -133,12 +96,7 @@ export const settingsSchema = z
       .min(1)
       .max(1_000)
       .default(DEFAULT_KALSHI_PRIMARY_MAX_CLIP_CONTRACTS),
-    kalshiPrimaryMaxClips: z
-      .number()
-      .int()
-      .min(1)
-      .max(20)
-      .default(DEFAULT_KALSHI_PRIMARY_MAX_CLIPS),
+    kalshiPrimaryMaxClips: z.number().int().min(1).max(20).default(DEFAULT_KALSHI_PRIMARY_MAX_CLIPS),
     polymarketHedgeDepthSafetyFactor: z
       .number()
       .positive()
@@ -149,12 +107,7 @@ export const settingsSchema = z
       .nonnegative()
       .max(1_000)
       .default(DEFAULT_POLYMARKET_HEDGE_HEADROOM_SHARES),
-    polymarketHedgeBookMaxAgeMs: z
-      .number()
-      .int()
-      .min(100)
-      .max(5_000)
-      .default(DEFAULT_POLYMARKET_HEDGE_BOOK_MAX_AGE_MS),
+    polymarketHedgeBookMaxAgeMs: z.number().int().min(100).max(5_000).default(DEFAULT_POLYMARKET_HEDGE_BOOK_MAX_AGE_MS),
     primaryRetryAttempts: z.number().int().min(0).max(10),
     primaryRetryDelayMs: z.number().int().min(0).max(5_000),
     hedgeRetryAttempts: z.number().int().min(0).max(10),
@@ -163,11 +116,7 @@ export const settingsSchema = z
     hedgeRescueMaxAttempts: z.number().int().min(1).max(10).default(DEFAULT_HEDGE_RESCUE_MAX_ATTEMPTS),
     hedgeRescueDelayMs: z.number().int().min(0).max(5_000).default(DEFAULT_HEDGE_RESCUE_DELAY_MS),
     hedgeRescueMaxLossUsd: z.number().nonnegative().max(10_000).default(DEFAULT_HEDGE_RESCUE_MAX_LOSS_USD),
-    hedgeRescueMinAdvantageUsd: z
-      .number()
-      .nonnegative()
-      .max(10_000)
-      .default(DEFAULT_HEDGE_RESCUE_MIN_ADVANTAGE_USD),
+    hedgeRescueMinAdvantageUsd: z.number().nonnegative().max(10_000).default(DEFAULT_HEDGE_RESCUE_MIN_ADVANTAGE_USD),
     hedgeRescueAllowPartial: z.boolean().default(DEFAULT_HEDGE_RESCUE_ALLOW_PARTIAL),
     forcedUnwindEnabled: z.boolean().default(DEFAULT_FORCED_UNWIND_ENABLED),
     forcedUnwindMaxAttempts: z.number().int().min(1).max(10).default(DEFAULT_FORCED_UNWIND_MAX_ATTEMPTS),
@@ -194,11 +143,7 @@ export const settingsSchema = z
       .min(0)
       .max(600)
       .default(DEFAULT_MISMATCH_GUARD_MIN_ELAPSED_SECONDS),
-    mismatchGuardMinMoveBps: z
-      .number()
-      .nonnegative()
-      .max(500)
-      .default(DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS),
+    mismatchGuardMinMoveBps: z.number().nonnegative().max(500).default(DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS),
     mismatchGuardPhase2StartSeconds: z
       .number()
       .int()
@@ -215,9 +160,7 @@ export const settingsSchema = z
       .nonnegative()
       .max(0.5)
       .default(DEFAULT_MISMATCH_GUARD_MAX_VENUE_DISAGREEMENT_PCT),
-    mismatchRiskMode: z
-      .enum(["shadow", "block_only", "enforce"])
-      .default(DEFAULT_MISMATCH_RISK_MODE),
+    mismatchRiskMode: z.enum(["shadow", "block_only", "enforce"]).default(DEFAULT_MISMATCH_RISK_MODE),
   })
   .superRefine((settings, ctx) => {
     if (settings.mismatchGuardPhase2StartSeconds < settings.mismatchGuardMinElapsedSeconds) {
@@ -269,20 +212,39 @@ export const settingsMapSchema = z.object({
   hype: settingsSchema,
 });
 
+export const strategyConfigUpdateSchema = z
+  .object({
+    config: settingsSchema,
+    expectedRevision: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const strategyConfigMapUpdateSchema = z
+  .object({
+    updates: z
+      .object({
+        btc: strategyConfigUpdateSchema,
+        eth: strategyConfigUpdateSchema,
+        sol: strategyConfigUpdateSchema,
+        xrp: strategyConfigUpdateSchema,
+        doge: strategyConfigUpdateSchema,
+        bnb: strategyConfigUpdateSchema,
+        hype: strategyConfigUpdateSchema,
+      })
+      .strict(),
+  })
+  .strict();
+
 export type SettingsMapInput = z.infer<typeof settingsMapSchema>;
 
-export function normalizeSettings(
-  input: Partial<StrategyConfig> | null | undefined,
-): StrategyConfig {
+export function normalizeSettings(input: Partial<StrategyConfig> | null | undefined): StrategyConfig {
   return settingsSchema.parse({
     ...DEFAULT_STRATEGY_CONFIG,
     ...(input ?? {}),
   });
 }
 
-export function normalizeSettingsMap(
-  input: Partial<StrategyConfigMap> | null | undefined,
-): StrategyConfigMap {
+export function normalizeSettingsMap(input: Partial<StrategyConfigMap> | null | undefined): StrategyConfigMap {
   return settingsMapSchema.parse({
     btc: {
       ...DEFAULT_STRATEGY_CONFIGS.btc,

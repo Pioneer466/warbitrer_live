@@ -9,8 +9,8 @@ import type {
   HealthResponse,
   MarketAsset,
   OpportunitySnapshot,
-  StrategyConfigMap,
   VenueFeedHealth,
+  VersionedStrategyConfigMap,
   WorkerState,
 } from "@/lib/types";
 import { vi } from "vitest";
@@ -32,7 +32,7 @@ import { HEALTH_THRESHOLDS } from "@/lib/health";
 const NOW = 1_800_000_000_000;
 
 describe("health API fail-closed readiness", () => {
-  let settings: StrategyConfigMap;
+  let settings: VersionedStrategyConfigMap;
   let workerStates: Record<MarketAsset, WorkerState>;
   let snapshots: Partial<Record<MarketAsset, OpportunitySnapshot | null>>;
   let circuitBreakers: CircuitBreaker[];
@@ -161,8 +161,11 @@ describe("health API fail-closed readiness", () => {
     for (const asset of MARKET_ASSETS) {
       settings[asset] = {
         ...settings[asset],
-        enableTrading: false,
-        shadowMode: true,
+        config: {
+          ...settings[asset].config,
+          enableTrading: false,
+          shadowMode: true,
+        },
       };
       workerStates[asset] = buildWorkerState(asset, null);
       snapshots[asset] = null;
@@ -197,7 +200,10 @@ describe("health API fail-closed readiness", () => {
     vi.stubEnv("LIVE_EXECUTION_ALLOWED", "true");
     settings.btc = {
       ...settings.btc,
-      shadowMode: false,
+      config: {
+        ...settings.btc.config,
+        shadowMode: false,
+      },
     };
     workerStates.btc.readinessStatus = "blocked";
 
@@ -229,15 +235,21 @@ describe("health API fail-closed readiness", () => {
 });
 
 function buildSettings() {
-  const settings = structuredClone(DEFAULT_STRATEGY_CONFIGS);
-  for (const asset of MARKET_ASSETS) {
-    settings[asset] = {
-      ...settings[asset],
-      enableTrading: asset === "btc",
-      shadowMode: true,
-    };
-  }
-  return settings;
+  return Object.fromEntries(
+    MARKET_ASSETS.map((asset) => [
+      asset,
+      {
+        asset,
+        config: {
+          ...structuredClone(DEFAULT_STRATEGY_CONFIGS[asset]),
+          enableTrading: asset === "btc",
+          shadowMode: true,
+        },
+        revision: 0,
+        updatedAt: NOW - 1_000,
+      },
+    ]),
+  ) as VersionedStrategyConfigMap;
 }
 
 function buildWorkerStates() {

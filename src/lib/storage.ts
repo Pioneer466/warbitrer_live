@@ -1,5 +1,5 @@
 import * as postgres from "@/lib/postgres-db";
-export { OrderIntentRevisionConflictError } from "@/lib/postgres-db";
+export { ConfigurationRevisionConflictError, OrderIntentRevisionConflictError } from "@/lib/postgres-db";
 import { isMarketAsset } from "@/lib/market-catalog";
 import { queueRunEventNotification } from "@/lib/notifications";
 import type { OracleSlotSample, SlotResolutionRecord } from "@/lib/oracle-history";
@@ -8,6 +8,7 @@ import type {
   MarketAsset,
   BridgeTransfer,
   CircuitBreaker,
+  ConfigurationMutationContext,
   DatabaseMaintenanceSummary,
   DatabaseMetrics,
   ExecutionCandidate,
@@ -26,8 +27,8 @@ import type {
   PnlSnapshot,
   PositionSnapshot,
   RunEvent,
-  StrategyConfig,
-  StrategyConfigMap,
+  StrategyConfigMapUpdate,
+  StrategyConfigUpdate,
   TradesResponse,
   Venue,
   VenueBalance,
@@ -42,24 +43,39 @@ async function db() {
   return postgres.getPgDb();
 }
 
-export async function readSettings(asset: MarketAsset): Promise<StrategyConfig> {
+export async function readSettings(asset: MarketAsset) {
   return postgres.getStrategyConfig(await db(), asset);
 }
 
-export async function readSettingsMap(): Promise<StrategyConfigMap> {
+export async function readSettingsMap() {
   return postgres.listStrategyConfigs(await db());
 }
 
-export async function writeSettings(asset: MarketAsset, payload: StrategyConfig) {
-  return postgres.updateStrategyConfig(await db(), asset, payload);
+export async function readExecutionConfiguration(asset: MarketAsset) {
+  return postgres.getExecutionConfiguration(await db(), asset);
 }
 
-export async function readGlobalRiskConfig(): Promise<GlobalRiskConfig> {
+export async function writeSettings(
+  asset: MarketAsset,
+  update: StrategyConfigUpdate,
+  context: ConfigurationMutationContext,
+) {
+  return postgres.updateStrategyConfig(await db(), asset, update, context);
+}
+
+export async function writeSettingsMap(updates: StrategyConfigMapUpdate, context: ConfigurationMutationContext) {
+  return postgres.updateStrategyConfigs(await db(), updates, context);
+}
+
+export async function readGlobalRiskConfig() {
   return postgres.getGlobalRiskConfig(await db());
 }
 
-export async function writeGlobalRiskConfig(payload: GlobalRiskConfig) {
-  return postgres.updateGlobalRiskConfig(await db(), payload);
+export async function writeGlobalRiskConfig(
+  update: { config: GlobalRiskConfig; expectedRevision: number },
+  context: ConfigurationMutationContext,
+) {
+  return postgres.updateGlobalRiskConfig(await db(), update, context);
 }
 
 export async function readWorkerState(asset: MarketAsset): Promise<WorkerState> {

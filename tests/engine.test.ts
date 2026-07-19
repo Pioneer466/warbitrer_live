@@ -15,6 +15,7 @@ import {
   evaluateBenignHedgeOverfill,
   evaluateExposureRecoveryOptions,
   evaluateStablePnlChangeReadiness,
+  executionConfigurationMatches,
   estimateRescueHedgeLossUsd,
   estimatePrimaryUnwindLossUsd,
   getOpportunitySnapshotAgeMs,
@@ -91,6 +92,7 @@ import type {
   VenueBalance,
 } from "@/lib/types";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { DEFAULT_GLOBAL_RISK_CONFIG } from "@/lib/risk-settings";
 import { deriveHedgedPairEconomics } from "@/lib/settlement";
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
@@ -165,6 +167,42 @@ function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
     asset: overrides.asset ?? base.asset,
   };
 }
+
+describe("execution configuration fencing", () => {
+  const expected = {
+    strategyRevision: 4,
+    globalRisk: {
+      config: DEFAULT_GLOBAL_RISK_CONFIG,
+      revision: 7,
+      updatedAt: 100,
+    },
+  };
+  const actual = {
+    strategy: {
+      asset: "btc" as const,
+      config: DEFAULT_STRATEGY_CONFIG,
+      revision: 4,
+      updatedAt: 100,
+    },
+    globalRisk: expected.globalRisk,
+  };
+
+  it("accepts only the exact strategy and global-risk revisions captured by the scan", () => {
+    expect(executionConfigurationMatches(expected, actual)).toBe(true);
+    expect(
+      executionConfigurationMatches(expected, {
+        ...actual,
+        strategy: { ...actual.strategy, revision: 5 },
+      }),
+    ).toBe(false);
+    expect(
+      executionConfigurationMatches(expected, {
+        ...actual,
+        globalRisk: { ...actual.globalRisk, revision: 8 },
+      }),
+    ).toBe(false);
+  });
+});
 
 describe("mismatch estimation bootstrap", () => {
   it("builds nominal economics before applying enforce sizing", () => {

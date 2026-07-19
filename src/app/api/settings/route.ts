@@ -1,21 +1,26 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
+import { createConfigurationConflictResponse } from "@/lib/configuration-api";
 import { getLiveSettingsBlockReasons } from "@/lib/execution-safety";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
-import { settingsMapSchema } from "@/lib/settings-schema";
-import { readSettingsMap, writeSettings } from "@/lib/storage";
+import { strategyConfigMapUpdateSchema } from "@/lib/settings-schema";
+import { readSettingsMap, writeSettingsMap } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   try {
-    return NextResponse.json(await readSettingsMap(), {
-      headers: {
-        "Cache-Control": "no-store",
+    return NextResponse.json(
+      { configs: await readSettingsMap() },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
       },
-    });
+    );
   } catch (error) {
     return createApiErrorResponse(error);
   }
@@ -23,8 +28,8 @@ export async function GET() {
 
 export async function PUT(request: Request) {
   try {
-    const body = await request.json();
-    const parsed = settingsMapSchema.safeParse(body);
+    const mutation = authenticateApiMutation(request);
+    const parsed = strategyConfigMapUpdateSchema.safeParse(await request.json());
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -36,7 +41,7 @@ export async function PUT(request: Request) {
     }
 
     const blockedAssets = MARKET_ASSETS.flatMap((asset) => {
-      const reasons = getLiveSettingsBlockReasons(asset, parsed.data[asset]);
+      const reasons = getLiveSettingsBlockReasons(asset, parsed.data.updates[asset].config);
       return reasons.length > 0 ? [{ asset, reasons }] : [];
     });
     if (blockedAssets.length > 0) {
@@ -49,9 +54,12 @@ export async function PUT(request: Request) {
       );
     }
 
-    await Promise.all(MARKET_ASSETS.map((asset) => writeSettings(asset, parsed.data[asset])));
-    return NextResponse.json(parsed.data);
+    return NextResponse.json({ configs: await writeSettingsMap(parsed.data.updates, mutation) });
   } catch (error) {
+    const conflict = createConfigurationConflictResponse(error);
+    if (conflict) {
+      return conflict;
+    }
     return createApiErrorResponse(error);
   }
 }

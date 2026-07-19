@@ -269,6 +269,37 @@ export type StrategyConfig = {
 
 export type StrategyConfigMap = AssetScoped<StrategyConfig>;
 
+export type VersionedConfiguration<T> = {
+  config: T;
+  revision: number;
+  updatedAt: number;
+};
+
+export type VersionedStrategyConfig = VersionedConfiguration<StrategyConfig> & {
+  asset: MarketAsset;
+};
+
+export type VersionedStrategyConfigMap = AssetScoped<VersionedStrategyConfig>;
+
+export type ConfigurationMutationContext = {
+  actor: string;
+  requestId: string;
+};
+
+export type ConfigurationRevisionConflict = {
+  configurationType: "strategy" | "global_risk";
+  key: string;
+  expectedRevision: number;
+  actualRevision: number;
+};
+
+export type StrategyConfigUpdate = {
+  config: StrategyConfig;
+  expectedRevision: number;
+};
+
+export type StrategyConfigMapUpdate = AssetScoped<StrategyConfigUpdate>;
+
 export type VenueBalance = {
   venue: Venue;
   capturedAt: number;

@@ -3,10 +3,16 @@
 import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
-import type { HealthResponse, MarketAsset, MismatchRiskMode, StrategyConfig } from "@/lib/types";
+import type {
+  HealthResponse,
+  MarketAsset,
+  MismatchRiskMode,
+  StrategyConfig,
+  VersionedStrategyConfig,
+} from "@/lib/types";
 
 export function TradingToggle({ asset }: { asset: MarketAsset }) {
-  const settings = usePollingJson<StrategyConfig>(`/api/settings/${asset}`, 2_000);
+  const settings = usePollingJson<VersionedStrategyConfig>(`/api/settings/${asset}`, 2_000);
   const health = usePollingJson<HealthResponse>("/api/health", 5_000, {
     parseJsonOnNonOk: true,
     clearDataOnError: true,
@@ -22,7 +28,8 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
     );
   }
 
-  const currentSettings = settings.data;
+  const currentSettings = settings.data.config;
+  const currentRevision = settings.data.revision;
   const { enableTrading, shadowMode } = currentSettings;
   const mode = !enableTrading ? "off" : shadowMode ? "shadow" : "live";
   const liveExecutionAllowed =
@@ -37,12 +44,19 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(nextSettings),
+        body: JSON.stringify({
+          config: nextSettings,
+          expectedRevision: currentRevision,
+        }),
       });
 
       if (!response.ok) {
+        if (response.status === 409) {
+          settings.refresh();
+        }
         throw new Error(await response.text());
       }
+      settings.refresh();
     } catch (writeError) {
       const message = writeError instanceof Error ? writeError.message : "Mise à jour impossible";
       setError(message);

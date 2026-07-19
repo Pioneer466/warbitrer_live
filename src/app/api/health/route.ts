@@ -43,7 +43,7 @@ export async function GET() {
     const assets = slots.map((slot, index) => {
       return buildAssetHealth({
         slot,
-        settings: config[slot.asset],
+        settings: config[slot.asset].config,
         workerState: workerStates[slot.asset],
         snapshot: latestSnapshots[index],
         circuitBreakers,

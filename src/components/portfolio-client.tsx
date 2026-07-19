@@ -25,11 +25,22 @@ import {
   isMismatchBlockingDecision,
 } from "@/lib/mismatch-risk-display";
 import type { GlobalRiskConfig } from "@/lib/risk-settings";
-import type { CircuitBreaker, CircuitBreakerKey, LiveOpportunity, MismatchRiskCounterfactualDecision, OrderIntent, PortfolioDashboardResponse, ReadinessStatus, StablePnlChange, VenueBalance } from "@/lib/types";
+import type {
+  CircuitBreaker,
+  CircuitBreakerKey,
+  LiveOpportunity,
+  MismatchRiskCounterfactualDecision,
+  OrderIntent,
+  PortfolioDashboardResponse,
+  ReadinessStatus,
+  StablePnlChange,
+  VenueBalance,
+  VersionedConfiguration,
+} from "@/lib/types";
 
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
-  const globalRisk = usePollingJson<GlobalRiskConfig>("/api/settings/risk", 5_000);
+  const globalRisk = usePollingJson<VersionedConfiguration<GlobalRiskConfig>>("/api/settings/risk", 5_000);
   const [globalBreakerBusy, setGlobalBreakerBusy] = useState(false);
   const [breakerClearBusyKey, setBreakerClearBusyKey] = useState<string | null>(null);
   const [globalBreakerMessage, setGlobalBreakerMessage] = useState<string | null>(null);
@@ -42,7 +53,8 @@ export function PortfolioClient() {
     return <PanelMessage title="Erreur" message={portfolio.error ?? "Aucune donnée portefeuille."} tone="rose" />;
   }
 
-  const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers, manualRequiredIntents } = portfolio.data;
+  const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers, manualRequiredIntents } =
+    portfolio.data;
   const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
   const nonGlobalBreakers = activeBreakers.filter((breaker) => breaker.key !== "global");
   const globalBreakerActive = globalBreaker?.active === true;
@@ -82,7 +94,9 @@ export function PortfolioClient() {
 
       setGlobalBreakerMessage(nextActive ? "Global circuit breaker activé." : "Global circuit breaker désactivé.");
     } catch (error) {
-      setGlobalBreakerMessage(error instanceof Error ? error.message : "Impossible de modifier le global circuit breaker.");
+      setGlobalBreakerMessage(
+        error instanceof Error ? error.message : "Impossible de modifier le global circuit breaker.",
+      );
     } finally {
       setGlobalBreakerBusy(false);
     }
@@ -95,7 +109,9 @@ export function PortfolioClient() {
     }
 
     const shouldCloseUnresolvedIntents =
-      options.forceCloseIntent === true || breaker.reason === "hedge_failure" || typeof breaker.payload?.intentId === "string";
+      options.forceCloseIntent === true ||
+      breaker.reason === "hedge_failure" ||
+      typeof breaker.payload?.intentId === "string";
     if (
       (breaker.payload?.requiresManualClear === true || shouldCloseUnresolvedIntents) &&
       !window.confirm(
@@ -127,7 +143,7 @@ export function PortfolioClient() {
         throw new Error(await response.text());
       }
 
-      const result = await response.json().catch(() => null) as { closedIntentIds?: string[] } | null;
+      const result = (await response.json().catch(() => null)) as { closedIntentIds?: string[] } | null;
       const closedCount = result?.closedIntentIds?.length ?? 0;
       setGlobalBreakerMessage(
         closedCount > 0
@@ -156,12 +172,19 @@ export function PortfolioClient() {
         <div className="mb-4">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-3">
             <div className="text-[9px] uppercase tracking-[0.30em] text-[rgba(201,168,100,0.45)]">
-              Vue Multi-Actifs · {new Date(portfolio.data.fetchedAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}
+              Vue Multi-Actifs ·{" "}
+              {new Date(portfolio.data.fetchedAt).toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+                year: "numeric",
+              })}
             </div>
             <GlobalBreakerButton active={globalBreakerActive} busy={globalBreakerBusy} onClick={toggleGlobalBreaker} />
           </div>
           <div className="flex flex-wrap gap-2">
-            <Chip tone={breakerCount > 0 ? "rose" : "emerald"}>{readyCount}/{assets.length} ready</Chip>
+            <Chip tone={breakerCount > 0 ? "rose" : "emerald"}>
+              {readyCount}/{assets.length} ready
+            </Chip>
             <Chip tone={liveCount > 0 ? "gold" : "mist"}>{liveCount} live</Chip>
             <Chip tone={shadowCount > 0 ? "indigo" : "mist"}>{shadowCount} shadow</Chip>
             <Chip tone={enforceRiskCount > 0 ? "rose" : "indigo"}>{enforceRiskCount} risk enforce</Chip>
@@ -174,15 +197,23 @@ export function PortfolioClient() {
           <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.10)] px-5 py-4 shadow-[0_0_28px_rgba(232,80,106,0.08)]">
             <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--wa-rose)]">Global circuit breaker actif</div>
+                <div className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[var(--wa-rose)]">
+                  Global circuit breaker actif
+                </div>
                 <div className="mt-2 text-sm leading-6 text-[var(--wa-ivory)]">
                   Aucun nouvel ordre live ne doit être lancé tant que ce breaker global est actif.
                 </div>
                 <div className="mt-1 text-xs text-[var(--wa-mist)]">
-                  Raison: {globalBreaker.reason ?? "manual"} · déclenché: {globalBreaker.triggeredAt ? new Date(globalBreaker.triggeredAt).toLocaleString("fr-FR") : "--"}
+                  Raison: {globalBreaker.reason ?? "manual"} · déclenché:{" "}
+                  {globalBreaker.triggeredAt ? new Date(globalBreaker.triggeredAt).toLocaleString("fr-FR") : "--"}
                 </div>
               </div>
-              <GlobalBreakerButton active={globalBreakerActive} busy={globalBreakerBusy} onClick={toggleGlobalBreaker} emphasis />
+              <GlobalBreakerButton
+                active={globalBreakerActive}
+                busy={globalBreakerBusy}
+                onClick={toggleGlobalBreaker}
+                emphasis
+              />
             </div>
           </div>
         ) : null}
@@ -200,18 +231,18 @@ export function PortfolioClient() {
           />
         ) : null}
         {nonGlobalBreakers.length > 0 ? (
-          <ActiveBreakerList
-            breakers={nonGlobalBreakers}
-            busyKey={breakerClearBusyKey}
-            onClear={clearBreaker}
-          />
+          <ActiveBreakerList breakers={nonGlobalBreakers} busyKey={breakerClearBusyKey} onClear={clearBreaker} />
         ) : null}
 
         <Surface glow>
           <div className="grid border-b border-[var(--wa-gold-border)] md:grid-cols-2 xl:grid-cols-4">
             <BigMetric label="Equity totale" value={formatV2Usd(pnl?.equityUsd, true)} tone="gold" huge />
             <BigMetric label="Cash disponible" value={formatV2Usd(pnl?.cashUsd, true)} tone="gold" />
-            <BigMetric label="Positions" value={String(openPositionsCount)} sub={pnl ? `${formatV2Usd(pnl.positionsValueUsd)} exposés` : "positions live"} />
+            <BigMetric
+              label="Positions"
+              value={String(openPositionsCount)}
+              sub={pnl ? `${formatV2Usd(pnl.positionsValueUsd)} exposés` : "positions live"}
+            />
             <BigMetric
               label="Delta Compte"
               value={formatSignedUsd(drawdownUsd)}
@@ -243,7 +274,7 @@ export function PortfolioClient() {
       <section>
         <SectionLabel right="cluster multi-actifs">Budget de Risque</SectionLabel>
         <GlobalRiskBudgetPanel
-          config={globalRisk.data}
+          config={globalRisk.data?.config ?? null}
           error={globalRisk.error}
           loading={globalRisk.loading}
         />
@@ -261,7 +292,11 @@ export function PortfolioClient() {
       <section>
         <SectionLabel right="10 dernières fenêtres stables · drawdown">P&amp;L Global</SectionLabel>
         <Surface>
-          {stablePnlChanges.length === 0 ? <V2EmptyState message="Aucune fenêtre stable enregistrée" /> : <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />}
+          {stablePnlChanges.length === 0 ? (
+            <V2EmptyState message="Aucune fenêtre stable enregistrée" />
+          ) : (
+            <StablePnlChart changes={stablePnlChanges.slice(0, 10).reverse()} />
+          )}
         </Surface>
       </section>
     </div>
@@ -307,7 +342,11 @@ function ManualInterventionList({
                   <Chip tone="rose">{intent.asset.toUpperCase()}</Chip>
                   <Chip tone="rose">{intent.status}</Chip>
                   <Chip tone={intent.shadow ? "indigo" : "gold"}>{intent.shadow ? "shadow" : "live"}</Chip>
-                  {breaker ? <Chip tone="rose">{breaker.reason ?? "breaker"}</Chip> : <Chip tone="amber">sans breaker</Chip>}
+                  {breaker ? (
+                    <Chip tone="rose">{breaker.reason ?? "breaker"}</Chip>
+                  ) : (
+                    <Chip tone="amber">sans breaker</Chip>
+                  )}
                 </div>
                 <div className="text-sm text-[var(--wa-ivory)]">
                   {intent.combination} · {intent.primaryVenue} → {intent.hedgeVenue}
@@ -443,7 +482,15 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
             <span className="font-mono text-xl font-semibold text-[var(--wa-gold)]">{asset.asset.toUpperCase()}</span>
             <Chip tone={modeTone}>{mode}</Chip>
             <Chip tone={readinessTone}>{asset.workerState.readinessStatus}</Chip>
-            <Chip tone={asset.config.mismatchRiskMode === "enforce" ? "rose" : asset.config.mismatchRiskMode === "block_only" ? "amber" : "indigo"}>
+            <Chip
+              tone={
+                asset.config.mismatchRiskMode === "enforce"
+                  ? "rose"
+                  : asset.config.mismatchRiskMode === "block_only"
+                    ? "amber"
+                    : "indigo"
+              }
+            >
               risk {asset.config.mismatchRiskMode}
             </Chip>
           </div>
@@ -452,7 +499,9 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
             {asset.workerState.phase} · feeds {feedReadyCount}/{asset.feedHealth.length}
           </div>
         </div>
-        <div className="font-mono text-3xl leading-none text-[var(--wa-ivory)]">{formatV2Countdown(asset.slot.secondsRemaining)}</div>
+        <div className="font-mono text-3xl leading-none text-[var(--wa-ivory)]">
+          {formatV2Countdown(asset.slot.secondsRemaining)}
+        </div>
       </div>
       <div className="grid grid-cols-2 gap-px overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)] sm:grid-cols-4">
         <MiniStat label="Budget" value={formatV2Usd(asset.config.maxPairNotionalUsd)} />
@@ -462,13 +511,20 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
           value={formatRiskProbability(bestAudit ? bestAudit.pFatalUpper95 : best?.mismatchRiskEstimate?.pFatalUpper95)}
           tone={getAssetMismatchTone(best)}
         />
-        <MiniStat label="Breakers" value={String(asset.activeBreakers.length)} tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"} />
+        <MiniStat
+          label="Breakers"
+          value={String(asset.activeBreakers.length)}
+          tone={asset.activeBreakers.length > 0 ? "rose" : "emerald"}
+        />
       </div>
       <div className="mt-4 border-t border-[var(--wa-gold-border)] pt-4 text-sm text-[var(--wa-mist)]">
         {best ? (
           <div className="flex flex-col gap-2">
             <div className="flex items-center justify-between gap-3">
-              <span>brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire {best.primaryVenue ?? "--"}</span>
+              <span>
+                brut live {best.grossCost === null ? "--" : best.grossCost.toFixed(3)} · primaire{" "}
+                {best.primaryVenue ?? "--"}
+              </span>
               <Chip tone={best.eligible ? "emerald" : "amber"}>{best.eligible ? "eligible" : "watch"}</Chip>
             </div>
             {bestAudit ? (
@@ -476,7 +532,15 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
                 <Chip tone={getAuditDecisionTone(bestAudit.decision)}>
                   block_only · {formatMismatchAuditDecision(bestAudit.decision)}
                 </Chip>
-                <Chip tone={bestAudit.economicsBasis === "executable" ? "emerald" : bestAudit.economicsBasis === "reference" ? "amber" : "mist"}>
+                <Chip
+                  tone={
+                    bestAudit.economicsBasis === "executable"
+                      ? "emerald"
+                      : bestAudit.economicsBasis === "reference"
+                        ? "amber"
+                        : "mist"
+                  }
+                >
                   {formatMismatchEconomicsBasis(bestAudit.economicsBasis)}
                 </Chip>
               </div>
@@ -491,14 +555,17 @@ function AssetCard({ asset }: { asset: PortfolioDashboardResponse["assets"][numb
 }
 
 function PortfolioVenueRow({ balance, last }: { balance: VenueBalance; last: boolean }) {
-  const allowance = balance.raw["allowanceUnlimited"] === true
-    ? "Illimitée"
-    : balance.allowanceUsd === null
-      ? "--"
-      : formatV2Usd(balance.allowanceUsd);
+  const allowance =
+    balance.raw["allowanceUnlimited"] === true
+      ? "Illimitée"
+      : balance.allowanceUsd === null
+        ? "--"
+        : formatV2Usd(balance.allowanceUsd);
 
   return (
-    <div className={`grid gap-4 bg-[var(--wa-bg1)] px-5 py-4 lg:grid-cols-[120px_1fr_82px] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
+    <div
+      className={`grid gap-4 bg-[var(--wa-bg1)] px-5 py-4 lg:grid-cols-[120px_1fr_82px] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}
+    >
       <div>
         <div className="mb-1 text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.50)]">{balance.venue}</div>
         <div className="text-sm text-[var(--wa-ivory)]">{balance.currency}</div>
@@ -509,7 +576,9 @@ function PortfolioVenueRow({ balance, last }: { balance: VenueBalance; last: boo
         <VenueMetric label="Allowance" value={allowance} />
       </div>
       <div className="flex items-start justify-start lg:justify-end">
-        <Chip tone={balance.status === "ready" ? "emerald" : balance.status === "degraded" ? "amber" : "rose"}>{balance.status}</Chip>
+        <Chip tone={balance.status === "ready" ? "emerald" : balance.status === "degraded" ? "amber" : "rose"}>
+          {balance.status}
+        </Chip>
       </div>
     </div>
   );
@@ -525,14 +594,30 @@ function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
   const min = Math.min(0, ...values);
   const max = Math.max(0, ...values);
   const range = max - min || 1;
-  const x = (index: number) => pad.left + (index + 0.5) / changes.length * innerWidth;
+  const x = (index: number) => pad.left + ((index + 0.5) / changes.length) * innerWidth;
   const y = (value: number) => pad.top + (1 - (value - min) / range) * innerHeight;
-  const line = values.map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
+  const line = values
+    .map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`)
+    .join(" ");
 
   return (
     <svg viewBox={`0 0 ${width} ${height}`} className="h-[280px] w-full" preserveAspectRatio="xMidYMid meet">
-      <line x1={pad.left} y1={y(0)} x2={width - pad.right} y2={y(0)} stroke="rgba(201,168,100,0.16)" strokeDasharray="4,4" />
-      <path d={line} fill="none" stroke="var(--wa-gold)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+      <line
+        x1={pad.left}
+        y1={y(0)}
+        x2={width - pad.right}
+        y2={y(0)}
+        stroke="rgba(201,168,100,0.16)"
+        strokeDasharray="4,4"
+      />
+      <path
+        d={line}
+        fill="none"
+        stroke="var(--wa-gold)"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
       {values.map((value, index) => (
         <g key={`${changes[index]!.intentId}-${changes[index]!.changedAt}`}>
           {(() => {
@@ -553,7 +638,14 @@ function StablePnlChart({ changes }: { changes: StablePnlChange[] }) {
                   fill="rgba(4,6,12,0.82)"
                   stroke="rgba(201,168,100,0.18)"
                 />
-                <text x={labelX} y={labelY} textAnchor="middle" fontSize="13" fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"} fontFamily="IBM Plex Mono">
+                <text
+                  x={labelX}
+                  y={labelY}
+                  textAnchor="middle"
+                  fontSize="13"
+                  fill={value >= 0 ? "var(--wa-emerald)" : "var(--wa-rose)"}
+                  fontFamily="IBM Plex Mono"
+                >
                   {label}
                 </text>
               </>
@@ -597,10 +689,22 @@ function Divider() {
   return <div className="hidden h-5 w-px bg-[var(--wa-gold-border)] sm:block" />;
 }
 
-function PanelMessage({ title, message, tone = "default" }: { title: string; message: string; tone?: "default" | "rose" }) {
+function PanelMessage({
+  title,
+  message,
+  tone = "default",
+}: {
+  title: string;
+  message: string;
+  tone?: "default" | "rose";
+}) {
   return (
     <Surface className={tone === "rose" ? "border-[rgba(232,80,106,0.28)]" : ""}>
-      <div className={tone === "rose" ? "px-5 py-6 text-sm text-[var(--wa-rose)]" : "px-5 py-6 text-sm text-[var(--wa-mist)]"}>
+      <div
+        className={
+          tone === "rose" ? "px-5 py-6 text-sm text-[var(--wa-rose)]" : "px-5 py-6 text-sm text-[var(--wa-mist)]"
+        }
+      >
         <div className="text-[var(--wa-ivory)]">{title}</div>
         <div className="mt-2">{message}</div>
       </div>

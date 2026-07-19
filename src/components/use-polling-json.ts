@@ -1,6 +1,6 @@
 "use client";
 
-import { startTransition, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useState } from "react";
 
 export type PollingState<T> = {
   data: T | null;
@@ -21,15 +21,16 @@ export function usePollingJson<T>(url: string, intervalMs: number, options: Poll
     error: null,
     loading: true,
   });
-  const mountedRef = useRef(true);
+  const [refreshSequence, setRefreshSequence] = useState(0);
+  const refresh = useCallback(() => setRefreshSequence((current) => current + 1), []);
 
   useEffect(() => {
-    mountedRef.current = true;
+    let active = true;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let requestInFlight = false;
 
     const scheduleNextLoad = () => {
-      if (!mountedRef.current || document.visibilityState === "hidden") {
+      if (!active || document.visibilityState === "hidden") {
         return;
       }
       timeoutId = setTimeout(load, intervalMs);
@@ -45,7 +46,7 @@ export function usePollingJson<T>(url: string, intervalMs: number, options: Poll
           cache: "no-store",
         });
         const result = await parsePollingJsonResponse<T>(response, { parseJsonOnNonOk });
-        if (!mountedRef.current) {
+        if (!active) {
           return;
         }
         startTransition(() => {
@@ -56,7 +57,7 @@ export function usePollingJson<T>(url: string, intervalMs: number, options: Poll
           });
         });
       } catch (error) {
-        if (!mountedRef.current) {
+        if (!active) {
           return;
         }
         startTransition(() => {
@@ -88,15 +89,15 @@ export function usePollingJson<T>(url: string, intervalMs: number, options: Poll
     void load();
 
     return () => {
-      mountedRef.current = false;
+      active = false;
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
     };
-  }, [clearDataOnError, intervalMs, parseJsonOnNonOk, url]);
+  }, [clearDataOnError, intervalMs, parseJsonOnNonOk, refreshSequence, url]);
 
-  return state;
+  return { ...state, refresh };
 }
 
 export async function parsePollingJsonResponse<T>(

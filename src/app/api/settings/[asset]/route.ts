@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { createApiErrorResponse } from "@/lib/api-error";
+import { authenticateApiMutation } from "@/lib/api-mutation-auth";
+import { createConfigurationConflictResponse } from "@/lib/configuration-api";
 import { getLiveSettingsBlockReasons } from "@/lib/execution-safety";
 import { isMarketAsset } from "@/lib/market-catalog";
-import { settingsSchema } from "@/lib/settings-schema";
+import { strategyConfigUpdateSchema } from "@/lib/settings-schema";
 import { readSettings, writeSettings } from "@/lib/storage";
 
 export const runtime = "nodejs";
@@ -28,13 +30,13 @@ export async function GET(_request: Request, context: { params: Promise<{ asset:
 
 export async function PUT(request: Request, context: { params: Promise<{ asset: string }> }) {
   try {
+    const mutation = authenticateApiMutation(request);
     const { asset } = await context.params;
     if (!isMarketAsset(asset)) {
       return NextResponse.json({ error: "asset invalide" }, { status: 400 });
     }
 
-    const body = await request.json();
-    const parsed = settingsSchema.safeParse(body);
+    const parsed = strategyConfigUpdateSchema.safeParse(await request.json());
 
     if (!parsed.success) {
       return NextResponse.json(
@@ -45,7 +47,7 @@ export async function PUT(request: Request, context: { params: Promise<{ asset: 
       );
     }
 
-    const liveBlockReasons = getLiveSettingsBlockReasons(asset, parsed.data);
+    const liveBlockReasons = getLiveSettingsBlockReasons(asset, parsed.data.config);
     if (liveBlockReasons.length > 0) {
       return NextResponse.json(
         {
@@ -56,8 +58,12 @@ export async function PUT(request: Request, context: { params: Promise<{ asset: 
       );
     }
 
-    return NextResponse.json(await writeSettings(asset, parsed.data));
+    return NextResponse.json(await writeSettings(asset, parsed.data, mutation));
   } catch (error) {
+    const conflict = createConfigurationConflictResponse(error);
+    if (conflict) {
+      return conflict;
+    }
     return createApiErrorResponse(error);
   }
 }
