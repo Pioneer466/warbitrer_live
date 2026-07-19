@@ -804,6 +804,7 @@ class PolymarketRealtimeFeed {
   private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private userWsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private priceWsHeartbeat: ReturnType<typeof setInterval> | null = null;
+  private marketReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private priceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private bootstrapPromise: Promise<void> | null = null;
   private resyncPromise: Promise<void> | null = null;
@@ -1043,6 +1044,11 @@ class PolymarketRealtimeFeed {
   }
 
   private connectMarketWs(now: number) {
+    if (this.ws || !this.tokenIds) {
+      return;
+    }
+
+    const tokenIds = this.tokenIds;
     this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
       status: "connecting",
       source: "ws",
@@ -1053,10 +1059,12 @@ class PolymarketRealtimeFeed {
     this.ws = ws;
 
     ws.on("open", () => {
-      if (!this.tokenIds) {
+      if (this.ws !== ws || this.tokenIds !== tokenIds) {
+        ws.close();
         return;
       }
 
+      this.clearMarketReconnectTimer();
       this.reconnectAttempt = 0;
       this.startMarketHeartbeat(ws);
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
@@ -1067,13 +1075,16 @@ class PolymarketRealtimeFeed {
       ws.send(
         JSON.stringify({
           type: "market",
-          assets_ids: [this.tokenIds.up, this.tokenIds.down],
+          assets_ids: [tokenIds.up, tokenIds.down],
           custom_feature_enabled: true,
         }),
       );
     });
 
     ws.on("message", (buffer: Buffer) => {
+      if (this.ws !== ws) {
+        return;
+      }
       const raw = buffer.toString();
       const nowTs = Date.now();
       if (raw === "PONG") {
@@ -1107,6 +1118,9 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("error", (error: unknown) => {
+      if (this.ws !== ws) {
+        return;
+      }
       this.stopMarketHeartbeat();
       this.lastError = error instanceof Error ? error.message : "Polymarket market WS error";
       this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
@@ -1117,20 +1131,44 @@ class PolymarketRealtimeFeed {
     });
 
     ws.on("close", () => {
-      this.stopMarketHeartbeat();
-      this.ws = null;
-      this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
-        status: "closed",
-        source: "ws",
-        details: "market channel ferme, retry programme",
-      });
-      const delay = nextReconnectDelay(this.reconnectAttempt++);
-      setTimeout(() => {
-        if (this.slotKey) {
-          this.connectMarketWs(Date.now());
-        }
-      }, delay);
+      this.handleMarketWsClose(ws);
     });
+  }
+
+  private handleMarketWsClose(ws: WebSocket) {
+    if (this.ws !== ws) {
+      return;
+    }
+
+    this.stopMarketHeartbeat();
+    this.ws = null;
+    this.subscriptions[0] = toSubscriptionState(this.subscriptions[0], {
+      status: "closed",
+      source: "ws",
+      details: "market channel ferme, retry programme",
+    });
+    this.scheduleMarketReconnect();
+  }
+
+  private clearMarketReconnectTimer() {
+    if (this.marketReconnectTimer) {
+      clearTimeout(this.marketReconnectTimer);
+      this.marketReconnectTimer = null;
+    }
+  }
+
+  private scheduleMarketReconnect() {
+    if (this.marketReconnectTimer || !this.slotKey) {
+      return;
+    }
+
+    const delay = nextReconnectDelay(this.reconnectAttempt++);
+    this.marketReconnectTimer = setTimeout(() => {
+      this.marketReconnectTimer = null;
+      if (this.slotKey && !this.ws) {
+        this.connectMarketWs(Date.now());
+      }
+    }, delay);
   }
 
   private connectPriceWs() {
@@ -1587,20 +1625,22 @@ class PolymarketRealtimeFeed {
   }
 
   private async reset() {
+    const marketWs = this.ws;
     const userWs = this.userWs;
     const userMarketRef = this.market?.conditionId ?? this.market?.id ?? null;
+    this.ws = null;
     this.userWs = null;
     if (userWs) {
       this.onPrivateFeedReset("polymarket", userMarketRef);
     }
-    this.ws?.close();
+    this.clearMarketReconnectTimer();
+    marketWs?.close();
     userWs?.close();
     this.priceWs?.close();
     this.stopMarketHeartbeat();
     this.stopUserHeartbeat();
     this.stopPriceHeartbeat();
     this.clearPriceReconnectTimer();
-    this.ws = null;
     this.priceWs = null;
     this.slotStartTs = null;
     this.market = null;

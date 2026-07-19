@@ -109,6 +109,35 @@ describe("market data helpers", () => {
     expect(isChainlinkPriceStreamSilent(2_000, 14_000, 20_000)).toBe(false);
   });
 
+  it("ignores stale Polymarket market socket closes and deduplicates reconnect timers", async () => {
+    vi.useFakeTimers();
+    const supervisor = new MarketDataSupervisor() as any;
+    const feed = supervisor.feeds.btc.polymarket as any;
+    const staleSocket = {};
+    const currentSocket = {};
+    feed.slotKey = "btc:1770000000000";
+    feed.ws = currentSocket;
+
+    feed.handleMarketWsClose(staleSocket);
+
+    expect(feed.ws).toBe(currentSocket);
+    expect(feed.marketReconnectTimer).toBeNull();
+
+    feed.handleMarketWsClose(currentSocket);
+    feed.scheduleMarketReconnect();
+    const connectMarketWs = vi.spyOn(feed, "connectMarketWs").mockImplementation(() => {});
+
+    expect(feed.ws).toBeNull();
+    expect(feed.marketReconnectTimer).not.toBeNull();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(connectMarketWs).toHaveBeenCalledTimes(1);
+
+    feed.ws = currentSocket;
+    feed.scheduleMarketReconnect();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(connectMarketWs).toHaveBeenCalledTimes(1);
+  });
+
   it("applies top-of-book level deltas and removes empty levels", () => {
     const levels = new Map<string, number>([
       ["0.34", 10],
