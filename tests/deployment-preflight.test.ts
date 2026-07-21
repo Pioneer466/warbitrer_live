@@ -76,6 +76,16 @@ describe("deployment preflight", () => {
     expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("WITH accounting_clock"));
   });
 
+  it("accepts a complete legacy V0 snapshot before migration history is initialized", async () => {
+    const db = buildQueryable({ schemaVersion: 0, initialized: false });
+    const snapshot = await collectDeploymentPreflightSnapshot(db);
+
+    expect(snapshot).toEqual(buildSnapshot({ schemaVersion: 0, liveReservation: null, accountingBacklog: null }));
+    expect(() => assertDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).not.toThrow();
+    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("deployment_preflight:entry_reservation"));
+    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("WITH accounting_clock"));
+  });
+
   it("accepts a clean V4 snapshot without requiring V7 accounting tables", async () => {
     const db = buildQueryable({ schemaVersion: 4 });
     const snapshot = await collectDeploymentPreflightSnapshot(db);
@@ -184,13 +194,14 @@ function buildSnapshot(overrides: Partial<DeploymentPreflightSnapshot> = {}): De
 
 function buildQueryable(options: {
   schemaVersion: number;
+  initialized?: boolean;
   omitMigrationVersion?: number;
   omitColumn?: string;
   accountingBacklogTotal?: number;
 }) {
   const query = vi.fn(async (sql: string) => {
     if (sql.includes("to_regclass")) {
-      return result([{ table_name: "schema_migrations" }]);
+      return result([{ table_name: options.initialized === false ? null : "schema_migrations" }]);
     }
     if (sql.includes("FROM schema_migrations")) {
       return result(

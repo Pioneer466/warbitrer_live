@@ -14,6 +14,29 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
 
 describePostgres("Postgres deployment preflight", () => {
+  it("checks a complete legacy schema before migration history is initialized", async () => {
+    await withIsolatedSchema(async (pool) => {
+      const baselineMigration = DATABASE_MIGRATIONS[0];
+      if (!baselineMigration) {
+        throw new Error("Expected the baseline database migration");
+      }
+      await baselineMigration.up(pool);
+
+      const snapshot = await collectDeploymentPreflightSnapshot(pool);
+
+      expect(snapshot).toMatchObject({
+        schemaVersion: 0,
+        liveIntents: { total: 0 },
+        unresolvedAttempts: { total: 0 },
+        openOrders: { total: 0 },
+        livePositions: { total: 0 },
+        liveReservation: null,
+        accountingBacklog: null,
+      });
+      expect(() => assertDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).not.toThrow();
+    });
+  }, 30_000);
+
   it("executes every latest-schema check against PostgreSQL", async () => {
     await withIsolatedSchema(async (pool) => {
       await runDatabaseMigrations(pool, DATABASE_MIGRATIONS);

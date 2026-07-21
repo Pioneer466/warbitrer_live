@@ -10,10 +10,16 @@
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE
 - BNB and HYPE remain catalog/configuration assets without production worker units
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: not deployed by this review
+- Deployment status: production rollout explicitly approved; source commit `fcb6f001` is pulled on the VPS, while the reviewed runtime rollout remains in progress
 - Live authorization: keep `LIVE_EXECUTION_ALLOWED=false` until a separate production rollout and approval
 
-The worktree intentionally contains the complete global hardening review. Do not discard or partially deploy it. Commit and push the coherent set only after the final diff review.
+The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
+
+## Rollout Note - Legacy V0 Preflight
+
+The first production preflight correctly ran before any service stop, but exposed an ordering defect: the deploy script checks live state before V1 migration while the preflight previously rejected every complete legacy database lacking `schema_migrations`. The preflight now accepts only the exact uninitialized V0 state (no applied history, every V1-V8 migration pending, and no migration problems other than the missing history table and pending migrations). It still validates the required legacy table shape and durable live state before migration; initialized V0, partial schemas, history gaps, unknown migrations, and checksum mismatches remain blocked.
+
+Coverage includes a unit-level V0 query simulation and a PostgreSQL integration case that builds a complete baseline schema without initializing migration history. Docker Desktop was stopped locally, so the integration case is retained for PostgreSQL-enabled CI and the production read-only preflight is the final rollout check against the actual legacy database.
 
 ## Core Invariants
 
@@ -102,12 +108,10 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 
 ## Next Actions
 
-1. Review `git diff --stat`, the V8 checksum, and the final iteration document.
-2. Commit the complete review set and push the review branch.
-3. On the VPS, keep the global breaker active and `LIVE_EXECUTION_ALLOWED=false`.
-4. Follow the documented deploy flow without skipping any preflight or backup.
-5. Validate V8 status, service topology, health, Polygon chain 137, venue feeds, incidents, order truth, and accounting backlog.
-6. Observe scan-only and shadow across several slots before a separate live decision.
+1. Keep `LIVE_EXECUTION_ALLOWED=false` throughout the approved production rollout.
+2. Complete the canonical deploy flow without skipping any preflight or backup.
+3. Validate V8 status, service topology, health, Polygon chain 137, venue feeds, incidents, order truth, and accounting backlog.
+4. Observe scan-only and shadow across several slots before a separate live decision.
 
 ## Resume Prompt
 

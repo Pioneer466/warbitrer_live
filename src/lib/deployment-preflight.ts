@@ -483,6 +483,17 @@ function assertSupportedMigrationState(status: Awaited<ReturnType<typeof getData
       `Deployment preflight is reviewed through V${DEPLOYMENT_PREFLIGHT_REVIEWED_SCHEMA_VERSION}, but the application defines V${applicationSchemaVersion}; review and bump the preflight explicitly`,
     );
   }
+  const uninitializedLegacySchema =
+    !status.initialized &&
+    status.currentVersion === 0 &&
+    status.applied.length === 0 &&
+    status.pending.length === applicationSchemaVersion &&
+    status.problems.every(
+      (problem) => problem === "schema_migrations table is missing" || problem.startsWith("pending migration "),
+    );
+  if (uninitializedLegacySchema) {
+    return;
+  }
   const blockingProblems = status.problems.filter((problem) => !problem.startsWith("pending migration "));
   if (blockingProblems.length > 0) {
     throw new Error(`Deployment preflight found an incompatible migration history: ${blockingProblems.join("; ")}`);
