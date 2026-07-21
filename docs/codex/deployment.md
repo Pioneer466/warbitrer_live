@@ -57,6 +57,24 @@ The schema is managed by checksummed, forward-only migrations V1-V8 defined in `
 
 Keep every application service stopped while migrations run. Do not restart until status is ready at V8.
 
+The first V0-to-V8 production upgrade may require the audited one-time legacy repair when exact old Polymarket
+FOK/FAK fills contradict their stale order projection. Run it only with every application service stopped, a verified
+fresh backup, `LIVE_EXECUTION_ALLOWED=false`, and the exact counts established by a dry-run and restore rehearsal:
+
+```bash
+npm run db:repair-v8-legacy -- --dry-run --expect-fill-assets N --expect-venue-orders N
+npm run db:repair-v8-legacy -- --apply --expect-fill-assets N --expect-venue-orders N
+```
+
+The repair is limited to parent-proven legacy fill assets and terminal IOC order rows with matching durable fills. It
+stores complete before/after JSON in `legacy_v8_precondition_repairs` and refuses unknown counts or remaining V8
+precondition defects. It never resolves or deletes financially ambiguous failed intents.
+
+An old installation can retain terminal legacy intents whose fills cannot be reconstructed into exact accounting.
+Those rows continue to block runtime live admission. A shadow-only rollout may bypass only that exact deployment
+preflight category by invoking `deploy.sh` with `ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true`; the override is
+passed only to preflight subprocesses, never to application services, and is invalid when live execution is enabled.
+
 ## Safe update
 
 `deploy/vps/deploy.sh` is the canonical updater for an already-cloned repository. It does not fetch or pull Git changes. First update the approved branch as `warbitrer`:

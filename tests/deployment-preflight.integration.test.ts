@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 
 import { runDatabaseMigrations } from "@/lib/db-migrations";
+import { repairLegacyV8Preconditions } from "@/lib/legacy-v8-repair";
 import {
   assertDeploymentPreflight,
   collectDeploymentPreflightSnapshot,
@@ -14,6 +15,94 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
 
 describePostgres("Postgres deployment preflight", () => {
+  it("repairs only the audited legacy V8 projection anomalies before the first migration", async () => {
+    await withIsolatedSchema(async (pool) => {
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
+      const now = Date.now() - 2 * 24 * 60 * 60_000;
+      await pool.query(
+        `
+          INSERT INTO order_intents (
+            id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status,
+            created_at, updated_at, resolved_at, primary_venue, hedge_venue, gross_cost,
+            target_notional_usd, max_slippage_bps, legs_json
+          ) VALUES (
+            'legacy-repair-intent', 'eth', false, 'eth:legacy-repair', $1, $2,
+            'POLY_UP_KALSHI_NO', 'failed', $1, $2, $2, 'polymarket', 'kalshi',
+            2.04, 5, 100,
+            '[{"id":"legacy-poly-leg","filledSize":5.1},{"id":"legacy-kalshi-leg","filledSize":0}]'::jsonb
+          )
+        `,
+        [now - 60_000, now],
+      );
+      await pool.query(
+        `
+          INSERT INTO venue_orders (
+            id, asset, shadow, intent_id, venue, venue_order_id, client_order_id,
+            market_ref, token_id, side, outcome, order_type, requested_price,
+            requested_size, filled_size, average_fill_price, fee_usd, status,
+            created_at, updated_at, raw_json
+          ) VALUES (
+            'legacy-repair-order', 'eth', false, 'legacy-repair-intent', 'polymarket',
+            'legacy-repair-venue-order', 'legacy-repair-client', 'poly-market', 'poly-token',
+            'BUY', 'UP', 'FOK', 0.4, 5, 5.1, 0.4, 0, 'pending', $1, $1, '{}'::jsonb
+          )
+        `,
+        [now],
+      );
+      await pool.query(
+        `
+          INSERT INTO fills (
+            id, asset, shadow, intent_id, venue, venue_order_id, trade_id, market_ref,
+            token_id, side, outcome, price, size, fee_usd, liquidity, filled_at, raw_json
+          ) VALUES (
+            'legacy-repair-fill', 'btc', false, 'legacy-repair-intent', 'polymarket',
+            'legacy-repair-venue-order', 'legacy-repair-trade', 'poly-market', 'poly-token',
+            'BUY', 'UP', 0.4, 5.10004, 0, 'TAKER', $1, '{}'::jsonb
+          )
+        `,
+        [now],
+      );
+      await pool.query("DROP TABLE schema_migrations");
+
+      await expect(
+        repairLegacyV8Preconditions(pool, {
+          apply: false,
+          expected: { fillAssetRows: 1, venueOrderRows: 1 },
+        }),
+      ).resolves.toMatchObject({ applied: false, fillAssetRows: 1, venueOrderRows: 1, auditRows: 2 });
+      await expect(pool.query("SELECT count(*) FROM legacy_v8_precondition_repairs")).rejects.toThrow();
+
+      await expect(
+        repairLegacyV8Preconditions(pool, {
+          apply: true,
+          expected: { fillAssetRows: 1, venueOrderRows: 1 },
+        }),
+      ).resolves.toMatchObject({ applied: true, fillAssetRows: 1, venueOrderRows: 1, auditRows: 2 });
+
+      await expect(pool.query("SELECT asset FROM fills WHERE id = 'legacy-repair-fill'")).resolves.toMatchObject({
+        rows: [{ asset: "eth" }],
+      });
+      await expect(
+        pool.query("SELECT status, requested_size FROM venue_orders WHERE id = 'legacy-repair-order'"),
+      ).resolves.toMatchObject({ rows: [{ status: "filled", requested_size: 5.1 }] });
+      await expect(pool.query("UPDATE legacy_v8_precondition_repairs SET reason = 'tampered'")).rejects.toThrow(
+        /append-only/,
+      );
+
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS);
+      const snapshot = await collectDeploymentPreflightSnapshot(pool);
+      expect(snapshot.liveIntents.total).toBe(1);
+      expect(snapshot.historicalLegacyExposure.total).toBe(1);
+      expect(snapshot.accountingBacklog).toMatchObject({ total: 1, legacyPending: 1 });
+      expect(
+        evaluateDeploymentPreflight(snapshot, {
+          LIVE_EXECUTION_ALLOWED: "false",
+          ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY: "true",
+        }),
+      ).toEqual([]);
+    });
+  }, 60_000);
+
   it("checks a complete legacy schema before migration history is initialized", async () => {
     await withIsolatedSchema(async (pool) => {
       const baselineMigration = DATABASE_MIGRATIONS[0];

@@ -73,7 +73,7 @@ describe("deployment preflight", () => {
     expect(snapshot).toEqual(buildSnapshot({ schemaVersion: 1, liveReservation: null, accountingBacklog: null }));
     expect(() => assertDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).not.toThrow();
     expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("deployment_preflight:entry_reservation"));
-    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("WITH accounting_clock"));
+    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("classified AS"));
   });
 
   it("accepts a complete legacy V0 snapshot before migration history is initialized", async () => {
@@ -83,7 +83,7 @@ describe("deployment preflight", () => {
     expect(snapshot).toEqual(buildSnapshot({ schemaVersion: 0, liveReservation: null, accountingBacklog: null }));
     expect(() => assertDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).not.toThrow();
     expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("deployment_preflight:entry_reservation"));
-    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("WITH accounting_clock"));
+    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("classified AS"));
   });
 
   it("accepts a clean V4 snapshot without requiring V7 accounting tables", async () => {
@@ -92,7 +92,7 @@ describe("deployment preflight", () => {
 
     expect(snapshot).toEqual(buildSnapshot({ schemaVersion: 4, accountingBacklog: null }));
     expect(() => assertDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).not.toThrow();
-    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("WITH accounting_clock"));
+    expect(db.queryMock).not.toHaveBeenCalledWith(expect.stringContaining("classified AS"));
   });
 
   it("reads and rejects the canonical accounting backlog on the latest schema", async () => {
@@ -103,6 +103,56 @@ describe("deployment preflight", () => {
     expect(evaluateDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" })).toEqual([
       expect.objectContaining({ code: "accounting_backlog" }),
     ]);
+  });
+
+  it("allows only exact historical legacy exposure under the explicit shadow-only override", () => {
+    const snapshot = buildSnapshot({
+      liveIntents: { total: 2, sampleIds: ["historical-1", "historical-2"] },
+      historicalLegacyExposure: { total: 2, sampleIds: ["historical-1", "historical-2"] },
+      accountingBacklog: {
+        total: 2,
+        missingHeads: 0,
+        legacyPending: 2,
+        quarantined: 0,
+        terminalOpen: 0,
+        historicalLegacyPending: 10,
+        oldestIntentId: "historical-1",
+      },
+    });
+
+    expect(evaluateDeploymentPreflight(snapshot, { LIVE_EXECUTION_ALLOWED: "false" }).map(({ code }) => code)).toEqual([
+      "live_intents_or_exposure",
+      "accounting_backlog",
+    ]);
+    expect(
+      evaluateDeploymentPreflight(snapshot, {
+        LIVE_EXECUTION_ALLOWED: "false",
+        ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY: "true",
+      }),
+    ).toEqual([]);
+  });
+
+  it("does not let the historical-debt override hide unrelated or quarantined state", () => {
+    const snapshot = buildSnapshot({
+      liveIntents: { total: 2, sampleIds: ["historical", "unrelated"] },
+      historicalLegacyExposure: { total: 1, sampleIds: ["historical"] },
+      accountingBacklog: {
+        total: 1,
+        missingHeads: 0,
+        legacyPending: 0,
+        quarantined: 1,
+        terminalOpen: 0,
+        historicalLegacyPending: 0,
+        oldestIntentId: "quarantined",
+      },
+    });
+
+    expect(
+      evaluateDeploymentPreflight(snapshot, {
+        LIVE_EXECUTION_ALLOWED: "false",
+        ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY: "true",
+      }).map(({ code }) => code),
+    ).toEqual(["live_intents_or_exposure", "accounting_backlog"]);
   });
 
   it("fails closed when required schema columns are missing", async () => {
@@ -170,6 +220,7 @@ function buildSnapshot(overrides: Partial<DeploymentPreflightSnapshot> = {}): De
   return {
     schemaVersion: latestSchemaVersion(),
     liveIntents: { total: 0, sampleIds: [] },
+    historicalLegacyExposure: { total: 0, sampleIds: [] },
     unresolvedAttempts: { total: 0, sampleIds: [] },
     openOrders: { total: 0, sampleIds: [] },
     livePositions: { total: 0, sampleIds: [] },
@@ -264,6 +315,7 @@ function buildQueryable(options: {
     }
     if (
       sql.includes("deployment_preflight:live_intents") ||
+      sql.includes("deployment_preflight:historical_legacy_exposure") ||
       sql.includes("deployment_preflight:order_attempts") ||
       sql.includes("deployment_preflight:venue_orders") ||
       sql.includes("deployment_preflight:positions")

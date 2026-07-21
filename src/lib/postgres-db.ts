@@ -7220,8 +7220,7 @@ export async function getLiveAccountingBacklog(pool: PgQueryable): Promise<Accou
             AND intent.status IN ('unwound', 'settled', 'failed', 'skipped', 'canceled') THEN true
           WHEN head.state = 'legacy_pending' THEN
             intent.status NOT IN ('unwound', 'settled', 'failed', 'skipped', 'canceled')
-            OR intent.resolved_at IS NULL
-            OR intent.resolved_at >= accounting_clock.utc_day_start
+            OR COALESCE(intent.resolved_at, intent.slot_end_ts) >= accounting_clock.utc_day_start
             OR EXISTS (
               SELECT 1 FROM fills AS mismatched_fill
               WHERE mismatched_fill.intent_id = intent.id

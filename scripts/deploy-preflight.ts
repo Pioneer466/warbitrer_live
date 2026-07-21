@@ -25,7 +25,12 @@ async function main() {
 
     console.log(`Deployment preflight passed on schema V${snapshot.schemaVersion}.`);
     console.log("LIVE_EXECUTION_ALLOWED: disabled");
-    console.log("Live intents or exposure: 0");
+    const historicalDebtOverride = isTruthy(process.env.ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY);
+    console.log(
+      snapshot.liveIntents.total === 0
+        ? "Live intents or exposure: 0"
+        : `Historical legacy exposure allowed for shadow-only deployment: ${snapshot.historicalLegacyExposure.total}`,
+    );
     console.log("Unresolved live order attempts: 0");
     console.log("Open live venue orders: 0");
     console.log("Economically active live positions: 0");
@@ -36,7 +41,11 @@ async function main() {
     );
     console.log(
       snapshot.accountingBacklog
-        ? `Blocking live accounting defects: ${snapshot.accountingBacklog.total} (missing-head=${snapshot.accountingBacklog.missingHeads}, legacy=${snapshot.accountingBacklog.legacyPending}, quarantined=${snapshot.accountingBacklog.quarantined}, terminal-open=${snapshot.accountingBacklog.terminalOpen})`
+        ? `Blocking live accounting defects: ${snapshot.accountingBacklog.total} (missing-head=${snapshot.accountingBacklog.missingHeads}, legacy=${snapshot.accountingBacklog.legacyPending}, quarantined=${snapshot.accountingBacklog.quarantined}, terminal-open=${snapshot.accountingBacklog.terminalOpen})${
+            historicalDebtOverride && snapshot.accountingBacklog.total > 0
+              ? "; retained as a runtime live-entry block"
+              : ""
+          }`
         : "Blocking live accounting heads: not present before schema V7",
     );
   } catch (error) {
@@ -48,6 +57,10 @@ async function main() {
     client?.release();
     await pool.end();
   }
+}
+
+function isTruthy(value: string | undefined) {
+  return ["1", "true", "yes", "on"].includes(value?.trim().toLowerCase() ?? "");
 }
 
 function requireDatabaseUrl() {

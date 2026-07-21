@@ -32,6 +32,7 @@
     "audit:prod": "node scripts/check-production-audit.mjs",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:status": "tsx scripts/db-status.ts",
+    "db:repair-v8-legacy": "tsx scripts/repair-legacy-v8-preconditions.ts",
     "verify": "npm run audit:prod && npm run lint && npm run format:check && npm run typecheck && npm test && npm run build && npm run build:worker",
     "poly:derive-api-key": "tsx scripts/polymarket-derive-api-key.ts",
     "incident:report": "node --import tsx ./scripts/incident-report.ts",

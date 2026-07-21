@@ -198,6 +198,21 @@ Le script corrigé:
 
 Il ne lance pas `git pull` et ne remplace pas les contrôles opérateur préalables. Une erreur après l’arrêt laisse les services applicatifs arrêtés afin d’éviter une reprise sur un état non validé.
 
+Pour la première migration V0 vers V8 seulement, des projections historiques peuvent nécessiter le réparateur
+audité `npm run db:repair-v8-legacy`. Toujours faire un dry-run puis utiliser les mêmes nombres attendus avec
+`--apply`, services arrêtés, backup vérifié et `LIVE_EXECUTION_ALLOWED=false`. La table
+`legacy_v8_precondition_repairs` conserve le JSON avant/après de chaque ligne corrigée.
+
+Si les seuls défauts restants sont d’anciennes intentions terminales avec exposition comptable incertaine, elles
+restent bloquantes pour toute entrée live. Le build shadow peut être déployé explicitement avec :
+
+```bash
+ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true sudo -E bash deploy/vps/deploy.sh
+```
+
+Cet override ne doit jamais être ajouté au fichier d’environnement et ne contourne pas le blocage comptable du
+runtime.
+
 Après un `hedge_failure`, utiliser la vue détaillée des incidents et résoudre chaque incident exact depuis l’interface ou l’API authentifiée. L’exposition doit d’abord être prouvée récupérée; ne jamais effacer globalement les breakers ni modifier leurs lignes directement en base.
 
 ## Séquence recommandée

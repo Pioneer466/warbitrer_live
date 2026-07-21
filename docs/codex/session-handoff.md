@@ -10,7 +10,7 @@
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE
 - BNB and HYPE remain catalog/configuration assets without production worker units
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: production rollout explicitly approved; source commit `fcb6f001` is pulled on the VPS, while the reviewed runtime rollout remains in progress
+- Deployment status: production rollout explicitly approved; source commit `53624a1` is pulled on the VPS, while the reviewed runtime rollout remains in progress
 - Live authorization: keep `LIVE_EXECUTION_ALLOWED=false` until a separate production rollout and approval
 
 The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
@@ -19,7 +19,19 @@ The global hardening review is committed and pushed. The rollout keeps real exec
 
 The first production preflight correctly ran before any service stop, but exposed an ordering defect: the deploy script checks live state before V1 migration while the preflight previously rejected every complete legacy database lacking `schema_migrations`. The preflight now accepts only the exact uninitialized V0 state (no applied history, every V1-V8 migration pending, and no migration problems other than the missing history table and pending migrations). It still validates the required legacy table shape and durable live state before migration; initialized V0, partial schemas, history gaps, unknown migrations, and checksum mismatches remain blocked.
 
-Coverage includes a unit-level V0 query simulation and a PostgreSQL integration case that builds a complete baseline schema without initializing migration history. Docker Desktop was stopped locally, so the integration case is retained for PostgreSQL-enabled CI and the production read-only preflight is the final rollout check against the actual legacy database.
+Coverage includes a unit-level V0 query simulation and a PostgreSQL integration case that builds a complete baseline schema without initializing migration history. The full PostgreSQL 18 suite passed before rollout.
+
+## Rollout Note - Audited V8 Legacy Bridge
+
+The production restore rehearsal identified 74 old non-BTC fills stored with the former BTC default and 238 terminal
+Polymarket FOK/FAK order projections with stale `pending` status or a rounded requested size below the durable fill.
+The one-time `db:repair-v8-legacy` command repairs only those parent- and fill-proven rows, records complete before/after
+evidence, and refuses count drift. A compact production clone proved that V1-V8 then migrate successfully.
+
+Thirty-nine historical failed live intents still contain fills without enough evidence for exact re-accounting. They
+must not be rewritten as settled or unwound. They remain `legacy_pending` and continue to block runtime live entry.
+The deployment preflight can admit only this exact historical category under the transient
+`ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true` shadow-only override while `LIVE_EXECUTION_ALLOWED=false`.
 
 ## Core Invariants
 

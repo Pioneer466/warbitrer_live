@@ -36,6 +36,10 @@ run_as_app() {
 }
 
 run_db_script() {
+  local environment_args=()
+  if [[ "${ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY:-false}" == "true" ]]; then
+    environment_args+=(--setenv=ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true)
+  fi
   sudo systemd-run \
     --quiet \
     --wait \
@@ -44,6 +48,7 @@ run_db_script() {
     --uid="$APP_USER" \
     --working-directory="$APP_DIR" \
     --property="EnvironmentFile=$ENV_FILE" \
+    "${environment_args[@]}" \
     /usr/bin/node --import tsx "$1"
 }
 

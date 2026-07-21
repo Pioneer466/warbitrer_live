@@ -79,7 +79,9 @@ const ACCOUNTING_EVIDENCE_REQUIRED_COLUMNS = {
   ],
 } as const;
 
-type PreflightEnvironment = Partial<Record<"LIVE_EXECUTION_ALLOWED", string | undefined>>;
+type PreflightEnvironment = Partial<
+  Record<"LIVE_EXECUTION_ALLOWED" | "ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY", string | undefined>
+>;
 
 type BlockingRows = {
   total: number;
@@ -96,6 +98,7 @@ type LiveReservationSnapshot = {
 export type DeploymentPreflightSnapshot = {
   schemaVersion: number;
   liveIntents: BlockingRows;
+  historicalLegacyExposure: BlockingRows;
   unresolvedAttempts: BlockingRows;
   openOrders: BlockingRows;
   livePositions: BlockingRows;
@@ -212,6 +215,80 @@ export async function collectDeploymentPreflightSnapshot(db: PgQueryable): Promi
       FROM unsafe_intents
     `,
     "live intents or exposure",
+  );
+
+  const accountingHeadJoin =
+    migrationStatus.currentVersion >= ACCOUNTING_SCHEMA_VERSION
+      ? "JOIN accounting_heads AS accounting_head ON accounting_head.intent_id = intent.id"
+      : "";
+  const accountingHeadPredicate =
+    migrationStatus.currentVersion >= ACCOUNTING_SCHEMA_VERSION ? "AND accounting_head.state = 'legacy_pending'" : "";
+  const historicalLegacyExposure = await readBlockingRows(
+    db,
+    `
+      /* deployment_preflight:historical_legacy_exposure */
+      WITH accounting_clock AS (
+        SELECT floor(extract(epoch FROM (
+          date_trunc('day', clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        )) * 1000)::bigint AS utc_day_start
+      ), historical_debt AS (
+        SELECT intent.id
+        FROM order_intents AS intent
+        ${accountingHeadJoin}
+        CROSS JOIN accounting_clock
+        WHERE intent.shadow = false
+          AND intent.status IN ('failed', 'skipped', 'canceled')
+          AND intent.slot_end_ts < accounting_clock.utc_day_start
+          ${accountingHeadPredicate}
+          AND (
+            EXISTS (SELECT 1 FROM fills AS fill WHERE fill.intent_id = intent.id AND fill.size > 0)
+            OR EXISTS (
+              SELECT 1 FROM venue_orders AS venue_order
+              WHERE venue_order.intent_id = intent.id AND venue_order.filled_size > 0
+            )
+            OR COALESCE(jsonb_path_exists(intent.legs_json, '$[*] ? (@.filledSize > 0)'), false)
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM fills AS fill
+            WHERE fill.intent_id = intent.id
+              AND (
+                fill.asset IS DISTINCT FROM intent.asset
+                OR fill.shadow IS DISTINCT FROM intent.shadow
+                OR fill.price::text IN ('NaN', 'Infinity', '-Infinity')
+                OR fill.price <= 0
+                OR fill.price > 1
+                OR fill.size::text IN ('NaN', 'Infinity', '-Infinity')
+                OR fill.size <= 0
+                OR fill.fee_usd::text IN ('NaN', 'Infinity', '-Infinity')
+                OR fill.fee_usd < 0
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM venue_orders AS venue_order
+            WHERE venue_order.intent_id = intent.id
+              AND (
+                venue_order.asset IS DISTINCT FROM intent.asset
+                OR venue_order.shadow IS DISTINCT FROM intent.shadow
+              )
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM order_attempts AS attempt
+            WHERE attempt.intent_id = intent.id
+              AND (
+                attempt.asset IS DISTINCT FROM intent.asset
+                OR attempt.shadow IS DISTINCT FROM intent.shadow
+              )
+          )
+      )
+      SELECT
+        count(*)::integer AS total,
+        COALESCE((array_agg(id ORDER BY id))[1:5], ARRAY[]::text[]) AS sample_ids
+      FROM historical_debt
+    `,
+    "historical legacy exposure",
   );
 
   const unresolvedAttempts = await readBlockingRows(
@@ -391,6 +468,7 @@ export async function collectDeploymentPreflightSnapshot(db: PgQueryable): Promi
   return {
     schemaVersion: migrationStatus.currentVersion,
     liveIntents,
+    historicalLegacyExposure,
     unresolvedAttempts,
     openOrders,
     livePositions,
@@ -404,14 +482,21 @@ export function evaluateDeploymentPreflight(
   environment: PreflightEnvironment = readPreflightEnvironment(),
 ) {
   const issues: DeploymentPreflightIssue[] = [];
+  const liveExecutionEnabled = isTruthyEnv(environment.LIVE_EXECUTION_ALLOWED);
+  const historicalDebtOverride =
+    !liveExecutionEnabled && isTruthyEnv(environment.ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY);
+  const liveIntentsAreOnlyHistoricalDebt =
+    historicalDebtOverride &&
+    snapshot.liveIntents.total > 0 &&
+    snapshot.liveIntents.total === snapshot.historicalLegacyExposure.total;
 
-  if (isTruthyEnv(environment.LIVE_EXECUTION_ALLOWED)) {
+  if (liveExecutionEnabled) {
     issues.push({
       code: "live_execution_gate_enabled",
       message: "LIVE_EXECUTION_ALLOWED must be disabled before deployment",
     });
   }
-  if (snapshot.liveIntents.total > 0) {
+  if (snapshot.liveIntents.total > 0 && !liveIntentsAreOnlyHistoricalDebt) {
     issues.push({
       code: "live_intents_or_exposure",
       message: describeRows("live intent(s) remain non-closed or exposed", snapshot.liveIntents),
@@ -453,7 +538,16 @@ export function evaluateDeploymentPreflight(
       ),
     });
   }
-  if (snapshot.accountingBacklog && snapshot.accountingBacklog.total > 0) {
+  const accountingBacklogIsOnlyHistoricalDebt =
+    historicalDebtOverride &&
+    snapshot.accountingBacklog !== null &&
+    snapshot.accountingBacklog.total > 0 &&
+    snapshot.accountingBacklog.total === snapshot.historicalLegacyExposure.total &&
+    snapshot.accountingBacklog.legacyPending === snapshot.accountingBacklog.total &&
+    snapshot.accountingBacklog.missingHeads === 0 &&
+    snapshot.accountingBacklog.quarantined === 0 &&
+    snapshot.accountingBacklog.terminalOpen === 0;
+  if (snapshot.accountingBacklog && snapshot.accountingBacklog.total > 0 && !accountingBacklogIsOnlyHistoricalDebt) {
     issues.push({
       code: "accounting_backlog",
       message: describeIds(
@@ -656,5 +750,8 @@ function describeIds(label: string, ids: readonly string[]) {
 }
 
 function readPreflightEnvironment(): PreflightEnvironment {
-  return { LIVE_EXECUTION_ALLOWED: process.env.LIVE_EXECUTION_ALLOWED };
+  return {
+    LIVE_EXECUTION_ALLOWED: process.env.LIVE_EXECUTION_ALLOWED,
+    ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY: process.env.ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY,
+  };
 }

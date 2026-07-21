@@ -99,6 +99,27 @@ describePostgres("Postgres accounting persistence", () => {
     });
   }, 30_000);
 
+  it("uses the completed slot as the historical boundary when a legacy terminal row has no resolved timestamp", async () => {
+    await withIsolatedSchema(async (pool) => {
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
+      const dayStart = utcDayStart(Date.now());
+      const historical = buildIntent("legacy-prior-day-without-resolved-at", "failed");
+      historical.slotStartTs = dayStart - 30 * 60_000;
+      historical.slotEndTs = dayStart - 15 * 60_000;
+      historical.createdAt = historical.slotStartTs + 10;
+      historical.updatedAt = dayStart + 1_000;
+      historical.resolvedAt = null;
+      await insertOrderIntent(pool, historical);
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS);
+
+      await expect(getLiveAccountingBacklog(pool)).resolves.toMatchObject({
+        total: 0,
+        legacyPending: 0,
+        historicalLegacyPending: 1,
+      });
+    });
+  }, 30_000);
+
   it("protects mandatory accounting heads and blocks live entry if one is missing", async () => {
     await withIsolatedSchema(async (pool) => {
       await migratePostgresDatabase(pool);
