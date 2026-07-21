@@ -17,7 +17,11 @@ const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
 describePostgres("Postgres deployment preflight", () => {
   it("repairs only the audited legacy V8 projection anomalies before the first migration", async () => {
     await withIsolatedSchema(async (pool) => {
-      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
+      const baselineMigration = DATABASE_MIGRATIONS[0];
+      if (!baselineMigration) {
+        throw new Error("Expected the baseline database migration");
+      }
+      await baselineMigration.up(pool);
       const now = Date.now() - 2 * 24 * 60 * 60_000;
       await pool.query(
         `
@@ -62,8 +66,6 @@ describePostgres("Postgres deployment preflight", () => {
         `,
         [now],
       );
-      await pool.query("DROP TABLE schema_migrations");
-
       await expect(
         repairLegacyV8Preconditions(pool, {
           apply: false,
