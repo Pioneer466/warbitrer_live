@@ -89,10 +89,7 @@ describe("joint mismatch probabilities", () => {
       correlation: 0.35,
     });
     const upNo = calculateMismatchOutcomeProbabilities("POLY_UP_KALSHI_NO", quadrants);
-    const downYes = calculateMismatchOutcomeProbabilities(
-      "POLY_DOWN_KALSHI_YES",
-      quadrants,
-    );
+    const downYes = calculateMismatchOutcomeProbabilities("POLY_DOWN_KALSHI_YES", quadrants);
 
     expect(upNo.pFatal).toBeCloseTo(downYes.pDouble, 12);
     expect(upNo.pDouble).toBeCloseTo(downYes.pFatal, 12);
@@ -146,15 +143,15 @@ describe("joint mismatch probabilities", () => {
     };
 
     expect(estimateMismatchRisk(common).available).toBe(true);
-    expect(
-      estimateMismatchRisk({ ...common, chainlinkSourceTimestampMs: 8_999 }),
-    ).toEqual({ available: false, reason: "chainlink_stale" });
-    expect(
-      estimateMismatchRisk({ ...common, cfSourceTimestampMs: 12_000 }),
-    ).toEqual({ available: false, reason: "cf_timestamp_in_future" });
-    expect(
-      estimateMismatchRisk({ ...common, correlation: 2 }),
-    ).toEqual({ available: false, reason: "invalid_input" });
+    expect(estimateMismatchRisk({ ...common, chainlinkSourceTimestampMs: 8_999 })).toEqual({
+      available: false,
+      reason: "chainlink_stale",
+    });
+    expect(estimateMismatchRisk({ ...common, cfSourceTimestampMs: 12_000 })).toEqual({
+      available: false,
+      reason: "cf_timestamp_in_future",
+    });
+    expect(estimateMismatchRisk({ ...common, correlation: 2 })).toEqual({ available: false, reason: "invalid_input" });
   });
 });
 
@@ -275,10 +272,7 @@ describe("hybrid mismatch cluster budget", () => {
       }),
     ).toThrow(RangeError);
     expect(() =>
-      calculateMaximumAdditionalFatalLossUsd(
-        { remainingExpectedLossUsd: 10, remainingAbsoluteLossUsd: 20 },
-        1.1,
-      ),
+      calculateMaximumAdditionalFatalLossUsd({ remainingExpectedLossUsd: 10, remainingAbsoluteLossUsd: 20 }, 1.1),
     ).toThrow(RangeError);
   });
 });

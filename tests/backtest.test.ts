@@ -38,9 +38,9 @@ describe("local backtest helpers", () => {
       "theoretical_bruteforce",
     ]);
     expect(variants.find((variant) => variant.name === "theoretical_bruteforce")?.deployable).toBe(false);
-    expect(
-      variants.find((variant) => variant.name === "theoretical_bruteforce")?.settingsByAsset.btc.maxLegPrice,
-    ).toBe(0.99);
+    expect(variants.find((variant) => variant.name === "theoretical_bruteforce")?.settingsByAsset.btc.maxLegPrice).toBe(
+      0.99,
+    );
   });
 
   it("turns insufficient exact-size depth into a simulated no-fill", () => {
@@ -86,6 +86,25 @@ describe("local backtest helpers", () => {
     expect(result.mismatchLossUsd).toBe(10);
   });
 
+  it("never simulates adaptive slippage above the configured live maximum", () => {
+    const result = simulateOpportunity(
+      { name: "current_safe", deployable: true, allowDepthBypass: false },
+      normalizeSettings({
+        maxSlippageBps: 5,
+        adaptiveSlippageTightBps: 100,
+        adaptiveSlippageDefaultBps: 100,
+        adaptiveSlippageThinBps: 100,
+      }),
+      buildSnapshot(),
+      buildOpportunity({ polyDepth: 100, kalshiDepth: 100 }),
+      { polyResolution: "UP", kalshiResolution: "NO" },
+    );
+
+    expect(result.status).toBe("filled");
+    expect(result.polyPrice).toBe(0.2001);
+    expect(result.kalshiPrice).toBe(0.7003);
+  });
+
   it("penalizes no-fills and mismatch losses in the risk score", () => {
     const variant = buildBacktestVariants(normalizeSettingsMap(DEFAULT_STRATEGY_CONFIGS))[0];
     const filled = simulateOpportunity(
@@ -128,11 +147,13 @@ describe("local backtest helpers", () => {
   });
 });
 
-function buildOpportunity(overrides: {
-  slotKey?: string;
-  polyDepth?: number;
-  kalshiDepth?: number;
-} = {}): LiveOpportunity {
+function buildOpportunity(
+  overrides: {
+    slotKey?: string;
+    polyDepth?: number;
+    kalshiDepth?: number;
+  } = {},
+): LiveOpportunity {
   const slotKey = overrides.slotKey ?? SLOT_KEY;
   return {
     id: `opp-${slotKey}`,
@@ -196,12 +217,14 @@ function buildOpportunity(overrides: {
   };
 }
 
-function buildSnapshot(overrides: {
-  asset?: MarketAsset;
-  slotKey?: string;
-  polymarket?: Partial<PolymarketQuote>;
-  kalshi?: Partial<KalshiQuote>;
-} = {}): OpportunitySnapshot {
+function buildSnapshot(
+  overrides: {
+    asset?: MarketAsset;
+    slotKey?: string;
+    polymarket?: Partial<PolymarketQuote>;
+    kalshi?: Partial<KalshiQuote>;
+  } = {},
+): OpportunitySnapshot {
   const asset = overrides.asset ?? "btc";
   const slotKey = overrides.slotKey ?? SLOT_KEY;
   return {
@@ -299,6 +322,8 @@ function buildKalshiQuote(asset: MarketAsset, slotKey: string): KalshiQuote {
     feeType: "quadratic",
     lastTradeYesPrice: 0.3,
     lastTradeNoPrice: 0.7,
+    priceLevelStructure: "deci_cent",
+    priceRanges: [{ start: "0.0000", end: "1.0000", step: "0.0010" }],
     orderbookLevels: {
       yesBids: [[0.69, 100]],
       noBids: [[0.29, 100]],

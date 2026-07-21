@@ -52,6 +52,35 @@ describe("database migration status", () => {
     expect(migrationSourceChecksum(source, 3)).toBe(DATABASE_MIGRATIONS[2]?.checksum);
   });
 
+  it("binds the entry admission migration checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    expect(migrationSourceChecksum(source, 4)).toBe(DATABASE_MIGRATIONS[3]?.checksum);
+  });
+
+  it("binds the circuit-breaker incident migration checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    const migration = DATABASE_MIGRATIONS.find((candidate) => candidate.version === 5);
+    expect(migrationSourceChecksum(source, 5)).toBe(migration?.checksum);
+  });
+
+  it("binds the order-attempt submission deadline checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    const migration = DATABASE_MIGRATIONS.find((candidate) => candidate.version === 6);
+    expect(migrationSourceChecksum(source, 6)).toBe(migration?.checksum);
+  });
+
+  it("binds the accounting ledger checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    const migration = DATABASE_MIGRATIONS.find((candidate) => candidate.version === 7);
+    expect(migrationSourceChecksum(source, 7)).toBe(migration?.checksum);
+  });
+
+  it("binds the accounting evidence hardening checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    const migration = DATABASE_MIGRATIONS.find((candidate) => candidate.version === 8);
+    expect(migrationSourceChecksum(source, 8)).toBe(migration?.checksum);
+  });
+
   it("reports an uninitialized database as pending and incompatible", async () => {
     const db = {
       query: vi.fn().mockResolvedValue(queryResult([{ table_name: null }])),

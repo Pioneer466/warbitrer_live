@@ -46,6 +46,7 @@ describe("settings API revision contract and live gate", () => {
       APP_BASIC_AUTH_USER: "",
       LIVE_EXECUTION_ALLOWED: "false",
       KALSHI_ENV: "prod",
+      POLYGON_RPC_URL: "https://polygon.example",
     };
     storageMocks.readSettings.mockResolvedValue(versionedAsset("btc"));
     storageMocks.readSettingsMap.mockResolvedValue(versionedSettingsMap());

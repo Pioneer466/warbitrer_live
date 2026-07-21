@@ -13,8 +13,7 @@ import type {
   PolymarketQuote,
 } from "@/lib/types";
 
-export const MISMATCH_RISK_RUNTIME_MODEL_VERSION =
-  "structural-ewma-gaussian-v1-uncalibrated";
+export const MISMATCH_RISK_RUNTIME_MODEL_VERSION = "structural-ewma-gaussian-v1-uncalibrated";
 export const MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS = 10_000;
 
 const DEFAULT_MAX_OBSERVATIONS = 900;
@@ -138,13 +137,8 @@ export class MismatchRiskRuntime {
     try {
       return this.calculateEstimate(input);
     } catch {
-      const asset = (
-        input as Partial<MismatchRiskRuntimeEstimateInput> | null | undefined
-      )?.asset;
-      return unavailableEstimate(
-        "invalid_input",
-        asset ? (this.observations.get(asset)?.length ?? 0) : 0,
-      );
+      const asset = (input as Partial<MismatchRiskRuntimeEstimateInput> | null | undefined)?.asset;
+      return unavailableEstimate("invalid_input", asset ? (this.observations.get(asset)?.length ?? 0) : 0);
     }
   }
 
@@ -166,28 +160,20 @@ export class MismatchRiskRuntime {
     }
 
     assetObservations.push({
-      pairTimestampMs: Math.max(
-        reference.chainlinkTimestampMs,
-        reference.cfTimestampMs,
-      ),
+      pairTimestampMs: Math.max(reference.chainlinkTimestampMs, reference.cfTimestampMs),
       chainlinkTimestampMs: reference.chainlinkTimestampMs,
       cfTimestampMs: reference.cfTimestampMs,
       chainlinkPriceUsd: reference.chainlinkPriceUsd,
       cfPriceUsd: reference.cfPriceUsd,
     });
     if (assetObservations.length > this.options.maxObservations) {
-      assetObservations.splice(
-        0,
-        assetObservations.length - this.options.maxObservations,
-      );
+      assetObservations.splice(0, assetObservations.length - this.options.maxObservations);
     }
     this.observations.set(input.asset, assetObservations);
     return true;
   }
 
-  private calculateEstimate(
-    input: MismatchRiskRuntimeEstimateInput,
-  ): MismatchRiskEstimate {
+  private calculateEstimate(input: MismatchRiskRuntimeEstimateInput): MismatchRiskEstimate {
     const extracted = extractReference(input, this.options);
     const currentObservationCount = this.observations.get(input.asset)?.length ?? 0;
     if (!extracted.available) {
@@ -201,41 +187,24 @@ export class MismatchRiskRuntime {
 
     this.observe({
       ...input,
-      maxSourceAgeMs:
-        input.executionMaxSourceAgeMs ?? input.maxSourceAgeMs,
-      maxPairSkewMs:
-        input.executionMaxPairSkewMs ??
-        input.maxPairSkewMs ??
-        this.options.maxPairSkewMs,
+      maxSourceAgeMs: input.executionMaxSourceAgeMs ?? input.maxSourceAgeMs,
+      maxPairSkewMs: input.executionMaxPairSkewMs ?? input.maxPairSkewMs ?? this.options.maxPairSkewMs,
     });
     const observationCount = this.observations.get(input.asset)?.length ?? 0;
     const { reference } = extracted;
-    const economicsAvailable =
-      isPositiveFinite(input.pairSize) &&
-      isNonNegativeFinite(input.totalCostUsd);
+    const economicsAvailable = isPositiveFinite(input.pairSize) && isNonNegativeFinite(input.totalCostUsd);
     if (
       !isNonNegativeFinite(input.slotStartTs) ||
       !isPositiveFinite(input.slotEndTs) ||
       input.slotStartTs >= input.slotEndTs
     ) {
-      return unavailableEstimate(
-        "slot_invalid",
-        observationCount,
-        reference.chainlinkAgeMs,
-        reference.cfAgeMs,
-      );
+      return unavailableEstimate("slot_invalid", observationCount, reference.chainlinkAgeMs, reference.cfAgeMs);
     }
     if (input.slotEndTs <= input.now) {
-      return unavailableEstimate(
-        "slot_closed",
-        observationCount,
-        reference.chainlinkAgeMs,
-        reference.cfAgeMs,
-      );
+      return unavailableEstimate("slot_closed", observationCount, reference.chainlinkAgeMs, reference.cfAgeMs);
     }
     const chainlinkStartPrice = input.polymarket.observedSlotOpenPriceUsd;
-    const chainlinkStartTimestampMs =
-      input.polymarket.observedSlotOpenCapturedAt;
+    const chainlinkStartTimestampMs = input.polymarket.observedSlotOpenCapturedAt;
     const kalshiStrikePrice = input.kalshi.targetPriceUsd;
     if (!isPositiveFinite(chainlinkStartPrice)) {
       return unavailableEstimate(
@@ -322,12 +291,7 @@ export class MismatchRiskRuntime {
         maxFutureSkewMs: this.options.futureToleranceMs,
       });
       if (!risk.available) {
-        return unavailableEstimate(
-          risk.reason,
-          observationCount,
-          reference.chainlinkAgeMs,
-          reference.cfAgeMs,
-        );
+        return unavailableEstimate(risk.reason, observationCount, reference.chainlinkAgeMs, reference.cfAgeMs);
       }
 
       const probabilities = risk.probabilities;
@@ -377,12 +341,7 @@ export class MismatchRiskRuntime {
         observationCount,
       };
     } catch {
-      return unavailableEstimate(
-        "model_error",
-        observationCount,
-        reference.chainlinkAgeMs,
-        reference.cfAgeMs,
-      );
+      return unavailableEstimate("model_error", observationCount, reference.chainlinkAgeMs, reference.cfAgeMs);
     }
   }
 
@@ -395,11 +354,7 @@ export class MismatchRiskRuntime {
 
     const returns = calculateReturns(observations, this.options.maxReturnGapMs);
     if (returns.length < this.options.minimumObservations - 1) {
-      return unavailableStatistics(
-        "insufficient_returns",
-        observations.length,
-        returns.length,
-      );
+      return unavailableStatistics("insufficient_returns", observations.length, returns.length);
     }
 
     const chainlinkValues = returns.map((value) => value.chainlink);
@@ -415,9 +370,7 @@ export class MismatchRiskRuntime {
     let squaredWeightTotal = 0;
     for (let index = 0; index < returns.length; index += 1) {
       const ageMs = Math.max(0, latestTimestampMs - returns[index].timestampMs);
-      const weight = Math.exp(
-        (-Math.LN2 * ageMs) / this.options.ewmaHalfLifeMs,
-      );
+      const weight = Math.exp((-Math.LN2 * ageMs) / this.options.ewmaHalfLifeMs);
       totalWeight += weight;
       squaredWeightTotal += weight * weight;
       weightedChainlinkSquare += weight * clippedChainlink[index] ** 2;
@@ -426,11 +379,7 @@ export class MismatchRiskRuntime {
     }
 
     if (totalWeight <= 0) {
-      return unavailableStatistics(
-        "insufficient_returns",
-        observations.length,
-        returns.length,
-      );
+      return unavailableStatistics("insufficient_returns", observations.length, returns.length);
     }
 
     const chainlinkVariance = weightedChainlinkSquare / totalWeight;
@@ -439,24 +388,12 @@ export class MismatchRiskRuntime {
     const rawCorrelation =
       chainlinkVariance <= 0 || cfVariance <= 0
         ? 0
-        : clamp(
-            covariance / Math.sqrt(chainlinkVariance * cfVariance),
-            -1,
-            1,
-          );
-    const shrinkageWeight =
-      returns.length /
-      (returns.length + this.options.correlationPriorObservations);
+        : clamp(covariance / Math.sqrt(chainlinkVariance * cfVariance), -1, 1);
+    const shrinkageWeight = returns.length / (returns.length + this.options.correlationPriorObservations);
     const shrunkCorrelation = rawCorrelation * shrinkageWeight;
-    const basisLog = robustEwmaBasis(
-      observations,
-      latestTimestampMs,
-      this.options.ewmaHalfLifeMs,
-    );
+    const basisLog = robustEwmaBasis(observations, latestTimestampMs, this.options.ewmaHalfLifeMs);
     const effectiveObservationCount =
-      squaredWeightTotal <= 0
-        ? returns.length
-        : Math.max(1, (totalWeight * totalWeight) / squaredWeightTotal);
+      squaredWeightTotal <= 0 ? returns.length : Math.max(1, (totalWeight * totalWeight) / squaredWeightTotal);
 
     return {
       available: true,
@@ -464,14 +401,8 @@ export class MismatchRiskRuntime {
       observationCount: observations.length,
       returnCount: returns.length,
       effectiveObservationCount,
-      chainlinkLogVolatilityPerSqrtSecond: Math.max(
-        MIN_LOG_VOLATILITY,
-        Math.sqrt(Math.max(0, chainlinkVariance)),
-      ),
-      cfLogVolatilityPerSqrtSecond: Math.max(
-        MIN_LOG_VOLATILITY,
-        Math.sqrt(Math.max(0, cfVariance)),
-      ),
+      chainlinkLogVolatilityPerSqrtSecond: Math.max(MIN_LOG_VOLATILITY, Math.sqrt(Math.max(0, chainlinkVariance))),
+      cfLogVolatilityPerSqrtSecond: Math.max(MIN_LOG_VOLATILITY, Math.sqrt(Math.max(0, cfVariance))),
       rawCorrelation,
       shrunkCorrelation,
       basisLog,
@@ -495,27 +426,18 @@ export class MismatchRiskRuntime {
 function normalizeOptions(options: MismatchRiskRuntimeOptions): RuntimeOptions {
   const normalized = {
     maxObservations: options.maxObservations ?? DEFAULT_MAX_OBSERVATIONS,
-    statisticsObservations:
-      options.statisticsObservations ?? DEFAULT_STATISTICS_OBSERVATIONS,
-    minimumObservations:
-      options.minimumObservations ?? DEFAULT_MINIMUM_OBSERVATIONS,
+    statisticsObservations: options.statisticsObservations ?? DEFAULT_STATISTICS_OBSERVATIONS,
+    minimumObservations: options.minimumObservations ?? DEFAULT_MINIMUM_OBSERVATIONS,
     maxPairSkewMs: options.maxPairSkewMs ?? DEFAULT_MAX_PAIR_SKEW_MS,
     maxReturnGapMs: options.maxReturnGapMs ?? DEFAULT_MAX_RETURN_GAP_MS,
-    futureToleranceMs:
-      options.futureToleranceMs ?? DEFAULT_FUTURE_TOLERANCE_MS,
+    futureToleranceMs: options.futureToleranceMs ?? DEFAULT_FUTURE_TOLERANCE_MS,
     ewmaHalfLifeMs: options.ewmaHalfLifeMs ?? DEFAULT_EWMA_HALF_LIFE_MS,
-    correlationPriorObservations:
-      options.correlationPriorObservations ??
-      DEFAULT_CORRELATION_PRIOR_OBSERVATIONS,
+    correlationPriorObservations: options.correlationPriorObservations ?? DEFAULT_CORRELATION_PRIOR_OBSERVATIONS,
   };
 
   assertIntegerAtLeast(normalized.minimumObservations, 3, "minimumObservations");
   assertIntegerAtLeast(normalized.maxObservations, normalized.minimumObservations, "maxObservations");
-  assertIntegerAtLeast(
-    normalized.statisticsObservations,
-    normalized.minimumObservations,
-    "statisticsObservations",
-  );
+  assertIntegerAtLeast(normalized.statisticsObservations, normalized.minimumObservations, "statisticsObservations");
   if (normalized.statisticsObservations > normalized.maxObservations) {
     normalized.statisticsObservations = normalized.maxObservations;
   }
@@ -523,27 +445,15 @@ function normalizeOptions(options: MismatchRiskRuntimeOptions): RuntimeOptions {
   assertPositiveFinite(normalized.maxReturnGapMs, "maxReturnGapMs");
   assertNonNegativeFinite(normalized.futureToleranceMs, "futureToleranceMs");
   assertPositiveFinite(normalized.ewmaHalfLifeMs, "ewmaHalfLifeMs");
-  assertNonNegativeFinite(
-    normalized.correlationPriorObservations,
-    "correlationPriorObservations",
-  );
+  assertNonNegativeFinite(normalized.correlationPriorObservations, "correlationPriorObservations");
   return normalized;
 }
 
-function extractReference(
-  input: MismatchRiskObservationInput,
-  options: RuntimeOptions,
-): ReferenceExtractionResult {
-  if (
-    !isNonNegativeFinite(input.now) ||
-    !isNonNegativeFinite(input.maxSourceAgeMs)
-  ) {
+function extractReference(input: MismatchRiskObservationInput, options: RuntimeOptions): ReferenceExtractionResult {
+  if (!isNonNegativeFinite(input.now) || !isNonNegativeFinite(input.maxSourceAgeMs)) {
     return unavailableReference("invalid_input");
   }
-  if (
-    input.polymarket.ref.asset !== input.asset ||
-    input.kalshi.ref.asset !== input.asset
-  ) {
+  if (input.polymarket.ref.asset !== input.asset || input.kalshi.ref.asset !== input.asset) {
     return unavailableReference("asset_mismatch");
   }
   if (!input.polymarket.slotAligned || !input.kalshi.slotAligned) {
@@ -563,11 +473,7 @@ function extractReference(
   if (!isPositiveFinite(chainlinkPriceUsd) || !isNonNegativeFinite(chainlinkTimestampMs)) {
     return unavailableReference("chainlink_unavailable");
   }
-  if (
-    !cf ||
-    !isPositiveFinite(cf.liveValueUsd) ||
-    !isNonNegativeFinite(cf.sourceTimestampMs)
-  ) {
+  if (!cf || !isPositiveFinite(cf.liveValueUsd) || !isNonNegativeFinite(cf.sourceTimestampMs)) {
     return unavailableReference("cf_unavailable", input.now - chainlinkTimestampMs, null);
   }
 
@@ -575,11 +481,7 @@ function extractReference(
   const cfAgeMs = input.now - cf.sourceTimestampMs;
   const maxPairSkewMs = input.maxPairSkewMs ?? options.maxPairSkewMs;
   if (chainlinkAgeMs < -options.futureToleranceMs) {
-    return unavailableReference(
-      "chainlink_timestamp_in_future",
-      chainlinkAgeMs,
-      cfAgeMs,
-    );
+    return unavailableReference("chainlink_timestamp_in_future", chainlinkAgeMs, cfAgeMs);
   }
   if (cfAgeMs < -options.futureToleranceMs) {
     return unavailableReference("cf_timestamp_in_future", chainlinkAgeMs, cfAgeMs);
@@ -638,53 +540,30 @@ function buildForecast(args: {
   statistics: MismatchRiskRuntimeStatistics;
 }): Forecast | null {
   const { input, reference, statistics } = args;
-  const chainlinkVolatility =
-    statistics.chainlinkLogVolatilityPerSqrtSecond;
+  const chainlinkVolatility = statistics.chainlinkLogVolatilityPerSqrtSecond;
   const cfVolatility = statistics.cfLogVolatilityPerSqrtSecond;
   const incrementCorrelation = statistics.shrunkCorrelation;
-  if (
-    chainlinkVolatility === null ||
-    cfVolatility === null ||
-    incrementCorrelation === null
-  ) {
+  if (chainlinkVolatility === null || cfVolatility === null || incrementCorrelation === null) {
     return null;
   }
 
-  const chainlinkHorizonSeconds = Math.max(
-    0,
-    (input.slotEndTs - reference.chainlinkTimestampMs) / 1_000,
-  );
-  const cfHorizonSeconds = Math.max(
-    0,
-    (input.slotEndTs - reference.cfTimestampMs) / 1_000,
-  );
+  const chainlinkHorizonSeconds = Math.max(0, (input.slotEndTs - reference.chainlinkTimestampMs) / 1_000);
+  const cfHorizonSeconds = Math.max(0, (input.slotEndTs - reference.cfTimestampMs) / 1_000);
   const chainlinkTerminalStdDev =
     reference.chainlinkPriceUsd * chainlinkVolatility * Math.sqrt(chainlinkHorizonSeconds);
   if (input.slotEndTs - input.now > FINAL_MINUTE_MS) {
-    const secondsBeforeFinalMinute = Math.max(
-      0,
-      cfHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT,
-    );
+    const secondsBeforeFinalMinute = Math.max(0, cfHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT);
     const cfAverageVarianceTime = secondsBeforeFinalMinute + FINAL_AVERAGE_SAMPLE_COUNT / 3;
-    const sharedHorizonSeconds = Math.min(
-      chainlinkHorizonSeconds,
-      cfHorizonSeconds,
-    );
+    const sharedHorizonSeconds = Math.min(chainlinkHorizonSeconds, cfHorizonSeconds);
     const covarianceTime =
-      Math.max(0, sharedHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT) +
-      FINAL_AVERAGE_SAMPLE_COUNT / 2;
-    const geometryDenominator = Math.sqrt(
-      chainlinkHorizonSeconds * cfAverageVarianceTime,
-    );
-    const geometry = geometryDenominator <= 0
-      ? 0
-      : clamp(covarianceTime / geometryDenominator, 0, 1);
+      Math.max(0, sharedHorizonSeconds - FINAL_AVERAGE_SAMPLE_COUNT) + FINAL_AVERAGE_SAMPLE_COUNT / 2;
+    const geometryDenominator = Math.sqrt(chainlinkHorizonSeconds * cfAverageVarianceTime);
+    const geometry = geometryDenominator <= 0 ? 0 : clamp(covarianceTime / geometryDenominator, 0, 1);
     return {
       chainlinkTerminalMean: reference.chainlinkPriceUsd,
       chainlinkTerminalStdDev,
       cfFinalAverageMean: reference.cfPriceUsd,
-      cfFinalAverageStdDev:
-        reference.cfPriceUsd * cfVolatility * Math.sqrt(cfAverageVarianceTime),
+      cfFinalAverageStdDev: reference.cfPriceUsd * cfVolatility * Math.sqrt(cfAverageVarianceTime),
       correlation: clamp(incrementCorrelation * geometry, -0.999, 0.999),
     };
   }
@@ -701,14 +580,11 @@ function buildForecast(args: {
   ) {
     return null;
   }
-  const remainingSampleCount =
-    FINAL_AVERAGE_SAMPLE_COUNT - finalMinuteAverage.windowSize;
+  const remainingSampleCount = FINAL_AVERAGE_SAMPLE_COUNT - finalMinuteAverage.windowSize;
   const remainingMeanStdDev =
     remainingSampleCount === 0
       ? 0
-      : reference.cfPriceUsd *
-        cfVolatility *
-        Math.sqrt(Math.max(cfHorizonSeconds, 1 / FINAL_AVERAGE_SAMPLE_COUNT) / 3);
+      : reference.cfPriceUsd * cfVolatility * Math.sqrt(Math.max(cfHorizonSeconds, 1 / FINAL_AVERAGE_SAMPLE_COUNT) / 3);
   const conditioned = conditionCfFinalAverage({
     observedAverage: finalMinuteAverage.valueUsd,
     observedSampleCount: finalMinuteAverage.windowSize,
@@ -724,9 +600,7 @@ function buildForecast(args: {
     cfFinalAverageMean: conditioned.finalAverageMean,
     cfFinalAverageStdDev: conditioned.finalAverageStdDev,
     correlation:
-      conditioned.finalAverageStdDev === 0
-        ? 0
-        : clamp(incrementCorrelation * (Math.sqrt(3) / 2), -0.999, 0.999),
+      conditioned.finalAverageStdDev === 0 ? 0 : clamp(incrementCorrelation * (Math.sqrt(3) / 2), -0.999, 0.999),
   };
 }
 
@@ -761,10 +635,7 @@ function isValidFinalMinuteAverage(
   );
 }
 
-function calculateReturns(
-  observations: PairedObservation[],
-  maxReturnGapMs: number,
-): ReturnObservation[] {
+function calculateReturns(observations: PairedObservation[], maxReturnGapMs: number): ReturnObservation[] {
   const returns: ReturnObservation[] = [];
   for (let index = 1; index < observations.length; index += 1) {
     const previous = observations[index - 1];
@@ -774,9 +645,7 @@ function calculateReturns(
       continue;
     }
     const rootSeconds = Math.sqrt(elapsedMs / 1_000);
-    const chainlink =
-      Math.log(current.chainlinkPriceUsd / previous.chainlinkPriceUsd) /
-      rootSeconds;
+    const chainlink = Math.log(current.chainlinkPriceUsd / previous.chainlinkPriceUsd) / rootSeconds;
     const cf = Math.log(current.cfPriceUsd / previous.cfPriceUsd) / rootSeconds;
     if (Number.isFinite(chainlink) && Number.isFinite(cf)) {
       returns.push({ timestampMs: current.pairTimestampMs, chainlink, cf });
@@ -790,8 +659,7 @@ function robustClip(values: number[]): number[] {
   const deviations = values.map((value) => Math.abs(value - center));
   const madScale = 1.4826 * median(deviations);
   const rmsScale = Math.sqrt(
-    values.reduce((sum, value) => sum + (value - center) ** 2, 0) /
-      Math.max(1, values.length),
+    values.reduce((sum, value) => sum + (value - center) ** 2, 0) / Math.max(1, values.length),
   );
   const scale = Math.max(madScale, rmsScale * 0.25, MIN_LOG_VOLATILITY);
   const lower = center - ROBUST_CLIP_MULTIPLIER * scale;
@@ -799,22 +667,13 @@ function robustClip(values: number[]): number[] {
   return values.map((value) => clamp(value, lower, upper));
 }
 
-function robustEwmaBasis(
-  observations: PairedObservation[],
-  latestTimestampMs: number,
-  halfLifeMs: number,
-): number {
-  const bases = observations.map((observation) =>
-    Math.log(observation.cfPriceUsd / observation.chainlinkPriceUsd),
-  );
+function robustEwmaBasis(observations: PairedObservation[], latestTimestampMs: number, halfLifeMs: number): number {
+  const bases = observations.map((observation) => Math.log(observation.cfPriceUsd / observation.chainlinkPriceUsd));
   const clipped = robustClip(bases);
   let totalWeight = 0;
   let weightedBasis = 0;
   for (let index = 0; index < observations.length; index += 1) {
-    const ageMs = Math.max(
-      0,
-      latestTimestampMs - observations[index].pairTimestampMs,
-    );
+    const ageMs = Math.max(0, latestTimestampMs - observations[index].pairTimestampMs);
     const weight = Math.exp((-Math.LN2 * ageMs) / halfLifeMs);
     totalWeight += weight;
     weightedBasis += weight * clipped[index];
@@ -822,15 +681,9 @@ function robustEwmaBasis(
   return totalWeight <= 0 ? 0 : weightedBasis / totalWeight;
 }
 
-function structuralFatalProbabilityUpperBound(
-  pFatal: number,
-  effectiveObservationCount: number,
-): number {
+function structuralFatalProbabilityUpperBound(pFatal: number, effectiveObservationCount: number): number {
   // This is an explicit finite-history stress buffer, not a label-calibrated interval.
-  const margin = Math.min(
-    0.05,
-    0.25 / Math.sqrt(Math.max(1, effectiveObservationCount)),
-  );
+  const margin = Math.min(0.05, 0.25 / Math.sqrt(Math.max(1, effectiveObservationCount)));
   return clamp(Math.max(pFatal, pFatal + margin), 0, 1);
 }
 
@@ -855,8 +708,7 @@ function unavailableEstimate(
     fatalPnlUsd: null,
     breakEvenFatalProbability: null,
     maximumAllowedFatalProbability: null,
-    chainlinkAgeMs:
-      chainlinkAgeMs === null ? null : Math.max(0, chainlinkAgeMs),
+    chainlinkAgeMs: chainlinkAgeMs === null ? null : Math.max(0, chainlinkAgeMs),
     cfAgeMs: cfAgeMs === null ? null : Math.max(0, cfAgeMs),
     sourceTimestampSkewMs: null,
     observationCount,
@@ -897,9 +749,7 @@ function median(values: number[]): number {
   }
   const sorted = [...values].sort((left, right) => left - right);
   const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle];
+  return sorted.length % 2 === 0 ? (sorted[middle - 1] + sorted[middle]) / 2 : sorted[middle];
 }
 
 function clamp(value: number, lower: number, upper: number): number {

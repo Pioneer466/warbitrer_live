@@ -53,9 +53,7 @@ export function TradesClient() {
   const intentMap = new Map(intents.map((intent) => [intent.id, intent]));
   const successIntents = intents.filter((intent) => intent.status === "hedged" || intent.status === "settled");
   const errorIntents = intents.filter(isErrorIntent);
-  const pendingIntents = intents.filter(
-    (intent) => !successIntents.includes(intent) && !errorIntents.includes(intent),
-  );
+  const pendingIntents = intents.filter((intent) => !successIntents.includes(intent) && !errorIntents.includes(intent));
   const totalNotional = intents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
   const totalFees = fills.reduce((sum, fill) => sum + fill.feeUsd, 0);
   const visibleFills = showAllFills ? fills : fills.slice(0, 8);
@@ -68,8 +66,16 @@ export function TradesClient() {
         <Surface glow>
           <div className="grid md:grid-cols-2 xl:grid-cols-4">
             <MetricCell label="Notionnel engagé" value={formatV2Usd(totalNotional)} tone="gold" />
-            <MetricCell label="Positions ouvertes" value={String(successIntents.filter((intent) => intent.status === "hedged").length)} meta="intents hedged" />
-            <MetricCell label="Trades réalisés" value={String(successIntents.filter((intent) => intent.status === "settled").length)} tone="emerald" />
+            <MetricCell
+              label="Positions ouvertes"
+              value={String(successIntents.filter((intent) => intent.status === "hedged").length)}
+              meta="intents hedged"
+            />
+            <MetricCell
+              label="Trades réalisés"
+              value={String(successIntents.filter((intent) => intent.status === "settled").length)}
+              tone="emerald"
+            />
             <MetricCell label="Frais payés" value={formatV2Usd(totalFees)} tone="rose" meta="fills enregistrés" />
           </div>
           <MismatchAuditSummaryStrip summary={mismatchAuditSummary} />
@@ -93,14 +99,38 @@ export function TradesClient() {
       </PageSection>
 
       <section>
-        <SectionLabel right={`${successIntents.length} réussis · ${pendingIntents.length} en cours · ${errorIntents.length} non exécutés/erreurs`}>Intents</SectionLabel>
+        <SectionLabel
+          right={`${successIntents.length} réussis · ${pendingIntents.length} en cours · ${errorIntents.length} non exécutés/erreurs`}
+        >
+          Intents
+        </SectionLabel>
         {intents.length === 0 ? (
-          <Surface><V2EmptyState message="Aucun intent pour ce filtre" /></Surface>
+          <Surface>
+            <V2EmptyState message="Aucun intent pour ce filtre" />
+          </Surface>
         ) : (
           <div className="grid gap-3 xl:grid-cols-3">
-            <IntentColumn title="Réussis" subtitle="hedged / settled" intents={successIntents} emptyMessage="Aucun trade réussi." tone="emerald" />
-            <IntentColumn title="En cours" subtitle="shadow en attente / exécution" intents={pendingIntents} emptyMessage="Aucun intent en cours." tone="amber" />
-            <IntentColumn title="Non exécutés / erreurs" subtitle="no fill / failed / recovery" intents={errorIntents} emptyMessage="Aucun rejet ou incident." tone="rose" />
+            <IntentColumn
+              title="Réussis"
+              subtitle="hedged / settled"
+              intents={successIntents}
+              emptyMessage="Aucun trade réussi."
+              tone="emerald"
+            />
+            <IntentColumn
+              title="En cours"
+              subtitle="shadow en attente / exécution"
+              intents={pendingIntents}
+              emptyMessage="Aucun intent en cours."
+              tone="amber"
+            />
+            <IntentColumn
+              title="Non exécutés / erreurs"
+              subtitle="no fill / failed / recovery"
+              intents={errorIntents}
+              emptyMessage="Aucun rejet ou incident."
+              tone="rose"
+            />
           </div>
         )}
       </section>
@@ -110,17 +140,30 @@ export function TradesClient() {
         <Surface>
           <div className="hidden grid-cols-[90px_1fr_82px_80px_80px_80px_96px] gap-3 border-b border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-5 py-2 md:grid">
             {["Actif", "Venue · Outcome · Side", "Status", "Size", "Prix", "Fee", "Heure"].map((header) => (
-              <div key={header} className="text-[8px] uppercase tracking-[0.18em] text-[rgba(201,168,100,0.38)]">{header}</div>
+              <div key={header} className="text-[8px] uppercase tracking-[0.18em] text-[rgba(201,168,100,0.38)]">
+                {header}
+              </div>
             ))}
           </div>
           {fills.length === 0 ? (
             <V2EmptyState message="Aucune exécution" />
           ) : (
             <>
-              {visibleFills.map((fill, index) => <FillRow key={fill.id} fill={fill} intent={intentMap.get(fill.intentId) ?? null} last={index === visibleFills.length - 1 && fills.length <= 8} />)}
+              {visibleFills.map((fill, index) => (
+                <FillRow
+                  key={fill.id}
+                  fill={fill}
+                  intent={intentMap.get(fill.intentId) ?? null}
+                  last={index === visibleFills.length - 1 && fills.length <= 8}
+                />
+              ))}
               {fills.length > 8 ? (
                 <div className="border-t border-[var(--wa-gold-border)] px-5 py-3">
-                  <V2Expand expanded={showAllFills} n={fills.length - 8} onClick={() => setShowAllFills((value) => !value)} />
+                  <V2Expand
+                    expanded={showAllFills}
+                    n={fills.length - 8}
+                    onClick={() => setShowAllFills((value) => !value)}
+                  />
                 </div>
               ) : null}
             </>
@@ -131,10 +174,14 @@ export function TradesClient() {
       <section>
         <SectionLabel right={`${orders.length} ordres · ${orderGroups.length} groupes`}>Orders Par Pair</SectionLabel>
         {orders.length === 0 ? (
-          <Surface><V2EmptyState message="Aucun ordre enregistré" /></Surface>
+          <Surface>
+            <V2EmptyState message="Aucun ordre enregistré" />
+          </Surface>
         ) : (
           <div className="grid gap-3">
-            {orderGroups.map((group) => <OrderGroupSection key={group.key} group={group} intentsById={intentMap} />)}
+            {orderGroups.map((group) => (
+              <OrderGroupSection key={group.key} group={group} intentsById={intentMap} />
+            ))}
           </div>
         )}
       </section>
@@ -144,22 +191,46 @@ export function TradesClient() {
   );
 }
 
-function IntentColumn({ title, subtitle, intents, emptyMessage, tone }: { title: string; subtitle: string; intents: OrderIntent[]; emptyMessage: string; tone: V2Tone }) {
+function IntentColumn({
+  title,
+  subtitle,
+  intents,
+  emptyMessage,
+  tone,
+}: {
+  title: string;
+  subtitle: string;
+  intents: OrderIntent[];
+  emptyMessage: string;
+  tone: V2Tone;
+}) {
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? intents : intents.slice(0, 4);
   return (
     <Surface>
       <div className="flex items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
         <div className="flex items-center gap-3">
-          <span className={`h-4 w-[3px] rounded ${tone === "emerald" ? "bg-[var(--wa-emerald)]" : tone === "amber" ? "bg-[var(--wa-amber)]" : "bg-[var(--wa-rose)]"}`} />
+          <span
+            className={`h-4 w-[3px] rounded ${tone === "emerald" ? "bg-[var(--wa-emerald)]" : tone === "amber" ? "bg-[var(--wa-amber)]" : "bg-[var(--wa-rose)]"}`}
+          />
           <div>
             <div className="text-sm text-[var(--wa-ivory)]">{title}</div>
             <div className="mt-0.5 text-[9px] text-[var(--wa-dim)]">{subtitle}</div>
           </div>
         </div>
-        <span className={`font-mono text-sm ${tone === "emerald" ? "text-[var(--wa-emerald)]" : tone === "amber" ? "text-[var(--wa-amber)]" : "text-[var(--wa-rose)]"}`}>{intents.length}</span>
+        <span
+          className={`font-mono text-sm ${tone === "emerald" ? "text-[var(--wa-emerald)]" : tone === "amber" ? "text-[var(--wa-amber)]" : "text-[var(--wa-rose)]"}`}
+        >
+          {intents.length}
+        </span>
       </div>
-      {visible.length === 0 ? <V2EmptyState message={emptyMessage} /> : visible.map((intent, index) => <IntentRow key={intent.id} intent={intent} last={index === visible.length - 1 && intents.length <= 4} />)}
+      {visible.length === 0 ? (
+        <V2EmptyState message={emptyMessage} />
+      ) : (
+        visible.map((intent, index) => (
+          <IntentRow key={intent.id} intent={intent} last={index === visible.length - 1 && intents.length <= 4} />
+        ))
+      )}
       {intents.length > 4 ? (
         <div className="border-t border-[var(--wa-gold-border)] px-5 py-3">
           <V2Expand expanded={expanded} n={intents.length - 4} onClick={() => setExpanded((value) => !value)} />
@@ -212,11 +283,14 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
   return (
     <div className={`px-5 py-4 text-sm ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
       <div className="mb-1 flex items-start justify-between gap-3">
-        <div className="font-mono text-[var(--wa-ivory)]">{intent.asset.toUpperCase()} · {intent.combination}</div>
+        <div className="font-mono text-[var(--wa-ivory)]">
+          {intent.asset.toUpperCase()} · {intent.combination}
+        </div>
         <Chip tone={getIntentTone(intent)}>{intent.status}</Chip>
       </div>
       <div className="mb-3 text-[11px] text-[var(--wa-mist)]">
-        {formatDateTime(intent.createdAt)} · {intent.primaryVenue} → {intent.hedgeVenue} · notionnel {formatV2Usd(deriveIntentCapitalUsd(intent))}
+        {formatDateTime(intent.createdAt)} · {intent.primaryVenue} → {intent.hedgeVenue} · notionnel{" "}
+        {formatV2Usd(deriveIntentCapitalUsd(intent))}
       </div>
       {settlement ? (
         <div className="mb-3 flex flex-wrap items-center gap-2">
@@ -226,10 +300,16 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
             </Chip>
           ) : (
             <Chip tone={settlement.aligned === null ? "mist" : settlement.aligned ? "emerald" : "rose"}>
-              {settlement.aligned === null ? "venues --" : settlement.aligned ? "venues alignées" : "venues non alignées"}
+              {settlement.aligned === null
+                ? "venues --"
+                : settlement.aligned
+                  ? "venues alignées"
+                  : "venues non alignées"}
             </Chip>
           )}
-          <span className={`font-mono text-[11px] ${settlement.pnlTone === "emerald" ? "text-[var(--wa-emerald)]" : settlement.pnlTone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
+          <span
+            className={`font-mono text-[11px] ${settlement.pnlTone === "emerald" ? "text-[var(--wa-emerald)]" : settlement.pnlTone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}
+          >
             P&amp;L {formatSignedUsd(intent.realizedPnlUsd)}
             {intent.roi !== null ? ` · ROI ${(intent.roi * 100).toFixed(2)}%` : ""}
           </span>
@@ -241,7 +321,9 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       <div className="grid gap-2 md:grid-cols-2">
         {intent.legs.map((leg) => (
           <div key={leg.id} className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2">
-            <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">{leg.venue} · {leg.outcome}</div>
+            <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">
+              {leg.venue} · {leg.outcome}
+            </div>
             <div className="text-[10px] text-[var(--wa-mist)]">
               {leg.filledSize > 0 && leg.filledPrice !== null
                 ? `investi ${formatV2Usd(deriveLegCapitalUsd(leg))} · req ${formatPrice(leg.requestedSize, 2)} · filled ${formatPrice(leg.filledSize, 2)} · fee ${formatV2Usd(leg.feeUsd)}${deriveLegCashAdjustmentUsd(leg) > 0 ? ` · adj ${formatV2Usd(deriveLegCashAdjustmentUsd(leg))}` : ""}${formatLegRiskReservations(leg)}`
@@ -252,8 +334,16 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
       </div>
       <IntentMismatchRiskDetails intent={intent} />
       {intent.shadowExecution ? <ShadowExecutionDetails intent={intent} /> : null}
-      {intent.failureReason ? <div className="mt-2 rounded bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">{intent.failureReason}</div> : null}
-      {intent.entrySizingReason ? <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">{intent.entrySizingReason}</div> : null}
+      {intent.failureReason ? (
+        <div className="mt-2 rounded bg-[rgba(232,80,106,0.06)] px-3 py-2 text-[10px] text-[var(--wa-rose)]">
+          {intent.failureReason}
+        </div>
+      ) : null}
+      {intent.entrySizingReason ? (
+        <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">
+          {intent.entrySizingReason}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -264,24 +354,23 @@ function ShadowExecutionDetails({ intent }: { intent: OrderIntent }) {
     return null;
   }
   const latency = audit.latencyMs === null ? null : `${(audit.latencyMs / 1000).toFixed(1)}s`;
-  const restLatency = audit.restFetchDurationMs === null
-    ? null
-    : `${(audit.restFetchDurationMs / 1000).toFixed(1)}s`;
-  const cooldown = audit.nextEligibleAt === null
-    ? ""
-    : ` · prochain essai ${formatDateTime(audit.nextEligibleAt)}`;
-  const meta = audit.status === "scheduled"
-    ? audit.restCapturedAt === null
-      ? `lecture REST lancée ${formatDateTime(audit.restStartedAt)}`
-      : `REST ${restLatency ?? "--"} · confirmation simulée ${formatDateTime(audit.completionNotBeforeAt)}`
-    : audit.status === "filled"
-      ? `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · fill ${(audit.fillRatio * 100).toFixed(0)}% · coût ${audit.realizedGrossCost === null ? "--" : formatPrice(audit.realizedGrossCost, 4)}${cooldown}`
-      : `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · ${audit.reason ?? audit.reasonCode ?? "aucun fill"}${cooldown}`;
+  const restLatency = audit.restFetchDurationMs === null ? null : `${(audit.restFetchDurationMs / 1000).toFixed(1)}s`;
+  const cooldown = audit.nextEligibleAt === null ? "" : ` · prochain essai ${formatDateTime(audit.nextEligibleAt)}`;
+  const meta =
+    audit.status === "scheduled"
+      ? audit.restCapturedAt === null
+        ? `lecture REST lancée ${formatDateTime(audit.restStartedAt)}`
+        : `REST ${restLatency ?? "--"} · confirmation simulée ${formatDateTime(audit.completionNotBeforeAt)}`
+      : audit.status === "filled"
+        ? `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · fill ${(audit.fillRatio * 100).toFixed(0)}% · coût ${audit.realizedGrossCost === null ? "--" : formatPrice(audit.realizedGrossCost, 4)}${cooldown}`
+        : `REST ${restLatency ?? "--"} · total ${latency ?? "--"} · ${audit.reason ?? audit.reasonCode ?? "aucun fill"}${cooldown}`;
   return (
     <div className="mt-2 rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2 text-[10px] text-[var(--wa-mist)]">
       <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-[var(--wa-ivory)]">{audit.modelVersion}</span>
-        <Chip tone={audit.status === "filled" ? "emerald" : audit.status === "no_fill" ? "rose" : "amber"}>{audit.status}</Chip>
+        <Chip tone={audit.status === "filled" ? "emerald" : audit.status === "no_fill" ? "rose" : "amber"}>
+          {audit.status}
+        </Chip>
       </div>
       <div>{meta}</div>
     </div>
@@ -290,16 +379,26 @@ function ShadowExecutionDetails({ intent }: { intent: OrderIntent }) {
 
 function FillRow({ fill, intent, last }: { fill: LiveFill; intent: OrderIntent | null; last: boolean }) {
   return (
-    <div className={`grid gap-3 px-5 py-3 text-sm md:grid-cols-[90px_1fr_82px_80px_80px_80px_96px] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
+    <div
+      className={`grid gap-3 px-5 py-3 text-sm md:grid-cols-[90px_1fr_82px_80px_80px_80px_96px] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}
+    >
       <div>
         <div className="font-mono text-[11px] font-semibold text-[var(--wa-gold)]">{fill.asset.toUpperCase()}</div>
         {fill.shadow ? <div className="text-[8px] text-[var(--wa-indigo)]">shadow</div> : null}
       </div>
       <div>
-        <div className="text-[var(--wa-ivory)]">{fill.venue} · {fill.outcome} · {fill.side}</div>
-        {intent ? <div className="mt-1 font-mono text-[9px] text-[var(--wa-dim)]">intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}</div> : null}
+        <div className="text-[var(--wa-ivory)]">
+          {fill.venue} · {fill.outcome} · {fill.side}
+        </div>
+        {intent ? (
+          <div className="mt-1 font-mono text-[9px] text-[var(--wa-dim)]">
+            intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}
+          </div>
+        ) : null}
       </div>
-      <div><Chip tone="emerald">filled</Chip></div>
+      <div>
+        <Chip tone="emerald">filled</Chip>
+      </div>
       <div className="font-mono text-[11px] text-[var(--wa-ivory)]">size {formatPrice(fill.size, 2)}</div>
       <div className="font-mono text-[11px] text-[var(--wa-ivory)]">avg {formatPrice(fill.price, 4)}</div>
       <div className="font-mono text-[11px] text-[var(--wa-rose)]">{formatV2Usd(fill.feeUsd)}</div>
@@ -318,7 +417,12 @@ function OrderGroupSection({ group, intentsById }: { group: OrderGroup; intentsB
         <div className="font-mono text-xs text-[var(--wa-mist)]">{group.orders.length} ordres</div>
       </div>
       {visibleOrders.map((order, index) => (
-        <OrderRow key={order.id} order={order} intent={intentsById.get(order.intentId) ?? null} last={index === visibleOrders.length - 1 && group.orders.length <= 6} />
+        <OrderRow
+          key={order.id}
+          order={order}
+          intent={intentsById.get(order.intentId) ?? null}
+          last={index === visibleOrders.length - 1 && group.orders.length <= 6}
+        />
       ))}
       {group.orders.length > 6 ? (
         <div className="border-t border-[var(--wa-gold-border)] px-5 py-3">
@@ -331,11 +435,22 @@ function OrderGroupSection({ group, intentsById }: { group: OrderGroup; intentsB
 
 function OrderRow({ order, intent, last }: { order: LiveOrder; intent: OrderIntent | null; last: boolean }) {
   return (
-    <div className={`grid gap-3 px-5 py-3 text-sm md:grid-cols-[1fr_auto] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
+    <div
+      className={`grid gap-3 px-5 py-3 text-sm md:grid-cols-[1fr_auto] ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}
+    >
       <div>
-        <div className="text-[var(--wa-ivory)]">{order.asset.toUpperCase()} · {order.venue} · {order.outcome} · {order.side}</div>
-        {intent ? <div className="mt-1 text-[11px] text-[var(--wa-mist)]">intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}</div> : null}
-        <div className="mt-1 text-[11px] text-[var(--wa-mist)]">size {formatPrice(order.requestedSize, 2)} · filled {formatPrice(order.filledSize, 2)} · avg {order.averageFillPrice === null ? "--" : formatPrice(order.averageFillPrice, 4)}</div>
+        <div className="text-[var(--wa-ivory)]">
+          {order.asset.toUpperCase()} · {order.venue} · {order.outcome} · {order.side}
+        </div>
+        {intent ? (
+          <div className="mt-1 text-[11px] text-[var(--wa-mist)]">
+            intent {intent.asset.toUpperCase()} · {intent.combination} · {intent.status}
+          </div>
+        ) : null}
+        <div className="mt-1 text-[11px] text-[var(--wa-mist)]">
+          size {formatPrice(order.requestedSize, 2)} · filled {formatPrice(order.filledSize, 2)} · avg{" "}
+          {order.averageFillPrice === null ? "--" : formatPrice(order.averageFillPrice, 4)}
+        </div>
       </div>
       <div className="flex flex-col items-start gap-2 md:items-end">
         <Chip tone={getOrderTone(order)}>{order.status}</Chip>
@@ -345,10 +460,22 @@ function OrderRow({ order, intent, last }: { order: LiveOrder; intent: OrderInte
   );
 }
 
-function PanelMessage({ title, message, tone = "default" }: { title: string; message: string; tone?: "default" | "rose" }) {
+function PanelMessage({
+  title,
+  message,
+  tone = "default",
+}: {
+  title: string;
+  message: string;
+  tone?: "default" | "rose";
+}) {
   return (
     <Surface className={tone === "rose" ? "border-[rgba(232,80,106,0.28)]" : ""}>
-      <div className={tone === "rose" ? "px-5 py-6 text-sm text-[var(--wa-rose)]" : "px-5 py-6 text-sm text-[var(--wa-mist)]"}>
+      <div
+        className={
+          tone === "rose" ? "px-5 py-6 text-sm text-[var(--wa-rose)]" : "px-5 py-6 text-sm text-[var(--wa-mist)]"
+        }
+      >
         <div className="text-[var(--wa-ivory)]">{title}</div>
         <div className="mt-2">{message}</div>
       </div>
@@ -392,21 +519,16 @@ function deriveSettlementSummary(intent: OrderIntent) {
   }
 
   const kalshiDirection = intent.kalshiResolution === "YES" ? "UP" : intent.kalshiResolution === "NO" ? "DOWN" : null;
-  const aligned = intent.polyResolution !== null && kalshiDirection !== null ? intent.polyResolution === kalshiDirection : null;
+  const aligned =
+    intent.polyResolution !== null && kalshiDirection !== null ? intent.polyResolution === kalshiDirection : null;
   const classification = classifySettledIntentMismatch(intent);
   const pnlTone: V2Tone = intent.realizedPnlUsd === null ? "mist" : intent.realizedPnlUsd >= 0 ? "emerald" : "rose";
 
   return { aligned, classification, pnlTone };
 }
 
-function getSettlementClassificationTone(
-  classification: MismatchSettlementClassification,
-): V2Tone {
-  return classification === "fatal_mismatch"
-    ? "rose"
-    : classification === "double_payout"
-      ? "gold"
-      : "emerald";
+function getSettlementClassificationTone(classification: MismatchSettlementClassification): V2Tone {
+  return classification === "fatal_mismatch" ? "rose" : classification === "double_payout" ? "gold" : "emerald";
 }
 
 function deriveIntentCapitalUsd(intent: OrderIntent) {
@@ -414,7 +536,8 @@ function deriveIntentCapitalUsd(intent: OrderIntent) {
 }
 
 function deriveLegCapitalUsd(leg: OrderIntent["legs"][number]) {
-  const tradedNotional = leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
+  const tradedNotional =
+    leg.filledSize > 0 && leg.filledPrice !== null ? leg.filledSize * leg.filledPrice : leg.requestedNotionalUsd;
   return Math.round((tradedNotional + leg.feeUsd + deriveLegCashAdjustmentUsd(leg)) * 10_000) / 10_000;
 }
 

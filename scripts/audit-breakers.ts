@@ -48,20 +48,24 @@ async function main() {
   });
 
   if (json) {
-    console.log(JSON.stringify({ fetchedAt: now, active: detailed.filter((item) => item.active), breakers: detailed }, null, 2));
+    console.log(
+      JSON.stringify({ fetchedAt: now, active: detailed.filter((item) => item.active), breakers: detailed }, null, 2),
+    );
     return;
   }
 
   const active = detailed.filter((item) => item.active);
   console.log(`Breakers actifs: ${active.length}/${detailed.length}`);
   for (const breaker of active) {
-    const cooldown = breaker.cooldownUntil === null
-      ? "aucun cooldown"
-      : `cooldown ${new Date(breaker.cooldownUntil).toISOString()} (${Math.ceil((breaker.cooldownRemainingMs ?? 0) / 1000)}s)`;
+    const cooldown =
+      breaker.cooldownUntil === null
+        ? "aucun cooldown"
+        : `cooldown ${new Date(breaker.cooldownUntil).toISOString()} (${Math.ceil((breaker.cooldownRemainingMs ?? 0) / 1000)}s)`;
     const manual = breaker.requiresManualClear ? "manual-clear requis" : "clear auto possible";
-    const unresolved = breaker.unresolvedIntentIds.length > 0
-      ? `intents ouverts: ${breaker.unresolvedIntentIds.join(", ")}`
-      : "aucun intent ouvert";
+    const unresolved =
+      breaker.unresolvedIntentIds.length > 0
+        ? `intents ouverts: ${breaker.unresolvedIntentIds.join(", ")}`
+        : "aucun intent ouvert";
     console.log(`- ${breaker.key} · ${breaker.reason ?? "sans raison"} · ${manual} · ${cooldown} · ${unresolved}`);
   }
   if (active.length === 0) {
@@ -87,7 +91,10 @@ function parseBreakerScope(key: CircuitBreakerKey) {
   };
 }
 
-function matchesBreakerScope(scope: ReturnType<typeof parseBreakerScope>, intent: Pick<OrderIntent, "asset" | "slotKey">) {
+function matchesBreakerScope(
+  scope: ReturnType<typeof parseBreakerScope>,
+  intent: Pick<OrderIntent, "asset" | "slotKey">,
+) {
   if (scope.type === "global") {
     return true;
   }
@@ -133,10 +140,7 @@ function loadEnvFile(path: string) {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     env[key] = value;

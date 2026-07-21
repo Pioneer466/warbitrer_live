@@ -29,7 +29,8 @@ Do not assume the generic recommendations in old prompts are implemented. The co
 - BNB and HYPE exist in the catalog/UI/config but are not in `ACTIVE_MARKET_ASSETS`.
 - Strategy configuration is stored in Postgres, not environment variables.
 - Production deployment: `systemd` + Caddy + local Postgres on a VPS.
-- Database schema is bootstrapped from `src/lib/postgres-db.ts`; there is no versioned migration directory.
+- Database schema changes are checksummed, forward-only migrations defined in `src/lib/postgres-db.ts`.
+- Migrations V1-V8 are applied explicitly with `npm run db:migrate` and verified with `npm run db:status`; runtime processes only verify compatibility.
 
 ## Standard workflow
 
@@ -54,7 +55,9 @@ Current execution modes are stored per asset:
 - `enableTrading=true`, `shadowMode=true`: synthetic intents/orders/fills.
 - `enableTrading=true`, `shadowMode=false`: real orders.
 
-Known safety gap: live mode currently has no independent environment-level authorization gate. Do not make live activation easier. Keep live disabled while market data or deployment state is uncertain.
+Live mode has an independent, fail-closed environment authorization gate. Real execution requires both an effective live strategy configuration and `LIVE_EXECUTION_ALLOWED=true`; keep the environment gate false while market data, reconciliation, or deployment state is uncertain.
+
+Production API mutations require application Basic Auth and reject cross-site browser requests. Caddy Basic Auth remains an independent external defense and does not replace application authentication.
 
 Before any live order, preserve or strengthen:
 
@@ -145,7 +148,13 @@ Canonical services:
 - `warbitrer-notifier`
 - `warbitrer-postgres-backup.timer`
 
-`warbitrer-worker.service` and parts of `deploy/vps/deploy.sh` are legacy. Do not use the deploy script blindly until it is corrected.
+The VPS does not use a combined `warbitrer-worker` service. `deploy/vps/deploy.sh` targets the split topology, creates a database backup, stops all application services, runs verification and both builds, applies migrations, verifies schema status, then starts and checks every split service.
+
+Do not deploy while any live intent, live order attempt, or capital exposure is non-terminal. This is especially important across client-order-ID changes: reconcile venue truth first and never repair the state by editing Postgres manually.
+
+## SSH access constraint
+
+Password-based SSH access must remain available for the operator. Repository code, documentation, and deployment scripts must not modify `sshd`, change `PasswordAuthentication`, rotate SSH credentials, or impose key-only access. SSH keys are optional and may coexist with password login.
 
 ## Documentation continuity
 

@@ -6,9 +6,22 @@ import {
   processScanTick,
 } from "@/lib/engine";
 import { isTruthyEnv, readEnv } from "@/lib/env";
+import {
+  CIRCUIT_BREAKER_INCIDENT_OWNERS,
+  createPolygonRpcIncident,
+  type PolygonRpcFailureKind,
+} from "@/lib/circuit-breaker-incidents";
+import { shutdownMarketDataSupervisor } from "@/lib/market-data";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
-import { schedulePendingNotificationFlush } from "@/lib/notifications";
-import { storageMode, writeCircuitBreaker } from "@/lib/storage";
+import { schedulePendingNotificationFlush, waitForPendingNotificationFlush } from "@/lib/notifications";
+import { checkPolygonRpcEndpoint } from "@/lib/polygon-rpc-health";
+import {
+  closeStorage,
+  readCurrentCircuitBreakerIncidents,
+  resolveCircuitBreakerIncident,
+  storageMode,
+  writeCircuitBreakerIncident,
+} from "@/lib/storage";
 import type { MarketAsset } from "@/lib/types";
 import {
   COLD_SCAN_INTERVAL_MS,
@@ -18,6 +31,13 @@ import {
   isHotOpportunitySnapshot,
 } from "@/worker/hot-cold";
 import { parseWorkerRuntimeOptions } from "@/worker/runtime";
+import {
+  runCoordinatedWorkerTasks,
+  runWatchdogBoundTask,
+  shutdownWorkerResources,
+  WorkerShutdownCoordinator,
+  WorkerTaskTimeoutError,
+} from "@/worker/shutdown";
 
 const SCAN_TICK_TIMEOUT_MS = 15_000;
 const EXECUTION_TICK_TIMEOUT_MS = 90_000;
@@ -26,27 +46,29 @@ const NOTIFICATION_FLUSH_INTERVAL_MS = 1_000;
 const SNAPSHOT_PERSIST_INTERVAL_MS = 1_000;
 const EXECUTION_IDLE_INTERVAL_MS = readPositiveIntEnv("WARBITRER_EXECUTION_IDLE_INTERVAL_MS", 1_000, 100, 10_000);
 const RECONCILE_INTERVAL_MS = 3_000;
-const WORKER_FATAL_EXIT_DELAY_MS = 5_000;
 const MIN_LOOP_SLEEP_MS = 10;
 
-let shutdownRequested = false;
+const shutdownCoordinator = new WorkerShutdownCoordinator();
 let wakeExecutionLoop: (() => void) | null = null;
 
 async function run() {
   const runtime = parseWorkerRuntimeOptions();
   console.log(`[worker] storage=${storageMode()}`);
-  console.log(
-    `[worker] role=${runtime.role} asset=${runtime.asset ?? "all"} arbiter=${runtime.arbiterWindowMs}ms`,
-  );
+  console.log(`[worker] role=${runtime.role} asset=${runtime.asset ?? "all"} arbiter=${runtime.arbiterWindowMs}ms`);
 
   process.once("SIGTERM", requestShutdown);
   process.once("SIGINT", requestShutdown);
 
-  await checkPolygonRpcHealth();
+  if (runtime.role === "reconciler" || runtime.role === "legacy") {
+    await checkPolygonRpcHealth();
+  }
 
   if (runtime.startupJitterMs > 0) {
     console.log(`[worker] startup jitter ${runtime.startupJitterMs}ms`);
-    await sleep(runtime.startupJitterMs);
+    await shutdownCoordinator.wait(runtime.startupJitterMs);
+  }
+  if (shutdownCoordinator.isRequested) {
+    return;
   }
 
   if (runtime.role === "asset-live") {
@@ -57,7 +79,7 @@ async function run() {
     console.log(
       `[worker] asset-live started: asset=${asset} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms hotTtl=${HOT_SIGNAL_TTL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executorIdle=${EXECUTION_IDLE_INTERVAL_MS}ms`,
     );
-    await Promise.all([runScanLoop(asset), runExecutionLoop(asset)]);
+    await runCoordinatedWorkerTasks([() => runScanLoop(asset), () => runExecutionLoop(asset)], requestLoopShutdown);
     return;
   }
 
@@ -76,14 +98,43 @@ async function run() {
   console.log(
     `[worker] legacy realtime loops enabled: assets=${ACTIVE_MARKET_ASSETS.join(",")} scan=${COLD_SCAN_INTERVAL_MS}/${HOT_SCAN_INTERVAL_MS}ms hotTtl=${HOT_SIGNAL_TTL_MS}ms snapshots=${SNAPSHOT_PERSIST_INTERVAL_MS}ms executorIdle=${EXECUTION_IDLE_INTERVAL_MS}ms reconcile=${RECONCILE_INTERVAL_MS}ms`,
   );
-  await Promise.all([runScanLoop(), runExecutionLoop(), runReconcileLoop(), runNotificationFlushLoop()]);
+  await runCoordinatedWorkerTasks(
+    [runScanLoop, runExecutionLoop, runReconcileLoop, runNotificationFlushLoop],
+    requestLoopShutdown,
+  );
 }
 
-run().catch(async (error) => {
-  console.error("[worker] fatal", error);
-  await sleep(WORKER_FATAL_EXIT_DELAY_MS);
-  process.exit(1);
-});
+void runWorkerProcess();
+
+async function runWorkerProcess() {
+  let failed = false;
+  try {
+    await run();
+  } catch (error) {
+    requestLoopShutdown();
+    failed = true;
+    console.error("[worker] fatal", error);
+  }
+
+  try {
+    await shutdownWorkerResources({
+      closeMarketData: shutdownMarketDataSupervisor,
+      waitForNotifications: waitForPendingNotificationFlush,
+      closeStorage,
+    });
+    console.log("[worker] shutdown complete");
+  } catch (error) {
+    failed = true;
+    console.error("[worker] shutdown failed", error);
+  } finally {
+    process.removeListener("SIGTERM", requestShutdown);
+    process.removeListener("SIGINT", requestShutdown);
+  }
+
+  if (failed) {
+    process.exit(1);
+  }
+}
 
 async function runScanLoop(asset?: MarketAsset) {
   let hotUntil = 0;
@@ -110,7 +161,7 @@ async function runScanLoop(asset?: MarketAsset) {
 }
 
 async function runExecutionLoop(asset?: MarketAsset) {
-  while (!shutdownRequested) {
+  while (!shutdownCoordinator.isRequested) {
     const startedAt = Date.now();
     try {
       await runWithWatchdog(asset ? `executor:${asset}` : "executor", EXECUTION_TICK_TIMEOUT_MS, () =>
@@ -118,12 +169,12 @@ async function runExecutionLoop(asset?: MarketAsset) {
       );
     } catch (error) {
       console.error("[worker] executor error", error);
-      if (error instanceof WorkerLoopTimeoutError) {
+      if (error instanceof WorkerTaskTimeoutError) {
         throw error;
       }
     }
 
-    if (shutdownRequested) {
+    if (shutdownCoordinator.isRequested) {
       break;
     }
 
@@ -164,52 +215,52 @@ async function runLoop({
   resolveIntervalMs: () => Promise<number>;
   tick: () => Promise<void> | void;
 }) {
-  while (!shutdownRequested) {
+  while (!shutdownCoordinator.isRequested) {
     const startedAt = Date.now();
     try {
       await runWithWatchdog(name, timeoutMs, tick);
     } catch (error) {
       console.error(`[worker] ${name} error`, error);
-      if (error instanceof WorkerLoopTimeoutError) {
+      if (error instanceof WorkerTaskTimeoutError) {
         throw error;
       }
     }
 
-    if (shutdownRequested) {
+    if (shutdownCoordinator.isRequested) {
       break;
     }
 
     const elapsed = Date.now() - startedAt;
     const intervalMs = await resolveIntervalMs();
     const waitMs = Math.max(MIN_LOOP_SLEEP_MS, intervalMs - elapsed);
-    await sleep(waitMs);
+    await shutdownCoordinator.wait(waitMs);
   }
 }
 
 async function runWithWatchdog<T>(name: string, timeoutMs: number, task: () => Promise<T> | T) {
-  let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
-
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutHandle = setTimeout(() => {
-      reject(new WorkerLoopTimeoutError(`${name} loop timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-  });
-
-  return Promise.race([Promise.resolve().then(task), timeoutPromise]).finally(() => {
-    if (timeoutHandle) {
-      clearTimeout(timeoutHandle);
-    }
+  return runWatchdogBoundTask({
+    name,
+    timeoutMs,
+    task,
+    onTimeout: (error) => {
+      console.error(`[worker] ${name} watchdog expired`, error);
+      requestLoopShutdown();
+    },
   });
 }
 
 function requestShutdown(signal: NodeJS.Signals) {
-  if (shutdownRequested) {
+  if (!requestLoopShutdown()) {
     return;
   }
 
-  shutdownRequested = true;
-  wakeExecutor();
   console.log(`[worker] shutdown requested by ${signal}`);
+}
+
+function requestLoopShutdown() {
+  const requested = shutdownCoordinator.request();
+  wakeExecutor();
+  return requested;
 }
 
 function wakeExecutor() {
@@ -234,10 +285,6 @@ function sleepUntilExecutionWake(ms: number) {
   });
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 function readPositiveIntEnv(name: string, fallback: number, min: number, max: number) {
   const raw = process.env[name];
   if (!raw) {
@@ -255,61 +302,52 @@ function readPositiveIntEnv(name: string, fallback: number, min: number, max: nu
 async function checkPolygonRpcHealth() {
   const env = readEnv();
   const autoConvertEnabled = isTruthyEnv(env.POLY_AUTO_CONVERT);
-  if (!env.POLYGON_RPC_URL) {
-    if (autoConvertEnabled) {
-      await writeRpcUnhealthyBreaker("POLYGON_RPC_URL missing while POLY_AUTO_CONVERT=true");
+  const liveExecutionEnabled = isTruthyEnv(env.LIVE_EXECUTION_ALLOWED);
+  const rpcRequired = autoConvertEnabled || liveExecutionEnabled;
+  const health = await checkPolygonRpcEndpoint(env.POLYGON_RPC_URL);
+  if (!health.ok) {
+    if (rpcRequired) {
+      await writeRpcUnhealthyBreaker(health.failureKind, health.detail);
     } else {
-      console.warn("[worker] POLYGON_RPC_URL missing; Polymarket auto-convert RPC health check skipped");
+      console.warn(`[worker] Polygon RPC health check degraded while live execution is disabled: ${health.detail}`);
     }
     return;
   }
 
-  try {
-    const response = await fetch(env.POLYGON_RPC_URL, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_blockNumber",
-        params: [],
-      }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    const payload = await response.json() as { result?: unknown; error?: unknown };
-    if (typeof payload.result !== "string") {
-      throw new Error(payload.error ? JSON.stringify(payload.error) : "missing eth_blockNumber result");
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    if (autoConvertEnabled) {
-      await writeRpcUnhealthyBreaker(message);
-    } else {
-      console.warn(`[worker] POLYGON_RPC_URL health check failed: ${message}`);
-    }
-  }
+  await resolveRecoveredPolygonRpcBreakers();
+  console.log(`[worker] Polygon RPC ready: chain=${health.chainId} block=${health.blockNumber}`);
 }
 
-async function writeRpcUnhealthyBreaker(reason: string) {
-  await writeCircuitBreaker({
-    key: "global",
-    active: true,
-    reason: "rpc_unhealthy",
-    triggeredAt: Date.now(),
-    payload: {
-      reason,
-      checkedAt: Date.now(),
-      requiresManualClear: true,
-    },
+async function writeRpcUnhealthyBreaker(failureKind: PolygonRpcFailureKind, detail: string) {
+  const triggeredAt = Date.now();
+  const incident = createPolygonRpcIncident({
+    triggeredAt,
+    failureKind,
+    detail: detail.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 1_024) || "unknown RPC failure",
+  });
+  await writeCircuitBreakerIncident({
+    incident,
+    actor: CIRCUIT_BREAKER_INCIDENT_OWNERS.polygonRpc,
+    requestId: `observe:${incident.id}`,
   });
 }
 
-class WorkerLoopTimeoutError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "WorkerLoopTimeoutError";
+async function resolveRecoveredPolygonRpcBreakers() {
+  const incidents = await readCurrentCircuitBreakerIncidents();
+  const ownedRpcIncidents = incidents.filter(
+    (incident) =>
+      incident.owner === CIRCUIT_BREAKER_INCIDENT_OWNERS.polygonRpc &&
+      incident.incidentKey === "rpc-unhealthy" &&
+      incident.resolutionPolicy === "owner",
+  );
+  for (const incident of ownedRpcIncidents) {
+    await resolveCircuitBreakerIncident({
+      incidentId: incident.id,
+      expectedRevision: incident.revision,
+      owner: CIRCUIT_BREAKER_INCIDENT_OWNERS.polygonRpc,
+      actor: CIRCUIT_BREAKER_INCIDENT_OWNERS.polygonRpc,
+      requestId: `rpc-recovered:${incident.id}:${incident.revision}`,
+      conditionRecovered: true,
+    });
   }
 }

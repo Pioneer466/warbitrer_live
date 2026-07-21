@@ -1,11 +1,40 @@
+import { createHash } from "node:crypto";
+
+import { AccountingLedgerError, type AccountingEvidenceFinality } from "@/lib/accounting-ledger";
+import {
+  attachAccountingFillProvenance,
+  buildAccountingFillMutationRequestId,
+  buildAccountingMutationRequestId,
+  buildShadowAccountingFillIdentity,
+  buildTerminalAccountingProjection,
+  classifyKalshiAccountingFee,
+  classifyPolymarketAccountingFee,
+} from "@/lib/accounting-runtime";
 import { readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
+import {
+  CIRCUIT_BREAKER_INCIDENT_OWNERS,
+  createDailyLossIncident,
+  createExecutionIncident,
+  createMarketDegradedIncident,
+  createMarketFeedIncident,
+} from "@/lib/circuit-breaker-incidents";
+import {
+  aggregateCircuitBreakerIncidents,
+  getEffectiveCircuitBreakerImpact,
+  getRelevantCircuitBreakerAggregates,
+  shouldPauseExecutionForCircuitBreakerImpact,
+} from "@/lib/circuit-breaker-policy";
+import type {
+  CircuitBreakerIncident,
+  CircuitBreakerRecoveryProof,
+  CircuitBreakerScopeAggregate,
+} from "@/lib/circuit-breaker-policy";
 import { hasKalshiCredentials, hasPolymarketCredentials } from "@/lib/env";
 import { assertNewLiveExecutionAllowed, isLiveExecutionAllowed } from "@/lib/execution-safety";
 import {
   applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
   calculateKalshiFee,
-  calculatePolymarketLevelFee,
   deriveMultiLevelPairedQuote,
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
@@ -13,6 +42,7 @@ import {
   normalizeVenueTargetSize,
   quoteMultiLevelBuyLeg,
 } from "@/lib/fees";
+import { moveKalshiOutcomePriceByTicks, normalizeKalshiOutcomePrice } from "@/lib/kalshi-price-grid";
 import {
   computeKalshiBuyDepthWithinPriceRange,
   createKalshiAdapter,
@@ -23,14 +53,14 @@ import {
   fetchKalshiOrders,
   fetchKalshiSeries,
   getKalshiOrderPriceUsd,
-  KALSHI_ORDER_PRICE_STEP_USD,
   mapKalshiFillToLiveFill,
   mapKalshiOrderStatus,
-  normalizeKalshiOrderPrice,
+  matchesKalshiOrderRequest,
   normalizeKalshiNumericOrderbookLevels,
 } from "@/lib/kalshi";
 import { getMarketDataSupervisor } from "@/lib/market-data";
-import { ACTIVE_MARKET_ASSETS, getMarketCatalogEntry, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
+import { normalizePriceToAuthoritativeTick, validateInitialEntryAdmission } from "@/lib/entry-admission-policy";
+import { ACTIVE_MARKET_ASSETS, getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
 import { buildPnlSnapshot } from "@/lib/pnl";
 import {
   confirmPolymarketOrderExecution,
@@ -44,12 +74,26 @@ import {
   fetchPolymarketTrades,
   getPolymarketTradeOrderMappingIssue,
   isConfirmedPolymarketTrade,
-  isPendingPolymarketTrade,
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
   resolvePolymarketOrderTruth,
 } from "@/lib/polymarket";
+import {
+  applyPolymarketOrderFilledEvidence,
+  fetchPolymarketOrderFilledEvidence,
+  PolymarketOnchainEvidenceError,
+} from "@/lib/polymarket-onchain-fill";
 import { autoConvertPolymarketIfConfigured, reconcilePolymarketProxyConversions } from "@/lib/recovery";
+import {
+  deriveKalshiRecoveryOrderPrice,
+  derivePolymarketRecoveryOrderPrice,
+  evaluateRecoveryLossCap,
+  normalizePolymarketBuyPriceCap,
+  validateRecoveryMarketState,
+  type AuthoritativeRecoveryOrderPrice,
+  type RecoveryFeeSchedule,
+  type RecoveryMarketStateDecision,
+} from "@/lib/recovery-order-policy";
 import { isRiskActivePosition } from "@/lib/positions";
 import {
   applyVenueBalanceReservations,
@@ -92,21 +136,30 @@ import { buildMismatchRiskAudit } from "@/lib/mismatch-risk-audit";
 import { applyMismatchRiskPolicy, recheckMismatchRiskCandidate } from "@/lib/mismatch-risk-policy";
 import { DEFAULT_GLOBAL_RISK_CONFIG, type GlobalRiskConfig } from "@/lib/risk-settings";
 import {
-  findOrderAttemptById,
   findOrderIntent,
   findVenueOrder,
-  insertOrderIntent,
-  readCircuitBreakers,
+  closeIntentAccountingWithoutExposure,
+  finalizeIntentAccounting,
+  admitLiveEntry,
+  admitShadowEntry,
+  claimAdmittedLiveOrderAttempt,
+  claimLiveOrderAttemptForSubmission,
+  revalidateLiveOrderAttemptBeforeDispatch,
+  hashOrderAttemptRequest,
+  readCurrentCircuitBreakerIncidents,
   readExecutionConfiguration,
   readExecutionCandidates,
   readFillsForIntentVenue,
-  readLastEntryCosts,
+  readLastAuthorizedEntryCosts,
   readLatestSnapshot,
   readGlobalRiskConfig,
-  readLiveFeesUsd,
-  readLiveRealizedPnlUsd,
+  readAccountingHead,
+  readAccountingFillEvidenceForIntent,
+  readAccountingRealizedPnlForUtcDay,
+  readAllTimeAccountingLedger,
   readOpenOrderIntents,
   readOrderAttemptsForIntent,
+  LiveOrderAttemptClaimError,
   OrderIntentRevisionConflictError,
   readPendingSlotResolutions,
   readPolymarketCashAdjustmentObservation,
@@ -116,7 +169,7 @@ import {
   readRecentVenueOrders,
   readSettings,
   readSettingsMap,
-  readStableRealizedPnlSince,
+  readStableAccountingProjectionBacklog,
   readVenueBalances,
   readDegradedMarketFillQualityCounts,
   replaceVenuePositions,
@@ -125,23 +178,27 @@ import {
   tryWithShadowExecutionLock,
   updateStablePnlChangeFromIntent,
   writeStablePnlChange,
-  writeCircuitBreaker,
+  resolveCircuitBreakerIncident,
+  writeCircuitBreakerIncident,
+  writeCircuitBreakerExposureRecovery,
   writeExecutionCandidate,
-  writeFill,
+  ingestVenueFillAccounting,
+  reaccountIntent,
   writeMarketFillQualityEvent,
   writeOrderAttempt,
   writeOrderIntent,
   writeOracleSlotSample,
   writePnlSnapshot,
   writeRunEvent,
-  writeSettlement,
   writeSnapshot,
   writeSlotResolution,
   writeVenueBalance,
   writeVenueOrder,
   writeWorkerState,
+  CircuitBreakerIncidentPersistenceError,
 } from "@/lib/storage";
 import type {
+  AccountingHeadState,
   ExecutionCoordinator,
   CircuitBreaker,
   ExecutionCandidate,
@@ -154,6 +211,7 @@ import type {
   OpportunitySnapshot,
   OrderAttempt,
   OrderIntent,
+  KalshiPriceRange,
   MismatchRiskEstimate,
   PairCombination,
   PositionSnapshot,
@@ -178,7 +236,6 @@ const IN_FLIGHT_INTENT_STALE_MS = 15_000;
 const LATE_PRIMARY_FILL_RESCUE_WINDOW_MS = 15 * 60 * 1000;
 const ORDER_SIZE_TOLERANCE = 1e-6;
 const STABLE_PNL_BALANCE_TOLERANCE_USD = 0.01;
-const STABLE_PNL_SETTLED_LOOKBACK_MS = 48 * 60 * 60 * 1000;
 const RECONCILE_STEP_TIMEOUT_MS = 30_000;
 const KALSHI_SOFT_HEDGE_FAILURE_WINDOW_MS = 15 * 60 * 1000;
 const SETTLED_RESOLUTION_REPAIR_LOOKBACK_MS = 12 * 60 * 60 * 1000;
@@ -195,7 +252,6 @@ const VENUE_BALANCES_CACHE_TTL_MS = 750;
 const OPEN_INTENTS_CACHE_TTL_MS = 750;
 const KALSHI_FEE_MULTIPLIER_CACHE_TTL_MS = 60 * 60 * 1000;
 const PRIMARY_NO_FILL_COOLDOWN_MS = 10_000;
-const POLYMARKET_CRYPTO_RESCUE_FEE_RATE = 0.07;
 const CONSERVATIVE_REMAINING_BUY_FEE_USD_PER_UNIT = 0.07;
 const HEDGE_FAILURE_RECOVERED_COOLDOWN_MS = 10_000;
 const HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS = 10_000;
@@ -244,7 +300,7 @@ let venueBalancesCache: { value: VenueBalance[]; capturedAt: number } | null = n
 let openIntentsCache: { value: OrderIntent[]; capturedAt: number } | null = null;
 const lastEntryCostsCache = new Map<
   string,
-  { value: Awaited<ReturnType<typeof readLastEntryCosts>>; capturedAt: number }
+  { value: Awaited<ReturnType<typeof readLastAuthorizedEntryCosts>>; capturedAt: number }
 >();
 const lastOracleSampleAtBySlot = new Map<string, number>();
 const observedResolutionSlots = new Map<string, string>();
@@ -387,8 +443,7 @@ type TickSharedContext = {
   venueBalances?: VenueBalance[];
   openIntents?: OrderIntent[];
   recentVenueOrders?: LiveOrder[];
-  circuitBreakers?: CircuitBreaker[];
-  lastEntryCosts?: Awaited<ReturnType<typeof readLastEntryCosts>>;
+  lastEntryCosts?: Awaited<ReturnType<typeof readLastAuthorizedEntryCosts>>;
   venuePositions?: {
     polymarket: PositionSnapshot[];
     kalshi: PositionSnapshot[];
@@ -431,7 +486,12 @@ export async function processScanTick(now = new Date()) {
         const snapshot = await scanAsset(asset, slot, settings, globalRisk, nowTs, {
           venueBalances: sharedVenueBalances,
           openIntents: sharedOpenIntents,
-          lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
+          lastEntryCosts: await readCachedLastEntryCosts(
+            asset,
+            slot.key,
+            settings.config.shadowMode ? "shadow" : "live",
+            nowTs,
+          ),
         });
         snapshots.push(snapshot);
       } catch (error) {
@@ -474,7 +534,12 @@ export async function processAssetScanTick(asset: MarketAsset, now = new Date())
     return await scanAsset(asset, slot, settings, globalRisk, nowTs, {
       venueBalances: await readCachedVenueBalances(nowTs),
       openIntents: await readCachedOpenIntents(nowTs),
-      lastEntryCosts: await readCachedLastEntryCosts(asset, slot.key, nowTs),
+      lastEntryCosts: await readCachedLastEntryCosts(
+        asset,
+        slot.key,
+        settings.config.shadowMode ? "shadow" : "live",
+        nowTs,
+      ),
     });
   } catch (error) {
     const message = `[${asset}] ${toErrorMessage(error)}`;
@@ -772,13 +837,11 @@ export async function processReconcileTick(now = new Date()) {
   const sharedVenueBalances = await refreshBalances(getGlobalPolyBridgeLowWaterUsdc(settingsMap), nowTs);
   const sharedVenuePositions = await refreshVenuePositions();
   const storedPositions = sharedVenuePositions === null ? await readPositions() : undefined;
-  const [sharedOpenIntents, sharedRecentVenueOrders, sharedCircuitBreakers, venueOrderReconcileData] =
-    await Promise.all([
-      readOpenOrderIntents(),
-      readRecentVenueOrders(1_000),
-      readCircuitBreakers(),
-      prefetchVenueOrderReconcileData(),
-    ]);
+  const [sharedOpenIntents, sharedRecentVenueOrders, venueOrderReconcileData] = await Promise.all([
+    readOpenOrderIntents(),
+    readRecentVenueOrders(1_000),
+    prefetchVenueOrderReconcileData(),
+  ]);
 
   for (const asset of ACTIVE_MARKET_ASSETS) {
     const settings = settingsMap[asset].config;
@@ -787,7 +850,6 @@ export async function processReconcileTick(now = new Date()) {
       venueBalances: sharedVenueBalances,
       openIntents: sharedOpenIntents,
       recentVenueOrders: sharedRecentVenueOrders,
-      circuitBreakers: sharedCircuitBreakers,
       venuePositions: sharedVenuePositions,
       storedPositions,
       venueOrderReconcileData,
@@ -1165,6 +1227,11 @@ async function recheckMismatchRiskForExecution(input: {
   venueExposureUsd: Record<Venue, number>;
   now: number;
   globalRiskConfig?: GlobalRiskConfig;
+  marketState?: {
+    polymarket: { quote: OpportunitySnapshot["polymarket"] };
+    kalshi: { quote: OpportunitySnapshot["kalshi"] };
+  };
+  balances?: VenueBalance[];
 }): Promise<
   | { allowed: true; opportunity: LiveOpportunity }
   | {
@@ -1187,8 +1254,8 @@ async function recheckMismatchRiskForExecution(input: {
     }
   }
   const [{ polymarket, kalshi }, balances] = await Promise.all([
-    marketDataSupervisor.readSlotState(input.slot, input.now),
-    readCachedVenueBalances(input.now),
+    input.marketState ?? marketDataSupervisor.readSlotState(input.slot, input.now),
+    input.balances ?? readCachedVenueBalances(input.now),
   ]);
   const candidateOpportunity = input.intent
     ? buildWorstFillRiskOpportunity({
@@ -1478,6 +1545,11 @@ function buildWorstFillRiskOpportunity(input: {
       {
         kalshiPriceTicksSlippage:
           isPrimary && riskLeg.venue === "kalshi" ? input.settings.kalshiPrimaryPriceTicksSlippage : undefined,
+        kalshiPriceRanges: riskLeg.venue === "kalshi" ? input.kalshi.priceRanges : undefined,
+        authoritativeTickSize:
+          riskLeg.venue === "polymarket"
+            ? input.polymarket.outcomes[riskLeg.outcome === "UP" ? "up" : "down"].tickSize
+            : undefined,
       },
     );
     if (request.price === null || request.price <= 0 || request.size <= 0) {
@@ -1665,6 +1737,33 @@ function applyRiskCheckedOpportunityToIntent(
   };
 }
 
+export function applyFinalEntryRiskOpportunityToIntent(
+  intent: OrderIntent,
+  opportunity: LiveOpportunity,
+  now: number,
+): OrderIntent {
+  const riskChecked = applyRiskCheckedOpportunityToIntent(intent, opportunity, now);
+  const legs = riskChecked.legs.map((leg) => {
+    const opportunityLeg = opportunity.legs.find(
+      (candidate) => candidate.venue === leg.venue && candidate.outcome === leg.outcome,
+    );
+    return opportunityLeg
+      ? {
+          ...leg,
+          requestedSize: opportunityLeg.size,
+          requestedNotionalUsd: opportunityLeg.targetNotionalUsd,
+        }
+      : leg;
+  }) as OrderIntent["legs"];
+  return {
+    ...riskChecked,
+    grossCost: opportunity.grossCost ?? riskChecked.grossCost,
+    targetNotionalUsd: round4(opportunity.legs.reduce((sum, leg) => sum + leg.targetNotionalUsd, 0)),
+    projectedNetProfitUsd: opportunity.projectedNetProfitUsd,
+    legs,
+  };
+}
+
 function buildRiskOpportunityTemplateFromIntent(intent: OrderIntent, settings: StrategyConfig): LiveOpportunity {
   const legs = intent.legs.map((leg) => ({
     venue: leg.venue,
@@ -1734,7 +1833,9 @@ export function createExecutionCoordinator(
       const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
       const polymarket = polymarketState.quote;
       const kalshi = kalshiState.quote;
-      const lastEntryCosts = sharedContext.lastEntryCosts ?? (await readLastEntryCosts(slot.asset, slot.key));
+      const lastEntryCosts =
+        sharedContext.lastEntryCosts ??
+        (await readLastAuthorizedEntryCosts(slot.asset, slot.key, settings.shadowMode ? "shadow" : "live"));
       const signalInput = {
         slotKey: slot.key,
         now,
@@ -1862,7 +1963,7 @@ export function createExecutionCoordinator(
       const snapshot = providedSnapshot ?? latestScanSnapshot ?? (await refreshLatestSnapshot(slot));
       const readiness = await computeReadiness(snapshot, slot.asset, now);
       const pausingBreakers = readiness.breakers.filter((breaker) =>
-        shouldPauseExecutionForBreaker(breaker, now, slot.asset, snapshot?.slotKey ?? slot.key),
+        shouldPauseExecutionForCircuitBreakerImpact(breaker.worstImpact),
       );
 
       await writeAssetWorkerState(
@@ -1896,7 +1997,7 @@ export function createExecutionCoordinator(
             : []),
           ...(await resumeInFlightIntents(
             activeSlotIntents.filter((intent) => !intent.shadow),
-            slot,
+            slot.asset,
             settings,
             now,
           )),
@@ -1969,9 +2070,11 @@ export function createExecutionCoordinator(
             break;
           }
 
-          const currentBreakers = (await readCircuitBreakers()).filter((breaker) =>
-            shouldPauseExecutionForBreaker(breaker, now, slot.asset, slot.key),
-          );
+          const currentBreakers = getRelevantCircuitBreakerAggregates(
+            aggregateCircuitBreakerIncidents(await readCurrentCircuitBreakerIncidents(), Date.now()),
+            slot.asset,
+            slot.key,
+          ).filter((breaker) => shouldPauseExecutionForCircuitBreakerImpact(breaker.worstImpact));
           if (currentBreakers.length > 0) {
             break;
           }
@@ -2061,6 +2164,26 @@ export function createExecutionCoordinator(
             mismatchRecheckAt,
           );
 
+          const executed = settings.shadowMode
+            ? await admitAndExecuteShadowIntent(
+                draftIntent,
+                slot,
+                snapshot,
+                settings,
+                expectedConfiguration,
+                executionOpportunity.primarySelection ?? null,
+              )
+            : await executeIntent(
+                draftIntent,
+                slot,
+                settings,
+                now,
+                expectedConfiguration,
+                executionOpportunity.primarySelection ?? null,
+              );
+          if (!executed) {
+            continue;
+          }
           for (const leg of executionOpportunity.legs) {
             exposureUsd[leg.venue] += leg.targetNotionalUsd + leg.feeEstimateUsd;
           }
@@ -2075,24 +2198,6 @@ export function createExecutionCoordinator(
           if (recoveryReserveUsd > 0) {
             exposureUsd[draftIntent.hedgeVenue] += recoveryReserveUsd;
           }
-
-          const intent = await insertOrderIntent(draftIntent);
-          await writeRunEvent({
-            level: "info",
-            eventType: "intent.created",
-            message: `Intent ${intent.id} created for ${intent.combination}`,
-            payload: {
-              slotKey: intent.slotKey,
-              primaryVenue: intent.primaryVenue,
-              primarySelection: executionOpportunity.primarySelection ?? null,
-              mismatchRiskAudit: intent.mismatchRiskAudit ?? null,
-            },
-            createdAt: now,
-          });
-
-          const executed = settings.shadowMode
-            ? await executeShadowIntent(intent, snapshot, settings, Date.now())
-            : await executeIntent(intent, slot, settings, now, expectedConfiguration);
           created.push(executed);
           createdCount += 1;
         }
@@ -2596,14 +2701,14 @@ async function readCachedOpenIntents(now: number) {
   return value;
 }
 
-async function readCachedLastEntryCosts(asset: MarketAsset, slotKey: string, now: number) {
-  const key = `${asset}:${slotKey}`;
+async function readCachedLastEntryCosts(asset: MarketAsset, slotKey: string, mode: "live" | "shadow", now: number) {
+  const key = `${mode}:${asset}:${slotKey}`;
   const cached = lastEntryCostsCache.get(key);
   if (cached && now - cached.capturedAt <= LAST_ENTRY_COSTS_CACHE_TTL_MS) {
     return cached.value;
   }
 
-  const value = await readLastEntryCosts(asset, slotKey);
+  const value = await readLastAuthorizedEntryCosts(asset, slotKey, mode);
   lastEntryCostsCache.set(key, { value, capturedAt: now });
   return value;
 }
@@ -2800,14 +2905,87 @@ function getGlobalPolyBridgeLowWaterUsdc(settingsMap: VersionedStrategyConfigMap
   return Math.max(...ACTIVE_MARKET_ASSETS.map((asset) => settingsMap[asset].config.polyBridgeLowWaterUsdc));
 }
 
+async function observeCircuitBreakerIncident(incident: CircuitBreakerIncident) {
+  return writeCircuitBreakerIncident({
+    incident,
+    actor: incident.owner,
+    requestId: `observe:${incident.id}`,
+  });
+}
+
+async function resolveOwnedCircuitBreakerSafely(
+  incident: CircuitBreakerIncident,
+  conditionRecovered: boolean,
+  exposureRecoveryProof?: CircuitBreakerRecoveryProof,
+) {
+  try {
+    return await resolveCircuitBreakerIncident({
+      incidentId: incident.id,
+      expectedRevision: incident.revision,
+      owner: incident.owner,
+      conditionRecovered,
+      exposureRecoveryProof,
+      actor: incident.owner,
+      requestId: `resolve:${incident.id}:${incident.revision}`,
+    });
+  } catch (error) {
+    if (
+      error instanceof CircuitBreakerIncidentPersistenceError &&
+      (error.code === "already_resolved" || error.code === "revision_conflict")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function recordCircuitBreakerExposureRecoverySafely(
+  incident: CircuitBreakerIncident,
+  recoveryProof: CircuitBreakerRecoveryProof,
+) {
+  try {
+    return await writeCircuitBreakerExposureRecovery({
+      incidentId: incident.id,
+      expectedRevision: incident.revision,
+      owner: incident.owner,
+      recoveryProof,
+      actor: incident.owner,
+      requestId: `exposure:${incident.id}:${incident.revision}`,
+    });
+  } catch (error) {
+    if (
+      error instanceof CircuitBreakerIncidentPersistenceError &&
+      (error.code === "already_resolved" || error.code === "revision_conflict")
+    ) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function describeCircuitBreakerAggregate(aggregate: CircuitBreakerScopeAggregate, now?: number) {
+  const remainingMs =
+    now === undefined || aggregate.cooldownUntil === null ? null : Math.max(0, aggregate.cooldownUntil - now);
+  const base = `${aggregate.scopeKey}:${aggregate.reasons.join(",")}:${aggregate.activeIncidentCount}`;
+  return remainingMs === null ? base : `${base}:retry_in=${remainingMs}ms`;
+}
+
+function sanitizeCircuitBreakerText(value: string) {
+  return value.replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 1_024) || "unknown";
+}
+
 async function computeReadiness(
   snapshot: OpportunitySnapshot | null,
   asset: MarketAsset,
   now: number,
-): Promise<{ state: Partial<WorkerState>; breakers: Awaited<ReturnType<typeof readCircuitBreakers>> }> {
+): Promise<{ state: Partial<WorkerState>; breakers: CircuitBreakerScopeAggregate[] }> {
   const balances = await readVenueBalances();
   const slotKey = snapshot?.slotKey ?? null;
-  const breakers = (await readCircuitBreakers()).filter((breaker) => isBreakerRelevantToSlot(breaker, asset, slotKey));
+  const breakers = getRelevantCircuitBreakerAggregates(
+    aggregateCircuitBreakerIncidents(await readCurrentCircuitBreakerIncidents(), now),
+    asset,
+    slotKey,
+  );
   const checks = balances.map((balance) => ({
     key: `${balance.venue}:balance`,
     label: `${balance.venue} readiness`,
@@ -2829,22 +3007,15 @@ async function computeReadiness(
       checkedAt: now,
     })),
   );
-  const activeBreakers = breakers.filter((breaker) => breaker.active);
-  const blockingBreakers = activeBreakers.filter(
-    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "blocked",
-  );
-  const cooldownBreakers = activeBreakers.filter(
-    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "cooldown",
-  );
-  const degradedBreakers = activeBreakers.filter(
-    (breaker) => getCircuitBreakerReadinessStatus(breaker, now) === "degraded",
-  );
+  const blockingBreakers = breakers.filter((breaker) => breaker.worstImpact === "blocked");
+  const cooldownBreakers = breakers.filter((breaker) => breaker.worstImpact === "cooldown");
+  const degradedBreakers = breakers.filter((breaker) => breaker.worstImpact === "degraded");
   if (blockingBreakers.length > 0) {
     checks.push({
       key: "circuit-breaker",
       label: "Circuit breaker",
       status: "blocked",
-      details: blockingBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      details: blockingBreakers.map(describeCircuitBreakerAggregate).join(" | "),
       checkedAt: now,
     });
   }
@@ -2853,7 +3024,7 @@ async function computeReadiness(
       key: "circuit-breaker-cooldown",
       label: "Circuit breaker cooldown",
       status: "cooldown",
-      details: cooldownBreakers.map((breaker) => describeCircuitBreakerForReadiness(breaker, now)).join(" | "),
+      details: cooldownBreakers.map((breaker) => describeCircuitBreakerAggregate(breaker, now)).join(" | "),
       checkedAt: now,
     });
   }
@@ -2862,7 +3033,7 @@ async function computeReadiness(
       key: "circuit-breaker-degraded",
       label: "Circuit breaker degraded",
       status: "degraded",
-      details: degradedBreakers.map((breaker) => `${breaker.key}:${breaker.reason}`).join(" | "),
+      details: degradedBreakers.map(describeCircuitBreakerAggregate).join(" | "),
       checkedAt: now,
     });
   }
@@ -2911,85 +3082,440 @@ function buildFeedBreakerSignature(slot: MarketSlot, feedHealth: VenueFeedHealth
   return `${slot.key}:${blocked || "ready"}`;
 }
 
-function buildPersistedFeedBreakerSignature(slot: MarketSlot, breaker: CircuitBreaker) {
-  if (!isFeedHealthBreaker(breaker)) {
-    return null;
-  }
-  const payload = breaker.payload as { feeds: Array<{ venue?: unknown; source?: unknown }> };
-  const blocked = payload.feeds
-    .map((feed) => `${String(feed.venue ?? "unknown")}:${String(feed.source ?? "unknown")}`)
-    .sort()
-    .join(",");
-  return `${slot.key}:${blocked || "ready"}`;
-}
-
 async function persistFeedCircuitBreaker(slot: MarketSlot, feedHealth: VenueFeedHealth[], now: number) {
-  const key = buildSlotBreakerKey(slot.key);
-  const breakers = await readCircuitBreakers();
-  const currentBreaker = breakers.find((breaker) => breaker.key === key) ?? null;
-  for (const breaker of breakers) {
-    const breakerAsset = getBreakerAsset(breaker.key);
-
-    if (
-      breaker.active &&
-      breaker.key.startsWith("slot:") &&
-      breaker.key !== key &&
-      breakerAsset === slot.asset &&
-      isFeedHealthBreaker(breaker)
-    ) {
-      await writeCircuitBreaker({
-        key: breaker.key,
-        active: false,
-        reason: null,
-        triggeredAt: null,
-        payload: null,
-      });
-    }
-  }
+  const incidents = await readCurrentCircuitBreakerIncidents();
+  const feedIncidents = incidents.filter(
+    (incident) =>
+      incident.owner === CIRCUIT_BREAKER_INCIDENT_OWNERS.marketFeed &&
+      incident.scope.type === "slot" &&
+      incident.scope.asset === slot.asset,
+  );
   const blockedFeeds = feedHealth.filter((feed) => feed.feedStatus === "blocked");
+  const blockedVenues = new Set(blockedFeeds.map((feed) => feed.venue));
 
-  if (blockedFeeds.length === 0) {
-    if (!currentBreaker?.active) {
-      return;
+  for (const incident of feedIncidents) {
+    if (incident.scope.type !== "slot") {
+      continue;
     }
-    if (!shouldManageFeedHealthBreaker(currentBreaker)) {
-      return;
+    const venue = incident.payload?.venue;
+    const currentSlotIncident = incident.scope.slotKey === slot.key;
+    if (!currentSlotIncident || (typeof venue === "string" && !blockedVenues.has(venue as Venue))) {
+      await resolveOwnedCircuitBreakerSafely(incident, true);
     }
-    await writeCircuitBreaker({
-      key,
-      active: false,
-      reason: null,
-      triggeredAt: null,
-      payload: null,
-    });
-    return;
   }
 
-  if (!shouldManageFeedHealthBreaker(currentBreaker)) {
-    return;
-  }
-
-  if (
-    currentBreaker?.active &&
-    buildPersistedFeedBreakerSignature(slot, currentBreaker) === buildFeedBreakerSignature(slot, feedHealth)
-  ) {
-    return;
-  }
-
-  await writeCircuitBreaker({
-    key,
-    active: true,
-    reason: "venue_error",
-    triggeredAt: now,
-    payload: {
-      feeds: blockedFeeds.map((feed) => ({
+  for (const feed of blockedFeeds) {
+    const existing = feedIncidents.find(
+      (incident) =>
+        incident.scope.type === "slot" && incident.scope.slotKey === slot.key && incident.payload?.venue === feed.venue,
+    );
+    if (existing?.payload?.source === feed.source) {
+      continue;
+    }
+    await observeCircuitBreakerIncident(
+      createMarketFeedIncident({
+        asset: slot.asset,
+        slotKey: slot.key,
         venue: feed.venue,
         source: feed.source,
+        triggeredAt: now,
         stalenessMs: feed.stalenessMs,
-        details: feed.details,
-      })),
+        details: feed.details.slice(0, 32).map(sanitizeCircuitBreakerText),
+      }),
+    );
+  }
+}
+
+type InitialEntryMarketState = Awaited<ReturnType<typeof marketDataSupervisor.readSlotState>>;
+
+function evaluateFinalInitialEntryPolicy(input: {
+  intent: OrderIntent;
+  slot: MarketSlot;
+  settings: StrategyConfig;
+  marketState: InitialEntryMarketState;
+  now: number;
+  submissionBudgetMs: number;
+}) {
+  return validateInitialEntryAdmission({
+    now: input.now,
+    slot: input.slot,
+    intent: input.intent,
+    polymarket: input.marketState.polymarket.quote,
+    kalshi: input.marketState.kalshi.quote,
+    entryCutoffSeconds: input.settings.entryCutoffSeconds,
+    submissionBudgetMs: input.submissionBudgetMs,
+    maxFeedAgeMs: input.settings.maxSignalAgeMs,
+    maxBookAgeMs: {
+      polymarket: Math.min(input.settings.maxSignalAgeMs, input.settings.polymarketHedgeBookMaxAgeMs),
+      kalshi: input.settings.maxSignalAgeMs,
     },
+    maxPairBookSkewMs: Math.min(input.settings.maxSignalAgeMs, input.settings.polymarketHedgeBookMaxAgeMs),
   });
+}
+
+async function recordInitialEntryRejection(input: {
+  intent: OrderIntent;
+  stage: string;
+  code: string;
+  reason: string;
+  now: number;
+  payload?: Record<string, unknown>;
+}) {
+  await writeRunEvent({
+    asset: input.intent.asset,
+    level: "warn",
+    eventType: "intent.entry_admission.rejected",
+    message: `Entry ${input.intent.id} rejected before initial submission (${input.reason})`,
+    payload: {
+      intentId: input.intent.id,
+      slotKey: input.intent.slotKey,
+      combination: input.intent.combination,
+      mode: input.intent.shadow ? "shadow" : "live",
+      stage: input.stage,
+      code: input.code,
+      ...input.payload,
+    },
+    createdAt: input.now,
+  });
+}
+
+async function writeAdmittedIntentCreatedEvent(
+  intent: OrderIntent,
+  primarySelection: LiveOpportunity["primarySelection"],
+  now: number,
+) {
+  await writeRunEvent({
+    asset: intent.asset,
+    level: "info",
+    eventType: "intent.created",
+    message: `Intent ${intent.id} admitted for ${intent.combination}`,
+    payload: {
+      intentId: intent.id,
+      slotKey: intent.slotKey,
+      primaryVenue: intent.primaryVenue,
+      primarySelection,
+      mismatchRiskAudit: intent.mismatchRiskAudit ?? null,
+      admissionMode: intent.shadow ? "shadow" : "live",
+    },
+    createdAt: now,
+  });
+}
+
+async function admitAndExecuteShadowIntent(
+  intent: OrderIntent,
+  slot: MarketSlot,
+  snapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+  expectedConfiguration: ExecutionConfigurationSnapshot,
+  primarySelection: LiveOpportunity["primarySelection"],
+): Promise<OrderIntent | null> {
+  const [openIntents, positions, balances] = await Promise.all([
+    readOpenOrderIntents(),
+    readPositions(),
+    readVenueBalances(),
+  ]);
+  const finalSnapshotAt = Date.now();
+  const marketState = await marketDataSupervisor.readSlotState(slot, finalSnapshotAt);
+  let candidate = markIntentStatus(intent, "pending", finalSnapshotAt);
+  const initialPolicy = evaluateFinalInitialEntryPolicy({
+    intent: candidate,
+    slot,
+    settings,
+    marketState,
+    now: finalSnapshotAt,
+    submissionBudgetMs: 0,
+  });
+  if (!initialPolicy.allowed) {
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "final_ws_policy",
+      code: initialPolicy.code,
+      reason: initialPolicy.reason,
+      now: finalSnapshotAt,
+    });
+    return null;
+  }
+
+  const depthPreflight = await preflightEntryDepthAndAdjustIntent(
+    candidate,
+    slot,
+    settings,
+    marketState,
+    finalSnapshotAt,
+  );
+  if (depthPreflight.status === "skipped") {
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "final_depth",
+      code: "insufficient_depth",
+      reason: depthPreflight.reason,
+      now: finalSnapshotAt,
+      payload: { depthPreflight },
+    });
+    return null;
+  }
+  candidate = markIntentStatus(depthPreflight.intent, "pending", finalSnapshotAt);
+
+  const riskEvaluatedAt = Date.now();
+  const risk = await recheckMismatchRiskForExecution({
+    opportunity: buildRiskOpportunityTemplateFromIntent(candidate, settings),
+    intent: candidate,
+    slot,
+    settings,
+    openIntents,
+    venueExposureUsd: calculateVenueExposureUsd(positions, openIntents),
+    now: riskEvaluatedAt,
+    globalRiskConfig: expectedConfiguration.globalRisk.config,
+    marketState,
+    balances,
+  });
+  if (!risk.allowed) {
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "final_mismatch_risk",
+      code: "mismatch_risk_recheck",
+      reason: risk.reason,
+      now: riskEvaluatedAt,
+      payload: {
+        estimate: risk.estimate,
+        mismatchRiskAudit: risk.opportunity?.mismatchRiskAudit ?? null,
+      },
+    });
+    return null;
+  }
+  candidate = markIntentStatus(
+    applyFinalEntryRiskOpportunityToIntent(candidate, risk.opportunity, riskEvaluatedAt),
+    "pending",
+    riskEvaluatedAt,
+  );
+
+  const policyEvaluatedAt = Date.now();
+  candidate = markIntentStatus(candidate, "pending", policyEvaluatedAt);
+  const policy = evaluateFinalInitialEntryPolicy({
+    intent: candidate,
+    slot,
+    settings,
+    marketState,
+    now: policyEvaluatedAt,
+    submissionBudgetMs: 0,
+  });
+  if (!policy.allowed) {
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "pre_admission_policy",
+      code: policy.code,
+      reason: policy.reason,
+      now: policyEvaluatedAt,
+    });
+    return null;
+  }
+
+  const admission = await admitShadowEntry({
+    now: policyEvaluatedAt,
+    intent: candidate,
+    expectedStrategyRevision: expectedConfiguration.strategyRevision,
+    expectedGlobalRiskRevision: expectedConfiguration.globalRisk.revision,
+    policyEvaluatedAt,
+    evidence: buildInitialEntryAdmissionEvidence("shadow", marketState, policy, null),
+  });
+  if (!admission.admitted) {
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "atomic_admission",
+      code: admission.code,
+      reason: admission.reason,
+      now: policyEvaluatedAt,
+      payload: {
+        blockingIntentId: admission.blockingIntentId ?? null,
+        activeBreakerKeys: admission.activeBreakerKeys ?? [],
+        nextEligibleAt: admission.nextEligibleAt ?? null,
+        retryAfterMs: admission.retryAfterMs ?? null,
+        previousGrossCost: admission.previousGrossCost ?? null,
+        maximumAllowedCost: admission.maximumAllowedCost ?? null,
+      },
+    });
+    return null;
+  }
+  if (!admission.fresh) {
+    return admission.intent;
+  }
+
+  await writeAdmittedIntentCreatedEvent(admission.intent, primarySelection, policyEvaluatedAt);
+  const finalSnapshot: OpportunitySnapshot = {
+    ...snapshot,
+    capturedAt: finalSnapshotAt,
+    polymarket: marketState.polymarket.quote,
+    kalshi: marketState.kalshi.quote,
+  };
+  return executeShadowIntent(admission.intent, finalSnapshot, settings, policyEvaluatedAt);
+}
+
+function buildInitialEntryAdmissionEvidence(
+  mode: "live" | "shadow",
+  marketState: InitialEntryMarketState,
+  policy: Extract<ReturnType<typeof evaluateFinalInitialEntryPolicy>, { allowed: true }>,
+  request: Record<string, unknown> | null,
+) {
+  return {
+    version: "initial-entry-v1",
+    mode,
+    policy: {
+      cutoffAt: policy.cutoffAt,
+      latestSubmissionStartAt: policy.latestSubmissionStartAt,
+      marketEvidenceValidUntil: policy.marketEvidenceValidUntil,
+      polymarketBookUpdatedAt: policy.polymarketBookUpdatedAt,
+      kalshiBookUpdatedAt: policy.kalshiBookUpdatedAt,
+      pairBookSkewMs: policy.pairBookSkewMs,
+    },
+    feeds: {
+      polymarket: {
+        source: marketState.polymarket.quote.source,
+        lastMessageAt: marketState.polymarket.quote.lastMessageAt,
+        stalenessMs: marketState.polymarket.quote.stalenessMs,
+      },
+      kalshi: {
+        source: marketState.kalshi.quote.source,
+        lastMessageAt: marketState.kalshi.quote.lastMessageAt,
+        stalenessMs: marketState.kalshi.quote.stalenessMs,
+        priceLevelStructure: marketState.kalshi.quote.priceLevelStructure,
+        priceRanges: marketState.kalshi.quote.priceRanges,
+      },
+    },
+    polymarketFees: {
+      metadataPresent: marketState.polymarket.quote.feeMetadataPresent ?? false,
+      enabled: marketState.polymarket.quote.feesEnabled ?? null,
+      rate: marketState.polymarket.quote.feeRate ?? null,
+      exponent: marketState.polymarket.quote.feeExponent ?? null,
+      upEffectiveRateBps: marketState.polymarket.quote.outcomes.up.feeRateBps,
+      downEffectiveRateBps: marketState.polymarket.quote.outcomes.down.feeRateBps,
+    },
+    request,
+  };
+}
+
+function getAuthoritativeOrderPricingOptions(
+  leg: Pick<OrderIntent["legs"][number], "venue" | "outcome">,
+  marketState: InitialEntryMarketState,
+) {
+  if (leg.venue === "kalshi") {
+    if ((leg.outcome !== "YES" && leg.outcome !== "NO") || marketState.kalshi.quote.priceRanges === null) {
+      throw new Error("Authoritative Kalshi price_ranges are unavailable for order pricing");
+    }
+    return {
+      kalshiPriceRanges: marketState.kalshi.quote.priceRanges,
+    };
+  }
+
+  const outcome =
+    leg.outcome === "UP"
+      ? marketState.polymarket.quote.outcomes.up
+      : leg.outcome === "DOWN"
+        ? marketState.polymarket.quote.outcomes.down
+        : null;
+  if (!outcome?.tickSize) {
+    throw new Error("Authoritative Polymarket tick size is unavailable for order pricing");
+  }
+  return {
+    authoritativeTickSize: outcome.tickSize,
+  };
+}
+
+function validateRecoveryLegMarketState(input: {
+  intent: OrderIntent;
+  leg: OrderIntent["legs"][number];
+  slot: MarketSlot;
+  marketState: InitialEntryMarketState;
+  orderSide: "BUY" | "SELL";
+  settings: StrategyConfig;
+  now: number;
+}): RecoveryMarketStateDecision {
+  return validateRecoveryMarketState({
+    now: input.now,
+    slot: input.slot,
+    intent: input.intent,
+    leg: input.leg,
+    orderSide: input.orderSide,
+    marketState: input.leg.venue === "polymarket" ? input.marketState.polymarket : input.marketState.kalshi,
+    maxFeedAgeMs: input.settings.maxSignalAgeMs,
+    maxBookAgeMs:
+      input.leg.venue === "polymarket"
+        ? Math.min(input.settings.maxSignalAgeMs, input.settings.polymarketHedgeBookMaxAgeMs)
+        : input.settings.maxSignalAgeMs,
+  });
+}
+
+export function buildRecoveryFeeSchedule(
+  leg: Pick<OrderIntent["legs"][number], "venue" | "outcome">,
+  marketState: InitialEntryMarketState,
+): RecoveryFeeSchedule {
+  if (leg.venue === "kalshi") {
+    const feeMultiplier = marketState.kalshi.quote.feeMultiplier;
+    const feeType = marketState.kalshi.quote.feeType;
+    if (
+      (feeType !== "quadratic" && feeType !== "quadratic_with_maker_fees") ||
+      !Number.isFinite(feeMultiplier) ||
+      feeMultiplier < 0
+    ) {
+      throw new Error("Authoritative Kalshi recovery fee schedule is unavailable");
+    }
+    return {
+      venue: "kalshi",
+      feeMultiplier,
+      maker: false,
+    };
+  }
+
+  const outcome =
+    leg.outcome === "UP"
+      ? marketState.polymarket.quote.outcomes.up
+      : leg.outcome === "DOWN"
+        ? marketState.polymarket.quote.outcomes.down
+        : null;
+  const feeRateBps = outcome?.feeRateBps ?? marketState.polymarket.quote.feeRateBps;
+  const feeMetadataPresent = marketState.polymarket.quote.feeMetadataPresent;
+  const feesEnabled = marketState.polymarket.quote.feesEnabled;
+  const feeRate = marketState.polymarket.quote.feeRate;
+  const feeExponent = marketState.polymarket.quote.feeExponent;
+  if (
+    feeMetadataPresent !== true ||
+    typeof feesEnabled !== "boolean" ||
+    !Number.isFinite(feeRateBps) ||
+    feeRateBps < 0 ||
+    (feesEnabled &&
+      (typeof feeRate !== "number" ||
+        !Number.isFinite(feeRate) ||
+        feeRate <= 0 ||
+        typeof feeExponent !== "number" ||
+        !Number.isFinite(feeExponent) ||
+        feeExponent < 0)) ||
+    (!feesEnabled &&
+      (feeRateBps !== 0 ||
+        (feeRate !== null && feeRate !== undefined && feeRate !== 0) ||
+        (feeExponent !== null && feeExponent !== undefined && (!Number.isFinite(feeExponent) || feeExponent < 0))))
+  ) {
+    throw new Error("Authoritative Polymarket recovery fee schedule is unavailable");
+  }
+  return {
+    venue: "polymarket",
+    feeRateBps,
+    feeRate: feesEnabled ? (feeRate as number) : null,
+    feeExponent: feesEnabled ? (feeExponent as number) : null,
+  };
+}
+
+function allocateRecoveryEntryFeeUsd(leg: Pick<OrderIntent["legs"][number], "feeUsd" | "filledSize">, size: number) {
+  if (
+    !Number.isFinite(leg.feeUsd) ||
+    leg.feeUsd < 0 ||
+    !Number.isFinite(leg.filledSize) ||
+    leg.filledSize <= 0 ||
+    !Number.isFinite(size) ||
+    size <= 0 ||
+    size > leg.filledSize + ORDER_SIZE_TOLERANCE
+  ) {
+    throw new Error("Durable entry fee allocation is unavailable for recovery pricing");
+  }
+  return (leg.feeUsd * size) / leg.filledSize;
 }
 
 async function executeIntent(
@@ -2998,24 +3524,61 @@ async function executeIntent(
   settings: StrategyConfig,
   now: number,
   expectedConfiguration: ExecutionConfigurationSnapshot,
-) {
+  primarySelection: LiveOpportunity["primarySelection"],
+): Promise<OrderIntent | null> {
   let primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   let hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {
     throw new Error(`Intent ${intent.id} missing legs`);
   }
 
-  let currentIntent = markIntentStatus(intent, "executing_primary", now);
-  currentIntent = await writeOrderIntent(currentIntent);
-  const entryDepthPreflight = await preflightEntryDepthAndAdjustIntent(currentIntent, slot, settings);
-  if (entryDepthPreflight.status === "skipped") {
-    return skipIntentBeforeSubmission(currentIntent, Date.now(), entryDepthPreflight.reason, "insufficient_depth", {
-      entryDepthPreflight,
+  let currentIntent = markIntentStatus(intent, "executing_primary", Date.now());
+  const [finalOpenIntents, finalPositions, finalBalances] = await Promise.all([
+    readOpenOrderIntents(),
+    readPositions(),
+    readVenueBalances(),
+  ]);
+  const finalEntrySnapshotAt = Date.now();
+  const finalEntryState = await marketDataSupervisor.readSlotState(slot, finalEntrySnapshotAt);
+  const initialPolicy = evaluateFinalInitialEntryPolicy({
+    intent: currentIntent,
+    slot,
+    settings,
+    marketState: finalEntryState,
+    now: finalEntrySnapshotAt,
+    submissionBudgetMs: settings.immediateOrderConfirmationTimeoutMs,
+  });
+  if (!initialPolicy.allowed) {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "final_ws_policy",
+      code: initialPolicy.code,
+      reason: initialPolicy.reason,
+      now: finalEntrySnapshotAt,
     });
+    return null;
+  }
+
+  const entryDepthPreflight = await preflightEntryDepthAndAdjustIntent(
+    currentIntent,
+    slot,
+    settings,
+    finalEntryState,
+    finalEntrySnapshotAt,
+  );
+  if (entryDepthPreflight.status === "skipped") {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "final_depth",
+      code: "insufficient_depth",
+      reason: entryDepthPreflight.reason,
+      now: Date.now(),
+      payload: { entryDepthPreflight },
+    });
+    return null;
   }
   if (entryDepthPreflight.intent !== currentIntent) {
     currentIntent = entryDepthPreflight.intent;
-    currentIntent = await writeOrderIntent(currentIntent);
     primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
     hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
     if (!primaryLeg || !hedgeLeg) {
@@ -3023,7 +3586,6 @@ async function executeIntent(
     }
   }
   const finalRiskCheckAt = Date.now();
-  const [finalOpenIntents, finalPositions] = await Promise.all([readOpenOrderIntents(), readPositions()]);
   const finalRiskCheck = await recheckMismatchRiskForExecution({
     opportunity: buildRiskOpportunityTemplateFromIntent(currentIntent, settings),
     intent: currentIntent,
@@ -3036,141 +3598,35 @@ async function executeIntent(
     ),
     now: finalRiskCheckAt,
     globalRiskConfig: expectedConfiguration.globalRisk.config,
+    marketState: finalEntryState,
+    balances: finalBalances,
   });
   if (!finalRiskCheck.allowed) {
-    if (finalRiskCheck.opportunity) {
-      currentIntent = applyRiskCheckedOpportunityToIntent(currentIntent, finalRiskCheck.opportunity, finalRiskCheckAt);
-    }
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "skipped",
-      finalRiskCheckAt,
-      `Final mismatch risk check failed: ${finalRiskCheck.reason}`,
-    );
-    currentIntent = await writeOrderIntent(currentIntent);
-    await writeRunEvent({
-      asset: currentIntent.asset,
-      level: "warn",
-      eventType: "intent.skipped.final_mismatch_risk_recheck",
-      message: `Intent ${currentIntent.id} rejected after final WS preflight`,
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "final_mismatch_risk",
+      code: "mismatch_risk_recheck",
+      reason: finalRiskCheck.reason,
+      now: finalRiskCheckAt,
       payload: {
-        intentId: currentIntent.id,
-        slotKey: currentIntent.slotKey,
-        combination: currentIntent.combination,
-        reason: finalRiskCheck.reason,
         estimate: finalRiskCheck.estimate,
         mismatchRiskAudit: finalRiskCheck.opportunity?.mismatchRiskAudit ?? null,
       },
-      createdAt: finalRiskCheckAt,
     });
-    return currentIntent;
+    return null;
   }
-  currentIntent = applyRiskCheckedOpportunityToIntent(currentIntent, finalRiskCheck.opportunity, finalRiskCheckAt);
-  currentIntent = await writeOrderIntent(currentIntent);
+  currentIntent = applyFinalEntryRiskOpportunityToIntent(currentIntent, finalRiskCheck.opportunity, finalRiskCheckAt);
   primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
   hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {
     throw new Error(`Intent ${currentIntent.id} missing legs after final mismatch risk check`);
   }
   const primaryMaxSlippageBps = entryDepthPreflight.maxSlippageBps;
-
-  const finalEntrySnapshotAt = Date.now();
-  const finalEntryState = await marketDataSupervisor.readSlotState(slot, finalEntrySnapshotAt);
-  const finalEntryIssue = validateFinalWsEntryDepthCoverage(
-    slot,
-    primaryLeg,
-    hedgeLeg,
-    finalEntryState.polymarket.quote,
-    finalEntryState.kalshi.quote,
-    settings,
-    finalEntrySnapshotAt,
-  );
-  if (finalEntryIssue) {
-    return skipIntentBeforeSubmission(
-      currentIntent,
-      finalEntrySnapshotAt,
-      `Final entry snapshot rejected primary submission (${finalEntryIssue})`,
-      "final_ws_depth_recheck",
-      { issue: finalEntryIssue },
-    );
-  }
-
-  let latestConfiguration: Awaited<ReturnType<typeof readExecutionConfiguration>>;
-  try {
-    latestConfiguration = await readExecutionConfiguration(slot.asset);
-  } catch (error) {
-    const unavailableAt = Date.now();
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "skipped",
-      unavailableAt,
-      `Configuration unavailable before primary submission: ${toErrorMessage(error)}`,
-    );
-    currentIntent = await writeOrderIntent(currentIntent);
-    await writeRunEvent({
-      asset: currentIntent.asset,
-      level: "warn",
-      eventType: "execution.skipped.configuration_unavailable",
-      message: `Intent ${currentIntent.id} skipped because execution configuration could not be revalidated`,
-      payload: {
-        intentId: currentIntent.id,
-        slotKey: currentIntent.slotKey,
-        stage: "before_primary_submission",
-        error: toErrorMessage(error),
-      },
-      createdAt: unavailableAt,
-    });
-    return currentIntent;
-  }
-  if (!executionConfigurationMatches(expectedConfiguration, latestConfiguration)) {
-    const changedAt = Date.now();
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "skipped",
-      changedAt,
-      "Configuration revision changed before primary submission",
-    );
-    currentIntent = await writeOrderIntent(currentIntent);
-    await writeConfigurationRevisionChangedEvent({
-      asset: currentIntent.asset,
-      slotKey: currentIntent.slotKey,
-      intentId: currentIntent.id,
-      stage: "before_primary_submission",
-      expected: expectedConfiguration,
-      actual: latestConfiguration,
-      now: changedAt,
-    });
-    return currentIntent;
-  }
-  if (
-    !latestConfiguration.strategy.config.enableTrading ||
-    latestConfiguration.strategy.config.shadowMode ||
-    !isLiveExecutionAllowed()
-  ) {
-    const disabledAt = Date.now();
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "skipped",
-      disabledAt,
-      "Live execution was disabled before primary submission",
-    );
-    currentIntent = await writeOrderIntent(currentIntent);
-    await writeRunEvent({
-      asset: currentIntent.asset,
-      level: "info",
-      eventType: "intent.skipped.live_execution_disabled",
-      message: `Intent ${currentIntent.id} skipped because live execution was disabled before primary submission`,
-      payload: {
-        intentId: currentIntent.id,
-        slotKey: currentIntent.slotKey,
-      },
-      createdAt: disabledAt,
-    });
-    return currentIntent;
-  }
-  assertNewLiveExecutionAllowed();
-
   const executionPrimaryLeg = primaryLeg;
+  const primaryOutcome =
+    executionPrimaryLeg.venue === "polymarket"
+      ? finalEntryState.polymarket.quote.outcomes[executionPrimaryLeg.outcome === "UP" ? "up" : "down"]
+      : finalEntryState.kalshi.quote.outcomes[executionPrimaryLeg.outcome === "YES" ? "yes" : "no"];
   const primaryRequest = buildVenueOrderRequest(
     executionPrimaryLeg,
     primaryMaxSlippageBps,
@@ -3179,27 +3635,182 @@ async function executeIntent(
     {
       kalshiPriceTicksSlippage:
         currentIntent.primaryVenue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
+      kalshiPriceRanges: currentIntent.primaryVenue === "kalshi" ? finalEntryState.kalshi.quote.priceRanges : undefined,
+      authoritativeTickSize: currentIntent.primaryVenue === "polymarket" ? primaryOutcome.tickSize : undefined,
     },
   );
+  primaryRequest.clientOrderId = buildStableClientOrderId({
+    intent: currentIntent,
+    leg: executionPrimaryLeg,
+    request: primaryRequest,
+    stage: "primary",
+  });
+  const exactPrimaryDepthIssue = validateInitialPrimaryRequestDepth(
+    executionPrimaryLeg,
+    primaryRequest,
+    finalEntryState,
+    settings,
+  );
+  if (exactPrimaryDepthIssue) {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "exact_primary_request_depth",
+      code: "insufficient_depth",
+      reason: exactPrimaryDepthIssue,
+      now: Date.now(),
+    });
+    return null;
+  }
+
+  const admissionAt = Date.now();
+  currentIntent = markIntentStatus(currentIntent, "executing_primary", admissionAt);
+  const finalPolicy = evaluateFinalInitialEntryPolicy({
+    intent: currentIntent,
+    slot,
+    settings,
+    marketState: finalEntryState,
+    now: admissionAt,
+    submissionBudgetMs: settings.immediateOrderConfirmationTimeoutMs,
+  });
+  if (!finalPolicy.allowed) {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "pre_admission_policy",
+      code: finalPolicy.code,
+      reason: finalPolicy.reason,
+      now: admissionAt,
+    });
+    return null;
+  }
+  if (!isLiveExecutionAllowed()) {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "environment_gate",
+      code: "live_execution_disabled",
+      reason: "Live execution is not independently authorized by the runtime environment",
+      now: admissionAt,
+    });
+    return null;
+  }
+  assertNewLiveExecutionAllowed();
+
+  const plannedAttempt = buildPlannedInitialEntryAttempt(
+    currentIntent,
+    executionPrimaryLeg,
+    primaryRequest,
+    admissionAt,
+  );
+  const admission = await admitLiveEntry({
+    now: admissionAt,
+    intent: currentIntent,
+    plannedAttempt,
+    expectedStrategyRevision: expectedConfiguration.strategyRevision,
+    expectedGlobalRiskRevision: expectedConfiguration.globalRisk.revision,
+    policyEvaluatedAt: admissionAt,
+    cutoffAt: finalPolicy.cutoffAt,
+    latestSubmissionStartAt: finalPolicy.latestSubmissionStartAt,
+    evidence: buildInitialEntryAdmissionEvidence(
+      "live",
+      finalEntryState,
+      finalPolicy,
+      serializeVenueOrderRequest(primaryRequest),
+    ),
+  });
+  if (!admission.admitted) {
+    await recordInitialEntryRejection({
+      intent: currentIntent,
+      stage: "atomic_admission",
+      code: admission.code,
+      reason: admission.reason,
+      now: admissionAt,
+      payload: {
+        blockingIntentId: admission.blockingIntentId ?? null,
+        activeBreakerKeys: admission.activeBreakerKeys ?? [],
+        previousGrossCost: admission.previousGrossCost ?? null,
+        maximumAllowedCost: admission.maximumAllowedCost ?? null,
+      },
+    });
+    return null;
+  }
+  currentIntent = admission.intent;
+  primaryLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.primaryVenue);
+  hedgeLeg = currentIntent.legs.find((leg) => leg.venue === currentIntent.hedgeVenue);
+  if (!primaryLeg || !hedgeLeg || !admission.plannedAttempt) {
+    throw new Error(`Admitted intent ${currentIntent.id} is missing its canonical primary attempt`);
+  }
+  if (!admission.fresh) {
+    return currentIntent;
+  }
+  await writeAdmittedIntentCreatedEvent(currentIntent, primarySelection, admissionAt);
   let primaryResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let primaryOrder: LiveOrder;
   let primaryExecutionTiming: OrderExecutionTiming | null = null;
   let persistPrimaryConfirmation: (() => Promise<void>) | null = null;
   try {
+    assertNewLiveExecutionAllowed();
     const primaryExecution = await submitAndConfirmOrder({
       intent: currentIntent,
-      leg: executionPrimaryLeg,
+      leg: primaryLeg,
       request: primaryRequest,
       stage: "primary",
-      now,
+      now: admissionAt,
       timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      quoteObservedAt:
+        currentIntent.primaryVenue === "polymarket"
+          ? finalPolicy.polymarketBookUpdatedAt
+          : finalPolicy.kalshiBookUpdatedAt,
+      submissionDeadlineAt: finalPolicy.latestSubmissionStartAt,
       deferConfirmedPersistence: true,
+      admittedInitialAttemptId: admission.plannedAttempt.id,
     });
     primaryResult = primaryExecution.result;
     primaryOrder = primaryExecution.order;
     primaryExecutionTiming = "timing" in primaryExecution ? primaryExecution.timing : null;
     persistPrimaryConfirmation = "persistConfirmed" in primaryExecution ? primaryExecution.persistConfirmed : null;
   } catch (error) {
+    if (isDefinitiveInitialSubmissionClaimRejection(error) || error instanceof OrderSubmissionNotStartedError) {
+      const rejectedAt = Date.now();
+      const claimCode = error instanceof OrderSubmissionNotStartedError ? error.reason : error.code;
+      const reason = `Initial submission authorization was rejected before the venue request started (${claimCode})`;
+      if (!(error instanceof OrderSubmissionNotStartedError)) {
+        await writeOrderAttempt({
+          ...admission.plannedAttempt,
+          status: "failed",
+          truthStatus: "not_submitted",
+          error: reason,
+          updatedAt: rejectedAt,
+        });
+      }
+      currentIntent = await closeIntentWithoutExposureAccounting({
+        intent: currentIntent,
+        status: "skipped",
+        now: rejectedAt,
+        stage: "initial_submission_claim_rejected",
+        reason,
+        proof: {
+          attemptId: admission.plannedAttempt.id,
+          attemptTruth: "not_submitted",
+          claimCode,
+        },
+      });
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "intent.skipped.initial_submission_claim_rejected",
+        message: `Intent ${currentIntent.id} skipped because its initial submission claim was rejected`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attemptId: admission.plannedAttempt.id,
+          clientOrderId: primaryRequest.clientOrderId,
+          claimCode,
+          claimReason: error.reason,
+        },
+        createdAt: rejectedAt,
+      });
+      return currentIntent;
+    }
+
     return markIntentManualRequired(
       currentIntent,
       Date.now(),
@@ -3285,21 +3896,36 @@ async function executeIntent(
 
   if (isTerminalOrderStatus(primaryResult.status)) {
     currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
-    currentIntent = markIntentStatus(currentIntent, "failed", now, describeTerminalNoFill("Primary", primaryResult));
-    currentIntent = await writeOrderIntent(currentIntent);
+    const terminalNoFillReason = describeTerminalNoFill("Primary", primaryResult);
+    currentIntent = await closeIntentWithoutExposureAccounting({
+      intent: currentIntent,
+      status: "failed",
+      now,
+      stage: "primary_terminal_no_fill",
+      reason: terminalNoFillReason,
+      proof: {
+        venue: primaryOrder.venue,
+        orderId: primaryOrder.venueOrderId,
+        orderStatus: primaryOrder.status,
+        filledSize: primaryOrder.filledSize,
+        venueResultStatus: primaryResult.status,
+      },
+    });
     if (shouldTripBreakerForTerminalNoFill(primaryResult)) {
-      await writeCircuitBreaker({
-        key: buildSlotBreakerKey(currentIntent.slotKey),
-        active: true,
-        reason: "venue_error",
-        triggeredAt: now,
-        payload: {
+      await observeCircuitBreakerIncident(
+        createExecutionIncident({
+          asset: currentIntent.asset,
+          slotKey: currentIntent.slotKey,
           intentId: currentIntent.id,
-          venue: currentIntent.primaryVenue,
           stage: "primary_confirmation",
+          reason: "venue_error",
+          disposition: "cooldown",
+          venue: currentIntent.primaryVenue,
           orderId: primaryOrder.venueOrderId,
-        },
-      });
+          triggeredAt: now,
+          cooldownUntil: now + PRIMARY_NO_FILL_COOLDOWN_MS,
+        }),
+      );
     } else {
       const failureKalshiBookWs =
         currentIntent.primaryVenue === "kalshi"
@@ -3363,43 +3989,6 @@ async function executeIntent(
       orderStatus: primaryResult.status,
     },
     createdAt: now,
-  });
-  return currentIntent;
-}
-
-async function skipIntentBeforeSubmission(
-  intent: OrderIntent,
-  now: number,
-  failureReason: string,
-  reason: string,
-  payload: Record<string, unknown>,
-) {
-  let currentIntent = markIntentStatus(intent, "skipped", now, failureReason);
-  currentIntent = await writeOrderIntent(currentIntent);
-  await writeRunEvent({
-    level: "info",
-    eventType: "order.primary.preflight_skipped",
-    message: `Intent ${currentIntent.id} skipped before submission (${reason})`,
-    payload: {
-      intentId: currentIntent.id,
-      slotKey: currentIntent.slotKey,
-      reason,
-      ...payload,
-    },
-    createdAt: now,
-  });
-  await writeCircuitBreaker({
-    key: buildSlotBreakerKey(currentIntent.slotKey),
-    active: true,
-    reason: "primary_no_fill",
-    triggeredAt: now,
-    payload: {
-      intentId: currentIntent.id,
-      slotKey: currentIntent.slotKey,
-      stage: "preflight_skipped_cooldown",
-      reason,
-      cooldownUntil: now + PRIMARY_NO_FILL_COOLDOWN_MS,
-    },
   });
   return currentIntent;
 }
@@ -3509,6 +4098,23 @@ export function shouldFailClosedOnSubmissionError(_leg: Pick<OrderIntent["legs"]
   return true;
 }
 
+export function isExpiredInitialSubmissionCapability(error: unknown) {
+  return error instanceof LiveOrderAttemptClaimError && error.code === "submission_capability_expired";
+}
+
+const DEFINITIVE_INITIAL_SUBMISSION_REJECTION_CODES = new Set([
+  "strategy_revision_changed",
+  "global_risk_revision_changed",
+  "trading_disabled",
+  "execution_mode_mismatch",
+  "circuit_breaker_active",
+  "submission_capability_expired",
+]);
+
+export function isDefinitiveInitialSubmissionClaimRejection(error: unknown): error is LiveOrderAttemptClaimError {
+  return error instanceof LiveOrderAttemptClaimError && DEFINITIVE_INITIAL_SUBMISSION_REJECTION_CODES.has(error.code);
+}
+
 export class OrderSubmissionTruthUnknownError extends Error {
   readonly attemptId: string;
 
@@ -3519,13 +4125,47 @@ export class OrderSubmissionTruthUnknownError extends Error {
   }
 }
 
+export class OrderSubmissionNotStartedError extends Error {
+  constructor(
+    public readonly attemptId: string,
+    public readonly reason: "submission_deadline_expired",
+  ) {
+    super(`Order submission ${attemptId} was not started (${reason})`);
+    this.name = "OrderSubmissionNotStartedError";
+  }
+}
+
 export function isOrderAttemptTruthUnresolved(attempt: Pick<OrderAttempt, "status" | "truthStatus">) {
+  if (attempt.status === "planned" && attempt.truthStatus === "admitted_not_claimed") {
+    return false;
+  }
+
+  if (attempt.status === "confirmed") {
+    return !isConclusiveOrderAttemptTruthStatus(attempt.truthStatus);
+  }
+
   return (
     attempt.status === "planned" ||
+    attempt.status === "submitting" ||
     attempt.status === "submitted" ||
     attempt.status === "truth_pending" ||
     (attempt.status === "failed" && attempt.truthStatus !== "not_submitted")
   );
+}
+
+const CONCLUSIVE_ORDER_ATTEMPT_TRUTH_STATUSES = new Set([
+  "pending",
+  "live",
+  "filled",
+  "partially_filled",
+  "canceled",
+  "expired",
+  "rejected",
+  "terminal_zero_fill",
+]);
+
+export function isConclusiveOrderAttemptTruthStatus(truthStatus: string | null) {
+  return truthStatus !== null && CONCLUSIVE_ORDER_ATTEMPT_TRUTH_STATUSES.has(truthStatus.trim().toLowerCase());
 }
 
 export function hasUnresolvedPrimarySubmissionAttempt(
@@ -3591,17 +4231,27 @@ async function holdPolymarketHedgeFailurePendingTruth(
   payload: Record<string, unknown>,
 ) {
   const pendingTruthReason = "Polymarket hedge no-fill awaiting authoritative zero-fill truth; primary unwind blocked";
-  const breakerKey = buildSlotBreakerKey(intent.slotKey);
-  const existingBreaker = (await readCircuitBreakers()).find((breaker) => breaker.key === breakerKey) ?? null;
   const alreadyPendingSameOrder =
     intent.status === "truth_pending" &&
     intent.failureReason === pendingTruthReason &&
     (hedgeOrder === null || hedgeLeg.venueOrderId === hedgeOrder.venueOrderId);
-  const existingPendingTruthBreaker =
-    existingBreaker?.active === true &&
-    existingBreaker.reason === "hedge_failure" &&
-    existingBreaker.payload?.intentId === intent.id &&
-    existingBreaker.payload?.stage === "polymarket_hedge_no_fill_truth_pending";
+  const incident = createExecutionIncident({
+    asset: intent.asset,
+    slotKey: intent.slotKey,
+    intentId: intent.id,
+    stage: "polymarket_hedge_no_fill_truth_pending",
+    reason: "hedge_failure",
+    disposition: "truth_pending",
+    venue: intent.hedgeVenue,
+    orderId: hedgeOrder?.venueOrderId ?? null,
+    triggeredAt: now,
+  });
+  const existingPendingTruthIncident = (await readCurrentCircuitBreakerIncidents()).some(
+    (candidate) =>
+      candidate.owner === incident.owner &&
+      candidate.incidentKey === incident.incidentKey &&
+      candidate.scope.type === "global",
+  );
 
   let currentIntent = intent;
   if (!alreadyPendingSameOrder) {
@@ -3610,7 +4260,7 @@ async function holdPolymarketHedgeFailurePendingTruth(
     currentIntent = await writeOrderIntent(currentIntent);
   }
 
-  if (!alreadyPendingSameOrder || !existingPendingTruthBreaker) {
+  if (!alreadyPendingSameOrder || !existingPendingTruthIncident) {
     await writeHedgeRetryBlockedPendingTruthEvent(currentIntent, hedgeLeg, hedgeOrder, now, {
       stage,
       ...payload,
@@ -3621,22 +4271,8 @@ async function holdPolymarketHedgeFailurePendingTruth(
     });
   }
 
-  if (!existingPendingTruthBreaker) {
-    await writeCircuitBreaker({
-      key: breakerKey,
-      active: true,
-      reason: "hedge_failure",
-      triggeredAt: now,
-      payload: {
-        intentId: currentIntent.id,
-        slotKey: currentIntent.slotKey,
-        venue: currentIntent.hedgeVenue,
-        stage: "polymarket_hedge_no_fill_truth_pending",
-        hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-        cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
-        ...payload,
-      },
-    });
+  if (!existingPendingTruthIncident) {
+    await observeCircuitBreakerIncident(incident);
   }
   return currentIntent;
 }
@@ -3701,12 +4337,48 @@ async function executeHedgeLeg(
 
   let currentIntent = markIntentStatus(resizedIntent, "hedging", now);
 
-  const hedgeMaxSlippageBps = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
+  const hedgePricing = await resolveAdaptiveSlippageForLiveLeg(hedgeLeg, slot, settings, now);
+  const hedgeMarketProof = validateRecoveryLegMarketState({
+    intent: resizedIntent,
+    leg: hedgeLeg,
+    slot,
+    marketState: hedgePricing.marketState,
+    orderSide: "BUY",
+    settings,
+    now,
+  });
+  if (!hedgeMarketProof.allowed) {
+    await writeRunEvent({
+      asset: resizedIntent.asset,
+      level: "error",
+      eventType: "order.hedge.market_proof_rejected",
+      message: `Hedge market proof rejected for intent ${resizedIntent.id}`,
+      payload: {
+        intentId: resizedIntent.id,
+        slotKey: resizedIntent.slotKey,
+        venue: hedgeLeg.venue,
+        code: hedgeMarketProof.code,
+        reason: hedgeMarketProof.reason,
+      },
+      createdAt: now,
+    });
+    return attemptPrimaryUnwindAfterHedgeFailure(
+      resizedIntent,
+      primaryLeg,
+      hedgeLeg,
+      null,
+      settings,
+      now,
+      `Hedge market proof rejected before submission (${hedgeMarketProof.code}: ${hedgeMarketProof.reason})`,
+    );
+  }
+  const hedgeMaxSlippageBps = hedgePricing.maxSlippageBps;
   const hedgeRequest = buildVenueOrderRequest(
     hedgeLeg,
     hedgeMaxSlippageBps,
     immediatePartialOrderType(hedgeLeg.venue),
     false,
+    getAuthoritativeOrderPricingOptions(hedgeLeg, hedgePricing.marketState),
   );
   let hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>>;
   let hedgeOrder: LiveOrder;
@@ -3719,11 +4391,38 @@ async function executeHedgeLeg(
       stage: "hedge",
       now,
       timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      quoteObservedAt: hedgeMarketProof.bookObservedAt,
+      submissionDeadlineAt: hedgeMarketProof.validUntil,
     });
     hedgeResult = hedgeExecution.result;
     hedgeOrder = hedgeExecution.order;
     hedgeExecutionTiming = "timing" in hedgeExecution ? hedgeExecution.timing : null;
   } catch (error) {
+    if (error instanceof OrderSubmissionNotStartedError) {
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "warn",
+        eventType: "order.hedge.submission_not_started",
+        message: `Hedge submission was rejected before the venue request for intent ${currentIntent.id}`,
+        payload: {
+          intentId: currentIntent.id,
+          slotKey: currentIntent.slotKey,
+          attemptId: error.attemptId,
+          reason: error.reason,
+          clientOrderId: hedgeRequest.clientOrderId,
+        },
+        createdAt: Date.now(),
+      });
+      return attemptPrimaryUnwindAfterHedgeFailure(
+        currentIntent,
+        primaryLeg,
+        hedgeLeg,
+        null,
+        settings,
+        Date.now(),
+        `Hedge submission was not started (${error.reason})`,
+      );
+    }
     return markIntentManualRequired(
       currentIntent,
       Date.now(),
@@ -3822,7 +4521,6 @@ async function executeHedgeLeg(
       slot,
       settings,
       now,
-      "hedge",
       settings.hedgeRetryAttempts,
       settings.hedgeRetryDelayMs,
     );
@@ -4072,12 +4770,15 @@ async function resumeShadowIntents(intents: OrderIntent[], snapshot: Opportunity
       continue;
     }
 
-    const restStartedAt = Date.now();
-    let currentIntent: OrderIntent = {
-      ...intent,
-      shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
-    };
-    currentIntent = await writeOrderIntent(currentIntent);
+    const existingAudit = intent.shadowExecution;
+    const restStartedAt = existingAudit?.restStartedAt ?? Date.now();
+    let currentIntent = intent;
+    if (!existingAudit) {
+      currentIntent = await writeOrderIntent({
+        ...intent,
+        shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
+      });
+    }
     resumed.push(await completeShadowIntent(currentIntent, snapshot, settings, restStartedAt));
   }
 
@@ -4090,6 +4791,10 @@ async function completeShadowIntent(
   settings: StrategyConfig,
   restStartedAt: number,
 ) {
+  if (intent.shadowExecution?.status === "filled" || intent.shadowExecution?.status === "no_fill") {
+    return persistCompletedShadowExecution(intent, intent.shadowExecution);
+  }
+
   const restCapture = await captureShadowRestSnapshot(intent, signalSnapshot, restStartedAt);
   const rawDecision = deriveShadowPairExecution({
     intent,
@@ -4149,23 +4854,41 @@ async function completeShadowIntent(
     capturedAt: restCapture.capturedAt,
     errors: restCapture.errors,
   });
-  const completedOrders = capturedIntent.legs.map((leg) =>
-    buildCompletedShadowOrder(capturedIntent, leg, decision, completedAudit, evaluatedAt),
+  const currentIntent = await writeOrderIntent({ ...capturedIntent, shadowExecution: completedAudit });
+  return persistCompletedShadowExecution(currentIntent, completedAudit);
+}
+
+async function persistCompletedShadowExecution(
+  intent: OrderIntent,
+  completedAudit: NonNullable<OrderIntent["shadowExecution"]>,
+) {
+  const evaluatedAt = completedAudit.evaluatedAt;
+  if (evaluatedAt === null || (completedAudit.status !== "filled" && completedAudit.status !== "no_fill")) {
+    throw new Error(`Intent ${intent.id} is missing a completed shadow execution audit`);
+  }
+  const completedOrders = intent.legs.map((leg) =>
+    buildCompletedShadowOrder(intent, leg, completedAudit, evaluatedAt),
   ) as [LiveOrder, LiveOrder];
   await Promise.all(completedOrders.map((order) => writeVenueOrder(order)));
 
-  let currentIntent: OrderIntent = { ...capturedIntent, shadowExecution: completedAudit };
-  if (decision.status === "no_fill") {
+  let currentIntent = intent;
+  if (completedAudit.status === "no_fill") {
     for (const order of completedOrders) {
       currentIntent = updateIntentLeg(currentIntent, order.venue, order, "failed", evaluatedAt);
     }
-    currentIntent = markIntentStatus(
-      currentIntent,
-      "skipped",
-      evaluatedAt,
-      `Shadow non exécuté: ${decision.reason ?? decision.reasonCode ?? "liquidité indisponible"}`,
-    );
-    currentIntent = await writeOrderIntent(currentIntent);
+    currentIntent = await closeIntentWithoutExposureAccounting({
+      intent: currentIntent,
+      status: "skipped",
+      now: evaluatedAt,
+      stage: "shadow_no_fill",
+      reason: `Shadow non exécuté: ${completedAudit.reason ?? completedAudit.reasonCode ?? "liquidité indisponible"}`,
+      proof: {
+        modelVersion: completedAudit.modelVersion,
+        auditStatus: completedAudit.status,
+        restCapturedAt: completedAudit.restCapturedAt,
+        orderIds: completedOrders.map((order) => order.venueOrderId),
+      },
+    });
     await writeRunEvent({
       asset: currentIntent.asset,
       level: "info",
@@ -4178,8 +4901,8 @@ async function completeShadowIntent(
         latencyMs: completedAudit.latencyMs,
         restFetchDurationMs: completedAudit.restFetchDurationMs,
         nextEligibleAt: completedAudit.nextEligibleAt,
-        reasonCode: decision.reasonCode,
-        reason: decision.reason,
+        reasonCode: completedAudit.reasonCode,
+        reason: completedAudit.reason,
         legs: completedAudit.legs,
       },
       createdAt: evaluatedAt,
@@ -4192,11 +4915,19 @@ async function completeShadowIntent(
     if (!leg) {
       throw new Error(`Intent ${intent.id} missing ${order.venue} leg during shadow completion`);
     }
-    const capacity = decision.legs.find((candidate) => candidate.leg.venue === order.venue);
-    if (!capacity?.quote) {
-      throw new Error(`Intent ${intent.id} missing ${order.venue} shadow fill quote`);
+    const auditLeg = completedAudit.legs.find((candidate) => candidate.venue === order.venue);
+    if (!auditLeg || auditLeg.vwapPrice === null) {
+      throw new Error(`Intent ${intent.id} missing ${order.venue} shadow fill audit`);
     }
-    await writeFill(buildShadowFill(currentIntent, leg, order, capacity.quote, completedAudit, evaluatedAt));
+    await ingestFillAccounting(
+      buildShadowFill(currentIntent, leg, order, auditLeg, completedAudit),
+      {
+        finality: "final",
+        venueTruth: "shadow_deterministic_execution",
+        feeProvenance: "synthetic_exact",
+      },
+      "shadow_completion",
+    );
     currentIntent = updateIntentLeg(
       currentIntent,
       order.venue,
@@ -4333,7 +5064,7 @@ async function attachRecentPolymarketFills(intent: OrderIntent) {
     const orderId = leg.venueOrderId as string;
     const matching = extractPolymarketTradesForOrder(trades, orderId).filter(isConfirmedPolymarketTrade);
     for (const trade of matching) {
-      await writePolymarketFillSafely(trade, intent.id, orderId, intent.asset, "intent_sync");
+      await ingestPolymarketFillAccounting(trade, intent.id, orderId, intent.asset, "intent_sync");
     }
   }
 
@@ -4341,29 +5072,32 @@ async function attachRecentPolymarketFills(intent: OrderIntent) {
 }
 
 async function attachRecentPolymarketFillsSafely(intent: OrderIntent, stage: "primary" | "hedge", now: number) {
-  try {
-    return await attachRecentPolymarketFills(intent);
-  } catch (error) {
-    if (error instanceof OrderIntentRevisionConflictError) {
-      throw error;
-    }
-    await writeRunEvent({
-      level: "warn",
-      eventType: "fills.polymarket.sync_failed",
-      message: `Polymarket fill sync failed during ${stage} for intent ${intent.id}`,
-      payload: {
-        intentId: intent.id,
-        stage,
-        error: toErrorMessage(error),
-      },
-      createdAt: now,
-    });
-    return intent;
-  }
+  void stage;
+  void now;
+  return attachRecentPolymarketFills(intent);
 }
 
-async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, settings: StrategyConfig, now: number) {
-  const recentOrders = await readRecentVenueOrders(200, slot.asset);
+export function deriveCanonicalIntentSlot(
+  intent: Pick<OrderIntent, "asset" | "slotKey" | "slotStartTs" | "slotEndTs">,
+) {
+  if (!Number.isSafeInteger(intent.slotStartTs) || !Number.isSafeInteger(intent.slotEndTs)) {
+    throw new Error(`Intent ${intent.slotKey} has invalid slot timestamps`);
+  }
+
+  const slot = getCurrentSlot(intent.asset, new Date(intent.slotStartTs + 1));
+  if (slot.key !== intent.slotKey || slot.startTs !== intent.slotStartTs || slot.endTs !== intent.slotEndTs) {
+    throw new Error(`Intent ${intent.slotKey} does not match its canonical ${intent.asset} slot`);
+  }
+  return slot;
+}
+
+async function resumeInFlightIntents(
+  intents: OrderIntent[],
+  workerAsset: MarketAsset,
+  settings: StrategyConfig,
+  now: number,
+) {
+  const recentOrders = await readRecentVenueOrders(200, workerAsset);
   const resumed: OrderIntent[] = [];
 
   for (const intent of intents) {
@@ -4380,9 +5114,31 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
       continue;
     }
 
+    let intentSlot: MarketSlot;
+    try {
+      intentSlot = deriveCanonicalIntentSlot(intent);
+    } catch (error) {
+      resumed.push(
+        await markIntentManualRequired(
+          intent,
+          now,
+          "intent_slot_identity_invalid",
+          `Intent recovery blocked because its persisted slot identity is invalid (${toErrorMessage(error)})`,
+          {
+            workerAsset,
+            intentAsset: intent.asset,
+            slotKey: intent.slotKey,
+            slotStartTs: intent.slotStartTs,
+            slotEndTs: intent.slotEndTs,
+          },
+        ),
+      );
+      continue;
+    }
+
     let currentIntent = intent;
     const intentOrders = recentOrders.filter((order) => order.intentId === intent.id);
-    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, primaryLeg, "entry");
+    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, intent, primaryLeg, "entry");
     if (
       primaryOrderSummary &&
       isPrimaryFillSizeHedgable(intent, {
@@ -4395,7 +5151,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
       currentIntent = await writeOrderIntent(currentIntent);
       await writeLiveTradeRunEvent(currentIntent, now);
 
-      const latestHedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, hedgeLeg);
+      const latestHedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent, hedgeLeg);
       if (latestHedgeOrder) {
         continue;
       }
@@ -4412,11 +5168,11 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
         createdAt: now,
       });
 
-      resumed.push(await executeHedgeLeg(currentIntent, slot, settings, now));
+      resumed.push(await executeHedgeLeg(currentIntent, intentSlot, settings, now));
       continue;
     }
 
-    const primaryOrder = findLatestIntentOrderForLeg(recentOrders, intent.id, primaryLeg);
+    const primaryOrder = findLatestIntentOrderForLeg(recentOrders, intent, primaryLeg);
     if (!primaryOrder || !shouldTreatPrimaryOrderAsFilled(intent, primaryOrder)) {
       continue;
     }
@@ -4430,7 +5186,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
       currentIntent = await attachRecentPolymarketFillsSafely(currentIntent, "primary", now);
     }
 
-    const latestHedgeOrder = findLatestIntentOrderForLeg(recentOrders, intent.id, hedgeLeg);
+    const latestHedgeOrder = findLatestIntentOrderForLeg(recentOrders, intent, hedgeLeg);
     if (latestHedgeOrder) {
       continue;
     }
@@ -4446,7 +5202,7 @@ async function resumeInFlightIntents(intents: OrderIntent[], slot: MarketSlot, s
       createdAt: now,
     });
 
-    resumed.push(await executeHedgeLeg(currentIntent, slot, settings, now));
+    resumed.push(await executeHedgeLeg(currentIntent, intentSlot, settings, now));
   }
 
   return resumed;
@@ -4547,17 +5303,77 @@ async function unwindPrimaryLeg(
     });
   }
 
-  const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
-  const fallbackExitPrice = primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99;
-  const requestedPrice = liveExitPrice ?? fallbackExitPrice;
-  const forcedPrice = force
-    ? deriveForcedUnwindOrderPrice(primaryLeg, requestedPrice, settings.maxSlippageBps, force.ticks)
-    : null;
-  const expectedExitPrice = forcedPrice ?? applySlippage(requestedPrice ?? 0, settings.maxSlippageBps, "SELL");
-  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, effectiveRequestedSize, expectedExitPrice);
+  if (primaryLeg.filledPrice === null || settings.forcedUnwindMaxLossUsd <= 0) {
+    throw new Error(`Unable to price unwind ${intent.id}: entry price or positive loss cap is unavailable`);
+  }
+
+  const pricingAt = Date.now();
+  const slot = deriveCanonicalIntentSlot(intent);
+  const unwindMarketState = await marketDataSupervisor.readSlotState(slot, pricingAt);
+  const marketProof = validateRecoveryLegMarketState({
+    intent,
+    leg: primaryLeg,
+    slot,
+    marketState: unwindMarketState,
+    orderSide: "SELL",
+    settings,
+    now: pricingAt,
+  });
+  if (!marketProof.allowed) {
+    throw new Error(`Primary unwind market proof rejected (${marketProof.code}: ${marketProof.reason})`);
+  }
+
+  const slippageReferencePrice = applySlippage(marketProof.referencePrice, settings.maxSlippageBps, "SELL");
+  const orderPrice:
+    AuthoritativeRecoveryOrderPrice | Extract<ReturnType<typeof derivePolymarketRecoveryOrderPrice>, { ok: false }> =
+    marketProof.venue === "polymarket"
+      ? derivePolymarketRecoveryOrderPrice({
+          referencePrice: slippageReferencePrice,
+          tickSize: marketProof.tickSize,
+          side: "SELL",
+          ticks: force?.ticks ?? 0,
+        })
+      : deriveKalshiRecoveryOrderPrice({
+          referencePrice: slippageReferencePrice,
+          outcome: marketProof.outcome,
+          side: "SELL",
+          ticks: force?.ticks ?? 0,
+          priceRanges: marketProof.priceRanges,
+        });
+  if (!orderPrice.ok) {
+    throw new Error(`Unable to derive authoritative unwind price (${orderPrice.code}: ${orderPrice.reason})`);
+  }
+
+  const executionLeg = {
+    ...primaryLeg,
+    requestedPrice: orderPrice.price,
+    side: "SELL" as const,
+    requestedSize: effectiveRequestedSize,
+    requestedNotionalUsd: effectiveRequestedSize * orderPrice.price,
+  };
+  const request = buildVenueOrderRequest(executionLeg, 0, primaryLeg.venue === "polymarket" ? "FAK" : "IOC", true, {
+    overridePrice: orderPrice.price,
+    ...(marketProof.venue === "polymarket"
+      ? { authoritativeTickSize: marketProof.tickSize }
+      : { kalshiPriceRanges: marketProof.priceRanges }),
+  });
+  if (request.price !== orderPrice.price) {
+    throw new Error(`Authoritative unwind price changed while building request for ${intent.id}`);
+  }
+
+  const fee = buildRecoveryFeeSchedule(primaryLeg, unwindMarketState);
+  const economics = evaluateRecoveryLossCap({
+    action: "unwind",
+    orderPrice,
+    size: effectiveRequestedSize,
+    entryPrice: primaryLeg.filledPrice,
+    allocatedEntryFeeUsd: allocateRecoveryEntryFeeUsd(primaryLeg, effectiveRequestedSize),
+    fee,
+    maxLossUsd: settings.forcedUnwindMaxLossUsd,
+  });
   await writeRunEvent({
     asset: intent.asset,
-    level: expectedLossUsd !== null && expectedLossUsd > 0 ? "warn" : "info",
+    level: economics.allowed && economics.worstCaseLossUsd <= ORDER_SIZE_TOLERANCE ? "info" : "warn",
     eventType: "order.unwind.economic_check",
     message: `Primary unwind economic check for intent ${intent.id}`,
     payload: {
@@ -4566,38 +5382,21 @@ async function unwindPrimaryLeg(
       requestedSize: effectiveRequestedSize,
       unhedgedPrimarySize,
       entryPrice: primaryLeg.filledPrice,
-      referenceExitPrice: requestedPrice,
-      expectedExitPrice,
+      referenceExitPrice: marketProof.referencePrice,
+      slippageReferencePrice,
+      expectedExitPrice: orderPrice.price,
       forcedAttempt: force?.attempt ?? null,
       forcedTicks: force?.ticks ?? null,
-      expectedLossUsd,
+      economics,
       maxLossUsd: settings.forcedUnwindMaxLossUsd,
+      marketEvidenceValidUntil: marketProof.validUntil,
+      bookObservedAt: marketProof.bookObservedAt,
     },
-    createdAt: now,
+    createdAt: pricingAt,
   });
-  if (
-    force &&
-    shouldBlockForcedUnwindLoss(primaryLeg, effectiveRequestedSize, expectedExitPrice, settings.forcedUnwindMaxLossUsd)
-  ) {
-    throw new Error(
-      `Forced unwind blocked by max loss: expected exit ${expectedExitPrice.toFixed(4)} exceeds configured loss cap`,
-    );
+  if (!economics.allowed) {
+    throw new Error(`Primary unwind blocked by loss policy (${economics.code}: ${economics.reason})`);
   }
-
-  const request = buildVenueOrderRequest(
-    {
-      ...primaryLeg,
-      requestedPrice,
-      side: "SELL",
-      requestedSize: effectiveRequestedSize,
-      requestedNotionalUsd:
-        effectiveRequestedSize * (requestedPrice ?? primaryLeg.filledPrice ?? primaryLeg.requestedPrice ?? 0),
-    },
-    settings.maxSlippageBps,
-    primaryLeg.venue === "polymarket" ? "FAK" : "IOC",
-    true,
-    forcedPrice !== null ? { overridePrice: forcedPrice } : undefined,
-  );
   if (force) {
     await writeRunEvent({
       level: "warn",
@@ -4609,42 +5408,67 @@ async function unwindPrimaryLeg(
         attempt: force.attempt,
         ticks: force.ticks,
         requestedSize: effectiveRequestedSize,
-        referencePrice: requestedPrice,
+        referencePrice: marketProof.referencePrice,
         orderPrice: request.price,
         maxLossUsd: settings.forcedUnwindMaxLossUsd,
+        worstCaseLossUsd: economics.worstCaseLossUsd,
       },
-      createdAt: now,
+      createdAt: pricingAt,
     });
   }
   const unwindExecution = await submitAndConfirmOrder({
     intent,
-    leg: { ...primaryLeg, side: "SELL" },
+    leg: executionLeg,
     request,
     stage: `${force ? "primary_unwind_forced" : "primary_unwind"}:${attempt}`,
-    now,
+    now: pricingAt,
     timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+    quoteObservedAt: marketProof.bookObservedAt,
+    submissionDeadlineAt: marketProof.validUntil,
   });
   return unwindExecution.order;
 }
 
-function deriveForcedUnwindOrderPrice(
+export function deriveForcedUnwindOrderPrice(
   primaryLeg: OrderIntent["legs"][number],
   referencePrice: number | null,
   maxSlippageBps: number,
   ticks: number,
+  kalshiPriceRanges: readonly KalshiPriceRange[] | null = null,
+  polymarketTickSize: number | null = null,
 ) {
   if (referencePrice === null || !Number.isFinite(referencePrice) || referencePrice <= 0) {
     return null;
   }
 
   if (primaryLeg.venue === "kalshi") {
-    return normalizeKalshiOrderPrice(
-      Math.max(KALSHI_ORDER_PRICE_STEP_USD, referencePrice - ticks * KALSHI_ORDER_PRICE_STEP_USD),
-      "SELL",
-    );
+    if ((primaryLeg.outcome !== "YES" && primaryLeg.outcome !== "NO") || kalshiPriceRanges === null) {
+      return null;
+    }
+    try {
+      const decision = deriveKalshiRecoveryOrderPrice({
+        referencePrice: applySlippage(referencePrice, maxSlippageBps, "SELL"),
+        outcome: primaryLeg.outcome,
+        side: "SELL",
+        ticks,
+        priceRanges: kalshiPriceRanges,
+      });
+      return decision.ok ? decision.price : null;
+    } catch {
+      return null;
+    }
   }
 
-  return round4(Math.max(0.001, applySlippage(referencePrice, maxSlippageBps + ticks * 100, "SELL")));
+  if (polymarketTickSize === null) {
+    return null;
+  }
+  const decision = derivePolymarketRecoveryOrderPrice({
+    referencePrice: applySlippage(referencePrice, maxSlippageBps, "SELL"),
+    tickSize: polymarketTickSize,
+    side: "SELL",
+    ticks,
+  });
+  return decision.ok ? decision.price : null;
 }
 
 export function estimatePrimaryUnwindLossUsd(
@@ -4659,185 +5483,118 @@ export function estimatePrimaryUnwindLossUsd(
   return round4(requestedSize * Math.max(0, primaryLeg.filledPrice - expectedExitPrice));
 }
 
-function shouldBlockForcedUnwindLoss(
-  primaryLeg: OrderIntent["legs"][number],
-  requestedSize: number,
-  expectedExitPrice: number | null,
-  maxLossUsd: number,
-) {
-  if (maxLossUsd <= 0) {
-    return false;
-  }
-
-  const expectedLossUsd = estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice);
-  if (expectedLossUsd === null) {
-    return false;
-  }
-
-  return expectedLossUsd > maxLossUsd + ORDER_SIZE_TOLERANCE;
-}
-
 async function retryLegWithinExecutionBuffer(
   intent: OrderIntent,
   leg: OrderIntent["legs"][number],
   slot: MarketSlot,
   settings: StrategyConfig,
   now: number,
-  stage: "primary" | "hedge",
   retryAttempt = 1,
-  options?: {
-    pairSizeCap?: number | null;
-    persistRepricedIntent?: boolean;
-  },
 ) {
   if (settings.executionPriceBuffer <= 0) {
     return null;
   }
 
-  const repriced = await repriceRetryLegWithinExecutionBuffer(
+  const retryOrderMarketState = await marketDataSupervisor.readSlotState(slot, now);
+  const marketProof = validateRecoveryLegMarketState({
     intent,
     leg,
     slot,
+    marketState: retryOrderMarketState,
+    orderSide: "BUY",
     settings,
     now,
-    stage,
-    retryAttempt,
-    options?.pairSizeCap,
-  );
-  if (!repriced) {
+  });
+  if (!marketProof.allowed) {
+    await writeRunEvent({
+      asset: intent.asset,
+      level: "warn",
+      eventType: "order.hedge.retry_market_proof_rejected",
+      message: `Hedge retry market proof rejected for intent ${intent.id}`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        venue: leg.venue,
+        retryAttempt,
+        code: marketProof.code,
+        reason: marketProof.reason,
+      },
+      createdAt: now,
+    });
     return null;
   }
-  let repricedIntent = repriced.intent;
-  let repricedLeg = repriced.leg;
-  if (stage === "primary") {
-    const riskCheckAt = Date.now();
-    const [retryOpenIntents, retryPositions] = await Promise.all([readOpenOrderIntents(), readPositions()]);
-    const riskCheck = await recheckMismatchRiskForExecution({
-      opportunity: buildRiskOpportunityTemplateFromIntent(repricedIntent, settings),
-      intent: repricedIntent,
-      slot,
-      settings,
-      openIntents: retryOpenIntents,
-      venueExposureUsd: calculateVenueExposureUsd(
-        retryPositions,
-        retryOpenIntents.filter((candidate) => candidate.id !== repricedIntent.id),
-      ),
-      now: riskCheckAt,
-    });
-    if (!riskCheck.allowed) {
-      await writeRunEvent({
-        asset: intent.asset,
-        level: "warn",
-        eventType: "order.primary.retry_blocked_mismatch_risk",
-        message: `Primary retry blocked after worst-fill mismatch risk recheck for intent ${intent.id}`,
-        payload: {
-          intentId: intent.id,
-          reason: riskCheck.reason,
-          estimate: riskCheck.estimate,
-          mismatchRiskAudit: riskCheck.opportunity?.mismatchRiskAudit ?? null,
-          retryAttempt,
-        },
-        createdAt: riskCheckAt,
-      });
-      return null;
-    }
-    repricedIntent = applyRiskCheckedOpportunityToIntent(repricedIntent, riskCheck.opportunity, riskCheckAt);
-    repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
-  } else {
-    const economicsAt = Date.now();
-    const { polymarket, kalshi } = await marketDataSupervisor.readSlotState(slot, economicsAt);
-    const worstFillOpportunity = buildWorstFillRiskOpportunity({
-      opportunity: buildRiskOpportunityTemplateFromIntent(repricedIntent, settings),
-      intent: repricedIntent,
-      polymarket: polymarket.quote,
-      kalshi: kalshi.quote,
-      settings,
-      reserveHedgeRetryBuffer: false,
-    });
-    if (worstFillOpportunity) {
-      repricedIntent = applyWorstFillEconomicsToIntent(
-        repricedIntent,
-        applyHedgeRecoveryReserveToOpportunity(worstFillOpportunity, repricedIntent, settings),
-        economicsAt,
-      );
-      repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
-    } else {
-      repricedIntent = applyConservativeHedgeRiskFallback(repricedIntent, settings, economicsAt);
-      repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
-      await writeRunEvent({
-        asset: intent.asset,
-        level: "error",
-        eventType: "order.hedge.retry_risk_fallback",
-        message: `Hedge retry risk calculation unavailable for intent ${intent.id}; conservative fallback persisted`,
-        payload: {
-          intentId: intent.id,
-          retryAttempt,
-          fatalLossExposureUsd: repricedIntent.fatalLossExposureUsd,
-        },
-        createdAt: economicsAt,
-      });
-    }
-  }
-  const retryPriceLadderTicks = getRetryPriceLadderTicks(repricedLeg, retryAttempt);
-
-  if (stage === "primary") {
-    const primaryLeg = repricedIntent.legs.find((candidate) => candidate.venue === repricedIntent.primaryVenue);
-    const hedgeLeg = repricedIntent.legs.find((candidate) => candidate.venue === repricedIntent.hedgeVenue);
-    if (!primaryLeg || !hedgeLeg) {
-      return null;
-    }
-    const retrySnapshotAt = Date.now();
-    const { polymarket, kalshi } = await marketDataSupervisor.readSlotState(slot, retrySnapshotAt);
-    const wsSnapshotIssue = validateFinalWsEntryDepthCoverage(
-      slot,
-      primaryLeg,
-      hedgeLeg,
-      polymarket.quote,
-      kalshi.quote,
-      settings,
-      retrySnapshotAt,
-    );
-    if (wsSnapshotIssue) {
-      await writeRunEvent({
-        asset: intent.asset,
-        level: "warn",
-        eventType: "order.primary.retry_blocked_ws_preflight",
-        message: `Primary retry blocked by final WS preflight for intent ${intent.id}`,
-        payload: {
-          intentId: intent.id,
-          slotKey: intent.slotKey,
-          retryAttempt,
-          reason: wsSnapshotIssue,
-        },
-        createdAt: retrySnapshotAt,
-      });
-      return null;
-    }
+  const repricedLeg = await repriceSingleHedgeLegWithinExecutionBuffer(
+    intent,
+    leg,
+    retryOrderMarketState,
+    settings,
+    retryAttempt,
+  );
+  if (!repricedLeg) {
+    return null;
   }
 
-  if (options?.persistRepricedIntent !== false) {
-    repricedIntent = await writeOrderIntent(repricedIntent);
-    repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id) ?? repricedLeg;
-  }
-  const retryOrderType =
-    stage === "primary" ? primaryImmediateOrderType(repricedLeg.venue) : immediatePartialOrderType(repricedLeg.venue);
-  const request = buildVenueOrderRequest(repricedLeg, settings.maxSlippageBps, retryOrderType, false, {
-    kalshiPriceTicksSlippage:
-      stage === "primary" && repricedLeg.venue === "kalshi" ? settings.kalshiPrimaryPriceTicksSlippage : undefined,
+  let repricedIntent: OrderIntent = {
+    ...intent,
+    updatedAt: now,
+    legs: intent.legs.map((candidate) => (candidate.id === leg.id ? repricedLeg : candidate)) as OrderIntent["legs"],
+  };
+  const { polymarket, kalshi } = retryOrderMarketState;
+  const worstFillOpportunity = buildWorstFillRiskOpportunity({
+    opportunity: buildRiskOpportunityTemplateFromIntent(repricedIntent, settings),
+    intent: repricedIntent,
+    polymarket: polymarket.quote,
+    kalshi: kalshi.quote,
+    settings,
+    reserveHedgeRetryBuffer: false,
   });
+  if (worstFillOpportunity) {
+    repricedIntent = applyWorstFillEconomicsToIntent(
+      repricedIntent,
+      applyHedgeRecoveryReserveToOpportunity(worstFillOpportunity, repricedIntent, settings),
+      now,
+    );
+  } else {
+    repricedIntent = applyConservativeHedgeRiskFallback(repricedIntent, settings, now);
+    await writeRunEvent({
+      asset: intent.asset,
+      level: "error",
+      eventType: "order.hedge.retry_risk_fallback",
+      message: `Hedge retry risk calculation unavailable for intent ${intent.id}; conservative fallback persisted`,
+      payload: {
+        intentId: intent.id,
+        retryAttempt,
+        fatalLossExposureUsd: repricedIntent.fatalLossExposureUsd,
+      },
+      createdAt: now,
+    });
+  }
+  repricedIntent = await writeOrderIntent(repricedIntent);
+  const persistedRepricedLeg = repricedIntent.legs.find((candidate) => candidate.id === repricedLeg.id);
+  if (!persistedRepricedLeg) {
+    return null;
+  }
+  const retryPriceLadderTicks = getRetryPriceLadderTicks(persistedRepricedLeg, retryAttempt);
+  const request = buildVenueOrderRequest(
+    persistedRepricedLeg,
+    settings.maxSlippageBps,
+    immediatePartialOrderType(persistedRepricedLeg.venue),
+    false,
+    getAuthoritativeOrderPricingOptions(persistedRepricedLeg, retryOrderMarketState),
+  );
   await writeRunEvent({
     level: "info",
-    eventType: `order.${stage}.repriced`,
-    message: `${stage === "primary" ? "Primary" : "Hedge"} leg repriced within execution buffer for intent ${intent.id}${
+    eventType: "order.hedge.repriced",
+    message: `Hedge leg repriced within execution buffer for intent ${intent.id}${
       retryPriceLadderTicks > 0
         ? ` (+${retryPriceLadderTicks} retry rung${retryPriceLadderTicks === 1 ? "" : "s"})`
         : ""
     }`,
     payload: {
       intentId: intent.id,
-      venue: repricedLeg.venue,
-      requestedPrice: repricedLeg.requestedPrice,
-      requestedSize: repricedLeg.requestedSize,
+      venue: persistedRepricedLeg.venue,
+      requestedPrice: persistedRepricedLeg.requestedPrice,
+      requestedSize: persistedRepricedLeg.requestedSize,
       orderPrice: request.price,
       grossCost: repricedIntent.grossCost,
       executionPriceBuffer: settings.executionPriceBuffer,
@@ -4851,19 +5608,38 @@ async function retryLegWithinExecutionBuffer(
   try {
     retryExecution = await submitAndConfirmOrder({
       intent: repricedIntent,
-      leg: repricedLeg,
+      leg: persistedRepricedLeg,
       request,
-      stage: `${stage}_retry:${retryAttempt}`,
+      stage: `hedge_retry:${retryAttempt}`,
       now,
       timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+      quoteObservedAt: marketProof.bookObservedAt,
+      submissionDeadlineAt: marketProof.validUntil,
     });
   } catch (error) {
-    if (shouldFailClosedOnSubmissionError(repricedLeg)) {
+    if (error instanceof OrderSubmissionNotStartedError) {
+      await writeRunEvent({
+        asset: repricedIntent.asset,
+        level: "warn",
+        eventType: "order.hedge.retry_submission_not_started",
+        message: `Hedge retry submission was rejected before the venue request for intent ${repricedIntent.id}`,
+        payload: {
+          intentId: repricedIntent.id,
+          retryAttempt,
+          attemptId: error.attemptId,
+          reason: error.reason,
+          clientOrderId: request.clientOrderId,
+        },
+        createdAt: Date.now(),
+      });
+      return null;
+    }
+    if (shouldFailClosedOnSubmissionError(persistedRepricedLeg)) {
       await markIntentManualRequired(
         repricedIntent,
         Date.now(),
-        `${repricedLeg.venue}_${stage}_retry_submission_truth_unknown`,
-        `${repricedLeg.venue} ${stage} retry may have reached the venue before the submission error (${toErrorMessage(error)})`,
+        `${persistedRepricedLeg.venue}_hedge_retry_submission_truth_unknown`,
+        `${persistedRepricedLeg.venue} hedge retry may have reached the venue before the submission error (${toErrorMessage(error)})`,
         {
           retryAttempt,
           clientOrderId: request.clientOrderId,
@@ -4877,17 +5653,17 @@ async function retryLegWithinExecutionBuffer(
   const order = retryExecution.order;
   await writeRunEvent({
     level: "info",
-    eventType: `order.${stage}.resubmitted`,
-    message: `${stage === "primary" ? "Primary" : "Hedge"} ${repricedLeg.venue} order ${order.venueOrderId} resubmitted after reprice`,
+    eventType: "order.hedge.resubmitted",
+    message: `Hedge ${persistedRepricedLeg.venue} order ${order.venueOrderId} resubmitted after reprice`,
     payload: {
       intentId: repricedIntent.id,
-      venue: repricedLeg.venue,
+      venue: persistedRepricedLeg.venue,
       orderId: order.venueOrderId,
       orderStatus: result.status,
       orderType: request.orderType,
       retryAttempt,
       retryPriceLadderTicks,
-      requestedPrice: repricedLeg.requestedPrice,
+      requestedPrice: persistedRepricedLeg.requestedPrice,
       orderPrice: request.price,
     },
     createdAt: now,
@@ -4900,61 +5676,14 @@ async function retryLegWithinExecutionBuffer(
   };
 }
 
-async function repriceRetryLegWithinExecutionBuffer(
-  intent: OrderIntent,
-  leg: OrderIntent["legs"][number],
-  slot: MarketSlot,
-  settings: StrategyConfig,
-  now: number,
-  stage: "primary" | "hedge",
-  retryAttempt = 1,
-  pairSizeCap?: number | null,
-) {
-  if (stage === "primary") {
-    const repricedIntent = await repriceIntentWithinExecutionBuffer(intent, slot, settings, now, pairSizeCap);
-    if (!repricedIntent) {
-      return null;
-    }
-
-    const repricedLeg = repricedIntent.legs.find((candidate) => candidate.id === leg.id);
-    if (!repricedLeg) {
-      return null;
-    }
-
-    return {
-      intent: repricedIntent,
-      leg: repricedLeg,
-    };
-  }
-
-  const repricedLeg = await repriceSingleHedgeLegWithinExecutionBuffer(intent, leg, slot, settings, now, retryAttempt);
-  if (!repricedLeg) {
-    return null;
-  }
-
-  return {
-    intent: {
-      ...intent,
-      updatedAt: now,
-      legs: intent.legs.map((candidate) => (candidate.id === leg.id ? repricedLeg : candidate)) as OrderIntent["legs"],
-    },
-    leg: repricedLeg,
-  };
-}
-
 async function retryLegWithinExecutionBufferWithAttempts(
   intent: OrderIntent,
   leg: OrderIntent["legs"][number],
   slot: MarketSlot,
   settings: StrategyConfig,
   now: number,
-  stage: "primary" | "hedge",
   attempts: number,
   retryDelayMs: number,
-  options?: {
-    pairSizeCap?: number | null;
-    persistRepricedIntent?: boolean;
-  },
 ) {
   if (attempts <= 0) {
     return null;
@@ -4969,22 +5698,13 @@ async function retryLegWithinExecutionBufferWithAttempts(
       await sleep(retryDelayMs);
     }
 
-    const retried = await retryLegWithinExecutionBuffer(
-      currentIntent,
-      leg,
-      slot,
-      settings,
-      Date.now(),
-      stage,
-      attempt,
-      options,
-    );
+    const retried = await retryLegWithinExecutionBuffer(currentIntent, leg, slot, settings, Date.now(), attempt);
     if (!retried) {
       if (lastResult) {
         await writeRunEvent({
           level: "warn",
-          eventType: `order.${stage}.retry_aborted`,
-          message: `${stage === "primary" ? "Primary" : "Hedge"} retry ${attempt}/${attempts} skipped because repricing was no longer valid`,
+          eventType: "order.hedge.retry_aborted",
+          message: `Hedge retry ${attempt}/${attempts} skipped because repricing was no longer valid`,
           payload: {
             intentId: currentIntent.id,
             venue: leg.venue,
@@ -5006,7 +5726,7 @@ async function retryLegWithinExecutionBufferWithAttempts(
       return { ...retried, attemptsSubmitted };
     }
 
-    if (stage === "hedge" && !shouldRetryTerminalZeroFillHedge(retried.intent, leg, retried.result)) {
+    if (!shouldRetryTerminalZeroFillHedge(retried.intent, leg, retried.result)) {
       await writeHedgeRetryBlockedPendingTruthEvent(retried.intent, leg, retried.order, Date.now(), {
         attempt,
         attempts,
@@ -5017,8 +5737,8 @@ async function retryLegWithinExecutionBufferWithAttempts(
 
     await writeRunEvent({
       level: "warn",
-      eventType: `order.${stage}.retry_terminal`,
-      message: `${stage === "primary" ? "Primary" : "Hedge"} retry ${attempt}/${attempts} ended without fill`,
+      eventType: "order.hedge.retry_terminal",
+      message: `Hedge retry ${attempt}/${attempts} ended without fill`,
       payload: {
         intentId: retried.intent.id,
         venue: leg.venue,
@@ -5180,12 +5900,11 @@ function doesSizingMeetProfitThresholds(
 async function repriceSingleHedgeLegWithinExecutionBuffer(
   intent: OrderIntent,
   leg: OrderIntent["legs"][number],
-  slot: MarketSlot,
+  marketState: InitialEntryMarketState,
   settings: StrategyConfig,
-  now: number,
   retryAttempt = 1,
 ) {
-  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const { polymarket: polymarketState, kalshi: kalshiState } = marketState;
   const liveLeg = getLiveIntentLegSnapshot(leg, polymarketState.quote, kalshiState.quote);
   if (!liveLeg) {
     return null;
@@ -5222,6 +5941,7 @@ function getLiveIntentLegSnapshot(
       depth: outcome.depth,
       minOrderSize: outcome.minOrderSize,
       tickSize: outcome.tickSize,
+      priceRanges: null,
     };
   }
 
@@ -5235,6 +5955,7 @@ function getLiveIntentLegSnapshot(
     depth: outcome.depth,
     minOrderSize: outcome.minOrderSize,
     tickSize: outcome.tickSize,
+    priceRanges: kalshi.priceRanges,
   };
 }
 
@@ -5259,6 +5980,7 @@ export function deriveBufferedRetryLeg<
     depth: number | null;
     minOrderSize: number | null;
     tickSize?: number | null;
+    priceRanges?: readonly KalshiPriceRange[] | null;
   },
   settings: Pick<
     StrategyConfig,
@@ -5270,15 +5992,35 @@ export function deriveBufferedRetryLeg<
     return null;
   }
 
-  const requestedPrice = deriveRetryReferencePrice(leg, liveLeg.price, liveLeg.tickSize ?? null, retryAttempt);
+  let requestedPrice: number | null;
+  try {
+    requestedPrice = deriveRetryReferencePrice(
+      leg,
+      liveLeg.price,
+      liveLeg.tickSize ?? null,
+      liveLeg.priceRanges ?? null,
+      retryAttempt,
+    );
+  } catch {
+    return null;
+  }
   if (requestedPrice === null) {
     return null;
   }
 
   const boundedPrice =
     leg.venue === "kalshi"
-      ? (deriveEffectiveKalshiRetryOrderPrice(requestedPrice, leg.side, settings.maxSlippageBps) ?? requestedPrice)
+      ? deriveEffectiveKalshiRetryOrderPrice(
+          requestedPrice,
+          leg.outcome,
+          leg.side,
+          settings.maxSlippageBps,
+          liveLeg.priceRanges ?? null,
+        )
       : requestedPrice;
+  if (boundedPrice === null) {
+    return null;
+  }
   const referencePrice = leg.requestedPrice;
   if (referencePrice !== null) {
     if (leg.side === "SELL") {
@@ -5324,22 +6066,42 @@ export function deriveBufferedRetryLeg<
 }
 
 function deriveRetryReferencePrice(
-  leg: Pick<OrderIntent["legs"][number], "venue" | "side">,
+  leg: Pick<OrderIntent["legs"][number], "venue" | "outcome" | "side">,
   livePrice: number,
   liveTickSize: number | null,
+  kalshiPriceRanges: readonly KalshiPriceRange[] | null,
   retryAttempt: number,
 ) {
   const retryPriceLadderTicks = getRetryPriceLadderTicks(leg, retryAttempt);
   if (retryPriceLadderTicks <= 0) {
-    return livePrice;
+    if (leg.venue !== "kalshi") {
+      return livePrice;
+    }
+    if ((leg.outcome !== "YES" && leg.outcome !== "NO") || kalshiPriceRanges === null) {
+      return null;
+    }
+    return normalizeKalshiOutcomePrice({
+      price: livePrice,
+      outcome: leg.outcome,
+      side: leg.side,
+      priceRanges: kalshiPriceRanges,
+    }).price;
   }
 
-  const priceStep =
-    leg.venue === "kalshi"
-      ? KALSHI_ORDER_PRICE_STEP_USD
-      : leg.venue === "polymarket"
-        ? Math.max(0.001, liveTickSize ?? 0.001)
-        : 0;
+  if (leg.venue === "kalshi") {
+    if ((leg.outcome !== "YES" && leg.outcome !== "NO") || kalshiPriceRanges === null) {
+      return null;
+    }
+    return moveKalshiOutcomePriceByTicks({
+      price: livePrice,
+      outcome: leg.outcome,
+      side: leg.side,
+      ticks: retryPriceLadderTicks,
+      priceRanges: kalshiPriceRanges,
+    }).price;
+  }
+
+  const priceStep = leg.venue === "polymarket" ? Math.max(0.001, liveTickSize ?? 0.001) : 0;
   if (priceStep <= 0) {
     return livePrice;
   }
@@ -5350,10 +6112,24 @@ function deriveRetryReferencePrice(
 
 function deriveEffectiveKalshiRetryOrderPrice(
   requestedPrice: number,
+  outcome: OrderIntent["legs"][number]["outcome"],
   side: OrderIntent["legs"][number]["side"],
   maxSlippageBps: number,
+  priceRanges: readonly KalshiPriceRange[] | null,
 ) {
-  return normalizeKalshiOrderPrice(applySlippage(requestedPrice, maxSlippageBps, side), side);
+  if ((outcome !== "YES" && outcome !== "NO") || priceRanges === null) {
+    return null;
+  }
+  try {
+    return normalizeKalshiOutcomePrice({
+      price: applySlippage(requestedPrice, maxSlippageBps, side),
+      outcome,
+      side,
+      priceRanges,
+    }).price;
+  } catch {
+    return null;
+  }
 }
 
 export function resolvePrimaryRetryPlan(
@@ -5419,10 +6195,16 @@ function resolveKalshiPrimarySizingDepth(
     return null;
   }
 
-  const maxBuyPrice = normalizeKalshiOrderPrice(
-    price + Math.max(0, ticksSlippage) * KALSHI_ORDER_PRICE_STEP_USD,
-    "BUY",
-  );
+  if (!kalshi.priceRanges) {
+    return null;
+  }
+  const maxBuyPrice = moveKalshiOutcomePriceByTicks({
+    price,
+    outcome,
+    side: "BUY",
+    ticks: Math.max(0, ticksSlippage),
+    priceRanges: kalshi.priceRanges,
+  }).price;
   return computeKalshiBuyDepthWithinPriceRange(kalshi.orderbookLevels, outcome, maxBuyPrice);
 }
 
@@ -5561,6 +6343,8 @@ async function preflightEntryDepthAndAdjustIntent(
   intent: OrderIntent,
   slot: MarketSlot,
   settings: StrategyConfig,
+  providedMarketState?: InitialEntryMarketState,
+  evaluatedAt?: number,
 ): Promise<
   | {
       status: "ready";
@@ -5590,11 +6374,9 @@ async function preflightEntryDepthAndAdjustIntent(
     };
   }
 
-  const preflightNow = Date.now();
-  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(
-    slot,
-    preflightNow,
-  );
+  const preflightNow = evaluatedAt ?? Date.now();
+  const { polymarket: polymarketState, kalshi: kalshiState } =
+    providedMarketState ?? (await marketDataSupervisor.readSlotState(slot, preflightNow));
   const wsSnapshotIssue = validateFinalWsEntrySnapshot(
     slot,
     primaryLeg,
@@ -5696,6 +6478,33 @@ type EntryDepthCheck = {
   executableDepth: number;
   coverageRatio: number;
 };
+
+function validateInitialPrimaryRequestDepth(
+  leg: OrderIntent["legs"][number],
+  request: VenueOrderRequest,
+  marketState: InitialEntryMarketState,
+  settings: StrategyConfig,
+) {
+  if (request.price === null || request.size <= 0) {
+    return "Initial primary request has no executable price or size";
+  }
+  const exactLeg = {
+    ...leg,
+    requestedPrice: request.price,
+    requestedSize: request.size,
+  };
+  const liveLeg = getLiveIntentLegSnapshot(exactLeg, marketState.polymarket.quote, marketState.kalshi.quote);
+  const depth = buildWsEntryDepthCheck(
+    exactLeg,
+    liveLeg,
+    marketState.polymarket.quote,
+    marketState.kalshi.quote,
+    settings,
+  );
+  return depth.coverageRatio + ORDER_SIZE_TOLERANCE >= 1
+    ? null
+    : `${leg.venue} ${leg.outcome} exact request depth coverage ${depth.coverageRatio.toFixed(4)} is below 1.0000`;
+}
 
 export function validateFinalWsEntrySnapshot(
   slot: MarketSlot,
@@ -5962,7 +6771,7 @@ function deriveEntryExecutableDepth(
   return displayedDepth;
 }
 
-function deriveAdaptiveSlippageBps(
+export function deriveAdaptiveSlippageBps(
   coverageRatio: number,
   settings: Pick<
     StrategyConfig,
@@ -5975,7 +6784,7 @@ function deriveAdaptiveSlippageBps(
   if (coverageRatio >= 1) {
     return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageDefaultBps);
   }
-  return Math.max(settings.maxSlippageBps, settings.adaptiveSlippageThinBps);
+  return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageThinBps);
 }
 
 async function resolveAdaptiveSlippageForLiveLeg(
@@ -5984,10 +6793,14 @@ async function resolveAdaptiveSlippageForLiveLeg(
   settings: StrategyConfig,
   now: number,
 ) {
-  const { polymarket: polymarketState, kalshi: kalshiState } = await marketDataSupervisor.readSlotState(slot, now);
+  const marketState = await marketDataSupervisor.readSlotState(slot, now);
+  const { polymarket: polymarketState, kalshi: kalshiState } = marketState;
   const liveLeg = getLiveIntentLegSnapshot(leg, polymarketState.quote, kalshiState.quote);
   const check = buildEntryDepthCheck(leg, liveLeg, settings);
-  return deriveAdaptiveSlippageBps(check.coverageRatio, settings);
+  return {
+    maxSlippageBps: deriveAdaptiveSlippageBps(check.coverageRatio, settings),
+    marketState,
+  };
 }
 
 export function getPolymarketHedgeMinNotionalViolation(
@@ -6110,6 +6923,56 @@ export function estimateRescueHedgeLossUsd(input: {
   );
 }
 
+export function deriveFeeSafePolymarketRescuePrice(input: {
+  maximumBuyPrice: number;
+  tickSize: number;
+  size: number;
+  entryPrice: number;
+  allocatedEntryFeeUsd: number;
+  fee: Extract<RecoveryFeeSchedule, { venue: "polymarket" }>;
+  maxLossUsd: number;
+}) {
+  const cap = normalizePolymarketBuyPriceCap({
+    maximumBuyPrice: input.maximumBuyPrice,
+    tickSize: input.tickSize,
+  });
+  if (!cap.ok) {
+    return { ok: false as const, code: cap.code, reason: cap.reason };
+  }
+
+  for (let tickIndex = cap.tickIndex; tickIndex > 0; tickIndex -= 1) {
+    const candidatePrice = tickIndex * input.tickSize;
+    const orderPrice = derivePolymarketRecoveryOrderPrice({
+      referencePrice: candidatePrice,
+      tickSize: input.tickSize,
+      side: "BUY",
+      ticks: 0,
+      maximumBuyPrice: candidatePrice,
+    });
+    if (!orderPrice.ok) {
+      continue;
+    }
+    const economics = evaluateRecoveryLossCap({
+      action: "rescue",
+      orderPrice,
+      size: input.size,
+      entryPrice: input.entryPrice,
+      allocatedEntryFeeUsd: input.allocatedEntryFeeUsd,
+      fee: input.fee,
+      maxLossUsd: input.maxLossUsd,
+    });
+    if (economics.allowed) {
+      return { ok: true as const, orderPrice, economics };
+    }
+  }
+
+  return {
+    ok: false as const,
+    code: "loss_cap_exceeded" as const,
+    reason: "No authoritative Polymarket BUY tick remains inside the fee-inclusive recovery loss cap",
+  };
+}
+
 export function isHedgedPairEconomicsWithinLossCap(
   economics: ReturnType<typeof deriveHedgedPairEconomics>,
   maximumAcceptedLossUsd = 0,
@@ -6206,6 +7069,7 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
     settings.hedgeRescueMaxLossUsd,
     settings.forcedUnwindMaxLossUsd > 0 ? settings.forcedUnwindMaxLossUsd : settings.hedgeRescueMaxLossUsd,
   );
+  const slot = deriveCanonicalIntentSlot(currentIntent);
 
   for (let attempt = 1; attempt <= settings.hedgeRescueMaxAttempts; attempt += 1) {
     if (attempt > 1 && settings.hedgeRescueDelayMs > 0) {
@@ -6246,88 +7110,98 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
       return { intent: currentIntent, recovered: currentIntent.status === "hedged", hold: false };
     }
 
-    const primaryEntryPrice = primaryLeg.filledPrice ?? primaryLeg.requestedPrice;
+    const primaryEntryPrice = primaryLeg.filledPrice;
     if (primaryEntryPrice === null) {
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
-    const maxHedgePrice = Math.min(0.99, Math.max(0.001, 1 - primaryEntryPrice + maxRescueLossUsd / unhedgedSize));
-    const bookFetchStartedAt = Date.now();
-    let book: Awaited<ReturnType<typeof fetchPolymarketBook>>;
-    try {
-      book = await fetchPolymarketBook(hedgeLeg.tokenId);
-    } catch (error) {
+    const rescueMarketState = await marketDataSupervisor.readSlotState(slot, attemptNow);
+    const marketProof = validateRecoveryLegMarketState({
+      intent: currentIntent,
+      leg: hedgeLeg,
+      slot,
+      marketState: rescueMarketState,
+      orderSide: "BUY",
+      settings,
+      now: attemptNow,
+    });
+    if (!marketProof.allowed || marketProof.venue !== "polymarket") {
       await writeRunEvent({
         asset: currentIntent.asset,
         level: "warn",
-        eventType: "order.hedge_rescue.evaluated",
-        message: `Hedge rescue book unavailable for intent ${currentIntent.id}`,
+        eventType: "order.hedge_rescue.market_proof_rejected",
+        message: `Hedge rescue market proof rejected for intent ${currentIntent.id}`,
         payload: {
           intentId: currentIntent.id,
           slotKey: currentIntent.slotKey,
           attempt,
-          error: toErrorMessage(error),
+          code: marketProof.allowed ? "venue_mismatch" : marketProof.code,
+          reason: marketProof.allowed ? "Expected Polymarket recovery proof" : marketProof.reason,
         },
-        createdAt: Date.now(),
+        createdAt: attemptNow,
       });
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
-    const bookAgeMs = Date.now() - bookFetchStartedAt;
-    if (bookAgeMs > settings.polymarketHedgeBookMaxAgeMs) {
-      await writeRunEvent({
-        asset: currentIntent.asset,
-        level: "warn",
-        eventType: "order.hedge_rescue.evaluated",
-        message: `Hedge rescue book too slow for intent ${currentIntent.id}`,
-        payload: {
-          intentId: currentIntent.id,
-          slotKey: currentIntent.slotKey,
-          attempt,
-          bookAgeMs,
-          maxBookAgeMs: settings.polymarketHedgeBookMaxAgeMs,
-        },
-        createdAt: Date.now(),
-      });
+    const fee = buildRecoveryFeeSchedule(hedgeLeg, rescueMarketState);
+    if (fee.venue !== "polymarket") {
+      throw new Error(`Polymarket rescue received a ${fee.venue} fee schedule`);
+    }
+    const normalizedTargetSize = Math.min(
+      unhedgedSize,
+      normalizeVenueTargetSize("polymarket", unhedgedSize, null, settings.minOrderSize),
+    );
+    if (normalizedTargetSize <= ORDER_SIZE_TOLERANCE) {
       return { intent: currentIntent, recovered: false, hold: false };
     }
-
-    const rawDepth = sumPolymarketAskDepthWithinLimit(book.asks, maxHedgePrice);
+    const allocatedEntryFeeUsd = allocateRecoveryEntryFeeUsd(primaryLeg, normalizedTargetSize);
+    const rawMaximumBuyPrice = 1 - primaryEntryPrice + (maxRescueLossUsd - allocatedEntryFeeUsd) / normalizedTargetSize;
+    const maximumBuyPrice = Math.min(1 - Number.EPSILON, rawMaximumBuyPrice);
+    const safePricing =
+      maximumBuyPrice > 0
+        ? deriveFeeSafePolymarketRescuePrice({
+            maximumBuyPrice,
+            tickSize: marketProof.tickSize,
+            size: normalizedTargetSize,
+            entryPrice: primaryEntryPrice,
+            allocatedEntryFeeUsd,
+            fee,
+            maxLossUsd: maxRescueLossUsd,
+          })
+        : {
+            ok: false as const,
+            code: "loss_cap_exceeded" as const,
+            reason: "Entry cost and fees consume the entire rescue loss budget",
+          };
+    const maxHedgePrice = safePricing.ok ? safePricing.orderPrice.price : null;
+    const asks =
+      (hedgeLeg.outcome === "UP"
+        ? rescueMarketState.polymarket.quote.orderbookLevels?.upAsks
+        : rescueMarketState.polymarket.quote.orderbookLevels?.downAsks
+      )?.map(([price, size]) => ({ price: String(price), size: String(size) })) ?? [];
+    const rawDepth = maxHedgePrice === null ? 0 : sumPolymarketAskDepthWithinLimit(asks, maxHedgePrice);
     const executableDepth = deriveSafePolymarketHedgeDepth(
       rawDepth,
       settings.polymarketHedgeDepthSafetyFactor,
       settings.polymarketHedgeHeadroomShares,
     );
     const minimumHedgeSize = getVenueMinimumOrderSize("polymarket", null, settings.minOrderSize);
-    const targetSize = Math.min(unhedgedSize, executableDepth);
-    const normalizedTargetSize = normalizeVenueTargetSize("polymarket", targetSize, null, settings.minOrderSize);
-    const quote = quotePolymarketBuyFromAsks(book.asks, maxHedgePrice, normalizedTargetSize);
-    const latestSnapshot = await readLatestSnapshot(currentIntent.asset, currentIntent.slotKey).catch(() => null);
-    const polymarketQuote = latestSnapshot?.polymarket ?? null;
-    const outcomeQuote = hedgeLeg.outcome === "UP" ? polymarketQuote?.outcomes.up : polymarketQuote?.outcomes.down;
-    const feeRateBps = outcomeQuote?.feeRateBps ?? polymarketQuote?.feeRateBps ?? 0;
-    const hedgeFeeUsd = calculatePolymarketLevelFee({
-      shares: quote.filledSize,
-      price: quote.vwap ?? maxHedgePrice,
-      feeRateBps,
-      feeRate: polymarketQuote?.feeRate ?? (feeRateBps > 0 ? undefined : POLYMARKET_CRYPTO_RESCUE_FEE_RATE),
-      feeExponent: polymarketQuote?.feeExponent ?? 1,
-    });
-    const hedgeLossUsd = estimateRescueHedgeLossUsd({
-      primaryEntryPrice,
-      hedgePrice: quote.vwap ?? maxHedgePrice,
-      size: quote.filledSize,
-      primaryFeeUsd: primaryLeg.feeUsd
-        ? (primaryLeg.feeUsd * quote.filledSize) / Math.max(primaryLeg.filledSize, ORDER_SIZE_TOLERANCE)
-        : 0,
-      hedgeFeeUsd,
-    });
+    const quote =
+      maxHedgePrice === null
+        ? { filledSize: 0, costUsd: 0, vwap: null }
+        : quotePolymarketBuyFromAsks(asks, maxHedgePrice, normalizedTargetSize);
+    const fullExecutableRescue =
+      normalizedTargetSize + ORDER_SIZE_TOLERANCE >= unhedgedSize &&
+      executableDepth + ORDER_SIZE_TOLERANCE >= normalizedTargetSize &&
+      quote.filledSize + ORDER_SIZE_TOLERANCE >= normalizedTargetSize;
+    const hedgeLossUsd = safePricing.ok && fullExecutableRescue ? safePricing.economics.worstCaseLossUsd : null;
+    const hedgeFeeUsd = safePricing.ok ? safePricing.economics.orderFeeUsd : null;
     const unwindEstimate = await estimatePrimaryUnwindRecoveryLoss(currentIntent, primaryLeg, attemptNow, settings);
     const holdEstimate = await estimateHoldToSettlementLoss(currentIntent, primaryLeg, attemptNow);
     const secondsToSettlement = Math.ceil((currentIntent.slotEndTs - attemptNow) / 1_000);
     const decision = evaluateExposureRecoveryOptions({
       rescueHedgeLossUsd: hedgeLossUsd,
-      rescueHedgeSize: quote.filledSize,
+      rescueHedgeSize: fullExecutableRescue ? normalizedTargetSize : quote.filledSize,
       unhedgedSize,
       unwindLossUsd: unwindEstimate.expectedLossUsd,
       holdExpectedLossUsd: holdEstimate.expectedLossUsd,
@@ -6356,6 +7230,8 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
         targetSize: normalizedTargetSize,
         quote,
         maxHedgePrice,
+        maximumBuyPrice,
+        pricePolicy: safePricing,
         hedgeFeeUsd,
         hedgeLossUsd,
         unwindLossUsd: unwindEstimate.expectedLossUsd,
@@ -6409,18 +7285,24 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
-    if (quote.filledSize + ORDER_SIZE_TOLERANCE < minimumHedgeSize) {
+    if (!safePricing.ok || normalizedTargetSize + ORDER_SIZE_TOLERANCE < minimumHedgeSize) {
       return { intent: currentIntent, recovered: false, hold: false };
     }
 
     const rescueLeg = {
       ...hedgeLeg,
-      requestedPrice: maxHedgePrice,
-      requestedSize: quote.filledSize,
-      requestedNotionalUsd: round4(quote.filledSize * maxHedgePrice),
+      requestedPrice: safePricing.orderPrice.price,
+      requestedSize: normalizedTargetSize,
+      requestedNotionalUsd: round4(normalizedTargetSize * safePricing.orderPrice.price),
     };
     const orderType = "FOK";
-    const rescueRequest = buildVenueOrderRequest(rescueLeg, 0, orderType, false, { overridePrice: maxHedgePrice });
+    const rescueRequest = buildVenueOrderRequest(rescueLeg, 0, orderType, false, {
+      overridePrice: safePricing.orderPrice.price,
+      authoritativeTickSize: marketProof.tickSize,
+    });
+    if (rescueRequest.price !== safePricing.orderPrice.price) {
+      throw new Error(`Authoritative rescue price changed while building request for ${currentIntent.id}`);
+    }
     let rescueOrder: LiveOrder;
     currentIntent = markIntentStatus(
       currentIntent,
@@ -6437,9 +7319,29 @@ async function attemptHedgeRescueBeforeUnwind(intent: OrderIntent, settings: Str
         stage: `hedge_rescue:${attempt}`,
         now: Date.now(),
         timeoutMs: settings.immediateOrderConfirmationTimeoutMs,
+        quoteObservedAt: marketProof.bookObservedAt,
+        submissionDeadlineAt: marketProof.validUntil,
       });
       rescueOrder = rescueExecution.order;
     } catch (error) {
+      if (error instanceof OrderSubmissionNotStartedError) {
+        await writeRunEvent({
+          asset: currentIntent.asset,
+          level: "warn",
+          eventType: "order.hedge_rescue.submission_not_started",
+          message: `Hedge rescue submission was rejected before the venue request for intent ${currentIntent.id}`,
+          payload: {
+            intentId: currentIntent.id,
+            slotKey: currentIntent.slotKey,
+            attempt,
+            attemptId: error.attemptId,
+            reason: error.reason,
+            orderType,
+          },
+          createdAt: Date.now(),
+        });
+        continue;
+      }
       const ambiguousSubmissionAt = Date.now();
       const errorMessage = toErrorMessage(error);
       await writeRunEvent({
@@ -6612,15 +7514,65 @@ async function estimatePrimaryUnwindRecoveryLoss(
   const unhedgedPrimarySize = deriveUnhedgedPrimarySize(intent);
   const requestedSize =
     unhedgedPrimarySize > ORDER_SIZE_TOLERANCE ? Math.min(exitableSize, unhedgedPrimarySize) : exitableSize;
-  const liveExitPrice = await resolvePrimaryExitPrice(intent, primaryLeg, now).catch(() => null);
-  const fallbackExitPrice = primaryLeg.filledPrice === null ? primaryLeg.requestedPrice : primaryLeg.filledPrice * 0.99;
-  const expectedExitPrice = applySlippage(liveExitPrice ?? fallbackExitPrice ?? 0, settings.maxSlippageBps, "SELL");
+  if (requestedSize <= 0 || primaryLeg.filledPrice === null || settings.forcedUnwindMaxLossUsd <= 0) {
+    return { requestedSize, expectedExitPrice: null, expectedLossUsd: null };
+  }
 
-  return {
-    requestedSize,
-    expectedExitPrice,
-    expectedLossUsd: estimatePrimaryUnwindLossUsd(primaryLeg, requestedSize, expectedExitPrice),
-  };
+  try {
+    const slot = deriveCanonicalIntentSlot(intent);
+    const marketState = await marketDataSupervisor.readSlotState(slot, now);
+    const proof = validateRecoveryLegMarketState({
+      intent,
+      leg: primaryLeg,
+      slot,
+      marketState,
+      orderSide: "SELL",
+      settings,
+      now,
+    });
+    if (!proof.allowed) {
+      return { requestedSize, expectedExitPrice: null, expectedLossUsd: null };
+    }
+    const referencePrice = applySlippage(proof.referencePrice, settings.maxSlippageBps, "SELL");
+    const orderPrice =
+      proof.venue === "polymarket"
+        ? derivePolymarketRecoveryOrderPrice({
+            referencePrice,
+            tickSize: proof.tickSize,
+            side: "SELL",
+            ticks: 0,
+          })
+        : deriveKalshiRecoveryOrderPrice({
+            referencePrice,
+            outcome: proof.outcome,
+            side: "SELL",
+            ticks: 0,
+            priceRanges: proof.priceRanges,
+          });
+    if (!orderPrice.ok) {
+      return { requestedSize, expectedExitPrice: null, expectedLossUsd: null };
+    }
+    const economics = evaluateRecoveryLossCap({
+      action: "unwind",
+      orderPrice,
+      size: requestedSize,
+      entryPrice: primaryLeg.filledPrice,
+      allocatedEntryFeeUsd: allocateRecoveryEntryFeeUsd(primaryLeg, requestedSize),
+      fee: buildRecoveryFeeSchedule(primaryLeg, marketState),
+      maxLossUsd: settings.forcedUnwindMaxLossUsd,
+    });
+    if (!("worstCaseLossUsd" in economics)) {
+      return { requestedSize, expectedExitPrice: orderPrice.price, expectedLossUsd: null };
+    }
+
+    return {
+      requestedSize,
+      expectedExitPrice: orderPrice.price,
+      expectedLossUsd: economics.worstCaseLossUsd,
+    };
+  } catch {
+    return { requestedSize, expectedExitPrice: null, expectedLossUsd: null };
+  }
 }
 
 async function estimateHoldToSettlementLoss(intent: OrderIntent, primaryLeg: OrderIntent["legs"][number], now: number) {
@@ -6807,6 +7759,39 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       unwindResult = await unwindPrimaryLeg(currentIntent, settings, Date.now(), attempt, force);
     } catch (error) {
       const errorMessage = toErrorMessage(error);
+      if (error instanceof OrderSubmissionNotStartedError) {
+        await writeRunEvent({
+          asset: currentIntent.asset,
+          level: "warn",
+          eventType: "order.unwind.submission_not_started",
+          message: `Primary unwind submission was rejected before the venue request for intent ${currentIntent.id}`,
+          payload: {
+            intentId: currentIntent.id,
+            venue: currentIntent.primaryVenue,
+            attempt,
+            attempts: maxAttempts,
+            attemptId: error.attemptId,
+            reason: error.reason,
+          },
+          createdAt: Date.now(),
+        });
+        if (attempt < maxAttempts) {
+          continue;
+        }
+        currentIntent = await markIntentManualRequired(
+          currentIntent,
+          Date.now(),
+          "primary_unwind_submission_window_exhausted",
+          "Every primary unwind attempt expired before venue submission; manual intervention required",
+          {
+            venue: currentIntent.primaryVenue,
+            attempts: maxAttempts,
+            lastAttemptId: error.attemptId,
+          },
+          hedgeOrder,
+        );
+        break;
+      }
       if (
         isPolymarketOrderbookUnavailableError(error) &&
         currentIntent.primaryVenue === "polymarket" &&
@@ -6877,28 +7862,30 @@ async function attemptPrimaryUnwindAfterHedgeFailure(
       await maybeWritePrimaryUnwindFilledSizeMismatchEvent(currentIntent, unwindResult, now);
       const averageExitPrice = unwindResult.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
       const payoutUsd = round4(unwindResult.filledSize * averageExitPrice - (unwindResult.feeUsd ?? 0));
-      currentIntent = finalizeUnwoundIntent({
-        intent: {
+      currentIntent = markIntentStatus(
+        {
           ...currentIntent,
           legs: currentIntent.legs.map((leg) =>
-            leg.id === primaryLeg.id
-              ? {
-                  ...leg,
-                  status: "unwound",
-                  payoutUsd,
-                }
-              : leg,
+            leg.id === primaryLeg.id ? { ...leg, status: "unwound", payoutUsd } : leg,
           ) as OrderIntent["legs"],
         },
+        "unwind_required",
         now,
-        failureReason: describeUnwoundAfterFailure(failureReason),
-      });
+        `${describeUnwoundAfterFailure(failureReason)}; awaiting final accounting fill evidence`,
+      );
       currentIntent = await writeOrderIntent(currentIntent);
-      await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_hedge_failure", now, {
-        venue: currentIntent.primaryVenue,
-        unwindOrderId: unwindResult.venueOrderId,
+      await writeRunEvent({
+        asset: currentIntent.asset,
+        level: "info",
+        eventType: "accounting.unwind.awaiting_fill_evidence",
+        message: `Intent ${currentIntent.id} awaits immutable unwind fill evidence before terminalization`,
+        payload: {
+          intentId: currentIntent.id,
+          venue: currentIntent.primaryVenue,
+          unwindOrderId: unwindResult.venueOrderId,
+        },
+        createdAt: now,
       });
-      await armRecoveredHedgeFailureCooldown(currentIntent, Date.now(), "primary_unwound_after_hedge_failure");
       break;
     }
 
@@ -7194,20 +8181,294 @@ async function tripManualInterventionBreaker(
   hedgeOrder: LiveOrder | null,
   stage: string,
 ) {
-  await writeCircuitBreaker({
-    key: "global",
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: intent.id,
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: intent.asset,
       slotKey: intent.slotKey,
-      venue: intent.primaryVenue,
+      intentId: intent.id,
       stage,
-      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
-      requiresManualClear: true,
-    },
+      reason: "hedge_failure",
+      disposition: "manual_intervention",
+      venue: intent.primaryVenue,
+      orderId: hedgeOrder?.venueOrderId ?? null,
+      triggeredAt: now,
+    }),
+  );
+}
+
+async function closeIntentWithoutExposureAccounting(input: {
+  intent: OrderIntent;
+  status: "failed" | "skipped" | "canceled";
+  now: number;
+  stage: string;
+  reason: string;
+  proof?: Record<string, unknown>;
+}) {
+  const head = await readAccountingHead(input.intent.id);
+  if (!head) {
+    throw new Error(`Accounting head missing for intent ${input.intent.id}`);
+  }
+  const terminalIntent: OrderIntent = {
+    ...markIntentStatus(input.intent, input.status, input.now, input.reason),
+    resolvedAt: input.intent.resolvedAt ?? input.now,
+    realizedPnlUsd: 0,
+    roi: null,
+  };
+  const proof = {
+    schema: "warbitrer.no-exposure-proof.v1",
+    stage: input.stage,
+    reason: input.reason,
+    intentRevision: input.intent.revision,
+    legs: input.intent.legs.map((leg) => ({
+      legId: leg.id,
+      venue: leg.venue,
+      venueOrderId: leg.venueOrderId,
+      filledSize: leg.filledSize,
+      status: leg.status,
+    })),
+    ...input.proof,
+  };
+
+  try {
+    await closeIntentAccountingWithoutExposure({
+      context: {
+        actor: `engine.${input.stage}`,
+        requestId: buildAccountingMutationRequestId(
+          "close_no_exposure",
+          input.intent.id,
+          input.intent.revision,
+          input.status,
+          input.now,
+          proof,
+        ),
+        occurredAt: input.now,
+      },
+      expectedHeadRevision: head.revision,
+      expectedIntentRevision: input.intent.revision,
+      terminalIntent,
+      proof,
+    });
+  } catch (error) {
+    const code = readAccountingPersistenceErrorCode(error);
+    if (code === "exposure_present" || code === "unresolved_submission") {
+      return markIntentManualRequired(
+        input.intent,
+        input.now,
+        `accounting_no_exposure_${input.stage}`,
+        `Intent cannot close without exposure proof (${toErrorMessage(error)})`,
+        {
+          requestedTerminalStatus: input.status,
+          accountingErrorCode: code,
+        },
+      );
+    }
+    if (code === "revision_conflict" || code === "state_conflict") {
+      const current = await findOrderIntent(input.intent.id);
+      if (current && (current.status === "failed" || current.status === "skipped" || current.status === "canceled")) {
+        return current;
+      }
+    }
+    throw error;
+  }
+
+  const persisted = await findOrderIntent(input.intent.id);
+  if (!persisted) {
+    throw new Error(`Intent ${input.intent.id} disappeared after no-exposure accounting closure`);
+  }
+  return persisted;
+}
+
+async function finalizeTerminalIntentWithAccounting(input: {
+  intent: OrderIntent;
+  terminalIntent: OrderIntent;
+  now: number;
+  stage: string;
+  stability: Record<string, unknown>;
+}) {
+  const head = await readAccountingHead(input.intent.id);
+  if (!head) {
+    throw new Error(`Accounting head missing for intent ${input.intent.id}`);
+  }
+  const operation = head.currentVersion === null ? "finalize" : "reaccount";
+  let projectedTerminalIntent: OrderIntent | null = null;
+
+  try {
+    const fills = await readAccountingFillEvidenceForIntent(input.intent.id);
+    const accounting = buildTerminalAccountingProjection({
+      terminalIntent: input.terminalIntent,
+      fills,
+      version: operation === "finalize" ? 1 : (head.currentVersion ?? 0) + 1,
+      capturedAt: input.now,
+      settlementObservedAt: input.now,
+    });
+    projectedTerminalIntent = accounting.terminalIntent;
+    const persistenceInput = {
+      context: {
+        actor: `engine.${input.stage}`,
+        requestId: buildAccountingMutationRequestId(
+          operation,
+          input.intent.id,
+          input.intent.revision,
+          accounting.projection.proofSha256,
+          input.stability,
+        ),
+        occurredAt: input.now,
+      },
+      expectedHeadRevision: head.revision,
+      expectedIntentRevision: input.intent.revision,
+      terminalIntent: accounting.terminalIntent,
+      ledgerInput: accounting.ledgerInput,
+      stability: {
+        schema: "warbitrer.accounting-stability.v1",
+        stage: input.stage,
+        observedAt: input.now,
+        ...input.stability,
+      },
+    };
+    if (operation === "finalize") {
+      await finalizeIntentAccounting(persistenceInput);
+    } else {
+      await reaccountIntent(persistenceInput);
+    }
+  } catch (error) {
+    const accountingCode =
+      error instanceof AccountingLedgerError ? error.code : readAccountingPersistenceErrorCode(error);
+    const [concurrentIntent, concurrentHead] = await Promise.all([
+      findOrderIntent(input.intent.id).catch(() => null),
+      readAccountingHead(input.intent.id).catch(() => null),
+    ]);
+    if (
+      concurrentIntent &&
+      concurrentHead &&
+      projectedTerminalIntent &&
+      concurrentHead.currentVersion !== null &&
+      concurrentHead.currentVersion >= (operation === "finalize" ? 1 : (head.currentVersion ?? 0) + 1) &&
+      isStableAccountingTerminalConcordant(concurrentIntent, concurrentHead, projectedTerminalIntent)
+    ) {
+      await writeRunEvent({
+        asset: concurrentIntent.asset,
+        level: "info",
+        eventType: "accounting.terminalization.concurrent_commit_observed",
+        message: `Accounting ${operation} was already committed for intent ${input.intent.id}`,
+        payload: {
+          intentId: input.intent.id,
+          stage: input.stage,
+          accountingVersion: concurrentHead.currentVersion,
+          accountingProofSha256: concurrentHead.currentProofSha256,
+          observedError: toErrorMessage(error),
+        },
+        createdAt: input.now,
+      });
+      return concurrentIntent;
+    }
+    await writeRunEvent({
+      asset: input.intent.asset,
+      level: "error",
+      eventType: "accounting.terminalization.blocked",
+      message: `Accounting ${operation} blocked for intent ${input.intent.id}`,
+      payload: {
+        intentId: input.intent.id,
+        requestedStatus: input.terminalIntent.status,
+        stage: input.stage,
+        accountingCode,
+        error: toErrorMessage(error),
+      },
+      createdAt: input.now,
+    });
+    if (input.intent.status !== "settled" && input.intent.status !== "unwound") {
+      return markIntentManualRequired(
+        input.intent,
+        input.now,
+        `accounting_terminalization_${input.stage}`,
+        `Stable accounting evidence is incomplete (${toErrorMessage(error)})`,
+        {
+          requestedStatus: input.terminalIntent.status,
+          accountingCode,
+        },
+      );
+    }
+    await observeCircuitBreakerIncident(
+      createExecutionIncident({
+        asset: input.intent.asset,
+        slotKey: input.intent.slotKey,
+        intentId: input.intent.id,
+        stage: `accounting_reaccount_${input.stage}`,
+        reason: "venue_error",
+        disposition: "manual_intervention",
+        venue: input.intent.primaryVenue,
+        triggeredAt: input.now,
+      }),
+    );
+    return input.intent;
+  }
+
+  const persisted = await findOrderIntent(input.intent.id);
+  if (!persisted) {
+    throw new Error(`Intent ${input.intent.id} disappeared after accounting ${operation}`);
+  }
+  return persisted;
+}
+
+export function isStableAccountingTerminalConcordant(
+  current: OrderIntent,
+  head: Pick<
+    NonNullable<Awaited<ReturnType<typeof readAccountingHead>>>,
+    "state" | "currentVersion" | "currentProofSha256"
+  >,
+  requested: OrderIntent,
+) {
+  if (
+    head.state !== "stable" ||
+    head.currentVersion === null ||
+    head.currentProofSha256 === null ||
+    current.status !== requested.status ||
+    current.resolvedAt === null ||
+    current.realizedPnlUsd === null ||
+    (current.status !== "settled" && current.status !== "unwound")
+  ) {
+    return false;
+  }
+  if (current.status === "settled") {
+    if (
+      current.polyResolution !== requested.polyResolution ||
+      current.kalshiResolution !== requested.kalshiResolution
+    ) {
+      return false;
+    }
+  }
+  if (current.realizedPnlUsd !== requested.realizedPnlUsd || current.roi !== requested.roi) {
+    return false;
+  }
+  if (current.legs.length !== requested.legs.length) {
+    return false;
+  }
+  const requestedLegs = new Map(requested.legs.map((leg) => [leg.id, leg]));
+  return current.legs.every((leg) => {
+    const expected = requestedLegs.get(leg.id);
+    return Boolean(
+      expected &&
+      leg.intentId === expected.intentId &&
+      leg.venue === expected.venue &&
+      leg.outcome === expected.outcome &&
+      leg.marketRef === expected.marketRef &&
+      (leg.tokenId ?? null) === (expected.tokenId ?? null) &&
+      leg.side === expected.side &&
+      leg.filledPrice === expected.filledPrice &&
+      leg.filledSize === expected.filledSize &&
+      leg.feeUsd === expected.feeUsd &&
+      leg.status === expected.status &&
+      leg.venueOrderId === expected.venueOrderId &&
+      leg.payoutUsd === expected.payoutUsd &&
+      leg.resolvedOutcome === expected.resolvedOutcome,
+    );
   });
+}
+
+function readAccountingPersistenceErrorCode(error: unknown) {
+  if (!error || typeof error !== "object" || !("code" in error) || typeof error.code !== "string") {
+    return null;
+  }
+  return error.code;
 }
 
 async function markIntentManualRequired(
@@ -7389,7 +8650,7 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedConte
       );
     }
 
-    const confirmedTrades = usableMatchingTrades.filter(isConfirmedPolymarketTrade);
+    const accountingTrades = usableMatchingTrades.filter(isConfirmedPolymarketTrade);
     const truth = resolvePolymarketOrderTruth({
       orderId: existingOrder.venueOrderId,
       order: extractPolymarketOpenOrderFromRaw(existingOrder.raw),
@@ -7415,23 +8676,56 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedConte
           orderTruth: truth,
         },
       });
-      for (const trade of confirmedTrades) {
-        await writePolymarketFillSafely(
+      const accountingFillsById = new Map<string, LiveFill>();
+      for (const trade of accountingTrades) {
+        const accountingFill = await ingestPolymarketFillAccounting(
           trade,
           existingOrder.intentId,
           existingOrder.venueOrderId,
           existingOrder.asset,
           "reconcile",
         );
+        accountingFillsById.set(accountingFill.id, accountingFill);
+      }
+      const accountingFills = [...accountingFillsById.values()];
+      const exactAccountingSize = accountingFills.reduce((sum, fill) => sum + fill.size, 0);
+      if (
+        accountingFills.length > 0 &&
+        Math.abs(exactAccountingSize - truth.effectiveFilledSize) <= ORDER_SIZE_TOLERANCE
+      ) {
+        await writeVenueOrder({
+          ...existingOrder,
+          status:
+            truth.status === "filled" && truth.confirmedFilledSize > 0
+              ? deriveConfirmedVenueOrderStatus(existingOrder, truth.confirmedFilledSize)
+              : truth.status,
+          filledSize: Math.max(existingOrder.filledSize, truth.effectiveFilledSize),
+          averageFillPrice: truth.averageFillPrice ?? existingOrder.averageFillPrice,
+          feeUsd: accountingFills.reduce((sum, fill) => sum + fill.feeUsd, 0),
+          updatedAt: now,
+          raw: {
+            ...(existingOrder.raw ?? {}),
+            trades: usableMatchingTrades,
+            orderTruth: truth,
+            exactAccountingFills: accountingFills.map((fill) => ({
+              id: fill.id,
+              tradeId: fill.tradeId,
+              price: fill.price,
+              size: fill.size,
+              feeUsd: fill.feeUsd,
+              onchainOrderFilled: fill.raw.onchainOrderFilled,
+            })),
+          },
+        });
       }
       touchedIntentLegs.add(`${existingOrder.intentId}:polymarket`);
       continue;
     }
 
-    if (usableMatchingTrades.some(isPendingPolymarketTrade)) {
+    if (truth.hasPendingExposure) {
       await writeVenueOrder({
         ...existingOrder,
-        status: mergePolymarketTradeObservationStatus(existingOrder.status, "pending"),
+        status: mergePolymarketTradeObservationStatus(existingOrder.status, "pending", truth.hasUnknownTradeTruth),
         filledSize: Math.max(existingOrder.filledSize, truth.effectiveFilledSize),
         averageFillPrice: truth.averageFillPrice ?? existingOrder.averageFillPrice,
         feeUsd: Math.max(existingOrder.feeUsd ?? 0, truth.feeUsd),
@@ -7474,14 +8768,19 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedConte
         liquidity: mappedFill.liquidity,
         now,
       }));
-    await writeFill({
-      ...mappedFill,
-      feeUsd: estimatedFeeUsd ?? mappedFill.feeUsd,
-      raw: {
-        ...mappedFill.raw,
-        estimatedFeeUsd: explicitFeeUsd === null ? estimatedFeeUsd : undefined,
+    const feeClassification = classifyKalshiAccountingFee(fill, estimatedFeeUsd);
+    await ingestFillAccounting(
+      {
+        ...mappedFill,
+        feeUsd: feeClassification.feeUsd,
+        raw: {
+          ...mappedFill.raw,
+          estimatedFeeUsd: feeClassification.feeProvenance === "estimated" ? estimatedFeeUsd : undefined,
+        },
       },
-    });
+      feeClassification,
+      "reconcile",
+    );
     touchedIntentLegs.add(`${existingOrder.intentId}:kalshi`);
   }
 
@@ -7552,30 +8851,200 @@ async function readCachedKalshiFeeMultiplier(asset: MarketAsset, now: number) {
   return value;
 }
 
-async function writePolymarketFillSafely(
+async function ingestPolymarketFillAccounting(
   trade: Parameters<typeof mapPolymarketTradeToFill>[0],
   intentId: string,
   venueOrderId: string,
   asset: MarketAsset,
   stage: "intent_sync" | "reconcile",
 ) {
+  const mappedFill = mapPolymarketTradeToFill(trade, intentId, { venueOrderId, asset });
+  let onchainEvidence;
   try {
-    await writeFill(mapPolymarketTradeToFill(trade, intentId, { venueOrderId, asset }));
+    onchainEvidence = await fetchPolymarketOrderFilledEvidence(trade, mappedFill);
   } catch (error) {
+    await recordPolymarketAccountingEvidenceFailure({
+      intentId,
+      asset,
+      venueOrderId,
+      tradeId: trade.id,
+      transactionHash: trade.transaction_hash ?? null,
+      stage,
+      error,
+    });
+    throw error;
+  }
+  const feeClassification = classifyPolymarketAccountingFee({
+    tradeStatus: trade.status,
+    onchainFeeUsd: onchainEvidence.feeUsd,
+    onchainEvidencePresent: true,
+  });
+  const accountingFill = applyPolymarketOrderFilledEvidence(mappedFill, onchainEvidence);
+  return ingestFillAccounting(
+    {
+      ...accountingFill,
+      feeUsd: feeClassification.feeUsd,
+    },
+    feeClassification,
+    stage,
+  );
+}
+
+async function recordPolymarketAccountingEvidenceFailure(input: {
+  intentId: string;
+  asset: MarketAsset;
+  venueOrderId: string;
+  tradeId: string;
+  transactionHash: string | null;
+  stage: "intent_sync" | "reconcile";
+  error: unknown;
+}) {
+  const now = Date.now();
+  const evidenceCode =
+    input.error instanceof PolymarketOnchainEvidenceError ? input.error.code : "unexpected_evidence_error";
+  await writeRunEvent({
+    asset: input.asset,
+    level: "error",
+    eventType: "accounting.polymarket.onchain_evidence_unavailable",
+    message: `Exact Polygon fill evidence unavailable for Polymarket trade ${input.tradeId}`,
+    payload: {
+      intentId: input.intentId,
+      venueOrderId: input.venueOrderId,
+      tradeId: input.tradeId,
+      transactionHash: input.transactionHash,
+      stage: input.stage,
+      evidenceCode,
+      error: toErrorMessage(input.error),
+    },
+    createdAt: now,
+  });
+
+  const intent = await findOrderIntent(input.intentId);
+  if (!intent) {
+    return;
+  }
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: intent.asset,
+      slotKey: intent.slotKey,
+      intentId: intent.id,
+      stage: `accounting_polymarket_onchain_${input.stage}`,
+      reason: "venue_error",
+      disposition: "manual_intervention",
+      venue: "polymarket",
+      orderId: input.venueOrderId,
+      triggeredAt: now,
+    }),
+  );
+}
+
+class AccountingFillQuarantinedError extends Error {
+  constructor(
+    readonly intentId: string,
+    readonly fillId: string,
+    readonly reason: string,
+  ) {
+    super(`Accounting quarantined fill ${fillId} for intent ${intentId}: ${reason}`);
+    this.name = "AccountingFillQuarantinedError";
+  }
+}
+
+async function ingestFillAccounting(
+  fill: LiveFill,
+  classification: {
+    finality: AccountingEvidenceFinality;
+    venueTruth: string;
+    feeProvenance:
+      "venue_explicit" | "onchain_event" | "protocol_zero" | "estimated" | "missing" | "invalid" | "synthetic_exact";
+  },
+  stage: string,
+) {
+  const intent = await findOrderIntent(fill.intentId);
+  if (!intent) {
+    throw new Error(`Accounting fill ${fill.id} references missing intent ${fill.intentId}`);
+  }
+  const leg = resolveAccountingLegForFill(intent, fill);
+  if (!leg) {
+    await observeCircuitBreakerIncident(
+      createExecutionIncident({
+        asset: intent.asset,
+        slotKey: intent.slotKey,
+        intentId: intent.id,
+        stage: `accounting_fill_identity_${stage}`,
+        reason: "venue_error",
+        disposition: "manual_intervention",
+        venue: fill.venue,
+        orderId: fill.venueOrderId,
+        triggeredAt: Date.now(),
+      }),
+    );
+    throw new Error(`Accounting fill ${fill.id} does not match a canonical leg of intent ${intent.id}`);
+  }
+  const head = await readAccountingHead(intent.id);
+  if (!head) {
+    throw new Error(`Accounting head missing for intent ${intent.id}`);
+  }
+  const accountingFill = attachAccountingFillProvenance(fill, classification);
+  const result = await ingestVenueFillAccounting({
+    context: {
+      actor: "engine.fill_ingestion",
+      requestId: buildAccountingFillMutationRequestId(accountingFill, leg.id, classification),
+      occurredAt: accountingFill.filledAt,
+    },
+    expectedHeadRevision: head.revision,
+    legId: leg.id,
+    finality: classification.finality,
+    fill: accountingFill,
+  });
+  if ("reason" in result) {
     await writeRunEvent({
-      level: "warn",
-      eventType: "fills.polymarket.write_failed",
-      message: `Polymarket fill write failed during ${stage} for intent ${intentId}`,
+      asset: intent.asset,
+      level: "error",
+      eventType: "accounting.fill.quarantined",
+      message: `Fill ${fill.id} quarantined during ${stage}`,
       payload: {
-        intentId,
-        stage,
-        venueOrderId,
-        tradeId: trade.id,
-        error: toErrorMessage(error),
+        intentId: intent.id,
+        fillId: fill.id,
+        venue: fill.venue,
+        venueOrderId: fill.venueOrderId,
+        tradeId: fill.tradeId,
+        finality: classification.finality,
+        reason: result.reason,
+        quarantineId: result.quarantineId,
       },
       createdAt: Date.now(),
     });
+    await observeCircuitBreakerIncident(
+      createExecutionIncident({
+        asset: intent.asset,
+        slotKey: intent.slotKey,
+        intentId: intent.id,
+        stage: `accounting_fill_quarantined_${stage}`,
+        reason: "venue_error",
+        disposition: "manual_intervention",
+        venue: fill.venue,
+        orderId: fill.venueOrderId,
+        triggeredAt: Date.now(),
+      }),
+    );
+    throw new AccountingFillQuarantinedError(intent.id, fill.id, result.reason);
   }
+  return accountingFill;
+}
+
+export function resolveAccountingLegForFill(intent: OrderIntent, fill: LiveFill) {
+  if (fill.intentId !== intent.id || fill.asset !== intent.asset || fill.shadow !== intent.shadow) {
+    return null;
+  }
+  return (
+    intent.legs.find(
+      (leg) =>
+        leg.venue === fill.venue &&
+        leg.marketRef === fill.marketRef &&
+        leg.outcome === fill.outcome &&
+        (leg.tokenId ?? null) === (fill.tokenId ?? null),
+    ) ?? null
+  );
 }
 
 async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
@@ -7605,8 +9074,8 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
     }
 
     const intentOrders = recentOrders.filter((order) => order.intentId === intent.id);
-    const primaryOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, primaryLeg);
-    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, primaryLeg, "entry");
+    const primaryOrder = findLatestIntentOrderForLeg(intentOrders, intent, primaryLeg);
+    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, intent, primaryLeg, "entry");
     if (
       (!primaryOrderSummary || primaryOrderSummary.filledSize <= 0) &&
       (!primaryOrder || !shouldTreatPrimaryOrderAsFilled(intent, primaryOrder))
@@ -7614,7 +9083,7 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
       continue;
     }
 
-    const hedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, hedgeLeg);
+    const hedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent, hedgeLeg);
     if (hedgeOrder?.status === "filled" || (hedgeOrder?.filledSize ?? 0) > 0) {
       continue;
     }
@@ -7642,31 +9111,33 @@ async function reconcileLatePrimaryFillRescue(asset: MarketAsset, now: number) {
       continue;
     }
 
-    rescued = markIntentStatus(
+    rescued = await markIntentManualRequired(
       rescued,
-      "failed",
       now,
+      "late_primary_fill_after_failure",
       "Late primary fill detected after intent had already failed; manual intervention required",
+      {
+        venue: intent.primaryVenue,
+        orderId: primaryOrder?.venueOrderId ?? primaryOrderSummary?.venueOrderId ?? null,
+      },
     );
-    rescued = await writeOrderIntent(rescued);
     await writeManualInterventionRunEvent(rescued, now, "late_primary_fill_after_failure", {
       venue: intent.primaryVenue,
       orderId: primaryOrder?.venueOrderId ?? primaryOrderSummary?.venueOrderId ?? null,
     });
-    await writeCircuitBreaker({
-      key: "global",
-      active: true,
-      reason: "hedge_failure",
-      triggeredAt: now,
-      payload: {
-        intentId: intent.id,
+    await observeCircuitBreakerIncident(
+      createExecutionIncident({
+        asset: intent.asset,
         slotKey: intent.slotKey,
+        intentId: intent.id,
+        stage: "late_primary_fill_after_close",
+        reason: "hedge_failure",
+        disposition: "manual_intervention",
         venue: intent.primaryVenue,
         orderId: primaryOrder?.venueOrderId ?? primaryOrderSummary?.venueOrderId ?? null,
-        stage: "late_primary_fill_after_close",
-        requiresManualClear: true,
-      },
-    });
+        triggeredAt: now,
+      }),
+    );
     await writeRunEvent({
       level: "error",
       eventType: "intent.failed.late_primary_fill",
@@ -7719,40 +9190,23 @@ async function reconcileSettlements(asset: MarketAsset, now: number) {
       venueResolutions.polyResolution,
       venueResolutions.kalshiResolution,
     );
-    const settled = await writeOrderIntent(
-      finalizeIntent({
+    await finalizeTerminalIntentWithAccounting({
+      intent: settlementIntent,
+      terminalIntent: finalizeIntent({
         intent: settlementIntent,
         polyResolution: venueResolutions.polyResolution,
         kalshiResolution: venueResolutions.kalshiResolution,
         payoutUsd,
         now,
       }),
-    );
-    for (const leg of settled.legs) {
-      const resolvedOutcome =
-        leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
-      const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
-      await writeSettlement({
-        id: `${settled.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
-        asset: settled.asset,
-        intentId: settled.id,
-        venue: leg.venue,
-        marketRef: leg.marketRef,
-        outcome: leg.outcome,
-        resolvedOutcome,
-        payoutUsd: legPayoutUsd,
-        settledAt: now,
-        raw: {
-          slotKey: settled.slotKey,
-          filledSize: leg.filledSize,
-          filledPrice: leg.filledPrice,
-          cashAdjustmentUsd: leg.cashAdjustmentUsd ?? 0,
-          legPayoutUsd,
-          polyResolution: venueResolutions.polyResolution,
-          kalshiResolution: venueResolutions.kalshiResolution,
-        },
-      });
-    }
+      now,
+      stage: "venue_settlement",
+      stability: {
+        resolutionSource: "official_venue_resolution",
+        polyResolution: venueResolutions.polyResolution,
+        kalshiResolution: venueResolutions.kalshiResolution,
+      },
+    });
   }
 }
 
@@ -7887,7 +9341,10 @@ export function mergeObservedSlotResolutionOutcomes(input: {
 }
 
 async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
-  const venueResolutions = await fetchVenueSettlementResolutions(intent);
+  const [venueResolutions, accountingHead] = await Promise.all([
+    fetchVenueSettlementResolutions(intent),
+    readAccountingHead(intent.id),
+  ]);
   if (!venueResolutions) {
     return {
       status: "unavailable" as const,
@@ -7895,7 +9352,7 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
     };
   }
 
-  const refreshedIntent = await refreshIntentFromStoredFills(intent, now);
+  const refreshedIntent = intent;
   const payoutUsd = calculateWinningPayout(
     refreshedIntent.legs,
     venueResolutions.polyResolution,
@@ -7909,57 +9366,43 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
     now: intent.resolvedAt ?? now,
   });
 
-  if (
-    intent.polyResolution === venueResolutions.polyResolution &&
-    intent.kalshiResolution === venueResolutions.kalshiResolution &&
-    intent.realizedPnlUsd === repaired.realizedPnlUsd &&
-    intent.roi === repaired.roi
-  ) {
+  if (!isSettledIntentAccountingRepairRequired(intent, repaired, accountingHead?.state ?? null)) {
     return {
       status: "unchanged" as const,
       intent,
     };
   }
 
-  let repairedIntent: OrderIntent = {
+  const repairedCandidate: OrderIntent = {
     ...repaired,
     updatedAt: now,
     resolvedAt: intent.resolvedAt ?? repaired.resolvedAt,
   };
 
-  repairedIntent = await writeOrderIntent(repairedIntent);
-  await updateStablePnlChangeFromIntent(repairedIntent);
-  for (const leg of repairedIntent.legs) {
-    const resolvedOutcome =
-      leg.venue === "polymarket" ? venueResolutions.polyResolution : venueResolutions.kalshiResolution;
-    const legPayoutUsd = leg.payoutUsd ?? (leg.outcome === resolvedOutcome ? leg.filledSize : 0);
-    await writeSettlement({
-      id: `${repairedIntent.id}:${leg.venue}:${leg.marketRef}:${leg.outcome}`,
-      asset: repairedIntent.asset,
-      intentId: repairedIntent.id,
-      venue: leg.venue,
-      marketRef: leg.marketRef,
-      outcome: leg.outcome,
-      resolvedOutcome,
-      payoutUsd: legPayoutUsd,
-      settledAt: repairedIntent.resolvedAt ?? now,
-      raw: {
-        slotKey: repairedIntent.slotKey,
-        filledSize: leg.filledSize,
-        filledPrice: leg.filledPrice,
-        cashAdjustmentUsd: leg.cashAdjustmentUsd ?? 0,
-        legPayoutUsd,
-        polyResolution: venueResolutions.polyResolution,
-        kalshiResolution: venueResolutions.kalshiResolution,
-        repairedFrom: {
-          polyResolution: intent.polyResolution,
-          kalshiResolution: intent.kalshiResolution,
-          realizedPnlUsd: intent.realizedPnlUsd,
-          roi: intent.roi,
-        },
-      },
-    });
+  const repairedIntent = await finalizeTerminalIntentWithAccounting({
+    intent,
+    terminalIntent: repairedCandidate,
+    now,
+    stage: "settlement_resolution_repair",
+    stability: {
+      resolutionSource: "official_venue_resolution",
+      previousPolyResolution: intent.polyResolution,
+      previousKalshiResolution: intent.kalshiResolution,
+      polyResolution: venueResolutions.polyResolution,
+      kalshiResolution: venueResolutions.kalshiResolution,
+      previousAccountingState: accountingHead?.state ?? "missing",
+    },
+  });
+  if (
+    repairedIntent.polyResolution !== venueResolutions.polyResolution ||
+    repairedIntent.kalshiResolution !== venueResolutions.kalshiResolution
+  ) {
+    return {
+      status: "unavailable" as const,
+      intent: repairedIntent,
+    };
   }
+  await updateStablePnlChangeFromIntent(repairedIntent);
 
   await writeRunEvent({
     level: "warn",
@@ -7984,6 +9427,20 @@ async function repairSettledIntentResolution(intent: OrderIntent, now: number) {
     status: "repaired" as const,
     intent: repairedIntent,
   };
+}
+
+export function isSettledIntentAccountingRepairRequired(
+  current: Pick<OrderIntent, "polyResolution" | "kalshiResolution" | "realizedPnlUsd" | "roi">,
+  repaired: Pick<OrderIntent, "polyResolution" | "kalshiResolution" | "realizedPnlUsd" | "roi">,
+  accountingState: AccountingHeadState | null,
+) {
+  return (
+    accountingState === "quarantined" ||
+    current.polyResolution !== repaired.polyResolution ||
+    current.kalshiResolution !== repaired.kalshiResolution ||
+    current.realizedPnlUsd !== repaired.realizedPnlUsd ||
+    current.roi !== repaired.roi
+  );
 }
 
 async function refreshIntentFromStoredFills(intent: OrderIntent, now: number) {
@@ -8176,13 +9633,19 @@ async function backfillUnwoundIntentPnl(asset: MarketAsset, now: number) {
       continue;
     }
 
-    await writeOrderIntent(
-      finalizeUnwoundIntent({
+    await finalizeTerminalIntentWithAccounting({
+      intent,
+      terminalIntent: finalizeUnwoundIntent({
         intent,
         now,
         failureReason: intent.failureReason,
       }),
-    );
+      now,
+      stage: "legacy_unwind_backfill",
+      stability: {
+        source: "immutable_accounting_fill_evidence",
+      },
+    });
   }
 }
 
@@ -8219,22 +9682,19 @@ async function holdIntentForUnavailableVenueReconcileTruth(input: {
   }
 
   if (actions.armBreaker) {
-    await writeCircuitBreaker({
-      key: buildSlotBreakerKey(currentIntent.slotKey),
-      active: true,
-      reason: "venue_error",
-      triggeredAt: input.now,
-      payload: {
-        intentId: currentIntent.id,
+    await observeCircuitBreakerIncident(
+      createExecutionIncident({
+        asset: currentIntent.asset,
         slotKey: currentIntent.slotKey,
-        venue: input.venue,
+        intentId: currentIntent.id,
         stage: input.stage,
+        reason: "venue_error",
+        disposition: "truth_pending",
+        venue: input.venue,
         orderId: input.orderId ?? null,
-        orderStatus: input.orderStatus,
-        unavailableSources,
-        requiresManualClear: true,
-      },
-    });
+        triggeredAt: input.now,
+      }),
+    );
   }
   return currentIntent;
 }
@@ -8289,15 +9749,17 @@ async function reconcileInFlightIntentStates(
     }
 
     const intentOrders = recentOrders.filter((order) => order.intentId === intent.id);
-    const primaryOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, primaryLeg);
-    const hedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent.id, hedgeLeg);
-    const unwindOrder = findLatestIntentReduceOnlyOrder(intentOrders, intent.id, primaryLeg);
-    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, primaryLeg, "entry");
+    const primaryOrder = findLatestIntentOrderForLeg(intentOrders, intent, primaryLeg);
+    const hedgeOrder = findLatestIntentOrderForLeg(intentOrders, intent, hedgeLeg);
+    const unwindOrder = findLatestIntentReduceOnlyOrder(intentOrders, intent, primaryLeg);
+    const primaryOrderSummary = summarizeIntentLegOrders(intentOrders, intent, primaryLeg, "entry");
     const stale = isInFlightIntentStale(intent, now);
     let currentIntent = intent;
 
     if (intent.status === "unwind_required") {
-      const primaryVenueFills = await readFillsForIntentVenue(intent.id, primaryLeg.venue);
+      const primaryVenueFills = (await readFillsForIntentVenue(intent.id, primaryLeg.venue)).filter(
+        (fill) => resolveAccountingLegForFill(currentIntent, fill)?.id === primaryLeg.id,
+      );
       const entryFillSummary = summarizeIntentLegFills(primaryVenueFills, primaryLeg, "entry");
       const exitFillSummary = summarizeIntentLegFills(primaryVenueFills, primaryLeg, "exit");
       const entryFilledSize = entryFillSummary?.filledSize ?? primaryLeg.filledSize;
@@ -8313,7 +9775,7 @@ async function reconcileInFlightIntentStates(
         currentIntent = await writeOrderIntent(currentIntent);
       }
 
-      const hedgeOrderSummary = summarizeIntentLegOrders(intentOrders, hedgeLeg, "entry");
+      const hedgeOrderSummary = summarizeIntentLegOrders(intentOrders, intent, hedgeLeg, "entry");
       if (hedgeOrderSummary && hedgeOrderSummary.filledSize > 0) {
         currentIntent = updateIntentLegFromFillSummary(currentIntent, hedgeLeg.id, hedgeOrderSummary, now);
         currentIntent = await writeOrderIntent(currentIntent);
@@ -8349,7 +9811,7 @@ async function reconcileInFlightIntentStates(
                 ? "Primary unwound after hedge failure"
                 : "Primary settled on Polymarket after hedge failure";
 
-          currentIntent = finalizeUnwoundIntent({
+          const terminalCandidate = finalizeUnwoundIntent({
             intent: {
               ...currentIntent,
               polyResolution,
@@ -8367,13 +9829,26 @@ async function reconcileInFlightIntentStates(
             now,
             failureReason,
           });
-          currentIntent = await writeOrderIntent(currentIntent);
-          await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
-            venue: currentIntent.primaryVenue,
-            exitFilledSize,
-            remainingExposureSize,
+          currentIntent = await finalizeTerminalIntentWithAccounting({
+            intent: currentIntent,
+            terminalIntent: terminalCandidate,
+            now,
+            stage: "primary_unwind_polymarket_settlement",
+            stability: {
+              source: "official_venue_resolution_and_final_fills",
+              polyResolution,
+              exitFilledSize,
+              remainingExposureSize,
+            },
           });
-          await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+          if (currentIntent.status === "unwound") {
+            await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
+              venue: currentIntent.primaryVenue,
+              exitFilledSize,
+              remainingExposureSize,
+            });
+            await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+          }
           continue;
         }
       }
@@ -8383,7 +9858,7 @@ async function reconcileInFlightIntentStates(
         (exitFillSummary && exitFilledSize + ORDER_SIZE_TOLERANCE >= entryFilledSize && entryFilledSize > 0)
       ) {
         const payoutUsd = round4(exitFilledSize * exitAverageFillPrice - exitFeeUsd);
-        currentIntent = finalizeUnwoundIntent({
+        const terminalCandidate = finalizeUnwoundIntent({
           intent: {
             ...currentIntent,
             legs: currentIntent.legs.map((leg) =>
@@ -8399,12 +9874,24 @@ async function reconcileInFlightIntentStates(
           now,
           failureReason: "Primary unwound after hedge failure",
         });
-        currentIntent = await writeOrderIntent(currentIntent);
-        await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
-          venue: currentIntent.primaryVenue,
-          exitFilledSize,
+        currentIntent = await finalizeTerminalIntentWithAccounting({
+          intent: currentIntent,
+          terminalIntent: terminalCandidate,
+          now,
+          stage: "primary_unwind_final_fills",
+          stability: {
+            source: "final_fills_and_position_truth",
+            exitFilledSize,
+            liveRemainingSize,
+          },
         });
-        await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+        if (currentIntent.status === "unwound") {
+          await recordMarketFillQualityForIntent(currentIntent, "unwind", "primary_unwound_after_reconcile", now, {
+            venue: currentIntent.primaryVenue,
+            exitFilledSize,
+          });
+          await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+        }
         continue;
       }
 
@@ -8428,7 +9915,7 @@ async function reconcileInFlightIntentStates(
         await maybeWritePrimaryUnwindFilledSizeMismatchEvent(currentIntent, unwindOrder, now);
         const averageExitPrice = unwindOrder.averageFillPrice ?? primaryLeg.filledPrice ?? 0;
         const payoutUsd = round4(unwindOrder.filledSize * averageExitPrice - (unwindOrder.feeUsd ?? 0));
-        currentIntent = finalizeUnwoundIntent({
+        const terminalCandidate = finalizeUnwoundIntent({
           intent: {
             ...currentIntent,
             legs: currentIntent.legs.map((leg) =>
@@ -8444,8 +9931,21 @@ async function reconcileInFlightIntentStates(
           now,
           failureReason: "Primary unwound after hedge failure",
         });
-        currentIntent = await writeOrderIntent(currentIntent);
-        await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+        currentIntent = await finalizeTerminalIntentWithAccounting({
+          intent: currentIntent,
+          terminalIntent: terminalCandidate,
+          now,
+          stage: "primary_unwind_order_complete",
+          stability: {
+            source: "terminal_order_and_final_fills",
+            venue: unwindOrder.venue,
+            orderId: unwindOrder.venueOrderId,
+            orderStatus: unwindOrder.status,
+          },
+        });
+        if (currentIntent.status === "unwound") {
+          await armRecoveredHedgeFailureCooldown(currentIntent, now, "primary_unwound_after_reconcile");
+        }
         continue;
       }
 
@@ -8520,18 +10020,18 @@ async function reconcileInFlightIntentStates(
             },
             createdAt: now,
           });
-          await writeCircuitBreaker({
-            key: buildSlotBreakerKey(currentIntent.slotKey),
-            active: true,
-            reason: "venue_error",
-            triggeredAt: now,
-            payload: {
-              intentId: currentIntent.id,
+          await observeCircuitBreakerIncident(
+            createExecutionIncident({
+              asset: currentIntent.asset,
               slotKey: currentIntent.slotKey,
+              intentId: currentIntent.id,
               stage: "primary_submission_truth_pending",
-              requiresManualClear: true,
-            },
-          });
+              reason: "venue_error",
+              disposition: "truth_pending",
+              venue: primaryLeg.venue,
+              triggeredAt: now,
+            }),
+          );
           continue;
         }
 
@@ -8552,13 +10052,18 @@ async function reconcileInFlightIntentStates(
           continue;
         }
 
-        currentIntent = markIntentStatus(
+        currentIntent = await closeIntentWithoutExposureAccounting({
           intent,
-          "failed",
+          status: "failed",
           now,
-          "Primary order not observed before timeout or slot end",
-        );
-        currentIntent = await writeOrderIntent(currentIntent);
+          stage: "primary_missing_after_timeout",
+          reason: "Primary order not observed before timeout or slot end",
+          proof: {
+            observedOrder: false,
+            observedFillSummary: false,
+            attemptIds: attempts.map((attempt) => attempt.id),
+          },
+        });
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_missing",
@@ -8621,8 +10126,19 @@ async function reconcileInFlightIntentStates(
         }
 
         currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
-        currentIntent = markIntentStatus(currentIntent, "failed", now, `Primary order ${primaryOrder.status}`);
-        currentIntent = await writeOrderIntent(currentIntent);
+        currentIntent = await closeIntentWithoutExposureAccounting({
+          intent: currentIntent,
+          status: "failed",
+          now,
+          stage: "primary_terminal_reconciled_no_fill",
+          reason: `Primary order ${primaryOrder.status}`,
+          proof: {
+            venue: primaryOrder.venue,
+            orderId: primaryOrder.venueOrderId,
+            orderStatus: primaryOrder.status,
+            filledSize: primaryOrder.filledSize,
+          },
+        });
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_terminal",
@@ -8663,13 +10179,19 @@ async function reconcileInFlightIntentStates(
         }
 
         currentIntent = updateIntentLeg(currentIntent, primaryLeg.venue, primaryOrder, "failed", now);
-        currentIntent = markIntentStatus(
-          currentIntent,
-          "failed",
+        currentIntent = await closeIntentWithoutExposureAccounting({
+          intent: currentIntent,
+          status: "failed",
           now,
-          `Primary order not completed before timeout or slot end (${primaryOrder.status})`,
-        );
-        currentIntent = await writeOrderIntent(currentIntent);
+          stage: "primary_unresolved_after_timeout",
+          reason: `Primary order not completed before timeout or slot end (${primaryOrder.status})`,
+          proof: {
+            venue: primaryOrder.venue,
+            orderId: primaryOrder.venueOrderId,
+            orderStatus: primaryOrder.status,
+            filledSize: primaryOrder.filledSize,
+          },
+        });
         await writeRunEvent({
           level: "warn",
           eventType: "intent.failed.primary_timeout",
@@ -8897,125 +10419,120 @@ async function reconcileInFlightIntentStates(
     }
   }
 
-  await syncActiveSlotExecutionBreakers(now, sharedContext);
+  await syncActiveSlotExecutionBreakers(now);
 }
 
-async function syncActiveSlotExecutionBreakers(now: number, sharedContext: TickSharedContext = {}) {
-  const [openIntents, breakers] = await Promise.all([
-    sharedContext.openIntents ?? readOpenOrderIntents(),
-    sharedContext.circuitBreakers ?? readCircuitBreakers(),
-  ]);
-  const unresolvedSlots = new Set(
-    openIntents
-      .filter(
-        (intent) =>
-          intent.status === "unwind_required" ||
-          intent.status === "manual_required" ||
-          intent.status === "truth_pending" ||
-          intent.status === "rescue_hedge",
-      )
-      .map((intent) => intent.slotKey),
+async function syncActiveSlotExecutionBreakers(now: number) {
+  const incidents = (await readCurrentCircuitBreakerIncidents()).filter(
+    (incident) => incident.owner === CIRCUIT_BREAKER_INCIDENT_OWNERS.execution,
   );
-  const currentSlotKeys = new Set(ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)).key));
 
-  for (const breaker of breakers) {
-    if (shouldKeepSlotExecutionBreakerActive(breaker, now, currentSlotKeys, unresolvedSlots)) {
-      continue;
-    }
+  for (const incident of incidents) {
+    const intent = incident.intentId === null ? null : await findOrderIntent(incident.intentId);
+    const exposureRecovered = intent ? isIntentExposureDurablyResolved(intent) : false;
+    const recoveryProof =
+      intent && exposureRecovered
+        ? {
+            owner: incident.owner,
+            confirmedAt: now,
+            evidenceId: `intent:${intent.id}:revision:${intent.revision}:status:${intent.status}`,
+          }
+        : undefined;
 
-    if (!breaker.active || !isSlotExecutionBreakerReason(breaker.reason)) {
-      continue;
-    }
-
-    if (breaker.key === "global") {
-      await writeCircuitBreaker({
-        key: "global",
-        active: false,
-        reason: null,
-        triggeredAt: null,
-        payload: null,
-      });
-      continue;
-    }
-
-    if (breaker.key.startsWith("slot:")) {
-      const slotKey = breaker.key.slice("slot:".length);
-      if (!unresolvedSlots.has(slotKey)) {
-        await writeCircuitBreaker({
-          key: breaker.key,
-          active: false,
-          reason: null,
-          triggeredAt: null,
-          payload: null,
-        });
+    if (incident.exposure.state === "unresolved") {
+      if (!recoveryProof) {
+        continue;
       }
+      if (incident.resolutionPolicy === "operator") {
+        await recordCircuitBreakerExposureRecoverySafely(incident, recoveryProof);
+      } else {
+        await resolveOwnedCircuitBreakerSafely(incident, true, recoveryProof);
+      }
+      continue;
+    }
+
+    if (incident.resolutionPolicy === "owner" && getEffectiveCircuitBreakerImpact(incident, now) === null) {
+      await resolveOwnedCircuitBreakerSafely(incident, true);
     }
   }
+}
+
+export function isIntentExposureDurablyResolved(intent: OrderIntent) {
+  if (intent.status === "hedged" || intent.status === "settled") {
+    const [first, second] = intent.legs;
+    return Boolean(
+      first &&
+      second &&
+      first.filledSize > ORDER_SIZE_TOLERANCE &&
+      second.filledSize > ORDER_SIZE_TOLERANCE &&
+      Math.abs(first.filledSize - second.filledSize) <= ORDER_SIZE_TOLERANCE,
+    );
+  }
+  if (intent.status === "unwound") {
+    return intent.legs.some((leg) => leg.venue === intent.primaryVenue && leg.status === "unwound");
+  }
+  if (intent.status === "failed" || intent.status === "skipped" || intent.status === "canceled") {
+    return intent.legs.every((leg) => leg.filledSize <= ORDER_SIZE_TOLERANCE);
+  }
+  return false;
 }
 
 async function enforceDailyLossCap(now: number) {
   const settingsMap = await readCachedSettingsMap(now);
-  const enabled = Object.values(settingsMap).some((settings) => settings.config.dailyLossCapEnabled);
-  if (!enabled) {
+  const dayStart = startOfUtcDay(now);
+  const incidents = (await readCurrentCircuitBreakerIncidents()).filter(
+    (incident) => incident.owner === CIRCUIT_BREAKER_INCIDENT_OWNERS.dailyLoss,
+  );
+  for (const incident of incidents) {
+    const incidentDayEnd = incident.payload?.dayEnd;
+    if (typeof incidentDayEnd === "number" && incidentDayEnd <= now) {
+      await resolveOwnedCircuitBreakerSafely(incident, true);
+    }
+  }
+
+  const enabledSettings = Object.values(settingsMap).filter((settings) => settings.config.dailyLossCapEnabled);
+  if (enabledSettings.length === 0) {
     return;
   }
-  const capUsd = Math.min(...Object.values(settingsMap).map((settings) => settings.config.dailyLossHardCapUsd));
-  const dayStart = startOfUtcDay(now);
-  const dayEnd = dayStart + 24 * 60 * 60 * 1000;
-  const realizedToday = await readStableRealizedPnlSince(dayStart, dayEnd);
-  const breakers = await readCircuitBreakers();
-  const globalBreaker = breakers.find((breaker) => breaker.key === "global") ?? null;
+  const capUsd = Math.min(...enabledSettings.map((settings) => settings.config.dailyLossHardCapUsd));
+  const realizedToday = (await readAccountingRealizedPnlForUtcDay(dayStart, false)).usd;
 
   if (realizedToday <= -capUsd + ORDER_SIZE_TOLERANCE) {
-    if (globalBreaker?.active && globalBreaker.reason === "daily_loss_cap") {
-      return;
-    }
-    await writeCircuitBreaker({
-      key: "global",
-      active: true,
-      reason: "daily_loss_cap",
+    const incident = createDailyLossIncident({
       triggeredAt: now,
-      payload: {
-        realizedToday,
-        thresholdUsd: -capUsd,
-        dayStart,
-        requiresManualClear: false,
-      },
+      dayStart,
+      realizedPnlUsd: realizedToday,
+      lossCapUsd: capUsd,
     });
-    await writeRunEvent({
-      level: "error",
-      eventType: "killswitch.daily_loss_cap",
-      message: `Daily stable realized PnL ${realizedToday.toFixed(2)} breached cap -${capUsd.toFixed(2)}`,
-      payload: {
-        realizedToday,
-        thresholdUsd: -capUsd,
-        dayStart,
-      },
-      createdAt: now,
-    });
-    return;
-  }
-
-  if (
-    globalBreaker?.active &&
-    globalBreaker.reason === "daily_loss_cap" &&
-    typeof globalBreaker.payload?.dayStart === "number" &&
-    globalBreaker.payload.dayStart < dayStart
-  ) {
-    await writeCircuitBreaker({
-      key: "global",
-      active: false,
-      reason: null,
-      triggeredAt: null,
-      payload: null,
-    });
+    const existing = incidents.some(
+      (candidate) => candidate.owner === incident.owner && candidate.incidentKey === incident.incidentKey,
+    );
+    if (!existing) {
+      await observeCircuitBreakerIncident(incident);
+      await writeRunEvent({
+        level: "error",
+        eventType: "killswitch.daily_loss_cap",
+        message: `Daily stable realized PnL ${realizedToday.toFixed(2)} breached cap -${capUsd.toFixed(2)}`,
+        payload: {
+          realizedToday,
+          thresholdUsd: -capUsd,
+          dayStart,
+        },
+        createdAt: now,
+      });
+    }
   }
 }
 
 async function evaluateMarketDegradedBreakers(asset: MarketAsset, now: number) {
   const since = now - MARKET_DEGRADED_WINDOW_MS;
   const degradedCounts = await readDegradedMarketFillQualityCounts(since, asset);
-  const breakers = await readCircuitBreakers();
+  const incidents = (await readCurrentCircuitBreakerIncidents()).filter(
+    (incident) =>
+      incident.owner === CIRCUIT_BREAKER_INCIDENT_OWNERS.marketDegraded &&
+      incident.scope.type === "slot" &&
+      incident.scope.asset === asset,
+  );
   const degradedSlotKeys = new Set<string>();
 
   for (const count of degradedCounts) {
@@ -9023,53 +10540,47 @@ async function evaluateMarketDegradedBreakers(asset: MarketAsset, now: number) {
       continue;
     }
     degradedSlotKeys.add(count.slotKey);
-    const key = buildSlotBreakerKey(count.slotKey);
-    const existing = breakers.find((breaker) => breaker.key === key);
+    const existing = incidents.find(
+      (incident) => incident.scope.type === "slot" && incident.scope.slotKey === count.slotKey,
+    );
     const cooldownUntil = now + MARKET_DEGRADED_COOLDOWN_MS;
-    if (existing?.active && existing.reason === "market_degraded") {
+    const existingCooldownUntil = existing?.timestamps.cooldownUntil ?? null;
+    if (existingCooldownUntil !== null && existingCooldownUntil > now + FEED_BREAKER_SYNC_INTERVAL_MS) {
       continue;
     }
-    await writeCircuitBreaker({
-      key,
-      active: true,
-      reason: "market_degraded",
-      triggeredAt: now,
-      payload: {
+    await observeCircuitBreakerIncident(
+      createMarketDegradedIncident({
         asset: count.asset,
         slotKey: count.slotKey,
+        triggeredAt: now,
+        cooldownUntil,
         degradedCount: count.degradedCount,
         windowMs: MARKET_DEGRADED_WINDOW_MS,
-        cooldownUntil,
-      },
-    });
-    await writeRunEvent({
-      asset: count.asset,
-      level: "warn",
-      eventType: "breaker.market_degraded",
-      message: `Slot ${count.slotKey} degraded after ${count.degradedCount} bad fill outcomes`,
-      payload: {
-        slotKey: count.slotKey,
-        degradedCount: count.degradedCount,
-        cooldownUntil,
-      },
-      createdAt: now,
-    });
+      }),
+    );
+    if (!existing) {
+      await writeRunEvent({
+        asset: count.asset,
+        level: "warn",
+        eventType: "breaker.market_degraded",
+        message: `Slot ${count.slotKey} degraded after ${count.degradedCount} bad fill outcomes`,
+        payload: {
+          slotKey: count.slotKey,
+          degradedCount: count.degradedCount,
+          cooldownUntil,
+        },
+        createdAt: now,
+      });
+    }
   }
 
-  for (const breaker of breakers) {
-    if (!breaker.active || breaker.reason !== "market_degraded" || !breaker.key.startsWith("slot:")) {
-      continue;
-    }
-    const slotKey = breaker.key.slice("slot:".length);
-    const cooldownUntil = typeof breaker.payload?.cooldownUntil === "number" ? breaker.payload.cooldownUntil : null;
-    if (!degradedSlotKeys.has(slotKey) && cooldownUntil !== null && cooldownUntil <= now) {
-      await writeCircuitBreaker({
-        key: breaker.key,
-        active: false,
-        reason: null,
-        triggeredAt: null,
-        payload: null,
-      });
+  for (const incident of incidents) {
+    if (
+      incident.scope.type === "slot" &&
+      !degradedSlotKeys.has(incident.scope.slotKey) &&
+      getEffectiveCircuitBreakerImpact(incident, now) === null
+    ) {
+      await resolveOwnedCircuitBreakerSafely(incident, true);
     }
   }
 }
@@ -9080,36 +10591,31 @@ function startOfUtcDay(now: number) {
 }
 
 async function refreshPnl(now: number, positions: PositionSnapshot[]) {
-  const [balances, realizedPnlUsd, feesUsd] = await Promise.all([
-    readVenueBalances(),
-    readLiveRealizedPnlUsd(),
-    readLiveFeesUsd(),
-  ]);
+  const [balances, accounting] = await Promise.all([readVenueBalances(), readAllTimeAccountingLedger(false)]);
 
   await writePnlSnapshot(
     buildPnlSnapshot({
       capturedAt: now,
       balances,
       positions,
-      realizedPnlUsd,
-      feesUsd,
+      realizedPnlUsd: accounting.realizedPnlUsd,
+      feesUsd: accounting.feesUsd,
     }),
   );
 }
 
 async function recordStablePnlChanges(now: number, balances: VenueBalance[], positions: PositionSnapshot[]) {
-  const settledIntents = await readRecentSettledOrderIntents(200);
-  const candidates = settledIntents.filter((intent) => {
-    const settledAt = intent.resolvedAt ?? intent.updatedAt;
-    return (
-      !intent.shadow &&
-      intent.status === "settled" &&
-      intent.realizedPnlUsd !== null &&
-      now - settledAt <= STABLE_PNL_SETTLED_LOOKBACK_MS
-    );
-  });
+  const candidates = await readStableAccountingProjectionBacklog(100);
 
-  for (const intent of candidates) {
+  for (const candidate of candidates) {
+    const intent: OrderIntent = {
+      ...candidate.intent,
+      realizedPnlUsd: candidate.realizedPnlUsd,
+      roi: candidate.roi,
+    };
+    if (intent.shadow || intent.status !== "settled") {
+      continue;
+    }
     const readiness = evaluateStablePnlChangeReadiness(intent, balances, positions);
     if (!readiness.ready) {
       continue;
@@ -9129,6 +10635,8 @@ async function recordStablePnlChanges(now: number, balances: VenueBalance[], pos
         intentId: intent.id,
         asset: intent.asset,
         combination: intent.combination,
+        accountingVersion: candidate.accountingVersion,
+        accountingProofSha256: candidate.proofSha256,
         realizedPnlUsd: intent.realizedPnlUsd,
         ...readiness.stability,
       },
@@ -9224,6 +10732,8 @@ export function buildVenueOrderRequest(
   reduceOnly: boolean,
   options?: {
     kalshiPriceTicksSlippage?: number;
+    kalshiPriceRanges?: readonly KalshiPriceRange[] | null;
+    authoritativeTickSize?: number | null;
     overridePrice?: number | null;
     polymarketBuyMode?: "shares" | "amount";
   },
@@ -9234,17 +10744,41 @@ export function buildVenueOrderRequest(
       : leg.requestedPrice === null
         ? null
         : applySlippage(leg.requestedPrice, maxSlippageBps, leg.side);
-  const kalshiTickAdjustedPrice =
-    leg.venue === "kalshi" && leg.side === "BUY" && options?.kalshiPriceTicksSlippage
-      ? normalizeKalshiOrderPrice(
-          (leg.requestedPrice ?? 0) + options.kalshiPriceTicksSlippage * KALSHI_ORDER_PRICE_STEP_USD,
-          leg.side,
-        )
-      : null;
-  const price =
-    leg.venue === "kalshi"
-      ? (kalshiTickAdjustedPrice ?? normalizeKalshiOrderPrice(slippageAdjustedPrice, leg.side))
-      : slippageAdjustedPrice;
+  let price = slippageAdjustedPrice;
+  if (leg.venue === "kalshi") {
+    const priceRanges = options?.kalshiPriceRanges;
+    if (!priceRanges || (leg.outcome !== "YES" && leg.outcome !== "NO")) {
+      throw new Error("Authoritative Kalshi price_ranges are required for order pricing");
+    }
+    if (leg.requestedPrice === null && options.overridePrice === undefined) {
+      price = null;
+    } else if (options.kalshiPriceTicksSlippage !== undefined) {
+      price = moveKalshiOutcomePriceByTicks({
+        price: leg.requestedPrice ?? 0,
+        outcome: leg.outcome,
+        side: leg.side,
+        ticks: options.kalshiPriceTicksSlippage,
+        priceRanges,
+      }).price;
+    } else if (slippageAdjustedPrice !== null) {
+      price = normalizeKalshiOutcomePrice({
+        price: slippageAdjustedPrice,
+        outcome: leg.outcome,
+        side: leg.side,
+        priceRanges,
+      }).price;
+    }
+  } else if (price !== null && options?.authoritativeTickSize !== undefined) {
+    const normalized = normalizePriceToAuthoritativeTick({
+      price,
+      tickSize: options.authoritativeTickSize ?? Number.NaN,
+      side: leg.side,
+    });
+    if (!normalized.ok) {
+      throw new Error(`Invalid authoritative Polymarket order tick: ${normalized.reason}`);
+    }
+    price = normalized.price;
+  }
   const maxCostUsd =
     leg.venue === "polymarket" && leg.side === "BUY"
       ? round4(leg.requestedNotionalUsd)
@@ -9308,6 +10842,39 @@ function buildLiveOrderRecord(
   };
 }
 
+export function buildPlannedInitialEntryAttempt(
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  request: VenueOrderRequest,
+  now: number,
+): OrderAttempt {
+  const clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+  const stableRequest = {
+    ...request,
+    clientOrderId,
+  };
+  return {
+    id: `${intent.id}:${leg.id}:primary:${clientOrderId}`,
+    asset: intent.asset,
+    shadow: false,
+    intentId: intent.id,
+    legId: leg.id,
+    stage: "primary",
+    venue: leg.venue,
+    side: stableRequest.side,
+    orderType: stableRequest.orderType,
+    clientOrderId,
+    venueOrderId: null,
+    status: "planned",
+    truthStatus: "admitted_not_claimed",
+    request: serializeVenueOrderRequest(stableRequest),
+    result: null,
+    error: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
 async function submitAndConfirmOrder(input: {
   intent: OrderIntent;
   leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
@@ -9315,48 +10882,109 @@ async function submitAndConfirmOrder(input: {
   stage: string;
   now: number;
   timeoutMs: number;
+  quoteObservedAt: number;
+  submissionDeadlineAt: number;
   deferConfirmedPersistence?: boolean;
+  admittedInitialAttemptId?: string;
 }) {
   input.request.clientOrderId = buildStableClientOrderId(input);
   const attemptId = `${input.intent.id}:${input.leg.id}:${input.stage}:${input.request.clientOrderId}`;
-  const reusableAttempt = await findReusableOrderAttempt(input, attemptId);
-  if (reusableAttempt) {
-    return reusableAttempt;
+  const serializedRequest = serializeVenueOrderRequest(input.request);
+  let claimedAttempt: OrderAttempt;
+  if (input.admittedInitialAttemptId !== undefined) {
+    if (input.stage !== "primary" || input.admittedInitialAttemptId !== attemptId) {
+      throw new Error(`Initial entry submission capability does not match ${attemptId}`);
+    }
+    claimedAttempt = await claimAdmittedLiveOrderAttempt({
+      intentId: input.intent.id,
+      attemptId,
+      request: serializedRequest,
+      claimedAt: Date.now(),
+    });
+  } else {
+    const plannedAttempt: OrderAttempt = {
+      id: attemptId,
+      asset: input.intent.asset,
+      shadow: input.intent.shadow,
+      intentId: input.intent.id,
+      legId: input.leg.id,
+      stage: input.stage,
+      venue: input.leg.venue,
+      side: input.request.side,
+      orderType: input.request.orderType,
+      clientOrderId: input.request.clientOrderId,
+      venueOrderId: null,
+      status: "planned",
+      truthStatus: null,
+      request: serializedRequest,
+      submissionDeadlineAt: input.submissionDeadlineAt,
+      result: null,
+      error: null,
+      createdAt: input.now,
+      updatedAt: input.now,
+    };
+    const claim = await claimLiveOrderAttemptForSubmission({
+      plannedAttempt,
+      submissionDeadlineAt: input.submissionDeadlineAt,
+    });
+    if (claim.decision === "reusable") {
+      return reuseExistingOrderAttempt(input, claim.attempt);
+    }
+    if (claim.decision === "ambiguous") {
+      if (input.leg.venue === "kalshi") {
+        try {
+          const recovered = await recoverSubmittedKalshiOrderAttempt(input, attemptId);
+          if (recovered) {
+            return recovered;
+          }
+        } catch (error) {
+          throw new OrderSubmissionTruthUnknownError(
+            attemptId,
+            `Kalshi ${input.stage} recovery lookup failed after an ambiguous claim: ${toErrorMessage(error)}`,
+          );
+        }
+      }
+      throw new OrderSubmissionTruthUnknownError(
+        attemptId,
+        `Existing ${input.stage} order attempt ${attemptId} has ambiguous submission truth (${claim.reason}); resubmission blocked`,
+      );
+    }
+    if (claim.decision === "rejected") {
+      throw new OrderSubmissionNotStartedError(attemptId, claim.reason);
+    }
+    claimedAttempt = claim.attempt;
   }
 
-  await writeOrderAttempt({
-    id: attemptId,
-    asset: input.intent.asset,
-    shadow: input.intent.shadow,
-    intentId: input.intent.id,
-    legId: input.leg.id,
-    stage: input.stage,
-    venue: input.leg.venue,
-    side: input.request.side,
-    orderType: input.request.orderType,
-    clientOrderId: input.request.clientOrderId,
-    venueOrderId: null,
-    status: "planned",
-    truthStatus: null,
-    request: serializeVenueOrderRequest(input.request),
-    result: null,
-    error: null,
-    createdAt: input.now,
-    updatedAt: input.now,
-  });
+  if (!Number.isSafeInteger(claimedAttempt.revision) || (claimedAttempt.revision ?? -1) < 0) {
+    throw new Error(`Claimed order attempt ${attemptId} is missing its durable revision`);
+  }
+  assertOrderAttemptMatchesIntentLeg(claimedAttempt, input.intent, input.leg, input.request, input.stage);
 
   let acknowledgedSubmission: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null = null;
   let acknowledgedAt: number | null = null;
   let submissionStartedAt: number | null = null;
   try {
-    const submitStartedAt = Date.now();
-    submissionStartedAt = submitStartedAt;
-    const submission = await adapterFor(input.leg.venue).placeOrder(input.request);
+    const dispatch = await dispatchClaimedLiveOrderAttempt({
+      attemptId,
+      revalidate: () =>
+        revalidateLiveOrderAttemptBeforeDispatch({
+          intentId: input.intent.id,
+          attemptId,
+          request: serializedRequest,
+          submissionDeadlineAt: input.submissionDeadlineAt,
+          expectedRevision: claimedAttempt.revision as number,
+        }),
+      onSubmissionStarted: (startedAt) => {
+        submissionStartedAt = startedAt;
+      },
+      placeOrder: () => adapterFor(input.leg.venue).placeOrder(input.request),
+    });
+    const { submission, submitStartedAt } = dispatch;
     const venueAckAt = Date.now();
     acknowledgedSubmission = submission;
     acknowledgedAt = venueAckAt;
     const submittedTiming: OrderExecutionTiming = {
-      quoteObservedAt: input.intent.createdAt,
+      quoteObservedAt: input.quoteObservedAt,
       decisionAt: input.now,
       submitStartedAt,
       venueAckAt,
@@ -9437,6 +11065,9 @@ async function submitAndConfirmOrder(input: {
       persistConfirmed: input.deferConfirmedPersistence ? persistConfirmed : null,
     };
   } catch (error) {
+    if (submissionStartedAt === null) {
+      throw error;
+    }
     let recoveryError: unknown = null;
     let recovered: Awaited<ReturnType<typeof recoverSubmittedKalshiOrderAttempt>> = null;
     try {
@@ -9455,7 +11086,7 @@ async function submitAndConfirmOrder(input: {
         confirmationError,
       );
       const timing: OrderExecutionTiming = {
-        quoteObservedAt: input.intent.createdAt,
+        quoteObservedAt: input.quoteObservedAt,
         decisionAt: input.now,
         submitStartedAt: submissionStartedAt ?? input.now,
         venueAckAt: acknowledgedAt ?? input.now,
@@ -9531,6 +11162,25 @@ async function submitAndConfirmOrder(input: {
   }
 }
 
+export async function dispatchClaimedLiveOrderAttempt<T>(input: {
+  attemptId: string;
+  revalidate: () => Promise<{
+    decision: "ready" | "expired";
+    reason?: "submission_deadline_expired";
+  }>;
+  onSubmissionStarted: (startedAt: number) => void;
+  placeOrder: () => Promise<T>;
+}) {
+  const decision = await input.revalidate();
+  if (decision.decision === "expired") {
+    throw new OrderSubmissionNotStartedError(input.attemptId, "submission_deadline_expired");
+  }
+  const submitStartedAt = Date.now();
+  input.onSubmissionStarted(submitStartedAt);
+  const submission = await input.placeOrder();
+  return { submission, submitStartedAt };
+}
+
 export function buildStableClientOrderId(input: {
   intent: OrderIntent;
   leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
@@ -9553,20 +11203,13 @@ export function buildStableClientOrderId(input: {
 }
 
 function stableHexHash(value: string, length: number) {
-  let hashA = 0x811c9dc5;
-  let hashB = 0x9e3779b9;
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    hashA ^= code;
-    hashA = Math.imul(hashA, 0x01000193) >>> 0;
-    hashB ^= code + index;
-    hashB = Math.imul(hashB, 0x85ebca6b) >>> 0;
+  if (!Number.isSafeInteger(length) || length < 1 || length > 64) {
+    throw new Error(`SHA-256 hex truncation length must be between 1 and 64, received ${length}`);
   }
-  const hex = `${hashA.toString(16).padStart(8, "0")}${hashB.toString(16).padStart(8, "0")}`;
-  return hex.repeat(Math.ceil(length / hex.length)).slice(0, length);
+  return createHash("sha256").update(value, "utf8").digest("hex").slice(0, length);
 }
 
-async function findReusableOrderAttempt(
+async function reuseExistingOrderAttempt(
   input: {
     intent: OrderIntent;
     leg: OrderIntent["legs"][number] & { side?: "BUY" | "SELL" };
@@ -9575,13 +11218,12 @@ async function findReusableOrderAttempt(
     now: number;
     timeoutMs: number;
   },
-  attemptId: string,
+  existing: OrderAttempt,
 ) {
-  const existing = await findOrderAttemptById(attemptId);
+  const attemptId = existing.id;
 
-  if (!existing) {
-    return null;
-  }
+  assertOrderAttemptMatchesIntentLeg(existing, input.intent, input.leg, input.request, input.stage);
+  assertReusableOrderAttemptRequestProof(existing, input.request);
 
   if (existing.status === "confirmed" && existing.result) {
     const result = deserializeVenueOrderResult(existing.result, input.leg.venue, existing.venueOrderId);
@@ -9637,7 +11279,10 @@ async function findReusableOrderAttempt(
     };
   }
 
-  if ((existing.status === "planned" || existing.status === "truth_pending") && input.leg.venue === "kalshi") {
+  if (
+    (existing.status === "planned" || existing.status === "submitting" || existing.status === "truth_pending") &&
+    input.leg.venue === "kalshi"
+  ) {
     try {
       const recovered = await recoverSubmittedKalshiOrderAttempt(input, attemptId);
       if (recovered) {
@@ -9655,6 +11300,66 @@ async function findReusableOrderAttempt(
     attemptId,
     `Existing ${input.stage} order attempt ${existing.id} has no reusable venue truth; resubmission blocked`,
   );
+}
+
+export function assertReusableOrderAttemptRequestProof(
+  existing: Pick<OrderAttempt, "id" | "request" | "requestSha256">,
+  request: VenueOrderRequest,
+) {
+  let storedRequestSha256: string;
+  let requestedRequestSha256: string;
+  try {
+    storedRequestSha256 = hashOrderAttemptRequest(existing.request);
+    requestedRequestSha256 = hashOrderAttemptRequest(serializeVenueOrderRequest(request));
+  } catch (error) {
+    throw new OrderSubmissionTruthUnknownError(
+      existing.id,
+      `Existing order attempt ${existing.id} has an invalid request proof; reuse and recovery blocked: ${toErrorMessage(error)}`,
+    );
+  }
+
+  const persistedRequestSha256 = existing.requestSha256;
+  if (
+    persistedRequestSha256 === undefined ||
+    persistedRequestSha256 === null ||
+    persistedRequestSha256 !== storedRequestSha256 ||
+    storedRequestSha256 !== requestedRequestSha256
+  ) {
+    throw new OrderSubmissionTruthUnknownError(
+      existing.id,
+      `Existing order attempt ${existing.id} does not match the canonical order request; reuse and recovery blocked`,
+    );
+  }
+
+  return requestedRequestSha256;
+}
+
+export function assertOrderAttemptMatchesIntentLeg(
+  attempt: Pick<
+    OrderAttempt,
+    "id" | "asset" | "shadow" | "intentId" | "legId" | "stage" | "venue" | "side" | "orderType" | "clientOrderId"
+  >,
+  intent: OrderIntent,
+  leg: OrderIntent["legs"][number],
+  request: VenueOrderRequest,
+  stage: string,
+) {
+  if (
+    attempt.asset !== intent.asset ||
+    attempt.shadow !== intent.shadow ||
+    attempt.intentId !== intent.id ||
+    attempt.legId !== leg.id ||
+    attempt.stage !== stage ||
+    attempt.venue !== leg.venue ||
+    attempt.side !== request.side ||
+    attempt.orderType !== request.orderType ||
+    attempt.clientOrderId !== request.clientOrderId
+  ) {
+    throw new OrderSubmissionTruthUnknownError(
+      attempt.id,
+      `Persisted order attempt ${attempt.id} does not match its canonical intent leg; reuse and dispatch blocked`,
+    );
+  }
 }
 
 async function recoverSubmittedKalshiOrderAttempt(
@@ -9847,23 +11552,21 @@ function buildPendingShadowOrder(
 function buildCompletedShadowOrder(
   intent: OrderIntent,
   leg: OrderIntent["legs"][number],
-  decision: ShadowPairExecutionDecision,
   audit: NonNullable<OrderIntent["shadowExecution"]>,
   now: number,
 ): LiveOrder {
   const suffix = leg.venue === intent.primaryVenue ? "primary" : "hedge";
   const pending = buildPendingShadowOrder(intent, leg, intent.createdAt, suffix);
-  const capacity = decision.legs.find((candidate) => candidate.leg.venue === leg.venue);
-  const quote = decision.status === "filled" ? (capacity?.quote ?? null) : null;
+  const auditLeg = audit.legs.find((candidate) => candidate.venue === leg.venue);
   return {
     ...pending,
-    filledSize: decision.status === "filled" ? decision.filledPairSize : 0,
-    averageFillPrice: quote?.vwapPrice ?? null,
-    feeUsd: quote?.feeUsd ?? 0,
+    filledSize: audit.status === "filled" ? audit.filledPairSize : 0,
+    averageFillPrice: audit.status === "filled" ? (auditLeg?.vwapPrice ?? null) : null,
+    feeUsd: audit.status === "filled" ? (auditLeg?.feeUsd ?? 0) : 0,
     status:
-      decision.status === "no_fill"
+      audit.status === "no_fill"
         ? "canceled"
-        : decision.filledPairSize + ORDER_SIZE_TOLERANCE >= leg.requestedSize
+        : audit.filledPairSize + ORDER_SIZE_TOLERANCE >= leg.requestedSize
           ? "filled"
           : "partially_filled",
     updatedAt: now,
@@ -9873,12 +11576,11 @@ function buildCompletedShadowOrder(
       latencyMs: audit.latencyMs,
       restFetchDurationMs: audit.restFetchDurationMs,
       nextEligibleAt: audit.nextEligibleAt,
-      decision: decision.status,
-      reasonCode: decision.reasonCode,
-      reason: decision.reason,
-      limitPrice: capacity?.limitPrice ?? null,
-      executableSize: capacity?.executableSize ?? 0,
-      consumedLevels: quote?.consumedLevels ?? [],
+      decision: audit.status,
+      reasonCode: audit.reasonCode,
+      reason: audit.reason,
+      limitPrice: auditLeg?.limitPrice ?? null,
+      executableSize: auditLeg?.executableSize ?? 0,
     },
   };
 }
@@ -9887,35 +11589,38 @@ function buildShadowFill(
   intent: OrderIntent,
   leg: OrderIntent["legs"][number],
   order: LiveOrder,
-  quote: NonNullable<ReturnType<typeof quoteMultiLevelBuyLeg>>,
+  auditLeg: NonNullable<OrderIntent["shadowExecution"]>["legs"][number],
   audit: NonNullable<OrderIntent["shadowExecution"]>,
-  now: number,
 ) {
+  const filledAt = audit.evaluatedAt;
+  if (filledAt === null || auditLeg.vwapPrice === null) {
+    throw new Error(`Intent ${intent.id} is missing final shadow fill evidence for leg ${leg.id}`);
+  }
+  const identity = buildShadowAccountingFillIdentity(intent.id, leg.id);
   return {
-    id: `shadow-fill:${intent.id}:${leg.venue}:${leg.outcome}:${now}`,
+    id: identity.fillId,
     asset: intent.asset,
     shadow: true,
     intentId: intent.id,
     venue: leg.venue,
     venueOrderId: order.venueOrderId,
-    tradeId: `shadow-trade:${intent.id}:${leg.venue}:${now}`,
+    tradeId: identity.tradeId,
     marketRef: leg.marketRef,
     tokenId: leg.tokenId,
     side: leg.side,
     outcome: leg.outcome,
-    price: quote.vwapPrice ?? 0,
+    price: auditLeg.vwapPrice,
     size: order.filledSize,
-    feeUsd: quote.feeUsd,
+    feeUsd: auditLeg.feeUsd,
     liquidity: "TAKER" as const,
-    filledAt: now,
+    filledAt,
     raw: {
       shadow: true,
       modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
       latencyMs: audit.latencyMs,
-      limitPrice: quote.limitPrice,
+      limitPrice: auditLeg.limitPrice,
       requestedSize: leg.requestedSize,
       fillRatio: audit.fillRatio,
-      consumedLevels: quote.consumedLevels,
     },
   };
 }
@@ -10129,23 +11834,19 @@ async function recordPostSubmissionIntentPersistenceIncident(input: {
   error: unknown;
 }) {
   const incidentAt = Date.now();
-  await writeCircuitBreaker({
-    key: "global",
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: incidentAt,
-    payload: {
-      intentId: input.intent.id,
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: input.intent.asset,
       slotKey: input.intent.slotKey,
+      intentId: input.intent.id,
       stage: input.stage,
+      reason: "hedge_failure",
+      disposition: "manual_intervention",
       venue: input.order.venue,
       orderId: input.order.venueOrderId,
-      orderStatus: input.order.status,
-      filledSize: input.order.filledSize,
-      persistenceError: toErrorMessage(input.error),
-      requiresManualClear: true,
-    },
-  });
+      triggeredAt: incidentAt,
+    }),
+  );
   await writeIntentIncidentRunEvent(
     input.intent,
     incidentAt,
@@ -10232,18 +11933,11 @@ function updateIntentLegFromFillSummary(
 
 export function summarizeIntentLegOrders(
   orders: LiveOrder[],
-  leg: Pick<OrderIntent["legs"][number], "venue" | "marketRef" | "outcome" | "tokenId" | "side">,
+  intent: Pick<OrderIntent, "id" | "asset" | "shadow">,
+  leg: OrderIntent["legs"][number],
   mode: "entry" | "exit",
 ) {
-  const expectedSide = mode === "entry" ? leg.side : leg.side === "BUY" ? "SELL" : "BUY";
-  const matchingOrders = orders.filter(
-    (order) =>
-      order.venue === leg.venue &&
-      order.marketRef === leg.marketRef &&
-      order.outcome === leg.outcome &&
-      order.side === expectedSide &&
-      (leg.tokenId === undefined || order.tokenId === undefined || order.tokenId === leg.tokenId),
-  );
+  const matchingOrders = orders.filter((order) => isVenueOrderCanonicalForIntentLeg(order, intent, leg, mode));
   if (matchingOrders.length === 0) {
     return null;
   }
@@ -10266,6 +11960,26 @@ export function summarizeIntentLegOrders(
     ...summary,
     venueOrderId: matchingOrders[0]?.venueOrderId ?? summary.venueOrderId,
   };
+}
+
+export function isVenueOrderCanonicalForIntentLeg(
+  order: LiveOrder,
+  intent: Pick<OrderIntent, "id" | "asset" | "shadow">,
+  leg: OrderIntent["legs"][number],
+  mode: "entry" | "exit",
+) {
+  const expectedSide = mode === "entry" ? leg.side : leg.side === "BUY" ? "SELL" : "BUY";
+  return (
+    order.asset === intent.asset &&
+    order.shadow === intent.shadow &&
+    order.intentId === intent.id &&
+    leg.intentId === intent.id &&
+    order.venue === leg.venue &&
+    order.marketRef === leg.marketRef &&
+    order.outcome === leg.outcome &&
+    order.side === expectedSide &&
+    (order.tokenId ?? null) === (leg.tokenId ?? null)
+  );
 }
 
 function resizeHedgeLegToFilledPrimary(intent: OrderIntent, now: number) {
@@ -10408,12 +12122,14 @@ async function syncIntentFromStoredVenueFills(
   }
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
+    const canonicalIntent = intent;
     const leg = intent.legs.find((candidate) => candidate.venue === venue);
     if (!leg) {
       return intent;
     }
 
-    const summary = summarizeIntentLegFills(fills, leg, "entry");
+    const canonicalFills = fills.filter((fill) => resolveAccountingLegForFill(canonicalIntent, fill)?.id === leg.id);
+    const summary = summarizeIntentLegFills(canonicalFills, leg, "entry");
     if (!summary) {
       return intent;
     }
@@ -10526,7 +12242,7 @@ async function confirmImmediateOrderExecution(
       () => true,
     );
   while (Date.now() <= deadline) {
-    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId).catch(() => null);
+    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId, request).catch(() => null);
     if (liveOrder) {
       latest = normalizeOrderResultFromLiveOrder(liveOrder, submission.raw);
       if (latest.status !== "live" && latest.status !== "pending") {
@@ -10545,7 +12261,7 @@ async function confirmImmediateOrderExecution(
 
   if (request.orderType === "FOK" && (latest.status === "live" || latest.status === "pending")) {
     await kalshiAdapter.cancelOrder(submission.venueOrderId).catch(() => null);
-    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId).catch(() => null);
+    const liveOrder = await kalshiAdapter.getOrder(submission.venueOrderId, request).catch(() => null);
     if (liveOrder) {
       latest = normalizeOrderResultFromLiveOrder(liveOrder, {
         ...(latest.raw ?? {}),
@@ -10584,7 +12300,9 @@ async function recoverKalshiOrderSubmissionForIntent(
   }
 
   const kalshiOrders = await fetchKalshiOrders();
-  const recoveredOrder = kalshiOrders.find((order) => order.client_order_id === request.clientOrderId);
+  const recoveredOrder = kalshiOrders.find(
+    (order) => order.client_order_id === request.clientOrderId && matchesKalshiOrderRequest(order, request),
+  );
   if (!recoveredOrder) {
     return null;
   }
@@ -10696,14 +12414,6 @@ function getCircuitBreakerReadinessStatus(
   return "blocked";
 }
 
-function describeCircuitBreakerForReadiness(breaker: Pick<CircuitBreaker, "key" | "payload" | "reason">, now: number) {
-  const cooldownUntil = getPayloadNumber(breaker.payload, "cooldownUntil");
-  const remainingMs = cooldownUntil === null ? null : Math.max(0, cooldownUntil - now);
-  return remainingMs === null
-    ? `${breaker.key}:${breaker.reason}`
-    : `${breaker.key}:${breaker.reason}:retry_in=${remainingMs}ms`;
-}
-
 export function shouldPauseExecutionForBreaker(
   breaker: Pick<CircuitBreaker, "active" | "key" | "payload" | "reason">,
   now: number,
@@ -10792,6 +12502,7 @@ export function hasKalshiHedgeRetryCapacity(
     depth: number | null;
     minOrderSize: number | null;
     tickSize?: number | null;
+    priceRanges?: readonly KalshiPriceRange[] | null;
   },
   settings: Pick<
     StrategyConfig,
@@ -11192,21 +12903,20 @@ async function armPrimarySoftNoFillGuard(
     return;
   }
 
-  await writeCircuitBreaker({
-    key: buildSlotBreakerKey(intent.slotKey),
-    active: true,
-    reason: "primary_no_fill",
-    triggeredAt: now,
-    payload: {
-      intentId: intent.id,
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: intent.asset,
       slotKey: intent.slotKey,
-      venue: intent.primaryVenue,
+      intentId: intent.id,
       stage: "primary_no_fill_cooldown",
-      primaryOrderId: primaryOrder.venueOrderId,
+      reason: "primary_no_fill",
+      disposition: "cooldown",
+      venue: intent.primaryVenue,
+      orderId: primaryOrder.venueOrderId,
+      triggeredAt: now,
       cooldownUntil: now + PRIMARY_NO_FILL_COOLDOWN_MS,
-      softNoFill: true,
-    },
-  });
+    }),
+  );
 }
 
 async function armHedgeFailureGuards(
@@ -11215,37 +12925,36 @@ async function armHedgeFailureGuards(
   _hedgeResult: Awaited<ReturnType<VenueAdapter["placeOrder"]>> | null,
   now: number,
 ) {
-  await writeCircuitBreaker({
-    key: buildSlotBreakerKey(intent.slotKey),
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: intent.id,
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: intent.asset,
       slotKey: intent.slotKey,
-      venue: intent.hedgeVenue,
+      intentId: intent.id,
       stage: "hedge_failure_unwind_pending",
-      hedgeOrderId: hedgeOrder?.venueOrderId ?? null,
+      reason: "hedge_failure",
+      disposition: "cooldown",
+      venue: intent.hedgeVenue,
+      orderId: hedgeOrder?.venueOrderId ?? null,
+      triggeredAt: now,
       cooldownUntil: now + HEDGE_FAILURE_UNWIND_PENDING_COOLDOWN_MS,
-    },
-  });
+    }),
+  );
 }
 
 async function armRecoveredHedgeFailureCooldown(intent: OrderIntent, now: number, stage: string) {
-  await writeCircuitBreaker({
-    key: buildSlotBreakerKey(intent.slotKey),
-    active: true,
-    reason: "hedge_failure",
-    triggeredAt: now,
-    payload: {
-      intentId: intent.id,
+  await observeCircuitBreakerIncident(
+    createExecutionIncident({
+      asset: intent.asset,
       slotKey: intent.slotKey,
-      venue: intent.hedgeVenue,
+      intentId: intent.id,
       stage,
-      recovered: true,
+      reason: "hedge_failure",
+      disposition: "cooldown",
+      venue: intent.hedgeVenue,
+      triggeredAt: now,
       cooldownUntil: now + HEDGE_FAILURE_RECOVERED_COOLDOWN_MS,
-    },
-  });
+    }),
+  );
 }
 
 function isRecentSoftHedgeNoFillEvent(
@@ -11294,28 +13003,6 @@ function countRecentSoftPrimaryNoFillEvents(
   return events.filter((event) => isRecentSoftPrimaryNoFillEvent(event, now, windowMs, venue)).length;
 }
 
-function getAssetFromSlotKey(slotKey: string | null | undefined): MarketAsset | null {
-  if (!slotKey) {
-    return null;
-  }
-
-  const [candidate] = slotKey.split(":");
-  return candidate && isMarketAsset(candidate) ? candidate : null;
-}
-
-function getBreakerAsset(key: CircuitBreaker["key"]): MarketAsset | null {
-  if (key.startsWith("asset:")) {
-    const candidate = key.slice("asset:".length);
-    return isMarketAsset(candidate) ? candidate : null;
-  }
-
-  if (key.startsWith("slot:")) {
-    return getAssetFromSlotKey(key.slice("slot:".length));
-  }
-
-  return null;
-}
-
 function getPayloadBoolean(payload: Record<string, unknown> | null, key: string) {
   return payload !== null && payload[key] === true;
 }
@@ -11353,22 +13040,16 @@ function deriveConfirmedVenueOrderStatus(order: LiveOrder, filledSize: number): 
   return filledSize + ORDER_SIZE_TOLERANCE >= order.requestedSize ? "filled" : "partially_filled";
 }
 
-function findLatestIntentOrderForLeg(recentOrders: LiveOrder[], intentId: string, leg: OrderIntent["legs"][number]) {
-  return (
-    recentOrders.find((order) => order.intentId === intentId && order.venue === leg.venue && order.side === leg.side) ??
-    null
-  );
+function findLatestIntentOrderForLeg(recentOrders: LiveOrder[], intent: OrderIntent, leg: OrderIntent["legs"][number]) {
+  return recentOrders.find((order) => isVenueOrderCanonicalForIntentLeg(order, intent, leg, "entry")) ?? null;
 }
 
 function findLatestIntentReduceOnlyOrder(
   recentOrders: LiveOrder[],
-  intentId: string,
+  intent: OrderIntent,
   leg: OrderIntent["legs"][number],
 ) {
-  return (
-    recentOrders.find((order) => order.intentId === intentId && order.venue === leg.venue && order.side === "SELL") ??
-    null
-  );
+  return recentOrders.find((order) => isVenueOrderCanonicalForIntentLeg(order, intent, leg, "exit")) ?? null;
 }
 
 function adapterFor(venue: OrderIntent["primaryVenue"]) {
@@ -11467,7 +13148,7 @@ export function isLatePrimaryFillRescueEligible(intent: OrderIntent, recentOrder
     return false;
   }
 
-  return !Boolean(findLatestIntentReduceOnlyOrder(recentOrders, intent.id, primaryLeg));
+  return !Boolean(findLatestIntentReduceOnlyOrder(recentOrders, intent, primaryLeg));
 }
 
 export function derivePrimaryExitSize(params: {
@@ -11650,8 +13331,9 @@ function mergePolymarketOrderStatusForNonDowngrade(existing: LiveOrder, mapped: 
 export function mergePolymarketTradeObservationStatus(
   existingStatus: LiveOrder["status"],
   observedStatus: LiveOrder["status"],
+  forcePending = false,
 ) {
-  return observedStatus === "pending" ? existingStatus : observedStatus;
+  return observedStatus === "pending" && !forcePending ? existingStatus : observedStatus;
 }
 
 function extractPolymarketOpenOrderFromRaw(raw: Record<string, unknown> | null | undefined) {

@@ -26,6 +26,9 @@ Voir `.env.example`.
 Variables principales:
 
 - `DATABASE_URL`
+- `APP_BASIC_AUTH_USER`
+- `APP_BASIC_AUTH_PASSWORD`
+- `LIVE_EXECUTION_ALLOWED=false|true`
 - `TELEGRAM_ENABLED`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
@@ -56,6 +59,8 @@ Pour Polymarket:
 La config de stratégie est stockée en base via `strategy_configs`, pas dans les variables d’environnement.
 Tu la pilotes via `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/[asset]` et `PUT /api/settings/[asset]`.
 
+En production, `APP_BASIC_AUTH_USER` et `APP_BASIC_AUTH_PASSWORD` sont obligatoires pour l’application. Les mutations API les vérifient explicitement et refusent aussi les requêtes navigateur cross-site. `LIVE_EXECUTION_ALLOWED` est une autorisation indépendante et fail-closed pour les nouvelles entrées réelles; laisse-la à `false` pour le scan et le shadow.
+
 Champs importants:
 
 - `enableTrading`
@@ -80,6 +85,8 @@ Le web et le worker tournent ensemble. Le runtime vérifie le schéma Postgres e
 - `npm run typecheck`
 - `npm test`
 - `npm run build`
+- `npm run build:worker`
+- `npm run db:status`
 
 ## Endpoints utiles
 
@@ -101,7 +108,7 @@ Le web et le worker tournent ensemble. Le runtime vérifie le schéma Postgres e
 
 - `enableTrading=false` : aucune exécution
 - `enableTrading=true` et `shadowMode=true` : simulation `rest-orderbook-v2`, sans soumission aux venues. Dès qu'une opportunité crée un intent, les carnets REST Polymarket et Kalshi sont demandés en parallèle. La paire est évaluée sur ces carnets avec profondeur, haircuts, slippage, frais, taille partielle commune et contrôles économiques. Un fill préparé reste en cours jusqu'à 15 secondes après la création pour simuler le temps d'exécution/confirmation; un échec REST ou un `no_fill` immédiatement démontrable n'attend pas artificiellement.
-- `enableTrading=true` et `shadowMode=false` : exécution live réelle
+- `enableTrading=true` et `shadowMode=false` : exécution live réelle uniquement si `LIVE_EXECUTION_ALLOWED=true` et les autres contrôles live sont prêts
 
 En shadow, `maxOpenIntentsPerSlot` ne limite plus tout le créneau. Un seul intent peut être en cours sur un actif, puis un cooldown durable de 60 secondes après sa finalisation autorise une nouvelle tentative si l'opportunité existe encore ou si une autre apparaît. La durée REST, la latence totale, le prochain instant éligible, les fills partiels et les raisons de `no_fill` sont visibles dans `/trades`.
 
@@ -113,11 +120,13 @@ La page `/recovery` sert au kill switch global, à la récupération Polymarket,
 Si tu pars sur un VPS en Israël, le repo n’a plus besoin de Railway. Il te faudra côté infra:
 
 - Postgres persistant
-- un process manager pour le web + worker, typiquement `systemd`
+- `systemd` avec un service web, un worker par actif, un reconciler et un notifier
 - un reverse proxy type Nginx ou Caddy pour HTTPS
 - NTP/horloge fiable
-- firewall restrictif et accès SSH par clé
+- firewall restrictif; l’accès SSH par mot de passe reste disponible, avec une clé SSH optionnelle en complément
 - variables d’environnement injectées au niveau du service système, pas dans le repo
+
+Les fichiers et scripts de ce dépôt ne modifient pas `sshd`, `PasswordAuthentication`, les mots de passe système ni les clés SSH, et n’imposent pas un accès key-only.
 
 Concrètement, mets les secrets soit:
 
@@ -131,7 +140,8 @@ Le pack de déploiement prêt à copier est dans [`deploy/vps`](./deploy/vps).
 Pour un VPS public, le mode recommandé est:
 
 - `Caddy` devant `127.0.0.1:3000`
-- `BasicAuth` côté Caddy
+- `BasicAuth` applicative obligatoire en production
+- `BasicAuth` côté Caddy comme défense externe indépendante
 - exposition seulement de `80/443`
 
 Le template est dans [`deploy/vps/Caddyfile`](./deploy/vps/Caddyfile).
@@ -172,7 +182,11 @@ Pourquoi pas Vercel seul:
 ## Notes d’exploitation
 
 - le trading live reste désactivé tant que `enableTrading` est `false` dans la config
+- une configuration live ne suffit pas: `LIVE_EXECUTION_ALLOWED=true` et un `POLYGON_RPC_URL` Polygon mainnet fonctionnel doivent aussi être présents dans l’environnement du runtime
 - le mode recommandé pour la montée en charge est d’abord `enableTrading=true` avec `shadowMode=true`
 - si une venue est non prête ou si un circuit breaker est actif, le worker refuse d’ouvrir de nouveaux intents
+- un fill Polymarket n’est comptabilisé comme final qu’après validation de son reçu Polygon et de l’événement V2 `OrderFilled`, frais exacts inclus
+- tout fill inséré après V8, même sur un intent legacy, doit passer par la transaction comptable atomique; un fill tardif met l’intent en quarantaine avant tout recalcul
+- ne jamais déployer tant qu’un intent live, une tentative d’ordre live ou une exposition en capital est non terminale; réconcilier d’abord la vérité venue, surtout lors d’un changement de génération des client order IDs
 - si Telegram est configuré, le worker n’envoie que 2 types de notifications: `trade_live` quand un intent live engage réellement du capital, et `manual_intervention_required` quand une action humaine est requise
 - le rebalance automatique entre cash Kalshi et USDC Polygon n’est pas implémenté; le périmètre treasury est limité au bridge officiel Polymarket

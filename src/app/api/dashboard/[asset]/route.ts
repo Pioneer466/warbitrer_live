@@ -26,9 +26,7 @@ export async function GET(_request: Request, context: { params: Promise<{ asset:
 
     const now = Date.now();
     const cached = dashboardCacheByAsset.get(asset);
-    let payload = cached && now - cached.capturedAt <= ASSET_DASHBOARD_CACHE_TTL_MS
-      ? cached.payload
-      : null;
+    let payload = cached && now - cached.capturedAt <= ASSET_DASHBOARD_CACHE_TTL_MS ? cached.payload : null;
     if (!payload) {
       payload = await readDashboard(getCurrentSlot(asset));
       dashboardCacheByAsset.set(asset, { capturedAt: now, payload });

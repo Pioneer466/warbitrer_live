@@ -6,8 +6,20 @@ const DEFAULT_HOT_SIGNAL_TTL_MS = 10_000;
 
 export function resolveHotColdConfig(env: Record<string, string | undefined> = process.env) {
   return {
-    coldScanIntervalMs: readPositiveIntEnv(env, "WARBITRER_COLD_SCAN_INTERVAL_MS", DEFAULT_COLD_SCAN_INTERVAL_MS, 250, 10_000),
-    hotScanIntervalMs: readPositiveIntEnv(env, "WARBITRER_HOT_SCAN_INTERVAL_MS", DEFAULT_HOT_SCAN_INTERVAL_MS, 100, 5_000),
+    coldScanIntervalMs: readPositiveIntEnv(
+      env,
+      "WARBITRER_COLD_SCAN_INTERVAL_MS",
+      DEFAULT_COLD_SCAN_INTERVAL_MS,
+      250,
+      10_000,
+    ),
+    hotScanIntervalMs: readPositiveIntEnv(
+      env,
+      "WARBITRER_HOT_SCAN_INTERVAL_MS",
+      DEFAULT_HOT_SCAN_INTERVAL_MS,
+      100,
+      5_000,
+    ),
     hotSignalTtlMs: readPositiveIntEnv(env, "WARBITRER_HOT_SIGNAL_TTL_MS", DEFAULT_HOT_SIGNAL_TTL_MS, 1_000, 60_000),
   };
 }
@@ -24,10 +36,7 @@ export function deriveNextScanIntervalMs(now: number, hotUntil: number) {
 export function isHotOpportunitySnapshot(
   snapshot: Pick<OpportunitySnapshot, "opportunities"> & Partial<Pick<OpportunitySnapshot, "kalshi" | "polymarket">>,
 ) {
-  if (
-    snapshot.kalshi?.feedHealth.feedStatus !== undefined &&
-    snapshot.kalshi.feedHealth.feedStatus !== "ready"
-  ) {
+  if (snapshot.kalshi?.feedHealth.feedStatus !== undefined && snapshot.kalshi.feedHealth.feedStatus !== "ready") {
     return false;
   }
   if (
@@ -39,8 +48,7 @@ export function isHotOpportunitySnapshot(
 
   return snapshot.opportunities.some(
     (opportunity) =>
-      opportunity.grossCost !== null &&
-      opportunity.grossCost <= opportunity.threshold + HOT_SIGNAL_WINDOW,
+      opportunity.grossCost !== null && opportunity.grossCost <= opportunity.threshold + HOT_SIGNAL_WINDOW,
   );
 }
 

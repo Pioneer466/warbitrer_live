@@ -3,6 +3,8 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 
 import {
+  closeIntentWithoutExposureAtomically,
+  findOrderIntent,
   insertOrderIntent,
   migratePostgresDatabase,
   OrderIntentRevisionConflictError,
@@ -17,7 +19,7 @@ const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
 
 describePostgres("Postgres order-intent CAS", () => {
-  it("serializes writers, preserves identity, and permits explicit late recovery", async () => {
+  it("serializes writers, preserves identity, and rejects unproved late recovery", async () => {
     await withIsolatedSchema(async (pool) => {
       await migratePostgresDatabase(pool);
       const inserted = await insertOrderIntent(pool, buildIntent());
@@ -31,7 +33,7 @@ describePostgres("Postgres order-intent CAS", () => {
         }),
         updateOrderIntent(pool, {
           ...inserted,
-          status: "skipped",
+          status: "manual_required",
           updatedAt: 201,
           failureReason: "concurrent test writer",
         }),
@@ -47,17 +49,29 @@ describePostgres("Postgres order-intent CAS", () => {
       expect(losers[0]?.reason).toBeInstanceOf(OrderIntentRevisionConflictError);
       expect(losers[0]?.reason).toMatchObject({ expectedRevision: 0, actualRevision: 1 });
 
-      const failed = await updateOrderIntent(pool, {
+      const terminalIntent: OrderIntent = {
         ...winners[0]!.value,
         status: "failed",
         updatedAt: 300,
+        resolvedAt: 300,
         failureReason: "primary truth timed out",
+      };
+      await expect(updateOrderIntent(pool, terminalIntent)).rejects.toThrow(/requires accounting head no_exposure/);
+      await closeIntentWithoutExposureAtomically(pool, {
+        context: { actor: "order-intent-cas-test", requestId: randomUUID(), occurredAt: 300 },
+        expectedHeadRevision: 0,
+        expectedIntentRevision: winners[0]!.value.revision,
+        terminalIntent,
+        proof: { venueOrders: "none", attempts: "none", positions: "none" },
       });
-      const rescued = await updateOrderIntent(pool, {
+      const failed = await findOrderIntent(pool, terminalIntent.id);
+      if (!failed) {
+        throw new Error("Accounting close did not persist its terminal intent");
+      }
+      const unprovedLateFill = {
         ...failed,
-        status: "primary_filled",
         updatedAt: 400,
-        failureReason: "late primary fill detected",
+        failureReason: "late primary fill detected without accounting evidence",
         legs: failed.legs.map((leg) =>
           leg.venue === failed.primaryVenue
             ? {
@@ -69,19 +83,20 @@ describePostgres("Postgres order-intent CAS", () => {
               }
             : leg,
         ) as OrderIntent["legs"],
-      });
-      expect(rescued).toMatchObject({ status: "primary_filled", revision: 3 });
-      expect(rescued.legs.find((leg) => leg.venue === rescued.primaryVenue)).toMatchObject({
-        requestedPrice: 0.46,
-        filledSize: 5,
-      });
+      };
+      await expect(updateOrderIntent(pool, { ...unprovedLateFill, status: "primary_filled" })).rejects.toThrow(
+        /no-exposure accounting head .* requires failed, skipped, or canceled parent intent/,
+      );
+      await expect(updateOrderIntent(pool, unprovedLateFill)).rejects.toThrow(
+        /no-exposure accounting head .* contradicts its exact parent projection/,
+      );
 
       const adjustedAfterPreflight = await updateOrderIntent(pool, {
-        ...rescued,
+        ...failed,
         maxSlippageBps: 45,
         updatedAt: 450,
       });
-      expect(adjustedAfterPreflight).toMatchObject({ maxSlippageBps: 45, revision: 4 });
+      expect(adjustedAfterPreflight).toMatchObject({ status: "failed", maxSlippageBps: 45, revision: 3 });
 
       await expect(updateOrderIntent(pool, { ...adjustedAfterPreflight, asset: "eth" })).rejects.toBeInstanceOf(
         PersistenceIdentityConflictError,
@@ -112,11 +127,13 @@ describePostgres("Postgres order-intent CAS", () => {
         revision: number;
         legs_json: OrderIntent["legs"];
         max_slippage_bps: number;
-      }>("SELECT asset, status, revision, legs_json, max_slippage_bps FROM order_intents WHERE id = $1", [rescued.id]);
+      }>("SELECT asset, status, revision, legs_json, max_slippage_bps FROM order_intents WHERE id = $1", [
+        adjustedAfterPreflight.id,
+      ]);
       expect(stored.rows[0]).toMatchObject({
         asset: "btc",
-        status: "primary_filled",
-        revision: 4,
+        status: "failed",
+        revision: 3,
         max_slippage_bps: 45,
       });
       expect(stored.rows[0]?.legs_json[0]?.marketRef).not.toBe("different-market");

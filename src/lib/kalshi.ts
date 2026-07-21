@@ -11,11 +11,13 @@ import {
 import { hasKalshiCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { assertProductionVenueEnvironment } from "@/lib/execution-safety";
 import { fetchJson } from "@/lib/fetch-json";
+import { getKalshiOutcomeTickSize, getKalshiV2BookDirection, parseKalshiPriceGrid } from "@/lib/kalshi-price-grid";
 import { getMarketCatalogEntry, inferKalshiAsset } from "@/lib/market-catalog";
 import type {
   ChartPriceSurface,
   ExecutionPriceSurface,
   KalshiQuote,
+  KalshiPriceRange,
   LiveFill,
   LiveOrder,
   MarketSlot,
@@ -51,6 +53,8 @@ export type KalshiMarketSummary = {
   yes_ask_size_fp: string;
   no_bid_size_fp: string;
   no_ask_size_fp: string;
+  price_level_structure?: string;
+  price_ranges?: KalshiPriceRange[];
 };
 
 type KalshiMarketList = {
@@ -144,8 +148,10 @@ type KalshiOrderResponse = {
     order_id: string;
     client_order_id?: string;
     ticker: string;
-    side: "yes" | "no";
-    action: "buy" | "sell";
+    side?: "yes" | "no";
+    action?: "buy" | "sell";
+    outcome_side?: "yes" | "no";
+    book_side?: "bid" | "ask";
     status: string;
     yes_price_dollars?: string;
     no_price_dollars?: string;
@@ -297,6 +303,8 @@ export async function fetchKalshiQuote(slot: MarketSlot): Promise<KalshiQuote> {
     feeType: series.series.fee_type,
     lastTradeYesPrice,
     lastTradeNoPrice: lastTradeYesPrice === null ? null : round4(1 - lastTradeYesPrice),
+    priceLevelStructure: freshMarket.price_level_structure ?? null,
+    priceRanges: normalizeKalshiMarketPriceRanges(freshMarket.price_ranges),
     resolution: null,
   };
 }
@@ -495,6 +503,7 @@ export function deriveKalshiOutcomeQuotesFromMarketWithSource(
   source: ChartPriceSurface["source"] = "rest-bootstrap",
   lastUpdatedAtOverride?: number | null,
 ) {
+  const priceRanges = normalizeKalshiMarketPriceRanges(market.price_ranges);
   const yesBid = parseMarketPrice(market.yes_bid_dollars);
   const yesAsk = parseMarketPrice(market.yes_ask_dollars);
   const noBid = parseMarketPrice(market.no_bid_dollars);
@@ -510,7 +519,7 @@ export function deriveKalshiOutcomeQuotesFromMarketWithSource(
     bestBid: yesBid,
     bestAsk: yesAsk,
     depth: parseMarketSize(market.yes_ask_size_fp),
-    tickSize: 0.001,
+    tickSize: deriveKalshiQuoteTickSize(yesAsk, "YES", priceRanges),
     minOrderSize: 1,
     feeRateBps: null,
     source,
@@ -525,7 +534,7 @@ export function deriveKalshiOutcomeQuotesFromMarketWithSource(
     bestBid: noBid,
     bestAsk: noAsk,
     depth: parseMarketSize(market.no_ask_size_fp),
-    tickSize: 0.001,
+    tickSize: deriveKalshiQuoteTickSize(noAsk, "NO", priceRanges),
     minOrderSize: 1,
     feeRateBps: null,
     source,
@@ -545,6 +554,7 @@ export function deriveKalshiOutcomeQuotes(
   },
   source: ChartPriceSurface["source"] = "rest-fallback",
   lastUpdatedAt: number | null = null,
+  priceRanges: KalshiPriceRange[] | null = null,
 ) {
   const yesBidLevel = getBestLevel(orderbook.yes_dollars);
   const noBidLevel = getBestLevel(orderbook.no_dollars);
@@ -563,7 +573,7 @@ export function deriveKalshiOutcomeQuotes(
       bestBid: yesBid,
       bestAsk: yesAsk,
       depth: noBidLevel?.size ?? null,
-      tickSize: 0.001,
+      tickSize: deriveKalshiQuoteTickSize(yesAsk, "YES", priceRanges),
       minOrderSize: 1,
       feeRateBps: null,
       source,
@@ -577,7 +587,7 @@ export function deriveKalshiOutcomeQuotes(
       bestBid: noBid,
       bestAsk: noAsk,
       depth: yesBidLevel?.size ?? null,
-      tickSize: 0.001,
+      tickSize: deriveKalshiQuoteTickSize(noAsk, "NO", priceRanges),
       minOrderSize: 1,
       feeRateBps: null,
       source,
@@ -754,9 +764,9 @@ export function createKalshiAdapter(): VenueAdapter {
         method: "DELETE",
       });
     },
-    async getOrder(orderId: string) {
+    async getOrder(orderId: string, expectedOrder?: VenueOrderRequest) {
       const response = await kalshiFetch<KalshiOrderResponse>(`/portfolio/orders/${encodeURIComponent(orderId)}`);
-      return mapKalshiLiveOrder(response.order, "unknown");
+      return mapKalshiLiveOrder(response.order, "unknown", expectedOrder);
     },
   };
 }
@@ -1119,6 +1129,8 @@ function createUnavailableKalshiQuote(
     feeType: series.fee_type,
     lastTradeYesPrice: null,
     lastTradeNoPrice: null,
+    priceLevelStructure: null,
+    priceRanges: null,
     resolution: null,
   };
 }
@@ -1265,12 +1277,39 @@ function emptyOutcome(
     bestBid: null,
     bestAsk: null,
     depth: null,
-    tickSize: 0.001,
+    tickSize: null,
     minOrderSize: 1,
     feeRateBps: null,
     source,
     lastUpdatedAt,
   });
+}
+
+export function normalizeKalshiMarketPriceRanges(ranges: KalshiPriceRange[] | undefined | null) {
+  if (!ranges) {
+    return null;
+  }
+  try {
+    parseKalshiPriceGrid(ranges);
+    return ranges.map((range) => ({ ...range }));
+  } catch {
+    return null;
+  }
+}
+
+function deriveKalshiQuoteTickSize(
+  price: number | null,
+  outcome: "YES" | "NO",
+  priceRanges: KalshiPriceRange[] | null,
+) {
+  if (price === null || priceRanges === null) {
+    return null;
+  }
+  try {
+    return getKalshiOutcomeTickSize({ price, outcome, side: "BUY", priceRanges });
+  } catch {
+    return null;
+  }
 }
 
 function withinTolerance(left: number, right: number) {
@@ -1385,8 +1424,10 @@ export function mapKalshiV2OrderResult(
   }
   const averageFillPrice =
     yesAveragePrice === null ? null : order.outcome === "YES" ? yesAveragePrice : round4(1 - yesAveragePrice);
-  const averageFeePaid = response.average_fee_paid === undefined ? 0 : Number(response.average_fee_paid);
-  if (!Number.isFinite(averageFeePaid) || averageFeePaid < 0) {
+  const rawAverageFeePaid = response.average_fee_paid;
+  const hasAverageFeePaid = typeof rawAverageFeePaid === "string" && rawAverageFeePaid.trim().length > 0;
+  const averageFeePaid = hasAverageFeePaid ? Number(rawAverageFeePaid) : 0;
+  if ((filledSize > 0 && !hasAverageFeePaid) || !Number.isFinite(averageFeePaid) || averageFeePaid < 0) {
     throw new Error("Frais moyens Create Order V2 Kalshi invalides");
   }
 
@@ -1407,14 +1448,21 @@ export function mapKalshiV2OrderResult(
   };
 }
 
-function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: string): LiveOrder {
+function mapKalshiLiveOrder(
+  order: KalshiOrderResponse["order"],
+  intentId: string,
+  expectedOrder?: VenueOrderRequest,
+): LiveOrder {
+  if (expectedOrder && !matchesKalshiOrderRequest(order, expectedOrder)) {
+    throw new Error(`Ordre Kalshi ${order.order_id} ne correspond pas à la requête attendue`);
+  }
+  const direction = resolveKalshiOrderDirection(order, expectedOrder);
   const asset = inferKalshiAsset(order.ticker);
   const filledSize = Number(order.fill_count_fp ?? 0);
   const requestedSize = Number(order.initial_count_fp ?? filledSize);
   const remainingSize = Number(order.remaining_count_fp ?? 0);
-  const outcome = order.side === "yes" ? "YES" : "NO";
   const price =
-    getKalshiOrderPriceUsd(outcome, {
+    getKalshiOrderPriceUsd(direction.outcome, {
       yes_price_dollars: order.yes_price_dollars,
       no_price_dollars: order.no_price_dollars,
     }) ?? null;
@@ -1428,8 +1476,8 @@ function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: strin
     venueOrderId: order.order_id,
     clientOrderId: order.client_order_id ?? null,
     marketRef: order.ticker,
-    side: order.action === "sell" ? "SELL" : "BUY",
-    outcome,
+    side: direction.side,
+    outcome: direction.outcome,
     orderType: "LIMIT",
     requestedPrice: price,
     requestedSize,
@@ -1441,4 +1489,82 @@ function mapKalshiLiveOrder(order: KalshiOrderResponse["order"], intentId: strin
     updatedAt: order.last_update_time ? Date.parse(order.last_update_time) : Date.now(),
     raw: order as unknown as Record<string, unknown>,
   };
+}
+
+export function matchesKalshiOrderRequest(order: KalshiOrderResponse["order"], expected: VenueOrderRequest) {
+  if (
+    (expected.outcome !== "YES" && expected.outcome !== "NO") ||
+    order.ticker !== expected.marketRef ||
+    (order.client_order_id !== undefined && order.client_order_id !== expected.clientOrderId)
+  ) {
+    return false;
+  }
+
+  const expectedBookSide = getKalshiV2BookDirection(expected.outcome, expected.side);
+  const expectedOutcomeSide = expectedBookSide === "bid" ? "yes" : "no";
+  const hasCanonicalDirection = order.outcome_side !== undefined || order.book_side !== undefined;
+  const hasLegacyDirection = order.side !== undefined || order.action !== undefined;
+  if (
+    hasCanonicalDirection &&
+    (order.outcome_side === undefined ||
+      order.book_side === undefined ||
+      order.outcome_side !== expectedOutcomeSide ||
+      order.book_side !== expectedBookSide)
+  ) {
+    return false;
+  }
+  if (
+    hasLegacyDirection &&
+    (order.side === undefined ||
+      order.action === undefined ||
+      order.side !== expected.outcome.toLowerCase() ||
+      order.action !== expected.side.toLowerCase())
+  ) {
+    return false;
+  }
+  if (!hasCanonicalDirection && !hasLegacyDirection) {
+    return false;
+  }
+
+  const requestedSize = Number(
+    order.initial_count_fp ?? Number(order.fill_count_fp ?? 0) + Number(order.remaining_count_fp ?? 0),
+  );
+  if (!Number.isFinite(requestedSize) || Math.abs(requestedSize - expected.size) > 1e-6) {
+    return false;
+  }
+  const observedPrice = getKalshiOrderPriceUsd(expected.outcome, {
+    yes_price_dollars: order.yes_price_dollars,
+    no_price_dollars: order.no_price_dollars,
+  });
+  return expected.price !== null && observedPrice !== null && Math.abs(observedPrice - expected.price) <= 0.00005;
+}
+
+function resolveKalshiOrderDirection(
+  order: KalshiOrderResponse["order"],
+  expected?: VenueOrderRequest,
+): { outcome: "YES" | "NO"; side: OrderSide } {
+  if (expected) {
+    if (expected.outcome !== "YES" && expected.outcome !== "NO") {
+      throw new Error(`Outcome Kalshi attendu invalide: ${expected.outcome}`);
+    }
+    return { outcome: expected.outcome, side: expected.side };
+  }
+
+  if (order.outcome_side !== undefined && order.book_side !== undefined) {
+    const outcome = order.outcome_side === "yes" ? "YES" : "NO";
+    const buyBookSide = outcome === "YES" ? "bid" : "ask";
+    return {
+      outcome,
+      side: order.book_side === buyBookSide ? "BUY" : "SELL",
+    };
+  }
+
+  if (order.side !== undefined && order.action !== undefined) {
+    return {
+      outcome: order.side === "yes" ? "YES" : "NO",
+      side: order.action === "buy" ? "BUY" : "SELL",
+    };
+  }
+
+  throw new Error(`Direction de l'ordre Kalshi ${order.order_id} indisponible ou ambiguë`);
 }

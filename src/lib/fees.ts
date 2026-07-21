@@ -154,39 +154,24 @@ export function roundToStep(value: number, step: number) {
   return Math.floor(value / step) * step;
 }
 
-export function calculateKalshiFee({
-  contracts,
-  price,
-  feeMultiplier = 1,
-  maker = false,
-}: KalshiFeeInput) {
+export function calculateKalshiFee({ contracts, price, feeMultiplier = 1, maker = false }: KalshiFeeInput) {
   const coefficient = (maker ? 0.0175 : 0.07) * feeMultiplier;
   return roundUpToCent(coefficient * contracts * price * (1 - price));
 }
 
-export function calculatePolymarketFee({
-  shares,
-  price,
-  feeRateBps = 0,
-}: PolymarketFeeInput) {
+export function calculatePolymarketFee({ shares, price, feeRateBps = 0 }: PolymarketFeeInput) {
   return roundPolymarketFee(shares * price * (feeRateBps / 10_000));
 }
 
-export function calculatePolymarketLevelFee(input: PolymarketFeeInput & {
-  feeRate?: number;
-  feeExponent?: number;
-}) {
+export function calculatePolymarketLevelFee(
+  input: PolymarketFeeInput & {
+    feeRate?: number;
+    feeExponent?: number;
+  },
+) {
   const feeRate = input.feeRate;
-  if (
-    feeRate !== undefined &&
-    Number.isFinite(feeRate) &&
-    feeRate > 0 &&
-    input.price > 0 &&
-    input.price < 1
-  ) {
-    const feeExponent = Number.isFinite(input.feeExponent)
-      ? Math.max(0, input.feeExponent ?? 0)
-      : 0;
+  if (feeRate !== undefined && Number.isFinite(feeRate) && feeRate > 0 && input.price > 0 && input.price < 1) {
+    const feeExponent = Number.isFinite(input.feeExponent) ? Math.max(0, input.feeExponent ?? 0) : 0;
     const feePerShare = feeRate * Math.pow(input.price * (1 - input.price), feeExponent);
     const effectiveFeeRateBps = (feePerShare / input.price) * 10_000;
     return calculatePolymarketFee({
@@ -198,25 +183,21 @@ export function calculatePolymarketLevelFee(input: PolymarketFeeInput & {
 
   return calculatePolymarketFee({
     ...input,
-    feeRateBps:
-      input.feeRateBps !== undefined && Number.isFinite(input.feeRateBps)
-        ? Math.max(0, input.feeRateBps)
-        : 0,
+    feeRateBps: input.feeRateBps !== undefined && Number.isFinite(input.feeRateBps) ? Math.max(0, input.feeRateBps) : 0,
   });
 }
 
-function calculatePolymarketWorstFillFee(input: Omit<PolymarketFeeInput, "price"> & {
-  limitPrice: number;
-  feeRate?: number;
-  feeExponent?: number;
-}) {
+function calculatePolymarketWorstFillFee(
+  input: Omit<PolymarketFeeInput, "price"> & {
+    limitPrice: number;
+    feeRate?: number;
+    feeExponent?: number;
+  },
+) {
   if (input.feeRate !== undefined && Number.isFinite(input.feeRate) && input.feeRate > 0) {
     const exponent = Number.isFinite(input.feeExponent) ? Math.max(0, input.feeExponent ?? 0) : 0;
     const feeMaximizingPrice = Math.min(0.5, Math.max(0, input.limitPrice));
-    const maximumFeePerShare = input.feeRate * Math.pow(
-      feeMaximizingPrice * (1 - feeMaximizingPrice),
-      exponent,
-    );
+    const maximumFeePerShare = input.feeRate * Math.pow(feeMaximizingPrice * (1 - feeMaximizingPrice), exponent);
     return roundPolymarketFee(input.shares * maximumFeePerShare);
   }
 
@@ -273,17 +254,15 @@ export function quoteMultiLevelBuyLeg(input: MultiLevelBuyLegInput): MultiLevelL
           feeMultiplier: normalizeFeeMultiplier(input.feeMultiplier),
           maker: input.maker,
         });
-  const calculateExpectedOrderFee = input.venue === "kalshi"
-    ? (levels: ConsumedBookLevel[]) => {
-        const coefficient = (input.maker ? 0.0175 : 0.07) * normalizeFeeMultiplier(input.feeMultiplier);
-        return roundUpToCent(
-          levels.reduce(
-            (sum, level) => sum + coefficient * level.size * level.price * (1 - level.price),
-            0,
-          ),
-        );
-      }
-    : undefined;
+  const calculateExpectedOrderFee =
+    input.venue === "kalshi"
+      ? (levels: ConsumedBookLevel[]) => {
+          const coefficient = (input.maker ? 0.0175 : 0.07) * normalizeFeeMultiplier(input.feeMultiplier);
+          return roundUpToCent(
+            levels.reduce((sum, level) => sum + coefficient * level.size * level.price * (1 - level.price), 0),
+          );
+        }
+      : undefined;
   return quotePreparedBook(
     input.venue,
     prepared,
@@ -337,9 +316,7 @@ export function deriveMultiLevelPairedQuote(input: MultiLevelPairedQuoteInput): 
     input.minPairSize !== undefined && Number.isFinite(input.minPairSize)
       ? Math.max(1, Math.ceil(input.minPairSize))
       : 1;
-  const emptyResult = (
-    limitingReason: MultiLevelPairedQuoteLimitingReason,
-  ): MultiLevelPairedQuote => ({
+  const emptyResult = (limitingReason: MultiLevelPairedQuoteLimitingReason): MultiLevelPairedQuote => ({
     commonSize: 0,
     maxExecutableSize,
     polymarket: emptyMultiLevelLegQuote("polymarket", polyBook),
@@ -379,9 +356,7 @@ export function deriveMultiLevelPairedQuote(input: MultiLevelPairedQuoteInput): 
   const polyMaxCostUsd = normalizeOptionalLimit(input.polymarket.maxCostUsd);
   const kalshiMaxCostUsd = normalizeOptionalLimit(input.kalshi.maxCostUsd);
   const maxAbsoluteFatalLossUsd = normalizeOptionalLimit(input.maxAbsoluteFatalLossUsd);
-  const maxProbabilityWeightedFatalLossUsd = normalizeOptionalLimit(
-    input.maxProbabilityWeightedFatalLossUsd,
-  );
+  const maxProbabilityWeightedFatalLossUsd = normalizeOptionalLimit(input.maxProbabilityWeightedFatalLossUsd);
   const minProjectedNetProfitUsd = normalizeNonNegative(input.minProjectedNetProfitUsd);
   const minProjectedNetReturn = normalizeNonNegative(input.minProjectedNetReturn);
   const minConservativeNetProfitUsd = normalizeNonNegative(input.minConservativeNetProfitUsd);
@@ -398,37 +373,41 @@ export function deriveMultiLevelPairedQuote(input: MultiLevelPairedQuoteInput): 
       "polymarket",
       polyBook,
       size,
-      (levelSize, price) => calculatePolymarketLevelFee({
-        shares: levelSize,
-        price,
-        feeRateBps: input.polymarket.feeRateBps,
-        feeRate: input.polymarket.feeRate,
-        feeExponent: input.polymarket.feeExponent,
-      }),
-      (requestedSize, limitPrice) => calculatePolymarketWorstFillFee({
-        shares: requestedSize,
-        limitPrice,
-        feeRateBps: input.polymarket.feeRateBps,
-        feeRate: input.polymarket.feeRate,
-        feeExponent: input.polymarket.feeExponent,
-      }),
+      (levelSize, price) =>
+        calculatePolymarketLevelFee({
+          shares: levelSize,
+          price,
+          feeRateBps: input.polymarket.feeRateBps,
+          feeRate: input.polymarket.feeRate,
+          feeExponent: input.polymarket.feeExponent,
+        }),
+      (requestedSize, limitPrice) =>
+        calculatePolymarketWorstFillFee({
+          shares: requestedSize,
+          limitPrice,
+          feeRateBps: input.polymarket.feeRateBps,
+          feeRate: input.polymarket.feeRate,
+          feeExponent: input.polymarket.feeExponent,
+        }),
     );
     const kalshi = quotePreparedBook(
       "kalshi",
       kalshiBook,
       size,
-      (levelSize, price) => calculateKalshiFee({
-        contracts: levelSize,
-        price,
-        feeMultiplier: normalizeFeeMultiplier(input.kalshi.feeMultiplier),
-        maker: input.kalshi.maker,
-      }),
-      (requestedSize, limitPrice) => calculateKalshiWorstFillFee({
-        contracts: requestedSize,
-        limitPrice,
-        feeMultiplier: normalizeFeeMultiplier(input.kalshi.feeMultiplier),
-        maker: input.kalshi.maker,
-      }),
+      (levelSize, price) =>
+        calculateKalshiFee({
+          contracts: levelSize,
+          price,
+          feeMultiplier: normalizeFeeMultiplier(input.kalshi.feeMultiplier),
+          maker: input.kalshi.maker,
+        }),
+      (requestedSize, limitPrice) =>
+        calculateKalshiWorstFillFee({
+          contracts: requestedSize,
+          limitPrice,
+          feeMultiplier: normalizeFeeMultiplier(input.kalshi.feeMultiplier),
+          maker: input.kalshi.maker,
+        }),
     );
     if (!polymarket || !kalshi) {
       continue;
@@ -489,10 +468,7 @@ export function deriveMultiLevelPairedQuote(input: MultiLevelPairedQuoteInput): 
       },
     });
     results.set(size, { quote, reason });
-    if (
-      reason === null &&
-      conservativeNetProfitUsd > bestConservativeNetProfitUsd + ORDER_SIZE_TOLERANCE
-    ) {
+    if (reason === null && conservativeNetProfitUsd > bestConservativeNetProfitUsd + ORDER_SIZE_TOLERANCE) {
       best = quote;
       bestConservativeNetProfitUsd = conservativeNetProfitUsd;
     }
@@ -568,11 +544,7 @@ export function normalizeVenueTargetSize(
   return roundToStep(size, step);
 }
 
-export function getVenueExecutableDepth(
-  venue: Venue,
-  displayedDepth: number | null,
-  kalshiDepthHeadroomContracts = 0,
-) {
+export function getVenueExecutableDepth(venue: Venue, displayedDepth: number | null, kalshiDepthHeadroomContracts = 0) {
   if (displayedDepth === null) {
     return null;
   }
@@ -584,10 +556,7 @@ export function getVenueExecutableDepth(
   return Math.max(0, displayedDepth - Math.max(0, kalshiDepthHeadroomContracts));
 }
 
-export function applyKalshiPrimaryDepthSafetyFactor(
-  displayedDepth: number | null,
-  safetyFactor: number,
-) {
+export function applyKalshiPrimaryDepthSafetyFactor(displayedDepth: number | null, safetyFactor: number) {
   if (displayedDepth === null) {
     return null;
   }
@@ -596,17 +565,12 @@ export function applyKalshiPrimaryDepthSafetyFactor(
     return 0;
   }
 
-  const normalizedSafetyFactor = Number.isFinite(safetyFactor)
-    ? Math.min(1, Math.max(0, safetyFactor))
-    : 1;
+  const normalizedSafetyFactor = Number.isFinite(safetyFactor) ? Math.min(1, Math.max(0, safetyFactor)) : 1;
 
   return displayedDepth * normalizedSafetyFactor;
 }
 
-export function getKalshiPrimaryMultiClipCapacity(
-  maxClipContracts: number,
-  maxClips: number,
-) {
+export function getKalshiPrimaryMultiClipCapacity(maxClipContracts: number, maxClips: number) {
   if (!Number.isFinite(maxClipContracts) || !Number.isFinite(maxClips)) {
     return null;
   }
@@ -697,29 +661,20 @@ export function deriveVenueExecutableSize(input: {
           input.minOrderSize,
           input.fallbackMinOrderSize,
         );
-  const cappedSize =
-    input.sizeCap === null || input.sizeCap === undefined ? Number.POSITIVE_INFINITY : input.sizeCap;
+  const cappedSize = input.sizeCap === null || input.sizeCap === undefined ? Number.POSITIVE_INFINITY : input.sizeCap;
   const executableDepth = getVenueExecutableDepth(
     input.venue,
     input.displayedDepth,
     input.kalshiDepthHeadroomContracts ?? 0,
   );
-  const rawExecutableSize = Math.min(
-    budgetLimitedSize,
-    cappedSize,
-    executableDepth ?? Number.POSITIVE_INFINITY,
-  );
+  const rawExecutableSize = Math.min(budgetLimitedSize, cappedSize, executableDepth ?? Number.POSITIVE_INFINITY);
   const normalized = normalizeVenueTargetSize(
     input.venue,
     rawExecutableSize,
     input.minOrderSize,
     input.fallbackMinOrderSize,
   );
-  const minimumSize = getVenueMinimumOrderSize(
-    input.venue,
-    input.minOrderSize,
-    input.fallbackMinOrderSize,
-  );
+  const minimumSize = getVenueMinimumOrderSize(input.venue, input.minOrderSize, input.fallbackMinOrderSize);
 
   return normalized + Number.EPSILON >= minimumSize ? normalized : 0;
 }
@@ -839,9 +794,7 @@ export function deriveBalancedPayoutPairSize(input: {
   };
   kalshiDepthHeadroomContracts?: number;
 }): BalancedPayoutPairSize {
-  const targetPairBudgetUsd = Number.isFinite(input.targetPairBudgetUsd)
-    ? Math.max(0, input.targetPairBudgetUsd)
-    : 0;
+  const targetPairBudgetUsd = Number.isFinite(input.targetPairBudgetUsd) ? Math.max(0, input.targetPairBudgetUsd) : 0;
   const normalizedMaxLegCapitalShare = Number.isFinite(input.maxLegCapitalShare)
     ? Math.min(1, Math.max(0, input.maxLegCapitalShare))
     : 1;
@@ -988,10 +941,7 @@ export function deriveBalancedPayoutPairSize(input: {
       input.kalshi.fallbackMinOrderSize,
     );
     const commonSize = Math.min(normalizedPolySize, normalizedKalshiSize);
-    if (
-      commonSize + ORDER_SIZE_TOLERANCE < polyMinimumSize ||
-      commonSize + ORDER_SIZE_TOLERANCE < kalshiMinimumSize
-    ) {
+    if (commonSize + ORDER_SIZE_TOLERANCE < polyMinimumSize || commonSize + ORDER_SIZE_TOLERANCE < kalshiMinimumSize) {
       continue;
     }
 
@@ -1123,13 +1073,10 @@ function quotePreparedBook(
     let allocatedFeeUsd = 0;
     for (let index = 0; index < consumedLevels.length; index += 1) {
       const level = consumedLevels[index];
-      const allocated = index === consumedLevels.length - 1
-        ? round5(expectedOrderFeeUsd - allocatedFeeUsd)
-        : round5(
-            perLevelFeeTotalUsd > 0
-              ? expectedOrderFeeUsd * (level.feeUsd / perLevelFeeTotalUsd)
-              : 0,
-          );
+      const allocated =
+        index === consumedLevels.length - 1
+          ? round5(expectedOrderFeeUsd - allocatedFeeUsd)
+          : round5(perLevelFeeTotalUsd > 0 ? expectedOrderFeeUsd * (level.feeUsd / perLevelFeeTotalUsd) : 0);
       level.feeUsd = Math.max(0, allocated);
       level.costUsd = round5(level.notionalUsd + level.feeUsd);
       allocatedFeeUsd += level.feeUsd;
@@ -1144,10 +1091,7 @@ function quotePreparedBook(
   const worstFillNotionalUsd = Math.max(notionalUsd, requestedSize * limitPrice);
   const worstFillFeeUsd = Math.max(feeUsd, calculateWorstFillFee(requestedSize, limitPrice));
   const expectedCostUsd = notionalUsd + feeUsd;
-  const worstFillCostUsd = Math.max(
-    expectedCostUsd,
-    worstFillNotionalUsd + worstFillFeeUsd,
-  );
+  const worstFillCostUsd = Math.max(expectedCostUsd, worstFillNotionalUsd + worstFillFeeUsd);
 
   return {
     venue,
@@ -1257,25 +1201,18 @@ function getMultiLevelCandidateRejectionReason(input: {
   if (raw.worstFillCostUsd > limits.maxAbsoluteFatalLossUsd + ORDER_SIZE_TOLERANCE) {
     return "absolute_fatal_loss";
   }
-  if (
-    raw.probabilityWeightedFatalLossUsd >
-    limits.maxProbabilityWeightedFatalLossUsd + ORDER_SIZE_TOLERANCE
-  ) {
+  if (raw.probabilityWeightedFatalLossUsd > limits.maxProbabilityWeightedFatalLossUsd + ORDER_SIZE_TOLERANCE) {
     return "probability_weighted_fatal_loss";
   }
   if (failsPositiveMinimum(raw.projectedNetProfitUsd, limits.minProjectedNetProfitUsd)) {
     return "projected_profit";
   }
-  if (
-    raw.projectedNetReturn === null ||
-    failsPositiveMinimum(raw.projectedNetReturn, limits.minProjectedNetReturn)
-  ) {
+  if (raw.projectedNetReturn === null || failsPositiveMinimum(raw.projectedNetReturn, limits.minProjectedNetReturn)) {
     return "projected_return";
   }
   if (
     limits.fatalMismatchProbabilityUpper >
-    limits.maxFatalProbabilityShareOfBreakEven * raw.breakEvenFatalProbability +
-      ORDER_SIZE_TOLERANCE
+    limits.maxFatalProbabilityShareOfBreakEven * raw.breakEvenFatalProbability + ORDER_SIZE_TOLERANCE
   ) {
     return "fatal_probability";
   }
@@ -1292,16 +1229,10 @@ function getMultiLevelCandidateRejectionReason(input: {
 }
 
 function failsPositiveMinimum(value: number, minimum: number) {
-  return minimum <= ORDER_SIZE_TOLERANCE
-    ? value <= ORDER_SIZE_TOLERANCE
-    : value + ORDER_SIZE_TOLERANCE < minimum;
+  return minimum <= ORDER_SIZE_TOLERANCE ? value <= ORDER_SIZE_TOLERANCE : value + ORDER_SIZE_TOLERANCE < minimum;
 }
 
-export function getVenueMinimumOrderSize(
-  venue: Venue,
-  minOrderSize: number | null,
-  fallbackMinOrderSize: number,
-) {
+export function getVenueMinimumOrderSize(venue: Venue, minOrderSize: number | null, fallbackMinOrderSize: number) {
   if (venue === "polymarket") {
     return minOrderSize ?? POLYMARKET_SHARE_ESTIMATE_STEP;
   }

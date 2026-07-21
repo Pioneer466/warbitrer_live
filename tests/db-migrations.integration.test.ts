@@ -103,7 +103,7 @@ describePostgres("Postgres migrations", () => {
         await secondPool.end();
       }
     });
-  });
+  }, 30_000);
 
   it("rolls back metadata and schema changes when a migration fails", async () => {
     await withIsolatedSchema(async (pool) => {
@@ -119,7 +119,7 @@ describePostgres("Postgres migrations", () => {
       );
       expect(relations.rows[0]).toEqual({ migrations: null, probe: null });
     });
-  });
+  }, 30_000);
 
   it("refuses a checksum change without altering recorded history", async () => {
     await withIsolatedSchema(async (pool) => {
@@ -140,7 +140,7 @@ describePostgres("Postgres migrations", () => {
       expect(recorded.rows[0]?.checksum).toBe(original.checksum);
       await expect(getDatabaseMigrationStatus(pool, [original])).resolves.toMatchObject({ ready: true });
     });
-  });
+  }, 30_000);
 
   it("reports the production registry through the read-only status path", async () => {
     await withIsolatedSchema(async (pool) => {

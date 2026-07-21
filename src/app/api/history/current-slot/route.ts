@@ -13,10 +13,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const asset = parseMarketAsset(url.searchParams.get("asset"));
     const slot = getCurrentSlot(asset);
-    const [points, latestSnapshot] = await Promise.all([
-      readHistoryPoints(slot),
-      readLatestSnapshot(asset, slot.key),
-    ]);
+    const [points, latestSnapshot] = await Promise.all([readHistoryPoints(slot), readLatestSnapshot(asset, slot.key)]);
     const fallbackPoints =
       points.length > 0 || !latestSnapshot
         ? points

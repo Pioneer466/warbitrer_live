@@ -1,10 +1,6 @@
-import type { OrderSide } from "@/lib/types";
+import type { KalshiPriceRange, OrderSide } from "@/lib/types";
 
-export type KalshiPriceRange = {
-  start: string;
-  end: string;
-  step: string;
-};
+export type { KalshiPriceRange } from "@/lib/types";
 
 export type KalshiBookSide = "bid" | "ask";
 
@@ -69,7 +65,7 @@ export function normalizeKalshiOutcomePrice(input: {
   side: OrderSide;
   priceRanges: readonly KalshiPriceRange[];
 }) {
-  const yesPriceUnits = toPriceUnits(input.outcome === "YES" ? input.price : 1 - input.price, "order price");
+  const yesPriceUnits = toRawPriceUnits(input.outcome === "YES" ? input.price : 1 - input.price, "order price");
   const grid = parseKalshiPriceGrid(input.priceRanges);
   const bookSide = getKalshiV2BookDirection(input.outcome, input.side);
   const normalizedYesUnits = findGridPrice(grid, yesPriceUnits, bookSide === "bid" ? "ceil" : "floor");
@@ -80,7 +76,7 @@ export function normalizeKalshiOutcomePrice(input: {
     price: fromPriceUnits(outcomeUnits),
     yesBookPrice: fromPriceUnits(normalizedYesUnits),
     bookSide,
-    adjusted: normalizedYesUnits !== yesPriceUnits,
+    adjusted: Math.abs(normalizedYesUnits - yesPriceUnits) > 1e-7,
   };
 }
 
@@ -146,8 +142,18 @@ export function isKalshiOutcomePriceValid(input: {
 }
 
 function findGridPrice(grid: number[], price: number, direction: "ceil" | "floor") {
-  const candidate =
-    direction === "ceil" ? grid.find((entry) => entry >= price) : grid.findLast((entry) => entry <= price);
+  const epsilon = 1e-7;
+  let candidate: number | undefined;
+  if (direction === "ceil") {
+    candidate = grid.find((entry) => entry + epsilon >= price);
+  } else {
+    for (let index = grid.length - 1; index >= 0; index -= 1) {
+      if (grid[index]! <= price + epsilon) {
+        candidate = grid[index];
+        break;
+      }
+    }
+  }
   if (candidate === undefined) {
     throw new KalshiPriceGridError("Kalshi order price is outside the authoritative grid");
   }
@@ -171,6 +177,13 @@ function toPriceUnits(value: number, label: string) {
     throw new KalshiPriceGridError(`${label} exceeds four decimal places: ${value}`);
   }
   return rounded;
+}
+
+function toRawPriceUnits(value: number, label: string) {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new KalshiPriceGridError(`Invalid ${label}: ${value}`);
+  }
+  return value * PRICE_SCALE;
 }
 
 function fromPriceUnits(value: number) {

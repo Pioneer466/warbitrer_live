@@ -1,8 +1,5 @@
 import { readEnv, type LiveEnv } from "@/lib/env";
-import {
-  ORACLE_SAMPLE_RETENTION_MS,
-  SLOT_RESOLUTION_RETENTION_MS,
-} from "@/lib/oracle-history";
+import { ORACLE_SAMPLE_RETENTION_MS, SLOT_RESOLUTION_RETENTION_MS } from "@/lib/oracle-history";
 
 const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;

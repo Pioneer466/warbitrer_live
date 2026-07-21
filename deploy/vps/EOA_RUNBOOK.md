@@ -45,9 +45,14 @@ Le fichier `/etc/warbitrer/polymarket-private-key.txt` doit contenir uniquement:
 
 Une fois le signer/funder EOA configuré:
 
+- conserver `LIVE_EXECUTION_ALLOWED=false`
+- mettre tous les actifs en scan-only
+- vérifier qu’aucun intent, order attempt ou exposition live n’est non terminal
+- terminer la réconciliation venue avant de changer de signer ou de funder
+
 ```bash
 cd /opt/warbitrer-live/app
-npm run poly:derive-api-key
+sudo -u warbitrer -H npm run poly:derive-api-key
 ```
 
 Copier ensuite dans `/etc/warbitrer/warbitrer.env`:
@@ -59,7 +64,25 @@ Copier ensuite dans `/etc/warbitrer/warbitrer.env`:
 Puis:
 
 ```bash
-sudo systemctl restart warbitrer-web warbitrer-worker
+sudo systemctl restart \
+  warbitrer-web \
+  warbitrer-asset@btc \
+  warbitrer-asset@eth \
+  warbitrer-asset@sol \
+  warbitrer-asset@xrp \
+  warbitrer-asset@doge \
+  warbitrer-reconciler \
+  warbitrer-notifier
+
+sudo systemctl --quiet is-active \
+  warbitrer-web \
+  warbitrer-asset@btc \
+  warbitrer-asset@eth \
+  warbitrer-asset@sol \
+  warbitrer-asset@xrp \
+  warbitrer-asset@doge \
+  warbitrer-reconciler \
+  warbitrer-notifier
 ```
 
 ## Important
@@ -70,3 +93,4 @@ Changer `POLY_PROXY` en `EOA` dans l’env ne déplace pas les positions existan
 - la migration EOA doit être faite avec un wallet de trading/funding cohérent
 - la page `/recovery` affiche déjà les checks bloquants avant toute bascule
 - `POLY_AUTO_CONVERT=true` active la conversion automatique vers `USDC.e` quand une position est `redeemable` ou `mergeable`
+- ne réactiver le live qu’après validation du nouveau wallet en scan/shadow et autorisation explicite via `LIVE_EXECUTION_ALLOWED=true`

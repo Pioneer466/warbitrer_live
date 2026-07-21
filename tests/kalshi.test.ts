@@ -25,6 +25,7 @@ import {
   mapKalshiPosition,
   mapKalshiOrderStatus,
   mapKalshiV2OrderResult,
+  matchesKalshiOrderRequest,
   normalizeKalshiOrderPrice,
   resolveKalshiMarketForSlot,
 } from "@/lib/kalshi";
@@ -969,6 +970,59 @@ describe("Kalshi V2 order mutations", () => {
     });
   });
 
+  it("accepts an explicit zero per-contract fee on a positive fill", () => {
+    const order = createVenueOrderRequest();
+
+    expect(
+      mapKalshiV2OrderResult(
+        {
+          order_id: "order-zero-fee",
+          fill_count: "10.00",
+          remaining_count: "0.00",
+          average_fill_price: "0.4500",
+          average_fee_paid: "0",
+          ts_ms: 1_785_000_000_000,
+        },
+        order,
+      ),
+    ).toMatchObject({ status: "filled", filledSize: 10, feeUsd: 0 });
+  });
+
+  it.each([undefined, "", "not-a-number", "-0.001"])(
+    "fails closed on unusable positive-fill fee evidence (%s)",
+    (averageFeePaid) => {
+      const order = createVenueOrderRequest();
+
+      expect(() =>
+        mapKalshiV2OrderResult(
+          {
+            order_id: "order-invalid-fee",
+            fill_count: "10.00",
+            remaining_count: "0.00",
+            average_fill_price: "0.4500",
+            average_fee_paid: averageFeePaid,
+            ts_ms: 1_785_000_000_000,
+          },
+          order,
+        ),
+      ).toThrow("Frais moyens Create Order V2 Kalshi invalides");
+    },
+  );
+
+  it("allows omitted fee evidence when the V2 response has no fill", () => {
+    expect(
+      mapKalshiV2OrderResult(
+        {
+          order_id: "order-no-fill",
+          fill_count: "0.00",
+          remaining_count: "0.00",
+          ts_ms: 1_785_000_000_000,
+        },
+        createVenueOrderRequest(),
+      ),
+    ).toMatchObject({ status: "canceled", filledSize: 0, feeUsd: 0 });
+  });
+
   it("rejects an impossible partial FOK response", () => {
     const order = createVenueOrderRequest();
     expect(() =>
@@ -982,6 +1036,140 @@ describe("Kalshi V2 order mutations", () => {
         order,
       ),
     ).toThrow("FOK partielle impossible");
+  });
+
+  it.each([
+    {
+      label: "BUY YES",
+      outcome: "YES" as const,
+      side: "BUY" as const,
+      outcomeSide: "yes" as const,
+      bookSide: "bid" as const,
+    },
+    {
+      label: "SELL NO",
+      outcome: "NO" as const,
+      side: "SELL" as const,
+      outcomeSide: "yes" as const,
+      bookSide: "bid" as const,
+    },
+    {
+      label: "BUY NO",
+      outcome: "NO" as const,
+      side: "BUY" as const,
+      outcomeSide: "no" as const,
+      bookSide: "ask" as const,
+    },
+    {
+      label: "SELL YES",
+      outcome: "YES" as const,
+      side: "SELL" as const,
+      outcomeSide: "no" as const,
+      bookSide: "ask" as const,
+    },
+  ])("matches canonical GET evidence for $label", ({ outcome, side, outcomeSide, bookSide }) => {
+    const price = outcome === "YES" ? 0.45 : 0.55;
+    const request = createVenueOrderRequest({ outcome, side, price, maxCostUsd: price * 10 });
+    const canonicalOrder = {
+      order_id: "order-v2",
+      client_order_id: request.clientOrderId,
+      ticker: request.marketRef,
+      outcome_side: outcomeSide,
+      book_side: bookSide,
+      status: "executed",
+      yes_price_dollars: "0.4500",
+      no_price_dollars: "0.5500",
+      initial_count_fp: "10.00",
+      fill_count_fp: "10.00",
+      remaining_count_fp: "0.00",
+    };
+
+    expect(matchesKalshiOrderRequest(canonicalOrder, request)).toBe(true);
+  });
+
+  it.each([
+    {
+      label: "BUY YES",
+      outcome: "YES" as const,
+      side: "BUY" as const,
+      legacySide: "yes" as const,
+      action: "buy" as const,
+    },
+    {
+      label: "SELL NO",
+      outcome: "NO" as const,
+      side: "SELL" as const,
+      legacySide: "no" as const,
+      action: "sell" as const,
+    },
+    {
+      label: "BUY NO",
+      outcome: "NO" as const,
+      side: "BUY" as const,
+      legacySide: "no" as const,
+      action: "buy" as const,
+    },
+    {
+      label: "SELL YES",
+      outcome: "YES" as const,
+      side: "SELL" as const,
+      legacySide: "yes" as const,
+      action: "sell" as const,
+    },
+  ])("matches legacy GET evidence for $label", ({ outcome, side, legacySide, action }) => {
+    const price = outcome === "YES" ? 0.45 : 0.55;
+    const request = createVenueOrderRequest({ outcome, side, price, maxCostUsd: price * 10 });
+    const legacyOrder = {
+      order_id: "order-v2",
+      client_order_id: request.clientOrderId,
+      ticker: request.marketRef,
+      side: legacySide,
+      action,
+      status: "executed",
+      yes_price_dollars: "0.4500",
+      no_price_dollars: "0.5500",
+      initial_count_fp: "10.00",
+      fill_count_fp: "10.00",
+      remaining_count_fp: "0.00",
+    };
+
+    expect(matchesKalshiOrderRequest(legacyOrder, request)).toBe(true);
+  });
+
+  it("rejects incomplete or mismatched GET evidence", () => {
+    const request = createVenueOrderRequest({ outcome: "NO", side: "BUY", price: 0.55, maxCostUsd: 5.5 });
+    const canonicalOrder = {
+      order_id: "order-v2",
+      client_order_id: request.clientOrderId,
+      ticker: request.marketRef,
+      outcome_side: "no" as const,
+      book_side: "ask" as const,
+      status: "executed",
+      yes_price_dollars: "0.4500",
+      no_price_dollars: "0.5500",
+      initial_count_fp: "10.00",
+      fill_count_fp: "10.00",
+      remaining_count_fp: "0.00",
+    };
+
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, ticker: "OTHER" }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, outcome_side: "yes" }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, book_side: "bid" }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, outcome_side: undefined }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, book_side: undefined }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, initial_count_fp: "9.00" }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...canonicalOrder, no_price_dollars: "0.5400" }, request)).toBe(false);
+
+    const legacyOrder = {
+      ...canonicalOrder,
+      outcome_side: undefined,
+      book_side: undefined,
+      side: "no" as const,
+      action: "buy" as const,
+    };
+    expect(matchesKalshiOrderRequest(legacyOrder, request)).toBe(true);
+    expect(matchesKalshiOrderRequest({ ...legacyOrder, action: undefined }, request)).toBe(false);
+    expect(matchesKalshiOrderRequest({ ...legacyOrder, action: "sell" }, request)).toBe(false);
   });
 
   it("uses V2 create and cancel endpoints while retaining the GET endpoint", async () => {

@@ -1,10 +1,19 @@
 import {
+  applyFinalEntryRiskOpportunityToIntent,
+  assertOrderAttemptMatchesIntentLeg,
+  assertReusableOrderAttemptRequestProof,
+  buildPlannedInitialEntryAttempt,
+  buildRecoveryFeeSchedule,
   buildStableClientOrderId,
   buildVenueOrderRequest,
   captureVenueReconcileFetch,
   countRecentKalshiSoftHedgeNoFillEvents,
   countRecentKalshiSoftPrimaryNoFillEvents,
   deriveFastKalshiPrimaryClipIntent,
+  deriveAdaptiveSlippageBps,
+  deriveCanonicalIntentSlot,
+  deriveForcedUnwindOrderPrice,
+  deriveFeeSafePolymarketRescuePrice,
   deriveKalshiPrimaryFallbackClipPlan,
   deriveLiveRemainingLegSize,
   deriveBufferedRetryLeg,
@@ -12,6 +21,7 @@ import {
   deriveRemainingExposureSize,
   derivePrimaryExitSize,
   deriveSafePolymarketHedgeDepth,
+  dispatchClaimedLiveOrderAttempt,
   evaluateBenignHedgeOverfill,
   evaluateExposureRecoveryOptions,
   evaluateStablePnlChangeReadiness,
@@ -29,11 +39,17 @@ import {
   isFeedHealthBreaker,
   isHedgedPairEconomicsWithinLossCap,
   isBreakerRelevantToSlot,
+  isDefinitiveInitialSubmissionClaimRejection,
+  isExpiredInitialSubmissionCapability,
+  isIntentExposureDurablyResolved,
+  isConclusiveOrderAttemptTruthStatus,
   isOpportunitySnapshotFresh,
   isLatePrimaryFillRescueEligible,
   isPolymarketOrderbookUnavailableError,
   isOrderAttemptTruthUnresolved,
   isRetryablePolymarketInventorySyncError,
+  isStableAccountingTerminalConcordant,
+  isSettledIntentAccountingRepairRequired,
   isTerminalPrimaryOrderWithNoObservedFill,
   isVenueReconcileTruthFresh,
   mergePolymarketTradeObservationStatus,
@@ -43,7 +59,9 @@ import {
   persistPostSubmissionIntentEvidence,
   persistPostSubmissionLegEvidence,
   mergeObservedSlotResolutionOutcomes,
+  OrderSubmissionNotStartedError,
   resolvePrimaryRetryPlan,
+  resolveAccountingLegForFill,
   resolveKalshiPrimaryMultiClipRetryPlan,
   shouldManageFeedHealthBreaker,
   shouldKeepPolymarketLegForResolution,
@@ -73,7 +91,11 @@ import {
   validateFinalWsEntryDepthCoverage,
   validateFinalWsEntrySnapshot,
 } from "@/lib/engine";
-import { OrderIntentRevisionConflictError } from "@/lib/postgres-db";
+import {
+  hashOrderAttemptRequest,
+  LiveOrderAttemptClaimError,
+  OrderIntentRevisionConflictError,
+} from "@/lib/postgres-db";
 import type { VenueReconcileFetchStates } from "@/lib/engine";
 import type {
   CircuitBreaker,
@@ -85,15 +107,20 @@ import type {
   MarketAsset,
   MarketSlot,
   OutcomeQuote,
+  OrderAttempt,
   OrderIntent,
   PolymarketQuote,
   PositionSnapshot,
   RunEvent,
   VenueBalance,
+  VenueOrderRequest,
 } from "@/lib/types";
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
 import { DEFAULT_GLOBAL_RISK_CONFIG } from "@/lib/risk-settings";
 import { deriveHedgedPairEconomics } from "@/lib/settlement";
+
+const CENT_PRICE_RANGES = [{ start: "0.0000", end: "1.0000", step: "0.0100" }] as const;
+const DECI_CENT_PRICE_RANGES = [{ start: "0.0000", end: "1.0000", step: "0.0010" }] as const;
 
 function buildIntent(overrides: Partial<OrderIntent> = {}): OrderIntent {
   const base: OrderIntent = {
@@ -201,6 +228,53 @@ describe("execution configuration fencing", () => {
         globalRisk: { ...actual.globalRisk, revision: 8 },
       }),
     ).toBe(false);
+  });
+});
+
+describe("adaptive slippage", () => {
+  const settings = {
+    adaptiveSlippageTightBps: 10,
+    adaptiveSlippageDefaultBps: 20,
+    adaptiveSlippageThinBps: 60,
+    maxSlippageBps: 30,
+  };
+
+  it("never exceeds the configured maximum on a thin book", () => {
+    expect(deriveAdaptiveSlippageBps(0.5, settings)).toBe(30);
+  });
+
+  it("uses the lower adaptive level when it is already below the maximum", () => {
+    expect(deriveAdaptiveSlippageBps(2, settings)).toBe(10);
+    expect(deriveAdaptiveSlippageBps(1, settings)).toBe(20);
+    expect(deriveAdaptiveSlippageBps(0.5, { ...settings, adaptiveSlippageThinBps: 25 })).toBe(25);
+  });
+});
+
+describe("canonical intent slot recovery", () => {
+  const slotStartTs = Date.UTC(2026, 6, 19, 10, 45, 0);
+
+  it("reconstructs the persisted slot instead of using the worker's current slot", () => {
+    const slot = deriveCanonicalIntentSlot({
+      asset: "doge",
+      slotKey: `doge:${slotStartTs}`,
+      slotStartTs,
+      slotEndTs: slotStartTs + 15 * 60_000,
+    });
+
+    expect(slot.key).toBe(`doge:${slotStartTs}`);
+    expect(slot.startTs).toBe(slotStartTs);
+    expect(slot.endTs).toBe(slotStartTs + 15 * 60_000);
+  });
+
+  it("fails closed when persisted slot identity is inconsistent", () => {
+    expect(() =>
+      deriveCanonicalIntentSlot({
+        asset: "doge",
+        slotKey: `doge:${slotStartTs + 15 * 60_000}`,
+        slotStartTs,
+        slotEndTs: slotStartTs + 15 * 60_000,
+      }),
+    ).toThrow(/does not match its canonical/);
   });
 });
 
@@ -597,6 +671,37 @@ describe("order-intent concurrency safety", () => {
 });
 
 describe("ambiguous submission safety", () => {
+  it("requires terminal evidence before an execution incident can prove exposure recovered", () => {
+    const base = buildIntent();
+    const pairedLegs: OrderIntent["legs"] = [
+      { ...base.legs[0], filledSize: 10, status: "filled" },
+      { ...base.legs[1], filledSize: 10, status: "filled" },
+    ];
+    expect(isIntentExposureDurablyResolved(buildIntent({ status: "hedged", legs: pairedLegs }))).toBe(true);
+    expect(
+      isIntentExposureDurablyResolved(
+        buildIntent({
+          status: "unwound",
+          legs: [{ ...base.legs[0], status: "unwound" }, base.legs[1]],
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isIntentExposureDurablyResolved(
+        buildIntent({
+          status: "failed",
+          legs: [
+            { ...base.legs[0], filledSize: 0 },
+            { ...base.legs[1], filledSize: 0 },
+          ],
+        }),
+      ),
+    ).toBe(true);
+    expect(isIntentExposureDurablyResolved(buildIntent({ status: "failed" }))).toBe(false);
+    expect(isIntentExposureDurablyResolved(buildIntent({ status: "hedged" }))).toBe(false);
+    expect(isIntentExposureDurablyResolved(buildIntent({ status: "manual_required" }))).toBe(false);
+  });
+
   it("fails closed for transport errors on both venues until venue truth is authoritative", () => {
     expect(shouldFailClosedOnSubmissionError({ venue: "polymarket" })).toBe(true);
     expect(shouldFailClosedOnSubmissionError({ venue: "kalshi" })).toBe(true);
@@ -611,6 +716,13 @@ describe("ambiguous submission safety", () => {
     };
 
     expect(isOrderAttemptTruthUnresolved(attempt)).toBe(true);
+    expect(
+      isOrderAttemptTruthUnresolved({
+        ...attempt,
+        truthStatus: "admitted_not_claimed",
+      }),
+    ).toBe(false);
+    expect(isOrderAttemptTruthUnresolved({ ...attempt, status: "submitting" })).toBe(true);
     expect(hasUnresolvedPrimarySubmissionAttempt([attempt], "leg-primary")).toBe(true);
     expect(
       hasUnresolvedPrimarySubmissionAttempt(
@@ -624,6 +736,34 @@ describe("ambiguous submission safety", () => {
         "leg-primary",
       ),
     ).toBe(false);
+
+    for (const truthStatus of [
+      null,
+      "",
+      "not_submitted",
+      "admitted_not_claimed",
+      "submission_in_progress",
+      "submission_unknown",
+      "confirmation_unknown",
+      "future_unknown_status",
+    ]) {
+      expect(isConclusiveOrderAttemptTruthStatus(truthStatus)).toBe(false);
+      expect(isOrderAttemptTruthUnresolved({ ...attempt, status: "confirmed", truthStatus })).toBe(true);
+    }
+
+    for (const truthStatus of [
+      "pending",
+      "live",
+      "filled",
+      "partially_filled",
+      "canceled",
+      "expired",
+      "rejected",
+      "terminal_zero_fill",
+    ]) {
+      expect(isConclusiveOrderAttemptTruthStatus(truthStatus)).toBe(true);
+      expect(isOrderAttemptTruthUnresolved({ ...attempt, status: "confirmed", truthStatus })).toBe(false);
+    }
   });
 
   it("does not confuse hedge or unwind attempts with a missing primary entry", () => {
@@ -703,10 +843,176 @@ describe("ambiguous submission safety", () => {
     expect(buildStableClientOrderId({ intent, leg, request, stage: "hedge_retry:2" })).not.toBe(first);
   });
 
+  it("uses a stable truncated SHA-256 client order identity without repeating a 64-bit fragment", () => {
+    const intent = buildIntent();
+    const leg = intent.legs[1];
+    const request: VenueOrderRequest = {
+      marketRef: leg.marketRef,
+      outcome: leg.outcome,
+      side: "BUY",
+      size: 10,
+      price: 0.45,
+      maxCostUsd: 4.5,
+      orderType: "IOC",
+      buyMode: "shares",
+      clientOrderId: "ignored",
+    };
+
+    const first = buildStableClientOrderId({ intent, leg, request, stage: "hedge_retry:1" });
+    const second = buildStableClientOrderId({ intent, leg, request, stage: "hedge_retry:1" });
+
+    expect(first).toBe("wa-32a5876d083e4fd2c9275960361afd");
+    expect(second).toBe(first);
+    expect(first.slice(3, 19)).not.toBe(first.slice(19));
+    expect(
+      buildStableClientOrderId({
+        intent,
+        leg: { ...leg, marketRef: `${leg.marketRef}:other` },
+        request: { ...request, marketRef: `${request.marketRef}:other` },
+        stage: "hedge_retry:1",
+      }),
+    ).not.toBe(first);
+  });
+
+  it.each(["initial", "recovery"])(
+    "does not call placeOrder when the %s dispatch deadline expires during a pause after claim",
+    async () => {
+      const gate: {
+        release?: (decision: { decision: "expired"; reason: "submission_deadline_expired" }) => void;
+      } = {};
+      const revalidate = vi.fn(
+        () =>
+          new Promise<{ decision: "expired"; reason: "submission_deadline_expired" }>((resolve) => {
+            gate.release = resolve;
+          }),
+      );
+      const placeOrder = vi.fn(async () => ({ venueOrderId: "must-not-exist" }));
+      const submissionStarted = vi.fn();
+
+      const dispatch = dispatchClaimedLiveOrderAttempt({
+        attemptId: "attempt-paused-after-claim",
+        revalidate,
+        onSubmissionStarted: submissionStarted,
+        placeOrder,
+      });
+      await vi.waitFor(() => expect(revalidate).toHaveBeenCalledTimes(1));
+      expect(placeOrder).not.toHaveBeenCalled();
+      gate.release?.({ decision: "expired", reason: "submission_deadline_expired" });
+
+      await expect(dispatch).rejects.toBeInstanceOf(OrderSubmissionNotStartedError);
+      expect(submissionStarted).not.toHaveBeenCalled();
+      expect(placeOrder).not.toHaveBeenCalled();
+    },
+  );
+
   it("only closes a terminal primary when venue truth shows zero fill", () => {
     expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "canceled", filledSize: 0 })).toBe(true);
     expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "canceled", filledSize: 0.5 })).toBe(false);
     expect(isTerminalPrimaryOrderWithNoObservedFill({ status: "filled", filledSize: 10 })).toBe(false);
+  });
+});
+
+describe("authoritative recovery fee schedules", () => {
+  function buildState(input?: {
+    polymarket?: Partial<{
+      feeRateBps: number;
+      feeRate: number | null;
+      feeExponent: number | null;
+      feeMetadataPresent: boolean;
+      feesEnabled: boolean | null;
+    }>;
+    kalshi?: Partial<{ feeMultiplier: number; feeType: string }>;
+  }) {
+    const polymarket = {
+      feeRateBps: 0,
+      feeRate: 0,
+      feeExponent: 0,
+      feeMetadataPresent: true,
+      feesEnabled: false,
+      ...input?.polymarket,
+    };
+    return {
+      polymarket: {
+        quote: {
+          ...polymarket,
+          outcomes: {
+            up: { feeRateBps: polymarket.feeRateBps },
+            down: { feeRateBps: polymarket.feeRateBps },
+          },
+        },
+      },
+      kalshi: {
+        quote: {
+          feeMultiplier: 1,
+          feeType: "quadratic",
+          ...input?.kalshi,
+        },
+      },
+    } as unknown as Parameters<typeof buildRecoveryFeeSchedule>[1];
+  }
+
+  it.each(["quadratic", "quadratic_with_maker_fees"])("accepts supported Kalshi taker model %s", (feeType) => {
+    expect(
+      buildRecoveryFeeSchedule(
+        { venue: "kalshi", outcome: "NO" },
+        buildState({ kalshi: { feeType, feeMultiplier: 1.25 } }),
+      ),
+    ).toEqual({ venue: "kalshi", feeMultiplier: 1.25, maker: false });
+  });
+
+  it.each(["flat", "unknown", "quadratic_maker_only", ""])(
+    "rejects unsupported Kalshi fee model %j before recovery pricing",
+    (feeType) => {
+      expect(() =>
+        buildRecoveryFeeSchedule({ venue: "kalshi", outcome: "YES" }, buildState({ kalshi: { feeType } })),
+      ).toThrow("Authoritative Kalshi recovery fee schedule is unavailable");
+    },
+  );
+
+  it("rejects an invalid multiplier even for a supported Kalshi fee model", () => {
+    expect(() =>
+      buildRecoveryFeeSchedule(
+        { venue: "kalshi", outcome: "YES" },
+        buildState({ kalshi: { feeMultiplier: Number.NaN } }),
+      ),
+    ).toThrow("Authoritative Kalshi recovery fee schedule is unavailable");
+  });
+
+  it("uses exact enabled Polymarket fee metadata", () => {
+    expect(
+      buildRecoveryFeeSchedule(
+        { venue: "polymarket", outcome: "UP" },
+        buildState({
+          polymarket: {
+            feeRateBps: 120,
+            feeRate: 0.02,
+            feeExponent: 1,
+            feeMetadataPresent: true,
+            feesEnabled: true,
+          },
+        }),
+      ),
+    ).toEqual({ venue: "polymarket", feeRateBps: 120, feeRate: 0.02, feeExponent: 1 });
+  });
+
+  it("allows an explicitly fee-free Polymarket market without inventing a fallback fee", () => {
+    expect(buildRecoveryFeeSchedule({ venue: "polymarket", outcome: "DOWN" }, buildState())).toEqual({
+      venue: "polymarket",
+      feeRateBps: 0,
+      feeRate: null,
+      feeExponent: null,
+    });
+  });
+
+  it.each([
+    { feeMetadataPresent: false, feesEnabled: null },
+    { feeMetadataPresent: true, feesEnabled: null },
+    { feeMetadataPresent: true, feesEnabled: true, feeRate: null, feeExponent: 1 },
+    { feeMetadataPresent: true, feesEnabled: false, feeRateBps: 10 },
+  ])("fails closed on ambiguous or inconsistent Polymarket fee provenance %#", (polymarket) => {
+    expect(() => buildRecoveryFeeSchedule({ venue: "polymarket", outcome: "UP" }, buildState({ polymarket }))).toThrow(
+      "Authoritative Polymarket recovery fee schedule is unavailable",
+    );
   });
 });
 
@@ -1058,6 +1364,32 @@ describe("worst-fill execution caps", () => {
       }),
     ).toContain("exceeds venue limit");
   });
+
+  it("applies final risk sizing and economics to the intent admitted to persistence", () => {
+    const intent = buildIntent({
+      status: "executing_primary",
+      revision: 0,
+      failureReason: null,
+      grossCost: 0.9,
+      targetNotionalUsd: 10,
+    });
+    const opportunity = buildWorstFillOpportunity({
+      grossCost: 0.94,
+      projectedNetProfitUsd: 0.24,
+      legs: [
+        { ...buildWorstFillOpportunity().legs[0], size: 4, targetNotionalUsd: 1.9 },
+        { ...buildWorstFillOpportunity().legs[1], size: 4, targetNotionalUsd: 1.86 },
+      ],
+    });
+
+    const updated = applyFinalEntryRiskOpportunityToIntent(intent, opportunity, 2_000);
+
+    expect(updated.grossCost).toBe(0.94);
+    expect(updated.targetNotionalUsd).toBe(3.76);
+    expect(updated.projectedNetProfitUsd).toBe(0.24);
+    expect(updated.legs.map((leg) => leg.requestedSize)).toEqual([4, 4]);
+    expect(updated.legs.map((leg) => leg.requestedNotionalUsd)).toEqual([1.9, 1.86]);
+  });
 });
 
 describe("final WS entry snapshot", () => {
@@ -1186,6 +1518,8 @@ describe("final WS entry snapshot", () => {
       feeType: "quadratic",
       lastTradeYesPrice: null,
       lastTradeNoPrice: null,
+      priceLevelStructure: "deci_cent",
+      priceRanges: [{ start: "0.0000", end: "1.0000", step: "0.0010" }],
     };
   };
 
@@ -1427,6 +1761,60 @@ describe("execution candidate arbitration", () => {
 });
 
 describe("settlement venue resolutions", () => {
+  it("reaccounts settled intents when immutable fill accounting is quarantined", () => {
+    const current = buildIntent({
+      status: "settled",
+      resolvedAt: 10,
+      realizedPnlUsd: 0.5,
+      roi: 0.05,
+      polyResolution: "DOWN",
+      kalshiResolution: "YES",
+    });
+
+    expect(isSettledIntentAccountingRepairRequired(current, current, "stable")).toBe(false);
+    expect(isSettledIntentAccountingRepairRequired(current, current, "quarantined")).toBe(true);
+    expect(isSettledIntentAccountingRepairRequired(current, { ...current, realizedPnlUsd: 0.51 }, "stable")).toBe(true);
+  });
+
+  it("recognizes a stable concurrent accounting commit only when terminal truth matches", () => {
+    const settled = buildIntent({
+      status: "settled",
+      resolvedAt: 10,
+      realizedPnlUsd: 0.5,
+      roi: 0.05,
+      polyResolution: "DOWN",
+      kalshiResolution: "YES",
+    });
+    const stableHead = {
+      state: "stable" as const,
+      currentVersion: 1,
+      currentProofSha256: "a".repeat(64),
+    };
+
+    expect(isStableAccountingTerminalConcordant(settled, stableHead, settled)).toBe(true);
+    expect(
+      isStableAccountingTerminalConcordant(settled, stableHead, {
+        ...settled,
+        polyResolution: "UP",
+      }),
+    ).toBe(false);
+    expect(
+      isStableAccountingTerminalConcordant(settled, stableHead, {
+        ...settled,
+        realizedPnlUsd: 0.51,
+      }),
+    ).toBe(false);
+    expect(
+      isStableAccountingTerminalConcordant(settled, stableHead, {
+        ...settled,
+        legs: settled.legs.map((leg, index) =>
+          index === 0 ? { ...leg, payoutUsd: 9.99 } : leg,
+        ) as OrderIntent["legs"],
+      }),
+    ).toBe(false);
+    expect(isStableAccountingTerminalConcordant(settled, { ...stableHead, state: "open" }, settled)).toBe(false);
+  });
+
   it("requires actual venue outcomes instead of falling back to an external reference", () => {
     expect(
       deriveSettledVenueResolutions({
@@ -1548,6 +1936,7 @@ describe("hedge retry repricing", () => {
           price: 0.42,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.01,
@@ -1577,6 +1966,7 @@ describe("hedge retry repricing", () => {
           price: 0.42,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.03,
@@ -1594,6 +1984,53 @@ describe("hedge retry repricing", () => {
     });
   });
 
+  it("uses the authoritative Kalshi grid for retry rungs", () => {
+    const hedgeLeg = {
+      ...buildIntent({ primaryVenue: "polymarket", hedgeVenue: "kalshi" }).legs[1],
+      requestedPrice: 0.421,
+      requestedNotionalUsd: 4.21,
+    };
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        {
+          price: 0.421,
+          depth: 25,
+          minOrderSize: 1,
+          priceRanges: DECI_CENT_PRICE_RANGES,
+        },
+        {
+          executionPriceBuffer: 0.01,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
+        },
+        3,
+      ),
+    ).toMatchObject({ requestedPrice: 0.423 });
+  });
+
+  it("fails closed when a Kalshi retry has no authoritative grid", () => {
+    const hedgeLeg = buildIntent({ primaryVenue: "polymarket", hedgeVenue: "kalshi" }).legs[1];
+
+    expect(
+      deriveBufferedRetryLeg(
+        hedgeLeg,
+        { price: 0.42, depth: 25, minOrderSize: 1, priceRanges: null },
+        {
+          executionPriceBuffer: 0.03,
+          maxLegPrice: 0.49,
+          maxSlippageBps: 0,
+          minOrderSize: 5,
+          kalshiDepthHeadroomContracts: 2,
+        },
+        2,
+      ),
+    ).toBeNull();
+  });
+
   it("refuses a Kalshi retry rung once the effective order price would exceed the allowed cap", () => {
     const hedgeLeg = buildIntent({
       primaryVenue: "polymarket",
@@ -1607,6 +2044,7 @@ describe("hedge retry repricing", () => {
           price: 0.49,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.01,
@@ -1637,6 +2075,7 @@ describe("hedge retry repricing", () => {
           price: 0.585,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: DECI_CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.01,
@@ -1670,6 +2109,7 @@ describe("hedge retry repricing", () => {
           price: 0.48,
           depth: 20,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.01,
@@ -1765,6 +2205,7 @@ describe("kalshi hedge safety guards", () => {
           price: 0.42,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.03,
@@ -1784,6 +2225,7 @@ describe("kalshi hedge safety guards", () => {
           price: 0.49,
           depth: 25,
           minOrderSize: 1,
+          priceRanges: CENT_PRICE_RANGES,
         },
         {
           executionPriceBuffer: 0.01,
@@ -1830,7 +2272,9 @@ describe("venue order request sizing", () => {
       requestedNotionalUsd: 10,
     };
 
-    const request = buildVenueOrderRequest(kalshiLeg, 30, "FOK", false);
+    const request = buildVenueOrderRequest(kalshiLeg, 30, "FOK", false, {
+      kalshiPriceRanges: CENT_PRICE_RANGES,
+    });
 
     expect(request.price).toBe(0.43);
     expect(request.maxCostUsd).toBeCloseTo(8.6, 4);
@@ -1846,11 +2290,242 @@ describe("venue order request sizing", () => {
 
     const request = buildVenueOrderRequest(kalshiLeg, 30, "IOC", false, {
       kalshiPriceTicksSlippage: 2,
+      kalshiPriceRanges: CENT_PRICE_RANGES,
     });
 
     expect(request.price).toBe(0.5);
     expect(request.maxCostUsd).toBe(10);
   });
+
+  it("moves an initial Kalshi primary across tapered price ranges without assuming cent ticks", () => {
+    const kalshiLeg = {
+      ...buildIntent().legs[1],
+      requestedPrice: 0.08,
+      requestedSize: 20,
+      requestedNotionalUsd: 1.6,
+    };
+
+    const request = buildVenueOrderRequest(kalshiLeg, 30, "IOC", false, {
+      kalshiPriceTicksSlippage: 3,
+      kalshiPriceRanges: [
+        { start: "0.0000", end: "0.1000", step: "0.0100" },
+        { start: "0.1000", end: "0.9000", step: "0.0500" },
+        { start: "0.9000", end: "1.0000", step: "0.0100" },
+      ],
+    });
+
+    expect(request.price).toBe(0.15);
+    expect(request.maxCostUsd).toBe(3);
+  });
+
+  it("fails closed when initial Kalshi pricing has no authoritative grid", () => {
+    const kalshiLeg = {
+      ...buildIntent().legs[1],
+      requestedPrice: 0.48,
+      requestedSize: 20,
+      requestedNotionalUsd: 9.6,
+    };
+
+    expect(() =>
+      buildVenueOrderRequest(kalshiLeg, 30, "IOC", false, {
+        kalshiPriceTicksSlippage: 1,
+        kalshiPriceRanges: null,
+      }),
+    ).toThrow("price_ranges");
+    expect(() => buildVenueOrderRequest(kalshiLeg, 30, "IOC", false)).toThrow("price_ranges");
+  });
+
+  it("rounds an initial Polymarket buy up to the authoritative tick", () => {
+    const polymarketLeg = {
+      ...buildIntent().legs[0],
+      requestedPrice: 0.42,
+      requestedSize: 20,
+      requestedNotionalUsd: 10,
+    };
+
+    const request = buildVenueOrderRequest(polymarketLeg, 30, "FOK", false, {
+      authoritativeTickSize: 0.01,
+    });
+
+    expect(request.price).toBe(0.43);
+  });
+
+  it("builds a complete stable planned attempt before initial live admission", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+
+    expect(attempt).toMatchObject({
+      asset: intent.asset,
+      shadow: false,
+      intentId: intent.id,
+      legId: leg.id,
+      stage: "primary",
+      venue: leg.venue,
+      status: "planned",
+      truthStatus: "admitted_not_claimed",
+      venueOrderId: null,
+      createdAt: 1_500,
+      updatedAt: 1_500,
+    });
+    expect(attempt.id).toContain(attempt.clientOrderId);
+    expect(attempt.request).toEqual({
+      marketRef: request.marketRef,
+      tokenId: request.tokenId ?? null,
+      outcome: request.outcome,
+      side: request.side,
+      size: request.size,
+      price: request.price,
+      maxCostUsd: request.maxCostUsd,
+      orderType: request.orderType,
+      buyMode: request.buyMode ?? null,
+      reduceOnly: false,
+      clientOrderId: attempt.clientOrderId,
+    });
+  });
+
+  it("accepts reuse only when the persisted canonical request proof is exact", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+    const reorderedRequest = Object.fromEntries(Object.entries(attempt.request).reverse());
+    const persistedAttempt: Pick<OrderAttempt, "id" | "request" | "requestSha256"> = {
+      id: attempt.id,
+      request: reorderedRequest,
+      requestSha256: hashOrderAttemptRequest(reorderedRequest),
+    };
+
+    expect(assertReusableOrderAttemptRequestProof(persistedAttempt, request)).toBe(
+      hashOrderAttemptRequest(attempt.request),
+    );
+  });
+
+  it("blocks dispatch or reuse when an attempt identity differs from its parent intent leg", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+
+    expect(() => assertOrderAttemptMatchesIntentLeg(attempt, intent, leg, request, "primary")).not.toThrow();
+    expect(() =>
+      assertOrderAttemptMatchesIntentLeg({ ...attempt, asset: "eth" }, intent, leg, request, "primary"),
+    ).toThrow(/canonical intent leg/);
+    expect(() =>
+      assertOrderAttemptMatchesIntentLeg({ ...attempt, intentId: "another-intent" }, intent, leg, request, "primary"),
+    ).toThrow(/canonical intent leg/);
+  });
+
+  it("fails closed before a venue call when a stable attempt id hides changed economics", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+    const persistedAttempt: Pick<OrderAttempt, "id" | "request" | "requestSha256"> = {
+      id: attempt.id,
+      request: attempt.request,
+      requestSha256: hashOrderAttemptRequest(attempt.request),
+    };
+    const changedRequest: VenueOrderRequest = {
+      ...request,
+      size: request.size + 1,
+      maxCostUsd: (request.maxCostUsd ?? 0) + (request.price ?? 0),
+    };
+    const venueCall = vi.fn();
+
+    expect(buildStableClientOrderId({ intent, leg, request: changedRequest, stage: "primary" })).toBe(
+      attempt.clientOrderId,
+    );
+    expect(() => {
+      assertReusableOrderAttemptRequestProof(persistedAttempt, changedRequest);
+      venueCall();
+    }).toThrow(/does not match the canonical order request/);
+    expect(venueCall).not.toHaveBeenCalled();
+  });
+
+  it("rejects a persisted request hash that does not prove the stored request", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+
+    expect(() =>
+      assertReusableOrderAttemptRequestProof(
+        {
+          id: attempt.id,
+          request: attempt.request,
+          requestSha256: "0".repeat(64),
+        },
+        request,
+      ),
+    ).toThrow(/does not match the canonical order request/);
+  });
+
+  it("rejects legacy reusable attempts without a durable request hash", () => {
+    const intent = buildIntent({ status: "executing_primary", revision: 0, failureReason: null });
+    const leg = intent.legs[0];
+    const request = buildVenueOrderRequest(leg, 0, "FOK", false, { authoritativeTickSize: 0.01 });
+    request.clientOrderId = buildStableClientOrderId({ intent, leg, request, stage: "primary" });
+    const attempt = buildPlannedInitialEntryAttempt(intent, leg, request, 1_500);
+
+    expect(() =>
+      assertReusableOrderAttemptRequestProof(
+        {
+          id: attempt.id,
+          request: attempt.request,
+          requestSha256: null,
+        },
+        request,
+      ),
+    ).toThrow(/does not match the canonical order request/);
+  });
+
+  it("distinguishes a definitively expired claim from ambiguous submission failures", () => {
+    expect(
+      isExpiredInitialSubmissionCapability(
+        new LiveOrderAttemptClaimError("submission_capability_expired", "intent-1", "attempt-1", "planned"),
+      ),
+    ).toBe(true);
+    expect(
+      isExpiredInitialSubmissionCapability(
+        new LiveOrderAttemptClaimError("attempt_already_claimed", "intent-1", "attempt-1", "submitting"),
+      ),
+    ).toBe(false);
+    expect(isExpiredInitialSubmissionCapability(new Error("transport failed"))).toBe(false);
+  });
+
+  it.each([
+    "strategy_revision_changed",
+    "global_risk_revision_changed",
+    "trading_disabled",
+    "execution_mode_mismatch",
+    "circuit_breaker_active",
+    "submission_capability_expired",
+  ] as const)("classifies %s as a definite pre-venue claim rejection", (code) => {
+    expect(
+      isDefinitiveInitialSubmissionClaimRejection(
+        new LiveOrderAttemptClaimError(code, "intent-1", "attempt-1", "planned"),
+      ),
+    ).toBe(true);
+  });
+
+  it.each(["attempt_already_claimed", "request_mismatch", "claim_conflict"] as const)(
+    "keeps %s in the ambiguous truth path",
+    (code) => {
+      expect(
+        isDefinitiveInitialSubmissionClaimRejection(
+          new LiveOrderAttemptClaimError(code, "intent-1", "attempt-1", "planned"),
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("blocks Polymarket hedge entries whose projected hedge notional is below the $1 CLOB floor", () => {
     expect(
@@ -2260,6 +2935,55 @@ describe("Kalshi primary IOC handling", () => {
 });
 
 describe("forced unwind request pricing", () => {
+  it("moves a forced Kalshi unwind by authoritative deci-cent ticks", () => {
+    const primaryLeg = {
+      ...buildIntent().legs[1],
+      venue: "kalshi" as const,
+      outcome: "YES" as const,
+      side: "BUY" as const,
+      filledPrice: 0.421,
+      filledSize: 10,
+    };
+
+    expect(deriveForcedUnwindOrderPrice(primaryLeg, 0.421, 30, 2, DECI_CENT_PRICE_RANGES)).toBe(0.417);
+    expect(deriveForcedUnwindOrderPrice(primaryLeg, 0.421, 30, 2, null)).toBeNull();
+  });
+
+  it("moves forced Polymarket unwinds by authoritative ticks", () => {
+    const primaryLeg = {
+      ...buildIntent().legs[0],
+      venue: "polymarket" as const,
+      outcome: "UP" as const,
+      side: "BUY" as const,
+    };
+
+    expect(deriveForcedUnwindOrderPrice(primaryLeg, 0.421, 30, 2, null, 0.01)).toBe(0.39);
+    expect(deriveForcedUnwindOrderPrice(primaryLeg, 0.421, 30, 2, null, null)).toBeNull();
+  });
+
+  it("lowers a Polymarket rescue limit until fees fit the exact loss cap", () => {
+    const decision = deriveFeeSafePolymarketRescuePrice({
+      maximumBuyPrice: 0.605,
+      tickSize: 0.01,
+      size: 10,
+      entryPrice: 0.4,
+      allocatedEntryFeeUsd: 0.05,
+      fee: {
+        venue: "polymarket",
+        feeRateBps: 0,
+        feeRate: 0.07,
+        feeExponent: 1,
+      },
+      maxLossUsd: 0.1,
+    });
+
+    expect(decision.ok).toBe(true);
+    if (decision.ok) {
+      expect(decision.orderPrice.price).toBeLessThan(0.6);
+      expect(decision.economics.worstCaseLossUsd).toBeLessThanOrEqual(0.1);
+    }
+  });
+
   it("can override the request price when building a reduce-only Kalshi sell", () => {
     const intent = buildIntent({
       primaryVenue: "kalshi",
@@ -2278,6 +3002,7 @@ describe("forced unwind request pricing", () => {
 
     const request = buildVenueOrderRequest(intent.legs[0], 30, "IOC", true, {
       overridePrice: 0.47,
+      kalshiPriceRanges: CENT_PRICE_RANGES,
     });
 
     expect(request.price).toBe(0.47);
@@ -2323,6 +3048,10 @@ describe("Polymarket reconciliation status monotonicity", () => {
 
   it("keeps an already pending order pending", () => {
     expect(mergePolymarketTradeObservationStatus("pending", "pending")).toBe("pending");
+  });
+
+  it("forces pending while an associated trade has unknown venue truth", () => {
+    expect(mergePolymarketTradeObservationStatus("canceled", "pending", true)).toBe("pending");
   });
 
   it("accepts a non-pending trade observation", () => {
@@ -2892,8 +3621,53 @@ describe("polymarket closed orderbook errors", () => {
 });
 
 describe("intent fill summaries", () => {
+  it("matches accounting fills only to their exact canonical leg identity", () => {
+    const intent = buildIntent();
+    const fill: LiveFill = {
+      id: "fill-accounting",
+      asset: intent.asset,
+      shadow: false,
+      intentId: intent.id,
+      venue: "polymarket",
+      venueOrderId: "poly-order",
+      tradeId: "trade-accounting",
+      marketRef: "poly-market",
+      tokenId: "token-1",
+      side: "BUY",
+      outcome: "DOWN",
+      price: 0.45,
+      size: 10,
+      feeUsd: 0,
+      liquidity: "TAKER",
+      filledAt: 10,
+      raw: {},
+    };
+
+    expect(resolveAccountingLegForFill(intent, fill)?.id).toBe("leg-primary");
+    expect(resolveAccountingLegForFill(intent, { ...fill, marketRef: "another-market" })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, asset: "eth" })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, shadow: true })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, intentId: "another-intent" })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, outcome: "UP" })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, tokenId: "another-token" })).toBeNull();
+    expect(resolveAccountingLegForFill(intent, { ...fill, tokenId: undefined })).toBeNull();
+
+    const kalshiFill: LiveFill = {
+      ...fill,
+      id: "fill-kalshi",
+      venue: "kalshi",
+      venueOrderId: "kalshi-order",
+      tradeId: "trade-kalshi",
+      marketRef: "kalshi-market",
+      tokenId: undefined,
+      outcome: "YES",
+    };
+    expect(resolveAccountingLegForFill(intent, kalshiFill)?.id).toBe("leg-hedge");
+    expect(resolveAccountingLegForFill(intent, { ...kalshiFill, tokenId: "unexpected-token" })).toBeNull();
+  });
+
   it("aggregates multiple primary entry orders for the same leg", () => {
-    const kalshiLeg = buildIntent({
+    const intent = buildIntent({
       primaryVenue: "kalshi",
       hedgeVenue: "polymarket",
       legs: [
@@ -2935,12 +3709,26 @@ describe("intent fill summaries", () => {
           resolvedOutcome: null,
         },
       ],
-    }).legs[1];
+    });
+    const kalshiLeg = intent.legs[1];
 
     const summary = summarizeIntentLegOrders(
       [
         buildOrder({
+          asset: "eth",
           venue: "kalshi",
+          tokenId: undefined,
+          side: "BUY",
+          outcome: "YES",
+          marketRef: "kalshi-market",
+          venueOrderId: "wrong-asset-order",
+          filledSize: 100,
+          averageFillPrice: 0.1,
+          status: "filled",
+        }),
+        buildOrder({
+          venue: "kalshi",
+          tokenId: undefined,
           side: "BUY",
           outcome: "YES",
           marketRef: "kalshi-market",
@@ -2953,6 +3741,7 @@ describe("intent fill summaries", () => {
         }),
         buildOrder({
           venue: "kalshi",
+          tokenId: undefined,
           side: "BUY",
           outcome: "YES",
           marketRef: "kalshi-market",
@@ -2964,6 +3753,7 @@ describe("intent fill summaries", () => {
           updatedAt: 1,
         }),
       ],
+      intent,
       kalshiLeg,
       "entry",
     );

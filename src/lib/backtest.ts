@@ -1,14 +1,7 @@
 import { Pool, types } from "pg";
 
-import {
-  DEFAULT_STRATEGY_CONFIGS,
-  POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD,
-} from "@/lib/constants";
-import {
-  applySlippage,
-  calculateKalshiFee,
-  calculatePolymarketFee,
-} from "@/lib/fees";
+import { DEFAULT_STRATEGY_CONFIGS, POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
+import { applySlippage, calculateKalshiFee, calculatePolymarketFee } from "@/lib/fees";
 import { ACTIVE_MARKET_ASSETS, isMarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
 import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
 import { buildSignals } from "@/lib/signals";
@@ -159,7 +152,10 @@ export function parseBacktestAssets(value: string | null | undefined): MarketAss
   if (value === "all") {
     return MARKET_ASSETS;
   }
-  const assets = value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+  const assets = value
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
   const invalid = assets.filter((asset) => !isMarketAsset(asset));
   if (invalid.length > 0) {
     throw new Error(`Invalid asset(s): ${invalid.join(", ")}`);
@@ -254,7 +250,12 @@ export async function runBacktestStrategies(options: BacktestOptions): Promise<B
     const variants = buildBacktestVariants(settings);
     const trades = variants.flatMap((variant) => simulateVariant(variant, snapshots, resolutions));
     const summaries = variants
-      .map((variant) => summarizeVariant(variant, trades.filter((trade) => trade.variant === variant.name)))
+      .map((variant) =>
+        summarizeVariant(
+          variant,
+          trades.filter((trade) => trade.variant === variant.name),
+        ),
+      )
       .sort((left, right) => right.riskScoreUsd - left.riskScoreUsd);
 
     return {
@@ -558,9 +559,9 @@ async function readSnapshots(pool: Pool, options: BacktestOptions): Promise<Oppo
 }
 
 async function readSettingsFromDb(pool: Pool): Promise<StrategyConfigMap> {
-  const result = await pool.query<{ asset: MarketAsset; payload: unknown }>(
-    "SELECT asset, payload FROM strategy_configs",
-  ).catch(() => ({ rows: [] as Array<{ asset: MarketAsset; payload: unknown }> }));
+  const result = await pool
+    .query<{ asset: MarketAsset; payload: unknown }>("SELECT asset, payload FROM strategy_configs")
+    .catch(() => ({ rows: [] as Array<{ asset: MarketAsset; payload: unknown }> }));
   const partial: Partial<StrategyConfigMap> = {};
   for (const row of result.rows) {
     if (isMarketAsset(row.asset)) {
@@ -625,13 +626,15 @@ function selectBacktestOpportunity(opportunities: LiveOpportunity[]) {
   if (eligible.length === 0) {
     return null;
   }
-  return [...eligible].sort((left, right) => {
-    const profitDelta = (right.projectedNetProfitUsd ?? 0) - (left.projectedNetProfitUsd ?? 0);
-    if (Math.abs(profitDelta) > ORDER_SIZE_TOLERANCE) {
-      return profitDelta;
-    }
-    return (left.grossCost ?? Number.POSITIVE_INFINITY) - (right.grossCost ?? Number.POSITIVE_INFINITY);
-  })[0] ?? null;
+  return (
+    [...eligible].sort((left, right) => {
+      const profitDelta = (right.projectedNetProfitUsd ?? 0) - (left.projectedNetProfitUsd ?? 0);
+      if (Math.abs(profitDelta) > ORDER_SIZE_TOLERANCE) {
+        return profitDelta;
+      }
+      return (left.grossCost ?? Number.POSITIVE_INFINITY) - (right.grossCost ?? Number.POSITIVE_INFINITY);
+    })[0] ?? null
+  );
 }
 
 function buildBaseTradeRow(
@@ -717,12 +720,12 @@ function computeBacktestSlippageBps(
     ...opportunity.legs.map((leg) => ((leg.depth ?? 0) * haircut) / Math.max(size, ORDER_SIZE_TOLERANCE)),
   );
   if (minCoverage >= 2) {
-    return settings.adaptiveSlippageTightBps;
+    return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageTightBps);
   }
   if (minCoverage >= 1) {
-    return settings.adaptiveSlippageDefaultBps;
+    return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageDefaultBps);
   }
-  return settings.adaptiveSlippageThinBps;
+  return Math.min(settings.maxSlippageBps, settings.adaptiveSlippageThinBps);
 }
 
 function getSnapshotRealismGrade(snapshot: OpportunitySnapshot): BacktestRealismGrade {
@@ -779,10 +782,7 @@ function computeMaxDrawdown(trades: BacktestTradeRow[]) {
 }
 
 function buildUnlimitedBalances(now: number): VenueBalance[] {
-  return [
-    buildUnlimitedBalance("polymarket", now),
-    buildUnlimitedBalance("kalshi", now),
-  ];
+  return [buildUnlimitedBalance("polymarket", now), buildUnlimitedBalance("kalshi", now)];
 }
 
 function buildUnlimitedBalance(venue: Venue, now: number): VenueBalance {
@@ -817,8 +817,9 @@ function buildBacktestMarkdownReport(
     "",
     "| Variant | Deployable | Risk score | Net P&L | Trades | No-fill | Incidents | Mismatch loss | Realism |",
     "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
-    ...summaries.map((summary) =>
-      `| ${summary.variant} | ${summary.deployable ? "yes" : "no"} | ${formatUsd(summary.riskScoreUsd)} | ${formatUsd(summary.netPnlUsd)} | ${summary.resolvedTrades}/${summary.trades} | ${(summary.noFillRate * 100).toFixed(1)}% | ${(summary.incidentRate * 100).toFixed(1)}% | ${formatUsd(summary.mismatchLossUsd)} | ${summary.realismGrade} |`,
+    ...summaries.map(
+      (summary) =>
+        `| ${summary.variant} | ${summary.deployable ? "yes" : "no"} | ${formatUsd(summary.riskScoreUsd)} | ${formatUsd(summary.netPnlUsd)} | ${summary.resolvedTrades}/${summary.trades} | ${(summary.noFillRate * 100).toFixed(1)}% | ${(summary.incidentRate * 100).toFixed(1)}% | ${formatUsd(summary.mismatchLossUsd)} | ${summary.realismGrade} |`,
     ),
     "",
     "## Conclusion",
@@ -837,10 +838,9 @@ function buildBacktestMarkdownReport(
 }
 
 function toCsv<T extends Record<string, unknown>>(rows: T[], columns: Array<keyof T>) {
-  return [
-    columns.join(","),
-    ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(",")),
-  ].join("\n") + "\n";
+  return (
+    [columns.join(","), ...rows.map((row) => columns.map((column) => csvCell(row[column])).join(","))].join("\n") + "\n"
+  );
 }
 
 function csvCell(value: unknown) {

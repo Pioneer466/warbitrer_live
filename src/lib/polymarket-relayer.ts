@@ -109,7 +109,13 @@ export async function submitPolymarketProxyTransactions(
     `${relayerUrl}/relay-payload?address=${encodeURIComponent(signerAddress)}&type=PROXY`,
   );
   const abstractSigner = createAbstractSigner(DEFAULT_POLY_CHAIN_ID, signer);
-  const request = await buildProxyTransactionRequest(abstractSigner, signerAddress, relayPayload, transactions, metadata);
+  const request = await buildProxyTransactionRequest(
+    abstractSigner,
+    signerAddress,
+    relayPayload,
+    transactions,
+    metadata,
+  );
   const response = await fetchJson<ProxyRelayerSubmitResponse>(`${relayerUrl}/submit`, {
     method: "POST",
     headers: {

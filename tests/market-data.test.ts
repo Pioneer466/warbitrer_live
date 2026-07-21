@@ -56,7 +56,14 @@ type PolymarketFeedTestHarness = {
   tokenIds: { up: string; down: string } | null;
   books: Map<string, PolymarketBookTestState>;
   ws: unknown;
+  userWs: unknown;
+  priceWs: unknown;
+  wsHeartbeat: ReturnType<typeof setInterval> | null;
+  userWsHeartbeat: ReturnType<typeof setInterval> | null;
+  priceWsHeartbeat: ReturnType<typeof setInterval> | null;
   marketReconnectTimer: ReturnType<typeof setTimeout> | null;
+  userReconnectTimer: ReturnType<typeof setTimeout> | null;
+  priceReconnectTimer: ReturnType<typeof setTimeout> | null;
   resyncPromise: Promise<void> | null;
   lastRestSyncAt: number | null;
   lastWsMessageAt: number | null;
@@ -72,6 +79,7 @@ type PolymarketFeedTestHarness = {
   applyPriceEvent: (event: unknown, now: number) => void;
   onPrivateFeedReset: (venue: "polymarket" | "kalshi", marketRef: string | null) => void;
   buildState: (slot: MarketSlot, now?: number) => LiveMarketState<PolymarketQuote>;
+  shutdown: () => Promise<void>;
 };
 
 type KalshiFeedTestHarness = {
@@ -83,6 +91,9 @@ type KalshiFeedTestHarness = {
   orderbookInSync: boolean;
   trades: unknown[];
   ws: unknown;
+  wsHeartbeat: ReturnType<typeof setInterval> | null;
+  wsBootstrapTimer: ReturnType<typeof setTimeout> | null;
+  wsReconnectTimer: ReturnType<typeof setTimeout> | null;
   wsOrderbookReady: boolean;
   lastRestSyncAt: number | null;
   lastWsMessageAt: number | null;
@@ -95,11 +106,12 @@ type KalshiFeedTestHarness = {
   subscribe: (ws: unknown, channel: string, marketTicker: string, cfBenchmarkIndexId?: string) => void;
   applyWsPayload: (payload: unknown, now: number) => boolean;
   buildState: (slot: MarketSlot, now?: number) => LiveMarketState<KalshiQuote>;
+  shutdown: () => Promise<void>;
 };
 
 type MarketDataSupervisorTestHarness = Pick<
   MarketDataSupervisor,
-  "readRecentOrderFills" | "readSlotState" | "waitForOrderFill"
+  "readRecentOrderFills" | "readSlotState" | "shutdown" | "waitForOrderFill"
 > & {
   feeds: Record<
     MarketAsset,
@@ -164,6 +176,8 @@ function primeKalshiFeed(feed: KalshiFeedTestHarness, slot: MarketSlot, now: num
     yes_ask_size_fp: "10",
     no_bid_size_fp: "10",
     no_ask_size_fp: "10",
+    price_level_structure: "linear_cent",
+    price_ranges: [{ start: "0.0000", end: "1.0000", step: "0.0100" }],
   };
   feed.orderbook = {
     yes: new Map([["0.40", 10]]),
@@ -667,7 +681,7 @@ describe("market data helpers", () => {
         side: "BUY",
         size: "8",
         price: "0.44",
-        status: "CONFIRMED",
+        status: "TRADE_STATUS_CONFIRMED",
         outcome: "Down",
         trader_side: "MAKER",
         timestamp: 1_771_234_567,
@@ -706,8 +720,29 @@ describe("market data helpers", () => {
         price: 0.56,
         size: 3.5,
         liquidity: "MAKER",
+        status: "CONFIRMED",
       }),
     );
+    expect(
+      parsePolymarketUserFills(
+        {
+          event_type: "trade",
+          id: "trade-poly-unknown",
+          taker_order_id: "order-poly-unknown",
+          market: "condition-1",
+          asset_id: "asset-up",
+          side: "BUY",
+          size: "1",
+          price: "0.5",
+          status: "TRADE_STATUS_SETTLED",
+          outcome: "Up",
+          trader_side: "TAKER",
+          timestamp: 1_771_234_567,
+          maker_orders: [],
+        },
+        capturedAt,
+      ),
+    ).toEqual([]);
   });
 
   it("keeps only authenticated-owner maker fills when owner metadata is present", () => {
@@ -883,6 +918,68 @@ describe("market data helpers", () => {
 
     await expect(disconnected).resolves.toBeNull();
     expect(supervisor.fillTracker.waiters.size).toBe(0);
+  });
+
+  it("settles every private-fill waiter and shuts every feed down idempotently", async () => {
+    const supervisor = inspectSupervisor();
+    const pendingKalshi = supervisor.waitForOrderFill({
+      venue: "kalshi",
+      venueOrderId: "pending-kalshi-order",
+      timeoutMs: 30_000,
+    });
+    const pendingPolymarket = supervisor.waitForOrderFill({
+      venue: "polymarket",
+      venueOrderId: "pending-polymarket-order",
+      timeoutMs: 30_000,
+    });
+    const feedShutdowns = Object.values(supervisor.feeds).flatMap((feeds) => [
+      vi.spyOn(feeds.polymarket as never, "shutdown").mockResolvedValue(undefined),
+      vi.spyOn(feeds.kalshi as never, "shutdown").mockResolvedValue(undefined),
+    ]);
+
+    const firstShutdown = supervisor.shutdown();
+    const secondShutdown = supervisor.shutdown();
+
+    expect(secondShutdown).toBe(firstShutdown);
+    await expect(Promise.all([pendingKalshi, pendingPolymarket])).resolves.toEqual([null, null]);
+    await expect(firstShutdown).resolves.toBeUndefined();
+    expect(supervisor.fillTracker.waiters.size).toBe(0);
+    expect(feedShutdowns).toHaveLength(MARKET_ASSETS.length * 2);
+    expect(feedShutdowns.every((shutdown) => shutdown.mock.calls.length === 1)).toBe(true);
+  });
+
+  it("closes live sockets and removes every feed timer", async () => {
+    vi.useFakeTimers();
+    const supervisor = inspectSupervisor();
+    const polymarket = inspectPolymarketFeed(supervisor);
+    const kalshi = inspectKalshiFeed(supervisor);
+    const marketSocket = { close: vi.fn() };
+    const userSocket = { close: vi.fn() };
+    const priceSocket = { close: vi.fn() };
+    const kalshiSocket = { close: vi.fn() };
+    polymarket.slotKey = buildSlot().key;
+    polymarket.ws = marketSocket;
+    polymarket.userWs = userSocket;
+    polymarket.priceWs = priceSocket;
+    polymarket.wsHeartbeat = setInterval(() => {}, 10_000);
+    polymarket.userWsHeartbeat = setInterval(() => {}, 10_000);
+    polymarket.priceWsHeartbeat = setInterval(() => {}, 10_000);
+    polymarket.marketReconnectTimer = setTimeout(() => {}, 10_000);
+    polymarket.userReconnectTimer = setTimeout(() => {}, 10_000);
+    polymarket.priceReconnectTimer = setTimeout(() => {}, 10_000);
+    kalshi.slotKey = buildSlot().key;
+    kalshi.ws = kalshiSocket;
+    kalshi.wsHeartbeat = setInterval(() => {}, 10_000);
+    kalshi.wsBootstrapTimer = setTimeout(() => {}, 10_000);
+    kalshi.wsReconnectTimer = setTimeout(() => {}, 10_000);
+
+    await supervisor.shutdown();
+
+    expect(marketSocket.close).toHaveBeenCalledTimes(1);
+    expect(userSocket.close).toHaveBeenCalledTimes(1);
+    expect(priceSocket.close).toHaveBeenCalledTimes(1);
+    expect(kalshiSocket.close).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("isolates a denied Kalshi fill subscription from CF and orderbook channels", () => {

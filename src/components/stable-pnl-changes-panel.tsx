@@ -33,7 +33,10 @@ export function StablePnlChangesPanel({
           </div>
         ) : (
           groupedChanges.map(({ latest: change, assets, count, windowStart }) => (
-            <div key={change.intentId} className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist">
+            <div
+              key={change.intentId}
+              className="rounded-[18px] border border-white/6 bg-white/[0.02] px-3 py-3 text-sm text-mist"
+            >
               <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                 <div>
                   <div className="text-[11px] uppercase tracking-[0.16em] text-mist/60">Drawdown Stable</div>
@@ -44,11 +47,14 @@ export function StablePnlChangesPanel({
                   <div className="mt-1 text-xs text-mist/60">{formatDateTime(change.changedAt)}</div>
                   {count > 1 ? (
                     <div className="mt-2 text-xs text-mist/70">
-                      Fenêtre {formatDateTime(windowStart)} · trades {assets.map((asset) => asset.toUpperCase()).join(" · ")}
+                      Fenêtre {formatDateTime(windowStart)} · trades{" "}
+                      {assets.map((asset) => asset.toUpperCase()).join(" · ")}
                     </div>
                   ) : null}
                 </div>
-                <div className={`font-mono text-[30px] leading-none ${change.drawdownUsd >= 0 ? "text-emerald-300" : "text-rose"}`}>
+                <div
+                  className={`font-mono text-[30px] leading-none ${change.drawdownUsd >= 0 ? "text-emerald-300" : "text-rose"}`}
+                >
                   {formatCurrency(change.drawdownUsd)}
                 </div>
               </div>

@@ -237,6 +237,8 @@ function buildSnapshot(input: {
       slotAligned: true,
       feedHealth: { feedStatus: "ready" },
       feeMultiplier: 1,
+      priceLevelStructure: "linear_cent",
+      priceRanges: [{ start: "0.0000", end: "1.0000", step: "0.0100" }],
       outcomes: {
         yes: { minOrderSize: 1 },
         no: { minOrderSize: 1 },

@@ -135,6 +135,59 @@ describe("API mutation authentication", () => {
     expect(JSON.stringify(result)).not.toContain("sec:ret");
   });
 
+  it("rejects an authenticated browser mutation from a cross-site context", () => {
+    const requestIdFactory = vi.fn(() => "must-not-be-created");
+    const error = captureAuthError(() =>
+      authenticateApiMutation(
+        request(basic("ops", "sec:ret"), {
+          "sec-fetch-site": "cross-site",
+        }),
+        {
+          env: configuredAuth,
+          requestIdFactory,
+        },
+      ),
+    );
+
+    expect(error).toMatchObject({
+      status: 403,
+      code: "api_mutation_cross_site_forbidden",
+    });
+    expect(requestIdFactory).not.toHaveBeenCalled();
+  });
+
+  it("rejects a mismatched Origin and accepts the exact forwarded host", () => {
+    const headers = {
+      host: "internal:3000",
+      "x-forwarded-host": "warbitrer.test",
+      origin: "https://evil.example",
+    };
+    const error = captureAuthError(() =>
+      authenticateApiMutation(request(basic("ops", "sec:ret"), headers), {
+        env: configuredAuth,
+      }),
+    );
+
+    expect(error).toMatchObject({
+      status: 403,
+      code: "api_mutation_cross_site_forbidden",
+    });
+
+    expect(
+      authenticateApiMutation(
+        request(basic("ops", "sec:ret"), {
+          ...headers,
+          origin: "https://warbitrer.test",
+          "sec-fetch-site": "same-origin",
+        }),
+        {
+          env: configuredAuth,
+          requestIdFactory: () => "same-origin-request",
+        },
+      ),
+    ).toMatchObject({ requestId: "same-origin-request" });
+  });
+
   it("supports UTF-8 credentials and a case-insensitive Basic scheme", () => {
     const user = "op\u00e9rateur";
     const password = "s\u00e9curit\u00e9";
@@ -197,9 +250,12 @@ describe("API mutation authentication", () => {
   });
 });
 
-function request(authorization?: string) {
+function request(authorization?: string, headers: Record<string, string> = {}) {
   return new Request("https://warbitrer.test/api/settings", {
-    headers: authorization ? { authorization } : undefined,
+    headers: {
+      ...headers,
+      ...(authorization ? { authorization } : {}),
+    },
   });
 }
 

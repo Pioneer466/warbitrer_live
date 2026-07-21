@@ -20,12 +20,8 @@ export function buildMismatchRiskAudit(input: {
   }
 
   const economicsBasis = readEconomicsBasis(input.estimate, input.policy);
-  const pairSize =
-    input.estimate.economicsPairSize ?? input.policy.economics?.pairSize ?? null;
-  const totalCostUsd =
-    input.estimate.economicsTotalCostUsd ??
-    input.policy.economics?.totalCostUsd ??
-    null;
+  const pairSize = input.estimate.economicsPairSize ?? input.policy.economics?.pairSize ?? null;
+  const totalCostUsd = input.estimate.economicsTotalCostUsd ?? input.policy.economics?.totalCostUsd ?? null;
   const referenceGate =
     economicsBasis === "reference" &&
     isPositiveFinite(pairSize) &&
@@ -40,20 +36,9 @@ export function buildMismatchRiskAudit(input: {
   const economicGate = input.policy.economicGate ?? referenceGate;
   const diagnosticReasonCodes = input.policy.diagnosticReasons
     .map((reason) => reason.code)
-    .filter(
-      (code) =>
-        economicsBasis !== "reference" || code !== "estimate_invalid",
-    );
-  const enforceReasons = deriveEnforceReasons(
-    input.estimate,
-    diagnosticReasonCodes,
-    economicsBasis,
-  );
-  const blockingReasons = readAuditBlockingReasons(
-    economicsBasis,
-    input.policy,
-    referenceGate,
-  );
+    .filter((code) => economicsBasis !== "reference" || code !== "estimate_invalid");
+  const enforceReasons = deriveEnforceReasons(input.estimate, diagnosticReasonCodes, economicsBasis);
+  const blockingReasons = readAuditBlockingReasons(economicsBasis, input.policy, referenceGate);
 
   return {
     evaluatedAt: input.evaluatedAt,
@@ -73,21 +58,18 @@ export function buildMismatchRiskAudit(input: {
     economicsBasis,
     pairSize,
     totalCostUsd,
-    breakEvenFatalProbability:
-      economicGate?.pBreakEven ?? input.estimate.breakEvenFatalProbability,
+    breakEvenFatalProbability: economicGate?.pBreakEven ?? input.estimate.breakEvenFatalProbability,
     maximumAllowedFatalProbability:
-      economicGate?.maximumAllowedFatalProbability ??
-      input.estimate.maximumAllowedFatalProbability,
+      economicGate?.maximumAllowedFatalProbability ?? input.estimate.maximumAllowedFatalProbability,
     pFatal: input.estimate.pFatal,
     pFatalUpper95: input.estimate.pFatalUpper95,
     conservativePnlUsd:
       economicsBasis === "executable" && input.estimate.available
-        ? input.opportunity.conservativeExpectedPnlUsd ??
-          input.estimate.conservativePnlUsd
+        ? (input.opportunity.conservativeExpectedPnlUsd ?? input.estimate.conservativePnlUsd)
         : input.estimate.conservativePnlUsd,
     fatalPnlUsd:
       economicsBasis === "executable"
-        ? input.opportunity.fatalMismatchPnlUsd ?? input.estimate.fatalPnlUsd
+        ? (input.opportunity.fatalMismatchPnlUsd ?? input.estimate.fatalPnlUsd)
         : input.estimate.fatalPnlUsd,
     estimateAvailable: input.estimate.available,
     executionUsable: input.estimate.executionUsable !== false,
@@ -138,10 +120,7 @@ export function reconstructMismatchRiskAudit(
     return null;
   }
   const pairSize = Math.min(...intent.legs.map((leg) => leg.requestedSize));
-  const totalCostUsd = intent.legs.reduce(
-    (sum, leg) => sum + leg.requestedNotionalUsd + Math.max(0, leg.feeUsd),
-    0,
-  );
+  const totalCostUsd = intent.legs.reduce((sum, leg) => sum + leg.requestedNotionalUsd + Math.max(0, leg.feeUsd), 0);
   if (!isPositiveFinite(pairSize) || !isNonNegativeFinite(totalCostUsd)) {
     return null;
   }
@@ -210,10 +189,7 @@ function deriveDecision(input: {
   return input.policy.allowed ? "would_allow" : "would_block";
 }
 
-function readEconomicsBasis(
-  estimate: MismatchRiskEstimate,
-  policy: MismatchRiskPolicyCheck,
-): MismatchEconomicsBasis {
+function readEconomicsBasis(estimate: MismatchRiskEstimate, policy: MismatchRiskPolicyCheck): MismatchEconomicsBasis {
   if (estimate.economicsBasis) {
     return estimate.economicsBasis;
   }
@@ -229,10 +205,7 @@ function deriveEnforceReasons(
   if (economicsBasis === "reference") {
     reasons.push("reference_economics_only");
   }
-  if (
-    estimate.modelVersion.toLowerCase().includes("uncalibrated") &&
-    !reasons.includes("model_uncalibrated")
-  ) {
+  if (estimate.modelVersion.toLowerCase().includes("uncalibrated") && !reasons.includes("model_uncalibrated")) {
     reasons.push("model_uncalibrated");
   }
   return [...new Set(reasons)];
@@ -253,10 +226,5 @@ function isNonNegativeFinite(value: number | null | undefined): value is number 
 }
 
 function isProbability(value: number | null | undefined): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 1
-  );
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }

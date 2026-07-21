@@ -2,110 +2,178 @@
 
 ## Scope
 
-Warbitrer can submit real orders to Kalshi and Polymarket. Changes to settings, execution, reconciliation, recovery, balances, positions, or circuit breakers can expose capital.
+Warbitrer can submit real orders to Kalshi and Polymarket. Settings, admission, execution, reconciliation, recovery, balances, positions, settlements, accounting, and circuit breakers can all expose or misstate capital.
 
-## Current execution controls
+## Execution authorization
 
-Per-asset strategy settings are stored in Postgres:
+Per-asset strategy settings are versioned in Postgres:
 
 ```text
 enableTrading=false                         scan only
 enableTrading=true + shadowMode=true        synthetic execution
-enableTrading=true + shadowMode=false       real execution
+enableTrading=true + shadowMode=false       requests live execution
 ```
 
-Base defaults are scan-only for BTC and ETH and shadow-enabled for several other catalog assets. Persisted database configuration overrides defaults, so always inspect the effective API/database state rather than relying on constants.
+The third state is necessary but not sufficient. New live entry also requires `LIVE_EXECUTION_ALLOWED=true`, `KALSHI_ENV=prod`, a Polygon mainnet `POLYGON_RPC_URL`, an active asset worker, exact fresh venue evidence, compatible configuration revisions, no relevant blocking incidents, and no unresolved live admission or accounting blocker.
+
+The environment gate is fail closed and is rechecked before submission. Keep it false during migration, deployment, uncertain feed state, or reconciliation. Disabling new entry must not disable hedge, unwind, settlement, or recovery work for capital already exposed.
+
+## Operator access
+
+Production application access fails closed unless both `APP_BASIC_AUTH_USER` and `APP_BASIC_AUTH_PASSWORD` are configured. Mutating routes authenticate independently before parsing a request body and reject cross-site browser requests. Caddy Basic Auth and HTTPS remain a separate external defense.
+
+Application HTTP authentication is unrelated to VPS login. Repository code and deployment scripts must not edit `sshd`, change `PasswordAuthentication`, rotate system passwords, or require key-only login. Password-based SSH access must remain available; an SSH key is optional.
 
 ## Required live posture
 
-Before real execution:
+Before any real execution:
 
-- Confirm the intended server, branch, commit, build, and worker topology.
-- Confirm application authentication and HTTPS/private access.
-- Confirm Kalshi and Polymarket credentials without printing them.
-- Confirm both feeds are fresh, aligned, and genuinely WS-backed where required.
-- Confirm no active global, asset, or slot breaker.
-- Confirm there are no unresolved intents, open orders, or unhedged positions.
-- Confirm balances, allowances, notional limits, loss cap, slippage, depth, and minimum sizes.
-- Confirm Postgres backup and rollback procedures.
-- Start with scan-only, then shadow, and only then consider live.
+- Verify the intended server, branch, commit, builds, and split worker topology.
+- Verify `npm run db:status` reports the exact V1-V8 migration history.
+- Verify application authentication, Caddy, HTTPS, and localhost-only Next.js binding.
+- Verify credentials by presence and readability without printing their values.
+- Verify `POLYGON_RPC_URL` resolves Polygon mainnet chain ID 137 and can read transaction receipts.
+- Verify Kalshi and Polymarket feeds are fresh, aligned, WebSocket-backed, and on the exact canonical slot.
+- Verify venue order books are fresh, exact, within the allowed pair skew, and use authoritative ticks.
+- Verify no active global, asset, or slot incident blocks execution.
+- Verify no unresolved live intent, order attempt, venue order, fill ambiguity, position, or accounting backlog.
+- Verify balances, allowances, notional limits, daily loss cap, slippage, depth, minimum sizes, and fee-inclusive recovery bounds.
+- Verify Postgres backup and tested rollback procedures.
+- Start with scan-only, then shadow, and only then consider a tightly bounded live canary after explicit operator approval.
+
+Tests, review scores, or a successful build do not authorize deployment or live trading.
 
 ## Implemented safeguards
 
-The code currently includes:
+### Configuration and entry
 
-- `enableTrading` and `shadowMode`
-- stale snapshot and feed readiness checks
-- global/asset/slot circuit breakers
-- per-slot open-intent limits
-- venue exposure limits and balance reservations
+- revision-checked strategy and global-risk configuration
+- atomic seven-asset bulk updates and append-only audit events
+- serialization between configuration mutations and live admission
+- independent environment authorization for new live entries
+- exact final market, slot, outcome, token, tick, and feed identity validation
+- fresh WebSocket feed and book requirements with bounded pair skew
+- entry cutoff and immutable submission budget
+- global live reservation and separate shadow reservation
+- mode-aware reentry checks using durable admission history
+- accounting and breaker gates inside the admission transaction
+
+### Economics and market risk
+
 - maximum pair notional and leg capital share
-- minimum projected profit/return and gross-cost thresholds
-- entry cutoff near settlement
-- orderbook depth and minimum-order preflight
-- adaptive slippage and bounded retry counts
-- stable client order IDs and order-attempt persistence
-- primary confirmation, hedge rescue, forced unwind, and manual intervention states
-- daily realized-loss breaker
-- global Postgres live-execution lock
-- reconciliation against venue orders, fills, and positions
+- venue exposure and balance reservations
+- executable multi-level depth and minimum-order checks
+- projected net profit, net return, and worst-case profit thresholds
+- fee-aware balanced sizing and recovery limits
+- adaptive slippage capped by `maxSlippageBps`
+- mismatch/dead-zone guards and execution-time rechecks
+- fail-closed mismatch enforcement when the model is unavailable or uncalibrated
+- daily realized-loss incident
 
-## Known gaps
+### Submission and venue truth
 
-These are not hypothetical recommendations; they are current risks:
+- stable client order identifiers and canonical request hashes
+- durable `planned` attempt committed with live admission
+- one-shot `planned -> submitting` claim
+- database-clock deadline checks at claim and immediately before the network request
+- monotone attempt revisions and parent-stage guards
+- `truth_pending` for transport or confirmation ambiguity
+- no blind resubmission when a venue may have accepted the order
+- bounded confirmation, cancel, rescue, unwind, and reconciliation paths
+- fresh orders, fills, trades, and positions required before destructive repair
+- Polymarket resolved and Kalshi finalized truth required for settlement
 
-1. There is no independent environment-level authorization required for live trading.
-2. The UI can change an asset directly from off/shadow to live without a confirmation challenge.
-3. Basic Auth becomes disabled when either auth environment variable is absent.
-4. Recovery and settings APIs rely on that same optional middleware.
-5. Kalshi WS protocol errors and sequence gaps are not observed durably enough.
-6. Startup schema changes are not versioned migrations.
+### Recovery
 
-Do not represent these gaps as already solved.
+- exact original intent, leg, venue, market, token, and slot proof
+- fresh WebSocket market and book evidence for recovery orders
+- authoritative tick movement for recovery prices
+- explicit fee provenance and fee-inclusive maximum-loss validation
+- manual intervention when exposure or submission truth cannot be proved safe
+
+### Circuit breakers
+
+- independent append-only incidents at global, asset, and slot scope
+- stable incident identity, owner, revision, impact, and resolution policy
+- separate causes coexist instead of overwriting one mutable scope row
+- unresolved exposure elevates an incident to blocking impact
+- owner-only automatic recovery with durable proof
+- exact operator acknowledgement for operator-owned incidents
+- cooldowns enforced from database time
+
+### Accounting
+
+- V7 accounting heads for every intent
+- immutable leg, fill, settlement, and version evidence
+- deterministic fixed-unit calculations and proof hashes
+- idempotent mutation request records
+- explicit no-exposure closures
+- exact zero-exposure parent projection enforced at commit
+- quarantine for late or conflicting facts
+- mandatory atomic accounting ingestion for every fill inserted after V8, including on legacy parents
+- stable fills linked to the current accounting version
+- append-only realized-P&L deltas for stable projections
+- exact Polymarket V2 `OrderFilled` receipt evidence for order identity, token, side, size, price, and fee
+- on-chain-derived Polymarket fill identities that deduplicate repeated CLOB representations of one event
+
+Confirmed CLOB status alone is not final accounting evidence. If the Polygon receipt is unavailable, failed, emitted by an untrusted exchange, or inconsistent with the CLOB trade, the fill is not inserted and an execution incident blocks new entry. Schema presence alone is not operational proof. Before live use, verify that current intents and the current UTC risk day have no `legacy_pending`, `quarantined`, or otherwise unstable accounting state.
 
 ## Order truth
 
 An order submission timeout, network error, or ambiguous venue response does not prove zero fill. Preserve:
 
-- stable client order identifiers
-- persisted request/attempt state before or around submission
+- the exact canonical request and stable client order ID
+- the persisted attempt before dispatch
+- the immutable submission deadline
+- the point at which network submission began
 - bounded immediate confirmation
-- subsequent order/fill/position reconciliation
-- `truth_pending` when venue truth is ambiguous
-- manual intervention and breaker activation when exposure cannot be proven safe
+- later order, trade, fill, and position reconciliation
+- `truth_pending` while venue truth is ambiguous
+- a blocking incident and manual intervention when exposure cannot be proved safe
 
-Do not clear an unresolved intent merely to clean the UI. Closing an intent is an operator assertion about exposure and must be backed by venue truth.
+Do not mark an intent failed, clear a reservation, or resubmit simply to clean the UI. A terminal state is an assertion about venue truth and capital exposure.
+
+## Accounting truth
+
+Do not treat a mutable intent field or one balance snapshot as a ledger. Stable realized P&L requires immutable final fill evidence, authoritative settlement facts, a versioned proof, and an append-only delta. A late fill or conflicting identity must quarantine the accounting head until deterministic re-accounting or explicit no-exposure evidence resolves it.
+
+Daily loss checks and live admission must consume stable financial truth. Historical migration debt must remain visible and must not contaminate the current UTC risk day.
 
 ## Market data safety
 
-- Do not trade from `rest-bootstrap`, stale `rest-fallback`, or `unavailable` feeds unless the implemented readiness rules explicitly prove freshness and eligibility.
-- Preserve full WS envelopes when sequence numbers or subscription IDs are outside `msg`.
-- Load a new orderbook snapshot before accepting deltas after a sequence gap.
-- A subscription acknowledgement is not market data freshness.
-- Avoid increasing REST polling in response to rate limiting.
+- Do not trade from `rest-bootstrap`, `rest-fallback`, or `unavailable` sources.
+- Preserve full WebSocket envelopes when sequence numbers or subscription IDs are outside `msg`.
+- Require a new order-book snapshot before accepting deltas after a sequence gap.
+- A subscription acknowledgement is not quote freshness.
+- Close and resubscribe unhealthy sessions with bounded backoff.
+- Do not increase REST polling in response to rate limiting.
+- Do not carry market or book identity across a slot rollover.
 
 ## Secrets
 
 Never log or commit:
 
-- Kalshi API key IDs paired with private keys
-- Polymarket private keys or L2 API credentials
-- relayer credentials
-- database passwords/URLs
-- Basic Auth passwords
-- backup archives or database dumps
+- Kalshi private keys or paired API key identifiers
+- Polymarket private keys, L2 credentials, or relayer credentials
+- database passwords or full connection URLs
+- application or Caddy Basic Auth passwords
+- complete authorization headers, cookies, backup archives, or database dumps
 
-Operational transcripts must be sanitized before publication.
+Operational transcripts must be sanitized before publication. Check that a secret exists without printing it.
 
 ## Review requirements
 
-Any execution-related change should include tests for the affected state transition and at least one failure/ambiguity path. Run:
+Execution-related changes require deterministic tests for the intended transition, a failure or ambiguity path, replay behavior, and relevant Postgres concurrency or rollback behavior. Run the smallest focused check first, then broaden to:
 
 ```bash
+npm run audit:prod
+npm run lint
 npm run typecheck
 npm test
+npm run test:coverage
 npm run build
 npm run build:worker
+npm run db:status
 ```
 
-Do not run live connector calls as automated tests and do not enable live trading for validation.
+Use fixture venue messages. Do not make live connector calls in automated tests and do not enable live trading as a validation technique.

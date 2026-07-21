@@ -5,6 +5,7 @@ import {
   derivePolymarketConfirmationRequestTimeoutMs,
   derivePolymarketDepth,
   derivePolymarketEffectiveFeeRateBps,
+  derivePolymarketFeeMetadata,
   extractPolymarketCollateralAllowanceInfo,
   extractPolymarketCollateralAllowanceUsd,
   extractPolymarketPositionValueUsd,
@@ -17,6 +18,7 @@ import {
   getPolymarketTradeOrderMappingIssue,
   getPolymarketSoftNoFillMessage,
   isConfirmedPolymarketTrade,
+  isPolymarketBuilderCodeActive,
   isPendingPolymarketTrade,
   mapPolymarketOrder,
   mapPolymarketTradeToFill,
@@ -64,6 +66,13 @@ describe("Polymarket helpers", () => {
       size: 10,
     });
     expect("amount" in plan.order).toBe(false);
+  });
+
+  it("distinguishes an active builder code from the no-builder wire representations", () => {
+    expect(isPolymarketBuilderCodeActive(undefined)).toBe(false);
+    expect(isPolymarketBuilderCodeActive("")).toBe(false);
+    expect(isPolymarketBuilderCodeActive(`0x${"0".repeat(64)}`)).toBe(false);
+    expect(isPolymarketBuilderCodeActive(`0x${"1".repeat(64)}`)).toBe(true);
   });
 
   it("keeps legacy Polymarket BUY amount mode explicit", () => {
@@ -454,6 +463,25 @@ describe("Polymarket helpers", () => {
     expect(derivePolymarketEffectiveFeeRateBps(null, 0.4)).toBe(0);
   });
 
+  it("distinguishes exact CLOB fee metadata from unknown and explicit fee-free markets", () => {
+    expect(derivePolymarketFeeMetadata({ fd: { r: 0.02, e: 1, to: true } })).toEqual({
+      feeMetadataPresent: true,
+      feesEnabled: true,
+    });
+    expect(derivePolymarketFeeMetadata({ fd: { r: 0, e: 0, to: false } })).toEqual({
+      feeMetadataPresent: true,
+      feesEnabled: false,
+    });
+    expect(derivePolymarketFeeMetadata({ fd: {} })).toEqual({
+      feeMetadataPresent: true,
+      feesEnabled: null,
+    });
+    expect(derivePolymarketFeeMetadata(null)).toEqual({
+      feeMetadataPresent: false,
+      feesEnabled: null,
+    });
+  });
+
   it("extracts a direct collateral allowance when the legacy field is present", () => {
     expect(extractPolymarketCollateralAllowanceUsd({ allowance: "2500000" }, "EOA")).toBe(2.5);
   });
@@ -580,12 +608,12 @@ describe("Polymarket helpers", () => {
     expect(matching).toHaveLength(2);
     expect(summary.filledSize).toBe(15);
     expect(summary.averageFillPrice).toBeCloseTo(0.4333, 4);
-    expect(summary.feeUsd).toBeCloseTo(0.0525, 4);
+    expect(summary.feeUsd).toBe(0);
     expect(truth).toMatchObject({
       effectiveFilledSize: 15,
       pendingFilledSize: 15,
       averageFillPrice: 0.4333,
-      feeUsd: 0.0525,
+      feeUsd: 0,
     });
     expect(makerFill).toMatchObject({
       id: "polymarket-fill:trade-2:order-1",
@@ -596,7 +624,7 @@ describe("Polymarket helpers", () => {
       outcome: "UP",
       price: 0.5,
       size: 5,
-      feeUsd: 0.0125,
+      feeUsd: 0,
       liquidity: "MAKER",
     });
   });
@@ -761,6 +789,7 @@ describe("Polymarket helpers", () => {
     const lifecycle = summarizePolymarketTradeLifecycle(trades);
     expect(lifecycle.confirmedTrades).toHaveLength(1);
     expect(lifecycle.pendingTrades).toHaveLength(1);
+    expect(lifecycle.unknownTrades).toHaveLength(0);
     expect(summarizePolymarketTrades(lifecycle.confirmedTrades).filledSize).toBe(10);
   });
 
@@ -911,6 +940,101 @@ describe("Polymarket helpers", () => {
     expect(shouldTreatPolymarketTerminalOrderAsPending(0, 0)).toBe(false);
     expect(shouldTreatPolymarketTerminalOrderAsPending(2, 5)).toBe(false);
   });
+
+  it("accepts only documented short and prefixed Polymarket trade statuses", () => {
+    const trade = {
+      id: "trade-status",
+      taker_order_id: "order-1",
+      market: "market-1",
+      asset_id: "asset-1",
+      side: Side.BUY,
+      size: "10",
+      fee_rate_bps: "0",
+      price: "0.4",
+      status: "TRADE_STATUS_CONFIRMED",
+      match_time: new Date(10).toISOString(),
+      last_update: new Date(10).toISOString(),
+      outcome: "UP",
+      bucket_index: 0,
+      owner: "owner",
+      maker_address: "maker",
+      maker_orders: [],
+      transaction_hash: "0x1",
+      trader_side: "TAKER" as const,
+    };
+
+    expect(isConfirmedPolymarketTrade(trade)).toBe(true);
+    expect(isPendingPolymarketTrade({ ...trade, status: "TRADE_STATUS_MATCHED" })).toBe(true);
+    expect(isConfirmedPolymarketTrade({ ...trade, status: "TRADE_STATUS_SETTLED" })).toBe(false);
+    expect(isPendingPolymarketTrade({ ...trade, status: "TRADE_STATUS_SETTLED" })).toBe(false);
+    expect(summarizePolymarketTrades([{ ...trade, status: "TRADE_STATUS_SETTLED" }], "order-1").filledSize).toBe(0);
+    expect(summarizePolymarketTrades([{ ...trade, status: "TRADE_STATUS_FAILED" }], "order-1").filledSize).toBe(0);
+  });
+
+  it.each(["TRADE_STATUS_SETTLED", "FUTURE_UNKNOWN_STATUS"])(
+    "keeps terminal zero-fill truth pending for an associated trade with unknown status %s",
+    (status) => {
+      const trade = {
+        id: "trade-unknown",
+        taker_order_id: "order-unknown",
+        market: "market-1",
+        asset_id: "asset-1",
+        side: Side.BUY,
+        size: "10",
+        fee_rate_bps: "0",
+        price: "0.4",
+        status,
+        match_time: new Date(10).toISOString(),
+        last_update: new Date(10).toISOString(),
+        outcome: "UP",
+        bucket_index: 0,
+        owner: "owner",
+        maker_address: "maker",
+        maker_orders: [],
+        transaction_hash: "0x1",
+        trader_side: "TAKER" as const,
+      };
+      const truth = resolvePolymarketOrderTruth({
+        orderId: "order-unknown",
+        order: {
+          id: "order-unknown",
+          status: "CANCELED",
+          market: "market-1",
+          asset_id: "asset-1",
+          side: "BUY",
+          original_size: "10",
+          size_matched: "0",
+          price: "0.4",
+          outcome: "Up",
+          order_type: "FOK",
+          maker_address: "0xabc",
+          owner: "owner",
+          expiration: "0",
+          associate_trades: ["trade-unknown"],
+          created_at: 1775513261,
+        },
+        trades: [trade],
+        expectedSize: 10,
+        expectedSizeIsExact: true,
+        orderType: "FOK",
+      });
+
+      expect(summarizePolymarketTradeLifecycle([trade]).unknownTrades).toEqual([trade]);
+      expect(truth).toMatchObject({
+        effectiveFilledSize: 0,
+        hasPendingExposure: true,
+        hasUnknownTradeTruth: true,
+        terminalZeroFill: false,
+        status: "pending",
+      });
+      expect(
+        shouldAcceptPolymarketTerminalZeroFill(truth, {
+          order: { ok: true, error: null },
+          trades: { ok: true, error: null },
+        }),
+      ).toBe(false);
+    },
+  );
 
   it("maps numeric polymarket trade timestamps to millisecond fill times", () => {
     const fill = mapPolymarketTradeToFill(

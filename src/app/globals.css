@@ -41,9 +41,7 @@ body {
   min-height: 100vh;
   color: var(--text-0);
   font-family: "Space Grotesk", "Avenir Next", "Satoshi", "Segoe UI", sans-serif;
-  background:
-    radial-gradient(rgba(201, 168, 100, 0.045) 0.7px, transparent 0.7px),
-    transparent;
+  background: radial-gradient(rgba(201, 168, 100, 0.045) 0.7px, transparent 0.7px), transparent;
   background-size: 18px 18px;
 }
 

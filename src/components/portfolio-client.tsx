@@ -38,6 +38,20 @@ import type {
   VersionedConfiguration,
 } from "@/lib/types";
 
+type BreakerIncidentDetails = {
+  id: string;
+  revision: number;
+  resolutionPolicy: "owner" | "operator";
+  incidentKey: string;
+  intentId: string | null;
+  scope: { type: "global" } | { type: "asset"; asset: string } | { type: "slot"; asset: string; slotKey: string };
+};
+
+type BreakerDetailsResponse = {
+  manualKillIncident: BreakerIncidentDetails | null;
+  incidents: BreakerIncidentDetails[];
+};
+
 export function PortfolioClient() {
   const portfolio = usePollingJson<PortfolioDashboardResponse>("/api/dashboard", 3_000);
   const globalRisk = usePollingJson<VersionedConfiguration<GlobalRiskConfig>>("/api/settings/risk", 5_000);
@@ -57,7 +71,7 @@ export function PortfolioClient() {
     portfolio.data;
   const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
   const nonGlobalBreakers = activeBreakers.filter((breaker) => breaker.key !== "global");
-  const globalBreakerActive = globalBreaker?.active === true;
+  const globalBreakerActive = globalBreaker?.payload?.manualKillActive === true;
   const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
   const shadowCount = assets.filter((asset) => asset.config.enableTrading && asset.config.shadowMode).length;
@@ -76,6 +90,21 @@ export function PortfolioClient() {
     setGlobalBreakerMessage(null);
     try {
       const nextActive = !globalBreakerActive;
+      let acknowledgement: { incidentId: string; expectedRevision: number } | null = null;
+      if (!nextActive) {
+        const detailsResponse = await fetch("/api/circuit-breakers?details=1", { cache: "no-store" });
+        if (!detailsResponse.ok) {
+          throw new Error(await detailsResponse.text());
+        }
+        const details = (await detailsResponse.json()) as BreakerDetailsResponse;
+        if (!details.manualKillIncident) {
+          throw new Error("Aucun incident manual-kill actif à acquitter.");
+        }
+        acknowledgement = {
+          incidentId: details.manualKillIncident.id,
+          expectedRevision: details.manualKillIncident.revision,
+        };
+      }
       const response = await fetch("/api/circuit-breakers", {
         method: "PUT",
         headers: {
@@ -85,6 +114,7 @@ export function PortfolioClient() {
           key: "global",
           active: nextActive,
           reason: "manual",
+          ...acknowledgement,
         }),
       });
 
@@ -102,30 +132,33 @@ export function PortfolioClient() {
     }
   }
 
-  async function clearBreaker(key: CircuitBreakerKey, options: { intentId?: string; forceCloseIntent?: boolean } = {}) {
+  async function acknowledgeBreaker(key: CircuitBreakerKey, intentId?: string) {
     const breaker = activeBreakers.find((candidate) => candidate.key === key);
     if (!breaker?.active) {
       return;
     }
 
-    const shouldCloseUnresolvedIntents =
-      options.forceCloseIntent === true ||
-      breaker.reason === "hedge_failure" ||
-      typeof breaker.payload?.intentId === "string";
-    if (
-      (breaker.payload?.requiresManualClear === true || shouldCloseUnresolvedIntents) &&
-      !window.confirm(
-        shouldCloseUnresolvedIntents
-          ? `Clear ${key} et fermer l'intent non résolu associé ? À faire uniquement si l'exposition a été traitée manuellement.`
-          : `Clear ${key} ? Ce breaker demandait un clear manuel.`,
-      )
-    ) {
+    if (!window.confirm(`Acquitter un incident exact de ${key} ? L'exposition doit déjà être prouvée résolue.`)) {
       return;
     }
 
     setBreakerClearBusyKey(key);
     setGlobalBreakerMessage(null);
     try {
+      const detailsResponse = await fetch("/api/circuit-breakers?details=1", { cache: "no-store" });
+      if (!detailsResponse.ok) {
+        throw new Error(await detailsResponse.text());
+      }
+      const details = (await detailsResponse.json()) as BreakerDetailsResponse;
+      const incident = details.incidents.find(
+        (candidate) =>
+          circuitBreakerIncidentScopeKey(candidate) === key &&
+          candidate.resolutionPolicy === "operator" &&
+          (intentId === undefined || candidate.intentId === intentId),
+      );
+      if (!incident) {
+        throw new Error(`Aucun incident opérateur acquittable trouvé pour ${key}.`);
+      }
       const response = await fetch("/api/circuit-breakers", {
         method: "PUT",
         headers: {
@@ -134,8 +167,8 @@ export function PortfolioClient() {
         body: JSON.stringify({
           key,
           active: false,
-          closeUnresolvedIntents: shouldCloseUnresolvedIntents,
-          intentId: options.intentId,
+          incidentId: incident.id,
+          expectedRevision: incident.revision,
         }),
       });
 
@@ -143,12 +176,11 @@ export function PortfolioClient() {
         throw new Error(await response.text());
       }
 
-      const result = (await response.json().catch(() => null)) as { closedIntentIds?: string[] } | null;
-      const closedCount = result?.closedIntentIds?.length ?? 0;
+      const result = (await response.json().catch(() => null)) as { active?: boolean } | null;
       setGlobalBreakerMessage(
-        closedCount > 0
-          ? `Breaker ${key} désactivé; ${closedCount} intent(s) non résolu(s) fermé(s).`
-          : `Breaker ${key} désactivé.`,
+        result?.active === true
+          ? `Incident acquitté; ${key} reste actif pour une autre cause.`
+          : `Incident acquitté; ${key} n'a plus de cause active.`,
       );
     } catch (error) {
       setGlobalBreakerMessage(error instanceof Error ? error.message : `Impossible de désactiver ${key}.`);
@@ -163,7 +195,7 @@ export function PortfolioClient() {
       setGlobalBreakerMessage(`Aucun breaker actif trouvé pour l'intent ${intent.id}.`);
       return;
     }
-    await clearBreaker(breaker.key, { intentId: intent.id, forceCloseIntent: true });
+    await acknowledgeBreaker(breaker.key, intent.id);
   }
 
   return (
@@ -231,7 +263,7 @@ export function PortfolioClient() {
           />
         ) : null}
         {nonGlobalBreakers.length > 0 ? (
-          <ActiveBreakerList breakers={nonGlobalBreakers} busyKey={breakerClearBusyKey} onClear={clearBreaker} />
+          <ActiveBreakerList breakers={nonGlobalBreakers} busyKey={breakerClearBusyKey} onClear={acknowledgeBreaker} />
         ) : null}
 
         <Surface glow>
@@ -368,9 +400,13 @@ function ManualInterventionList({
                   onClick={() => onClear(intent)}
                   disabled={!breaker || busyKey === breaker.key}
                   className="w-full rounded border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.12)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--wa-rose)] transition hover:bg-[rgba(232,80,106,0.18)] disabled:cursor-not-allowed disabled:opacity-50 lg:w-auto"
-                  title={breaker ? "Clear le breaker et fermer cet intent" : "Aucun breaker actif associé"}
+                  title={
+                    breaker
+                      ? "Acquitter l'incident après preuve durable de résolution de l'exposition"
+                      : "Aucun breaker actif associé"
+                  }
                 >
-                  {breaker && busyKey === breaker.key ? "levée..." : "Lever breaker + intent"}
+                  {breaker && busyKey === breaker.key ? "acquittement..." : "Acquitter incident"}
                 </button>
               </div>
             </div>
@@ -424,10 +460,15 @@ function ActiveBreakerList({
             <button
               type="button"
               onClick={() => onClear(breaker.key)}
-              disabled={busyKey === breaker.key}
+              disabled={busyKey === breaker.key || breaker.payload?.requiresManualClear !== true}
+              title={
+                breaker.payload?.requiresManualClear === true
+                  ? "Acquitter un incident opérateur exact"
+                  : "Ce breaker est résolu automatiquement par son sous-système propriétaire"
+              }
               className="w-full rounded border border-[rgba(232,80,106,0.34)] bg-[rgba(232,80,106,0.10)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] text-[var(--wa-rose)] transition hover:bg-[rgba(232,80,106,0.16)] disabled:cursor-not-allowed disabled:opacity-50 sm:w-auto"
             >
-              {busyKey === breaker.key ? "clear..." : "clear"}
+              {busyKey === breaker.key ? "acquittement..." : "acquitter"}
             </button>
           </div>
         ))}
@@ -749,12 +790,25 @@ function getAuditDecisionTone(decision: MismatchRiskCounterfactualDecision): V2T
 
 function findBreakerForIntent(breakers: CircuitBreaker[], intent: OrderIntent) {
   return (
-    breakers.find((breaker) => breaker.active && breaker.payload?.intentId === intent.id) ??
+    breakers.find(
+      (breaker) =>
+        breaker.active && Array.isArray(breaker.payload?.intentIds) && breaker.payload.intentIds.includes(intent.id),
+    ) ??
     breakers.find((breaker) => breaker.active && breaker.key === `slot:${intent.slotKey}`) ??
     breakers.find((breaker) => breaker.active && breaker.key === `asset:${intent.asset}`) ??
     breakers.find((breaker) => breaker.active && breaker.key === "global") ??
     null
   );
+}
+
+function circuitBreakerIncidentScopeKey(incident: BreakerIncidentDetails) {
+  if (incident.scope.type === "global") {
+    return "global";
+  }
+  if (incident.scope.type === "asset") {
+    return `asset:${incident.scope.asset}`;
+  }
+  return `slot:${incident.scope.slotKey}`;
 }
 
 function formatSignedUsd(value: number | null | undefined) {

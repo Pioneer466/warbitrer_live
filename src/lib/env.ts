@@ -53,19 +53,15 @@ export function hasKalshiCredentials(env = readEnv()) {
 export function hasPolymarketCredentials(env = readEnv()) {
   return Boolean(
     (env.POLY_PRIVATE_KEY || env.POLY_PRIVATE_KEY_PATH) &&
-      env.POLY_API_KEY &&
-      env.POLY_API_SECRET &&
-      env.POLY_API_PASSPHRASE &&
-      env.POLY_FUNDER_ADDRESS &&
-      env.POLY_SIGNATURE_TYPE,
+    env.POLY_API_KEY &&
+    env.POLY_API_SECRET &&
+    env.POLY_API_PASSPHRASE &&
+    env.POLY_FUNDER_ADDRESS &&
+    env.POLY_SIGNATURE_TYPE,
   );
 }
 
-export function readSecretValue(options: {
-  inline?: string;
-  path?: string;
-  label: string;
-}) {
+export function readSecretValue(options: { inline?: string; path?: string; label: string }) {
   if (options.inline) {
     return options.inline;
   }

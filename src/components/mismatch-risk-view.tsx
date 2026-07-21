@@ -1,12 +1,6 @@
 "use client";
 
-import {
-  Chip,
-  formatV2Usd,
-  Surface,
-  V2_TONE_TEXT,
-  type V2Tone,
-} from "@/components/v2-ui";
+import { Chip, formatV2Usd, Surface, V2_TONE_TEXT, type V2Tone } from "@/components/v2-ui";
 import {
   classifySettledIntentMismatch,
   formatMismatchAuditDecision,
@@ -72,16 +66,9 @@ export function AssetMismatchRiskOverview({
           <RiskMetric
             label="P fatal 95%"
             value={formatRiskProbability(estimate?.pFatalUpper95)}
-            tone={probabilityTone(
-              estimate?.pFatalUpper95,
-              estimate?.maximumAllowedFatalProbability,
-              modelState,
-            )}
+            tone={probabilityTone(estimate?.pFatalUpper95, estimate?.maximumAllowedFatalProbability, modelState)}
           />
-          <RiskMetric
-            label="Limite modèle"
-            value={formatRiskProbability(estimate?.maximumAllowedFatalProbability)}
-          />
+          <RiskMetric label="Limite modèle" value={formatRiskProbability(estimate?.maximumAllowedFatalProbability)} />
           <RiskMetric
             label="P&L conservateur"
             value={formatSignedUsd(estimate?.conservativePnlUsd)}
@@ -96,12 +83,7 @@ export function AssetMismatchRiskOverview({
         <RiskEstimateFooter estimate={estimate} />
       </Surface>
 
-      <GlobalRiskBudgetPanel
-        config={globalConfig}
-        error={globalConfigError}
-        loading={globalConfigLoading}
-        compact
-      />
+      <GlobalRiskBudgetPanel config={globalConfig} error={globalConfigError} loading={globalConfigLoading} compact />
 
       <Surface className="xl:col-span-2">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
@@ -146,15 +128,15 @@ export function GlobalRiskBudgetPanel({
           <div className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.45)]">
             Budget fatal global
           </div>
-          <div className="mt-1 text-xs text-[var(--wa-mist)]">
-            Cluster multi-actifs et fraîcheur d’exécution
-          </div>
+          <div className="mt-1 text-xs text-[var(--wa-mist)]">Cluster multi-actifs et fraîcheur d’exécution</div>
         </div>
         <Chip tone={config ? "emerald" : loading ? "amber" : "rose"}>
           {config ? "chargé" : loading ? "chargement" : "indisponible"}
         </Chip>
       </div>
-      <div className={`grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] ${compact ? "md:grid-cols-3" : "md:grid-cols-3 xl:grid-cols-6"}`}>
+      <div
+        className={`grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] ${compact ? "md:grid-cols-3" : "md:grid-cols-3 xl:grid-cols-6"}`}
+      >
         <RiskMetric label="Part attendue" value={formatRiskProbability(config?.clusterExpectedFatalLossShare)} />
         <RiskMetric label="Cap attendu" value={formatV2Usd(config?.clusterExpectedFatalLossCapUsd)} />
         <RiskMetric label="Part absolue" value={formatRiskProbability(config?.clusterAbsoluteFatalLossShare)} />
@@ -171,11 +153,7 @@ export function GlobalRiskBudgetPanel({
   );
 }
 
-export function OpportunityMismatchRiskDetails({
-  opportunity,
-}: {
-  opportunity: LiveOpportunity;
-}) {
+export function OpportunityMismatchRiskDetails({ opportunity }: { opportunity: LiveOpportunity }) {
   const estimate = opportunity.mismatchRiskEstimate ?? null;
   const audit = opportunity.mismatchRiskAudit ?? null;
   const economics = readOpportunityMismatchEconomics(opportunity);
@@ -201,9 +179,7 @@ export function OpportunityMismatchRiskDetails({
             </Chip>
           ) : null}
           {economics ? (
-            <Chip tone={economicsBasisTone(economics.basis)}>
-              {formatMismatchEconomicsBasis(economics.basis)}
-            </Chip>
+            <Chip tone={economicsBasisTone(economics.basis)}>{formatMismatchEconomicsBasis(economics.basis)}</Chip>
           ) : null}
           <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
           {estimate?.available ? (
@@ -218,26 +194,14 @@ export function OpportunityMismatchRiskDetails({
         <RiskMetric
           label="P fatal 95%"
           value={formatRiskProbability(pFatalUpper95)}
-          tone={probabilityTone(
-            pFatalUpper95,
-            limit,
-            auditModelState,
-          )}
+          tone={probabilityTone(pFatalUpper95, limit, auditModelState)}
         />
         <RiskMetric label="P alignée" value={formatRiskProbability(estimate?.pAligned)} />
         <RiskMetric label="P double payout" value={formatRiskProbability(estimate?.pDouble)} />
         <RiskMetric label="P seuil rentabilité" value={formatRiskProbability(breakEven)} />
         <RiskMetric label="P limite" value={formatRiskProbability(limit)} />
-        <RiskMetric
-          label="P&L conservateur"
-          value={formatSignedUsd(conservativePnl)}
-          tone={pnlTone(conservativePnl)}
-        />
-        <RiskMetric
-          label="P&L fatal"
-          value={formatSignedUsd(fatalPnl)}
-          tone={pnlTone(fatalPnl)}
-        />
+        <RiskMetric label="P&L conservateur" value={formatSignedUsd(conservativePnl)} tone={pnlTone(conservativePnl)} />
+        <RiskMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
         <RiskMetric label="Taille économique" value={formatPairSize(economics?.pairSize)} />
         <RiskMetric label="Coût économique" value={formatV2Usd(economics?.totalCostUsd)} />
       </div>
@@ -279,9 +243,7 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
             {audit ? (
               <>
                 <Chip tone={auditDecisionTone(audit.decision)}>
-                  {audit.source === "reconstructed"
-                    ? "approx. reconstruit · "
-                    : "block_only · "}
+                  {audit.source === "reconstructed" ? "approx. reconstruit · " : "block_only · "}
                   {formatMismatchAuditDecision(audit.decision)}
                 </Chip>
                 <Chip tone={economicsBasisTone(audit.economicsBasis)}>
@@ -295,9 +257,7 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
               <Chip tone="mist">audit absent</Chip>
             )}
             {settlement ? (
-              <Chip tone={settlementTone(settlement)}>
-                {formatMismatchSettlementClassification(settlement)}
-              </Chip>
+              <Chip tone={settlementTone(settlement)}>{formatMismatchSettlementClassification(settlement)}</Chip>
             ) : null}
           </div>
           {audit ? (
@@ -311,16 +271,8 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
         <RiskMetric label="P fatal" value={formatRiskProbability(pFatal)} />
         <RiskMetric label="P fatal 95%" value={formatRiskProbability(pFatalUpper95)} />
         <RiskMetric label="P limite" value={formatRiskProbability(audit?.maximumAllowedFatalProbability)} />
-        <RiskMetric
-          label="P&L conservateur"
-          value={formatSignedUsd(conservativePnl)}
-          tone={pnlTone(conservativePnl)}
-        />
-        <RiskMetric
-          label="Exposition fatale"
-          value={formatV2Usd(intent.fatalLossExposureUsd)}
-          tone="rose"
-        />
+        <RiskMetric label="P&L conservateur" value={formatSignedUsd(conservativePnl)} tone={pnlTone(conservativePnl)} />
+        <RiskMetric label="Exposition fatale" value={formatV2Usd(intent.fatalLossExposureUsd)} tone="rose" />
         <RiskMetric label="Taille économique" value={formatPairSize(audit?.pairSize)} />
         <RiskMetric label="Coût économique" value={formatV2Usd(audit?.totalCostUsd)} />
         <RiskMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
@@ -360,16 +312,12 @@ function OpportunityAuditRow({
           <div className="font-mono text-xs text-[var(--wa-ivory)]">{label}</div>
           <div className="mt-2 flex flex-wrap gap-2">
             {audit ? (
-              <Chip tone={auditDecisionTone(audit.decision)}>
-                {formatMismatchAuditDecision(audit.decision)}
-              </Chip>
+              <Chip tone={auditDecisionTone(audit.decision)}>{formatMismatchAuditDecision(audit.decision)}</Chip>
             ) : (
               <Chip tone="mist">audit absent</Chip>
             )}
             {economics ? (
-              <Chip tone={economicsBasisTone(economics.basis)}>
-                {formatMismatchEconomicsBasis(economics.basis)}
-              </Chip>
+              <Chip tone={economicsBasisTone(economics.basis)}>{formatMismatchEconomicsBasis(economics.basis)}</Chip>
             ) : null}
             {audit ? (
               <Chip tone={audit.enforceReady ? "emerald" : "amber"}>
@@ -379,11 +327,19 @@ function OpportunityAuditRow({
           </div>
         </div>
         <div className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-2 sm:grid-cols-3 xl:grid-cols-6">
-          <AuditInlineMetric label="P fatal 95%" value={formatRiskProbability(pFatalUpper95)} tone={probabilityTone(pFatalUpper95, limit, modelState)} />
+          <AuditInlineMetric
+            label="P fatal 95%"
+            value={formatRiskProbability(pFatalUpper95)}
+            tone={probabilityTone(pFatalUpper95, limit, modelState)}
+          />
           <AuditInlineMetric label="Limite" value={formatRiskProbability(limit)} />
           <AuditInlineMetric label="Taille" value={formatPairSize(economics?.pairSize)} />
           <AuditInlineMetric label="Coût" value={formatV2Usd(economics?.totalCostUsd)} />
-          <AuditInlineMetric label="P&L conservateur" value={formatSignedUsd(conservativePnl)} tone={pnlTone(conservativePnl)} />
+          <AuditInlineMetric
+            label="P&L conservateur"
+            value={formatSignedUsd(conservativePnl)}
+            tone={pnlTone(conservativePnl)}
+          />
           <AuditInlineMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
         </div>
       </div>
@@ -400,13 +356,7 @@ function OpportunityAuditRow({
   );
 }
 
-function MismatchAuditReasons({
-  audit,
-  compact = false,
-}: {
-  audit: MismatchRiskAudit;
-  compact?: boolean;
-}) {
+function MismatchAuditReasons({ audit, compact = false }: { audit: MismatchRiskAudit; compact?: boolean }) {
   const rows: Array<{ label: string; values: string[]; tone: V2Tone }> = [];
   if (audit.blockingReasons.length > 0) {
     rows.push({ label: "Blocage", values: audit.blockingReasons, tone: "rose" });
@@ -425,7 +375,9 @@ function MismatchAuditReasons({
   }
 
   return (
-    <div className={`border-t border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] ${compact ? "px-5 py-2" : "px-3 py-2"}`}>
+    <div
+      className={`border-t border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] ${compact ? "px-5 py-2" : "px-3 py-2"}`}
+    >
       {rows.length === 0 ? (
         <div className="text-[10px] text-[var(--wa-dim)]">Aucune raison de blocage enregistrée.</div>
       ) : (
@@ -439,15 +391,7 @@ function MismatchAuditReasons({
   );
 }
 
-function AuditInlineMetric({
-  label,
-  value,
-  tone = "mist",
-}: {
-  label: string;
-  value: string;
-  tone?: V2Tone;
-}) {
+function AuditInlineMetric({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {
   return (
     <div className="min-w-0">
       <div className="text-[8px] uppercase tracking-[0.14em] text-[var(--wa-dim)]">{label}</div>
@@ -512,15 +456,7 @@ function RiskEstimateFooter({ estimate }: { estimate: MismatchRiskEstimate | nul
   );
 }
 
-function RiskMetric({
-  label,
-  value,
-  tone = "mist",
-}: {
-  label: string;
-  value: string;
-  tone?: V2Tone;
-}) {
+function RiskMetric({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {
   return (
     <div className="min-w-0 bg-[var(--wa-bg1)] px-3 py-3">
       <div className="mb-1 text-[8px] uppercase tracking-[0.14em] text-[var(--wa-dim)]">{label}</div>
@@ -555,11 +491,7 @@ function economicsBasisTone(basis: MismatchEconomicsBasis): V2Tone {
 }
 
 function settlementTone(classification: MismatchSettlementClassification): V2Tone {
-  return classification === "fatal_mismatch"
-    ? "rose"
-    : classification === "double_payout"
-      ? "gold"
-      : "emerald";
+  return classification === "fatal_mismatch" ? "rose" : classification === "double_payout" ? "gold" : "emerald";
 }
 
 function combinedOutcomeTone(

@@ -6,11 +6,7 @@ import {
   fetchPolymarketTrades,
   resolvePolymarketOrderTruth,
 } from "@/lib/polymarket";
-import {
-  findOrderIntent,
-  readFillsForIntentVenue,
-  readRecentVenueOrders,
-} from "@/lib/storage";
+import { findOrderIntent, readFillsForIntentVenue, readRecentVenueOrders } from "@/lib/storage";
 
 const DEFAULT_ENV_PATH = process.env.WARBITRER_ENV_PATH || "/etc/warbitrer/warbitrer.env";
 
@@ -33,13 +29,13 @@ async function main() {
     readFillsForIntentVenue(intent.id, "polymarket"),
     readFillsForIntentVenue(intent.id, "kalshi"),
     fetchPolymarketTrades().catch(() => []),
-    createPolymarketAdapter().getPositions().catch(() => []),
+    createPolymarketAdapter()
+      .getPositions()
+      .catch(() => []),
   ]);
 
   const polymarketTokenIds = new Set(
-    intent.legs
-      .filter((leg) => leg.venue === "polymarket" && leg.tokenId)
-      .map((leg) => leg.tokenId),
+    intent.legs.filter((leg) => leg.venue === "polymarket" && leg.tokenId).map((leg) => leg.tokenId),
   );
   const relevantPositions = positions.filter(
     (position) =>
@@ -79,14 +75,15 @@ async function main() {
 
   const primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue) ?? null;
   const hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue) ?? null;
-  const netExposure = primaryLeg && hedgeLeg
-    ? {
-        primaryFilledSize: primaryLeg.filledSize,
-        hedgeFilledSize: hedgeLeg.filledSize,
-        unhedgedPrimarySize: round6(Math.max(0, primaryLeg.filledSize - hedgeLeg.filledSize)),
-        overfilledHedgeSize: round6(Math.max(0, hedgeLeg.filledSize - primaryLeg.filledSize)),
-      }
-    : null;
+  const netExposure =
+    primaryLeg && hedgeLeg
+      ? {
+          primaryFilledSize: primaryLeg.filledSize,
+          hedgeFilledSize: hedgeLeg.filledSize,
+          unhedgedPrimarySize: round6(Math.max(0, primaryLeg.filledSize - hedgeLeg.filledSize)),
+          overfilledHedgeSize: round6(Math.max(0, hedgeLeg.filledSize - primaryLeg.filledSize)),
+        }
+      : null;
 
   console.log(
     JSON.stringify(
@@ -189,10 +186,7 @@ function loadEnvFile(path: string) {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     env[key] = value;

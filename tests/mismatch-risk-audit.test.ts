@@ -1,15 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  buildMismatchRiskAudit,
-  reconstructMismatchRiskAudit,
-} from "@/lib/mismatch-risk-audit";
+import { buildMismatchRiskAudit, reconstructMismatchRiskAudit } from "@/lib/mismatch-risk-audit";
 import type { MismatchRiskPolicyCheck } from "@/lib/mismatch-risk-policy";
-import type {
-  LiveOpportunity,
-  MismatchRiskEstimate,
-  OrderIntent,
-} from "@/lib/types";
+import type { LiveOpportunity, MismatchRiskEstimate, OrderIntent } from "@/lib/types";
 
 describe("mismatch risk counterfactual audit", () => {
   it("records the exact block_only verdict without changing the opportunity", () => {
@@ -80,10 +73,7 @@ describe("mismatch risk counterfactual audit", () => {
       blockingReasonCodes: [],
       diagnosticReasonCodes: [],
       enforceReady: false,
-      enforceReasons: expect.arrayContaining([
-        "model_uncalibrated",
-        "reference_economics_only",
-      ]),
+      enforceReasons: expect.arrayContaining(["model_uncalibrated", "reference_economics_only"]),
     });
   });
 
@@ -100,12 +90,8 @@ describe("mismatch risk counterfactual audit", () => {
         allowed: false,
         economics: null,
         economicGate: null,
-        diagnosticReasons: [
-          { code: "estimate_invalid", message: "Taille appariée invalide" },
-        ],
-        blockingReasons: [
-          { code: "estimate_invalid", message: "Taille appariée invalide" },
-        ],
+        diagnosticReasons: [{ code: "estimate_invalid", message: "Taille appariée invalide" }],
+        blockingReasons: [{ code: "estimate_invalid", message: "Taille appariée invalide" }],
       }),
       evaluatedAt: 123_000,
       source: "scan",
@@ -139,10 +125,7 @@ describe("mismatch risk counterfactual audit", () => {
 
     expect(audit).toMatchObject({
       enforceReady: false,
-      enforceReasons: [
-        "invalid_capital",
-        "cluster_absolute_budget_exceeded",
-      ],
+      enforceReasons: ["invalid_capital", "cluster_absolute_budget_exceeded"],
     });
   });
 
@@ -182,9 +165,7 @@ function opportunity(overrides: Partial<LiveOpportunity> = {}): LiveOpportunity 
   } as LiveOpportunity;
 }
 
-function estimate(
-  overrides: Partial<MismatchRiskEstimate> = {},
-): MismatchRiskEstimate {
+function estimate(overrides: Partial<MismatchRiskEstimate> = {}): MismatchRiskEstimate {
   return {
     available: true,
     executionUsable: true,
@@ -210,9 +191,7 @@ function estimate(
   };
 }
 
-function policy(
-  overrides: Partial<MismatchRiskPolicyCheck> = {},
-): MismatchRiskPolicyCheck {
+function policy(overrides: Partial<MismatchRiskPolicyCheck> = {}): MismatchRiskPolicyCheck {
   return {
     mode: "block_only",
     allowed: true,

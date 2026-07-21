@@ -46,6 +46,7 @@ jobs:
       - run: npm run db:status
       - run: npm run audit:prod
       - run: npm run lint
+      - run: npm run format:check
       - run: npm run typecheck
       - run: npm run test:coverage
       - run: npm run build

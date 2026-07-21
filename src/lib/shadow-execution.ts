@@ -5,7 +5,9 @@ import {
   type ExecutableBookLevel,
   type MultiLevelLegQuote,
 } from "@/lib/fees";
-import { deriveKalshiBuyPriceLevels, normalizeKalshiOrderPrice } from "@/lib/kalshi";
+import { SHADOW_REENTRY_COOLDOWN_MS } from "@/lib/entry-admission-policy";
+import { deriveKalshiBuyPriceLevels } from "@/lib/kalshi";
+import { normalizeKalshiOutcomePrice } from "@/lib/kalshi-price-grid";
 import type {
   OpportunitySnapshot,
   OrderIntent,
@@ -16,7 +18,7 @@ import type {
 
 export const SHADOW_EXECUTION_MODEL_VERSION = "rest-orderbook-v2";
 export const SHADOW_MIN_COMPLETION_DELAY_MS = 15_000;
-export const SHADOW_REENTRY_COOLDOWN_MS = 60_000;
+export { SHADOW_REENTRY_COOLDOWN_MS } from "@/lib/entry-admission-policy";
 
 type ShadowSettings = Pick<
   StrategyConfig,
@@ -147,8 +149,7 @@ export function getShadowReentryCooldownRemainingMs(
     return 0;
   }
   const completedAt = lastIntent.shadowExecution?.evaluatedAt ?? lastIntent.updatedAt;
-  const nextEligibleAt = lastIntent.shadowExecution?.nextEligibleAt ??
-    completedAt + SHADOW_REENTRY_COOLDOWN_MS;
+  const nextEligibleAt = lastIntent.shadowExecution?.nextEligibleAt ?? completedAt + SHADOW_REENTRY_COOLDOWN_MS;
   return Math.max(0, nextEligibleAt - now);
 }
 
@@ -188,11 +189,7 @@ export function deriveShadowPairExecution(input: {
   }
 
   if (capacities.some((capacity) => !capacity.levelsAvailable)) {
-    return noFill(
-      capacities,
-      "orderbook_unavailable",
-      "Carnet complet indisponible au moment de l'exécution shadow",
-    );
+    return noFill(capacities, "orderbook_unavailable", "Carnet complet indisponible au moment de l'exécution shadow");
   }
 
   if (capacities.some((capacity) => capacity.limitPrice === null)) {
@@ -203,9 +200,7 @@ export function deriveShadowPairExecution(input: {
     Math.min(requestedPairSize, capacities[0].executableSize, capacities[1].executableSize),
   );
   if (commonExecutableSize < minimumPairSize) {
-    const movedBeyondLimit = capacities.some(
-      (capacity) => capacity.levelsAvailable && capacity.executableSize === 0,
-    );
+    const movedBeyondLimit = capacities.some((capacity) => capacity.levelsAvailable && capacity.executableSize === 0);
     return noFill(
       capacities,
       movedBeyondLimit ? "price_moved_beyond_limit" : "insufficient_common_depth",
@@ -225,10 +220,7 @@ export function deriveShadowPairExecution(input: {
       continue;
     }
 
-    const executablePair: [MultiLevelLegQuote, MultiLevelLegQuote] = [
-      polymarketQuote,
-      kalshiQuote,
-    ];
+    const executablePair: [MultiLevelLegQuote, MultiLevelLegQuote] = [polymarketQuote, kalshiQuote];
     const economicIssue = getEconomicIssue(executablePair, input.settings);
     if (economicIssue) {
       lastEconomicReason = economicIssue;
@@ -262,7 +254,7 @@ function deriveLegCapacity(
   requestedPairSize: number,
 ): ShadowLegCapacity {
   const levels = getBuyLevels(snapshot, leg);
-  const limitPrice = deriveLimitPrice(leg, settings);
+  const limitPrice = deriveLimitPrice(leg, snapshot, settings);
   const minimumSize = Math.ceil(
     getVenueMinimumOrderSize(
       leg.venue,
@@ -329,9 +321,10 @@ function quoteLegAtSize(
 
 function getBuyLevels(snapshot: OpportunitySnapshot, leg: OrderIntentLeg): ExecutableBookLevel[] {
   if (leg.venue === "polymarket") {
-    const raw = leg.outcome === "UP"
-      ? snapshot.polymarket.orderbookLevels?.upAsks
-      : snapshot.polymarket.orderbookLevels?.downAsks;
+    const raw =
+      leg.outcome === "UP"
+        ? snapshot.polymarket.orderbookLevels?.upAsks
+        : snapshot.polymarket.orderbookLevels?.downAsks;
     return normalizeLevels(raw ?? []);
   }
 
@@ -342,30 +335,43 @@ function getBuyLevels(snapshot: OpportunitySnapshot, leg: OrderIntentLeg): Execu
 function normalizeLevels(levels: Array<[number, number]>) {
   return levels
     .map(([price, size]) => ({ price, size }))
-    .filter((level) =>
-      Number.isFinite(level.price) &&
-      Number.isFinite(level.size) &&
-      level.price > 0 &&
-      level.price < 1 &&
-      level.size > 0,
+    .filter(
+      (level) =>
+        Number.isFinite(level.price) &&
+        Number.isFinite(level.size) &&
+        level.price > 0 &&
+        level.price < 1 &&
+        level.size > 0,
     );
 }
 
-function deriveLimitPrice(leg: OrderIntentLeg, settings: ShadowSettings) {
+function deriveLimitPrice(leg: OrderIntentLeg, snapshot: OpportunitySnapshot, settings: ShadowSettings) {
   if (leg.requestedPrice === null || leg.requestedPrice <= 0) {
     return null;
   }
-  const rawLimit = Math.min(
-    settings.maxLegPrice,
-    applySlippage(leg.requestedPrice, settings.maxSlippageBps),
-  );
-  return leg.venue === "kalshi" ? normalizeKalshiOrderPrice(rawLimit, "BUY") : round4(rawLimit);
+  const rawLimit = Math.min(settings.maxLegPrice, applySlippage(leg.requestedPrice, settings.maxSlippageBps));
+  if (leg.venue !== "kalshi") {
+    return round4(rawLimit);
+  }
+  if ((leg.outcome !== "YES" && leg.outcome !== "NO") || snapshot.kalshi.priceRanges === null) {
+    return null;
+  }
+  try {
+    return normalizeKalshiOutcomePrice({
+      price: rawLimit,
+      outcome: leg.outcome,
+      side: "BUY",
+      priceRanges: snapshot.kalshi.priceRanges,
+    }).price;
+  } catch {
+    return null;
+  }
 }
 
 function getEconomicIssue(quotes: [MultiLevelLegQuote, MultiLevelLegQuote], settings: ShadowSettings) {
   const pairSize = Math.min(quotes[0].size, quotes[1].size);
-  const grossCost = (quotes[0].vwapPrice ?? Number.POSITIVE_INFINITY) +
-    (quotes[1].vwapPrice ?? Number.POSITIVE_INFINITY);
+  const grossCost =
+    (quotes[0].vwapPrice ?? Number.POSITIVE_INFINITY) + (quotes[1].vwapPrice ?? Number.POSITIVE_INFINITY);
   const totalCostUsd = quotes[0].costUsd + quotes[1].costUsd;
   const projectedNetProfitUsd = pairSize - totalCostUsd;
   const projectedNetReturn = totalCostUsd > 0 ? projectedNetProfitUsd / totalCostUsd : null;
@@ -397,9 +403,7 @@ function getSnapshotMinimumOrderSize(snapshot: OpportunitySnapshot, leg: OrderIn
       ? snapshot.polymarket.outcomes.up.minOrderSize
       : snapshot.polymarket.outcomes.down.minOrderSize;
   }
-  return leg.outcome === "YES"
-    ? snapshot.kalshi.outcomes.yes.minOrderSize
-    : snapshot.kalshi.outcomes.no.minOrderSize;
+  return leg.outcome === "YES" ? snapshot.kalshi.outcomes.yes.minOrderSize : snapshot.kalshi.outcomes.no.minOrderSize;
 }
 
 function getRequestedPairSize(legs: OrderIntent["legs"]) {

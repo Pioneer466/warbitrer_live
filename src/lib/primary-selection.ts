@@ -47,11 +47,7 @@ export function choosePrimaryVenueForOpportunity(
   const kalshiScore = scorePrimaryCandidate(kalshiLeg, polymarketLeg);
   const recommendedPrimaryVenue = recommendPrimaryVenue(polymarketScore, kalshiScore);
   const livePrimaryVenue =
-    mode === "dynamic"
-      ? recommendedPrimaryVenue
-      : mode === "kalshi_only" || mode === "shadow"
-        ? "kalshi"
-        : "kalshi";
+    mode === "dynamic" ? recommendedPrimaryVenue : mode === "kalshi_only" || mode === "shadow" ? "kalshi" : "kalshi";
 
   return {
     primaryVenue: livePrimaryVenue,
@@ -83,9 +79,7 @@ function describePrimarySelectionRecommendation(
   recommended: Venue,
 ) {
   if (recommended === "kalshi") {
-    return kalshiScore.score <= polymarketScore.score
-      ? "kalshi_scarcer_leg"
-      : "kalshi_tie_preference";
+    return kalshiScore.score <= polymarketScore.score ? "kalshi_scarcer_leg" : "kalshi_tie_preference";
   }
   return "polymarket_scarcer_leg";
 }

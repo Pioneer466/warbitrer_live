@@ -1,175 +1,116 @@
 # Warbitrer - Codex Session Handoff
 
-## Date
+## Current State
 
-2026-07-14 (Europe/Paris)
+- Date: 2026-07-21, Europe/Paris
+- Branch: `review/global-hardening-2026-07-19`
+- Base before the current dirty review set: `e5b637f`
+- Target runtime: Node 22, Next.js 15.5.20, PostgreSQL 18
+- Production topology: web, five asset workers, reconciler, notifier, Postgres, and Caddy
+- Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE
+- BNB and HYPE remain catalog/configuration assets without production worker units
+- Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
+- Deployment status: not deployed by this review
+- Live authorization: keep `LIVE_EXECUTION_ALLOWED=false` until a separate production rollout and approval
 
-## Current objective
+The worktree intentionally contains the complete global hardening review. Do not discard or partially deploy it. Commit and push the coherent set only after the final diff review.
 
-Deploy and verify the implemented Kalshi WebSocket recovery fix on the VPS. Kalshi should use an authenticated WS orderbook as the primary quote source, with REST limited to discovery, bootstrap, resync, and cautious fallback.
+## Core Invariants
 
-Keep live trading disabled until this is verified.
+### Entry and submission
 
-## Repository state
+- A new live entry requires enabled live strategy state, the environment gate, exact fresh aligned venue evidence, compatible configuration revisions, no relevant incident, and no accounting blocker.
+- Live admission is globally serialized in PostgreSQL; shadow admission is serialized per asset.
+- Admission commits the intent, immutable evidence, reservation, and planned primary attempt together.
+- A request can cross the network only after its one-shot claim and final database-clock dispatch compare-and-swap.
+- Unknown submission truth remains unresolved and must never trigger a blind retry.
 
-- Branch: `main`
-- HEAD: `53887fd` (`Document repository context and modernize TS paths`)
-- Working tree: Kalshi WS fix implemented but not committed or deployed
-- Remote tracking: `origin/main`
-- Runtime: Node 22, Next.js 15, React 19, TypeScript 5.8, Postgres
-- Active workers: BTC, ETH, SOL, XRP, DOGE
-- BNB/HYPE exist in catalog/UI/config but are not active workers
-- Production topology: Next.js web, per-asset workers, reconciler, notifier, Postgres, Caddy
+### Venue and recovery truth
 
-This publication adds the repository-specific context files (`AGENTS.md`, `README-CODEX-CONTEXT.md`, and `docs/codex/`). The previous raw discussion was removed after its non-sensitive operational state was consolidated here.
+- Kalshi order mutations use fixed-point V2 fields and authoritative price grids.
+- Polymarket final fill evidence requires a trusted Polygon V2 `OrderFilled` receipt matching order, token, side, size, price, and fee.
+- Recovery validates the original intent/leg/market identity, fresh books, explicit fee provenance, and fee-inclusive loss bounds.
+- Disabling new entries must not disable hedge, unwind, settlement, or recovery for existing exposure.
 
-## Last operational history
+### Breakers and accounting
 
-1. A new VPS was restored from a historical backup containing Postgres and service configuration.
-2. Repository ownership and memory pressure caused failed `npm ci` runs; a 2 GB swap was recommended.
-3. Portfolio UI/API support was added for displaying and closing manual-intervention intents.
-4. Kalshi REST discovery was narrowed to the current/next slot and production REST/WS hosts were updated.
-5. Kalshi still reportedly remained on REST bootstrap/fallback after deployment.
-6. The final pasted VPS diagnostic was referenced by the old transcript but its content is not present in this repository.
+- Independent breaker causes coexist as append-only owned incidents.
+- Only the owner and required durable recovery proof can resolve an automatic incident; operator-owned incidents require exact acknowledgement.
+- Every intent has an accounting head. Facts and versions are immutable and request replay is explicit.
+- Stable P&L comes only from a complete deterministic versioned proof.
+- A late or conflicting fill quarantines the head before re-accounting.
+- A `no_exposure` head requires its closure fact and a zero-exposure parent projection.
+- Every fill inserted after V8, including one attached to a legacy parent, must use atomic accounting ingestion.
 
-## 2026-07-14 Kalshi assessment
+## Database History
 
-- Kalshi's official endpoint, RSA-PSS signing path, subscription form, fixed-point payload fields, and ping/pong protocol match the integration.
-- Historical code marked every WS message, including ACK/error, as realtime. That could report `ws` without receiving quote data.
-- Commit `cd2d44e` changed unhealthy Kalshi REST resync from roughly 1 second to 4 seconds. This matches the observed approximately 3 second fallback latency but did not itself prove a WS protocol break.
-- The current persistent failure mechanism was definite: protocol errors or an ACK-only socket could remain open forever, preventing `ensureWs()` from creating a new session.
-- The recent source-selection correction exposed that state as `rest-bootstrap` instead of masking it as `ws`.
+The exact checksummed sequence is:
 
-## Implemented fix
+1. V1 `legacy_schema_baseline`
+2. V2 `order_truth_revision`
+3. V3 `configuration_revision_audit`
+4. V4 `entry_admission`
+5. V5 `circuit_breaker_incidents`
+6. V6 `order_attempt_submission_deadline`
+7. V7 `accounting_ledger`
+8. V8 `accounting_evidence_hardening`
 
-- Require a valid `orderbook_snapshot` before aggregate Kalshi source becomes `ws`.
-- Close and reconnect on protocol error, malformed/missing snapshot, transport failure, heartbeat timeout, or orderbook sequence gap.
-- Respect reconnect backoff even while the asset scan loop continues.
-- Read snapshot/delta sequence from the official outer envelope.
-- Keep the book live through ping/pong transport health after the initial snapshot.
-- Alternate between the dedicated and officially supported shared WS hosts when initialization fails.
-- Log sanitized `open`, `subscribe-sent`, `subscribed`, `orderbook-ready`, `session-failed`, `error`, and `close` lifecycle events.
+V1-V7 are frozen. Any later schema change requires V9. V8 is part of the current unshipped review set and its final checksum is documented in iteration 07.
 
-## Remaining repository findings
-
-- `deploy/vps/deploy.sh` is stale: it omits `build:worker` and restarts the legacy service.
-- `.env.local` is loaded by Next.js but not automatically by the standalone worker.
-- Live activation has no independent environment-level gate and application Basic Auth is optional.
-- Codex docs were generic templates and have now been replaced with repository-specific context.
-- Cursor's TypeScript 6 warning was caused by the now-deprecated `baseUrl` option. The line dated from the initial commit, not the current session. It was removed because `paths` already uses the explicit `./src/*` target.
-
-## Files modified in the Kalshi fix
-
-- `src/lib/constants.ts`
-- `src/lib/kalshi.ts`
-- `src/lib/market-data.ts`
-- `tests/kalshi.test.ts`
-- `tests/market-data.test.ts`
-- `docs/codex/runbook.md`
-- `docs/codex/websocket-debugging.md`
-- `docs/codex/session-handoff.md`
-
-No execution/order logic, trading setting, deployment script, or secret was changed.
-
-## Commands and checks
-
-```bash
-git status --short --branch
-node -p "require('typescript/package.json').version"
-tsc --showConfig -p tsconfig.json
-npm run typecheck
-npm test
-npm run build
-npm run build:worker
-```
-
-Results after the Kalshi fix:
-
-- TypeScript 5.8.3 configuration parsed successfully.
-- Typecheck passed.
-- 23 test files passed, 259 tests total.
-- Next.js production build passed.
-- Worker bundle build passed.
-
-No live API or real Postgres integration test was run.
-
-## Blockers
-
-- The new worker bundle has not yet been deployed and observed against authenticated Kalshi production WS.
-- Missing post-deploy sanitized `[kalshi-ws]` lifecycle logs from each asset worker.
-- Live safety gate and deployment script still need correction before live use.
-
-## Safest next steps
-
-1. Keep `enableTrading=false` and preserve a global breaker during diagnosis.
-2. Commit/push, pull on the VPS, run `npm ci`, `npm run build`, and `npm run build:worker`, then restart the split services.
-3. Confirm each asset logs `open -> subscribe-sent -> subscribed -> orderbook-ready` and `/api/health` reports Kalshi source `ws`.
-4. If initialization fails, use the first `protocol error`, `session-failed`, or `close` record as the root-cause evidence; do not increase REST polling.
-5. Keep trading disabled through several slot rollovers and verify no recurring REST fallback or sequence gaps.
-6. Correct the stale VPS deploy script and add a server-side live authorization gate before considering real trading.
-
-## Resume prompt
+## Verification Completed
 
 ```text
-Read AGENTS.md, README.md, README-CODEX-CONTEXT.md, and docs/codex/session-handoff.md. Continue the unresolved Kalshi WebSocket diagnosis. Keep live trading disabled, do not print secrets, and do not modify execution logic until feed evidence identifies the smallest safe change.
+Production audit       0 high, 0 moderate, 17 low
+ESLint                 passed, zero warnings
+Prettier               passed repository-wide
+TypeScript             passed
+Tests with Postgres    62 files, 1007 tests passed
+Coverage               54.03% lines, 74.53% branches, 67.93% functions
+Next.js build          passed
+Worker bundle          passed
+Fresh PG18 migration   V8/V8 ready
+Shell syntax           passed
+git diff --check       passed
 ```
 
-## 2026-07-17 - Shadow execution realism
+Automated tests use fixture venue messages. No live venue request was made.
 
-### Objective and evidence
+## Deployment Boundary
 
-The shadow executor was audited after analyzing `warbitrer-mismatch-20260717T170222Z.tar.gz`. The archive contained 408 exact mismatch-audited intents but only 75 independent asset/slot/combination situations. The old shadow path filled both legs completely at the requested price in 1 ms and allowed repeated hedged entries, materially overstating trade count and executable P&L.
+Use `deploy/vps/README.md` and `docs/codex/deployment.md`. The deploy script performs:
 
-### Implemented behavior
+1. dirty-tree, commit, environment, and topology checks
+2. live-state preflight before shutdown
+3. stopped-service preflight and quiescent Postgres backup
+4. install, audit, lint, format, typecheck, tests, and both builds
+5. explicit V1-V8 migration and read-only schema status
+6. post-migration preflight
+7. split-service restart with repeated stability checks
 
-- New deterministic model `rest-orderbook-v2` in `src/lib/shadow-execution.ts`.
-- A shadow intent is persisted as `executing_primary` with two pending `SHADOW_REST_IOC` orders. Full Polymarket and Kalshi books are fetched immediately and in parallel, rather than being observed only after a delay.
-- A prepared fill completes no earlier than 15 seconds after intent creation to represent order/confirmation time. REST failures and immediately demonstrable `no_fill` decisions terminate without an artificial wait.
-- Quotes apply configured venue depth safety factors and headroom, original price/slippage limits, multi-level VWAP, venue fees, pair/leg capital limits, and profit/return thresholds.
-- The simulator fills only the common executable integer pair size. It records a partial paired fill when sufficient minimum size remains, otherwise `no_fill`.
-- Degraded/unaligned feeds, missing books, price movement beyond the limit, insufficient common depth, and invalid delayed economics are durable `no_fill` reasons.
-- Only in-flight shadow intents block another attempt on the same asset. After every completed attempt, a durable 60-second cooldown replaces the previous one-intent-per-slot ceiling.
-- Pending shadow work is resumed from Postgres after normal loop iterations or worker restart and is excluded from live venue reconciliation.
-- Audit data is stored in `order_intents.shadow_execution_json` and shown in `/trades`, including model version, REST duration, total latency, next eligible time, fill ratio, realized gross cost, and rejection reason.
-- Live order submission, confirmation, rescue, unwind, and global live execution locking were not changed.
+The rollout must fail stopped on any contradiction. Start scan-only, then shadow. A passing repository review does not authorize live trading.
 
-### Modified files
+## SSH Constraint
 
-- `src/lib/shadow-execution.ts`
-- `src/lib/engine.ts`
-- `src/lib/risk.ts`
-- `src/lib/types.ts`
-- `src/lib/postgres-db.ts`
-- `src/components/trades-client.tsx`
-- `tests/shadow-execution.test.ts`
-- `tests/risk.test.ts`
-- `tests/postgres-db.test.ts`
-- `README.md`
-- `docs/codex/session-handoff.md`
+Password-based VPS SSH access must remain available. Do not edit `sshd`, `PasswordAuthentication`, system passwords, `authorized_keys`, or private keys. A GitHub deploy key is separate and optional.
 
-### Verification and remaining limits
+## Intentional Cleanup
 
-- `npm run typecheck`: passed.
-- `npm test`: 32 files and 388 tests passed.
-- `npm run build`: passed (Next.js production build).
-- `npm run build:worker`: passed (Node 22 worker bundle).
-- No live venue call or production database integration test was run.
-- This v2 model is intentionally conservative but still models both legs from one immediate paired REST capture. It does not yet replay sub-second queue position, adverse movement between primary and hedge, or real account-specific fill probability.
-- Keep trading and mismatch risk in shadow until delayed fill/no-fill distributions have been observed across several days. Do not compare new trade counts directly with the old instant-fill dataset.
+- Removed obsolete `LIVE_RISK_REVIEW.md`, `PLAN.md`, `last_thread.md`, and generated `cloc` output after consolidating durable information into `docs/`.
+- Removed the obsolete combined VPS worker service; the split topology is canonical.
+- Removed direct repair scripts that bypassed current accounting and breaker ownership rules.
+- Local backup archives remain ignored and were not modified.
 
-## 2026-07-19 - Terminal Polymarket order status repair
+## Next Actions
 
-- During the VPS migration audit, 226 Polymarket order rows attached to terminal intents were found in `pending` or `partially_filled` state.
-- The rows did not represent open intents, but the reconciler could repeatedly downgrade a stored non-pending order to `pending` whenever the venue trade feed still contained pending trade truth.
-- Pending-only trade observations now preserve any established stored order status, while still retaining pending trade evidence in `raw_json`; authoritative open-order observations keep their existing reconciliation behavior.
-- A regression test covers live, partial, filled, canceled, rejected, expired, and already-pending statuses.
-- Production must remain scan-only with the global manual breaker active while the affected historical rows are repaired and the reconciler is reintroduced.
+1. Review `git diff --stat`, the V8 checksum, and the final iteration document.
+2. Commit the complete review set and push the review branch.
+3. On the VPS, keep the global breaker active and `LIVE_EXECUTION_ALLOWED=false`.
+4. Follow the documented deploy flow without skipping any preflight or backup.
+5. Validate V8 status, service topology, health, Polygon chain 137, venue feeds, incidents, order truth, and accounting backlog.
+6. Observe scan-only and shadow across several slots before a separate live decision.
 
-## 2026-07-19 - Versioned Postgres migration foundation
+## Resume Prompt
 
-- Runtime storage access no longer executes schema DDL. It checks the exact known `schema_migrations` history and fails closed when the table is missing, a migration is pending/unknown/renamed, or a checksum differs.
-- `npm run db:migrate` applies forward-only migrations in one transaction on the same `PoolClient` that owns the advisory lock; `npm run db:status` is read-only and exits non-zero unless the schema is compatible.
-- Migration 1 is an additive snapshot of the former legacy bootstrap. Defaults and asset seeds are frozen, and a unit test binds its recorded SHA-256 checksum to the exact immutable source block.
-- `PG_POOL_MAX` now rejects values below 2. With eight split production processes and the default value 3, budget up to 24 application connections plus capacity for migrations, backups, and operator sessions.
-- VPS service templates run `db:status` before starting. Deployment documentation requires a verified backup, stopped services, `db:migrate`, and successful `db:status` before restart. Production has not been migrated or deployed by this code change.
-- Verification: targeted unit tests passed; Postgres 18 integration tests passed for fresh migration, idempotent rerun/data preservation, legacy upgrade, concurrent runners, transactional rollback, checksum mismatch, and read-only status; full suite passed 41 files/478 tests; typecheck, Next build, and worker build passed. The temporary Docker test container was removed.
+```text
+Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Preserve password-based VPS SSH access. Do not deploy or enable live trading without explicit approval. Continue from the current review branch and verify the complete diff before committing.
+```

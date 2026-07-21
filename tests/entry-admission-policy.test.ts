@@ -135,6 +135,11 @@ function buildAdmissionInput(): InitialEntryAdmissionInput {
         downBids: [[0.59, 20]],
         downAsks: [[0.6, 20]],
       },
+      feeRateBps: 0,
+      feeRate: 0,
+      feeExponent: 0,
+      feeMetadataPresent: true,
+      feesEnabled: false,
     },
     kalshi: {
       ref: buildRef("kalshi"),
@@ -150,6 +155,7 @@ function buildAdmissionInput(): InitialEntryAdmissionInput {
         no: buildOutcome("NO", NOW - 250),
       },
       resolution: null,
+      priceRanges: [{ start: "0.0000", end: "1.0000", step: "0.0100" }],
       orderbookLevels: {
         yesBids: [[0.59, 20]],
         noBids: [[0.39, 20]],
@@ -180,10 +186,32 @@ describe("initial entry admission policy", () => {
     expect(validateInitialEntryAdmission(buildAdmissionInput())).toEqual({
       allowed: true,
       cutoffAt: SLOT_END - 180_000,
-      latestSubmissionStartAt: SLOT_END - 181_000,
+      latestSubmissionStartAt: NOW + 750,
+      marketEvidenceValidUntil: NOW + 750,
       polymarketBookUpdatedAt: NOW - 200,
       kalshiBookUpdatedAt: NOW - 250,
       pairBookSkewMs: 50,
+    });
+  });
+
+  it("closes the immutable submission capability when otherwise-fresh evidence has no remaining lifetime", () => {
+    const input = buildAdmissionInput();
+    input.polymarket.outcomes.up.chart.lastUpdatedAt = NOW - input.maxBookAgeMs.polymarket;
+    input.kalshi.outcomes.no.chart.lastUpdatedAt = NOW - input.maxBookAgeMs.kalshi;
+
+    expectAdmissionFailure(input, "evidence_window_closed");
+  });
+
+  it("keeps the slot submission deadline when it is earlier than every evidence deadline", () => {
+    const input = buildAdmissionInput();
+    input.entryCutoffSeconds = 599;
+    input.submissionBudgetMs = 500;
+
+    expect(validateInitialEntryAdmission(input)).toMatchObject({
+      allowed: true,
+      cutoffAt: NOW + 1_000,
+      latestSubmissionStartAt: NOW + 500,
+      marketEvidenceValidUntil: NOW + 750,
     });
   });
 
@@ -207,6 +235,45 @@ describe("initial entry admission policy", () => {
     ];
 
     expect(validateInitialEntryAdmission(input).allowed).toBe(true);
+  });
+
+  it("requires authoritative Kalshi price ranges that contain the selected executable price", () => {
+    const missing = buildAdmissionInput();
+    missing.kalshi.priceRanges = null;
+    expectAdmissionFailure(missing, "invalid_market_tick");
+
+    const incomplete = buildAdmissionInput();
+    incomplete.kalshi.priceRanges = [{ start: "0.0000", end: "0.5000", step: "0.0100" }];
+    expectAdmissionFailure(incomplete, "invalid_market_tick");
+
+    const offGrid = buildAdmissionInput();
+    offGrid.kalshi.priceRanges = [{ start: "0.0000", end: "1.0000", step: "0.0200" }];
+    offGrid.kalshi.outcomes.no.buyPrice = 0.41;
+    offGrid.kalshi.outcomes.no.execution.buyPrice = 0.41;
+    expectAdmissionFailure(offGrid, "invalid_market_tick");
+  });
+
+  it("requires an explicit coherent Polymarket fee schedule", () => {
+    const missing = buildAdmissionInput();
+    missing.polymarket.feeMetadataPresent = false;
+    expectAdmissionFailure(missing, "fee_schedule_unavailable");
+
+    const unknown = buildAdmissionInput();
+    unknown.polymarket.feesEnabled = null;
+    expectAdmissionFailure(unknown, "fee_schedule_unavailable");
+
+    const contradictoryZero = buildAdmissionInput();
+    contradictoryZero.polymarket.feeRateBps = 10;
+    expectAdmissionFailure(contradictoryZero, "fee_schedule_unavailable");
+
+    const enabled = buildAdmissionInput();
+    enabled.polymarket.feesEnabled = true;
+    enabled.polymarket.feeRate = 0.02;
+    enabled.polymarket.feeExponent = 1;
+    enabled.polymarket.feeRateBps = 120;
+    enabled.polymarket.outcomes.up.feeRateBps = 120;
+    enabled.polymarket.outcomes.up.execution.feeRateBps = 120;
+    expect(validateInitialEntryAdmission(enabled).allowed).toBe(true);
   });
 
   it.each<[string, (input: InitialEntryAdmissionInput) => void, InitialEntryAdmissionFailureCode]>([

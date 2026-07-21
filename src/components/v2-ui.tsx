@@ -32,12 +32,25 @@ export function V2Shell({ activePath, children }: ShellProps) {
           aria-label="Portfolio"
           className="mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[var(--wa-gold-border-strong)] bg-[var(--wa-bg0)] shadow-[0_0_22px_rgba(201,168,100,0.18)]"
         >
-          <Image src="/logo.png" alt="Wolff Arbitrer" width={50} height={50} className="h-[50px] w-[50px] rounded-full object-cover" priority />
+          <Image
+            src="/logo.png"
+            alt="Wolff Arbitrer"
+            width={50}
+            height={50}
+            className="h-[50px] w-[50px] rounded-full object-cover"
+            priority
+          />
         </Link>
         <div className="mb-3 h-px w-8 bg-[var(--wa-gold-border)]" />
         <SideTab href="/" label="PORT" active={activePath === "/"} icon="◈" />
         {ACTIVE_MARKET_ASSETS.map((asset) => (
-          <SideTab key={asset} href={`/${asset}`} label={asset.toUpperCase()} active={activePath === `/${asset}`} icon={asset[0]!.toUpperCase()} />
+          <SideTab
+            key={asset}
+            href={`/${asset}`}
+            label={asset.toUpperCase()}
+            active={activePath === `/${asset}`}
+            icon={asset[0]!.toUpperCase()}
+          />
         ))}
         <div className="my-3 h-px w-8 bg-[var(--wa-gold-border)]" />
         <SideTab href="/trades" label="TRD" active={activePath === "/trades"} icon="↕" />
@@ -53,17 +66,7 @@ export function V2Shell({ activePath, children }: ShellProps) {
   );
 }
 
-function SideTab({
-  href,
-  label,
-  active,
-  icon,
-}: {
-  href: string;
-  label: string;
-  active: boolean;
-  icon: string;
-}) {
+function SideTab({ href, label, active, icon }: { href: string; label: string; active: boolean; icon: string }) {
   return (
     <Link
       href={href}
@@ -74,7 +77,9 @@ function SideTab({
           : "border-transparent text-[var(--wa-mist)] hover:border-[var(--wa-gold-border)] hover:bg-[rgba(201,168,100,0.05)] hover:text-[var(--wa-ivory)]"
       }`}
     >
-      {active ? <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-[var(--wa-gold)]" /> : null}
+      {active ? (
+        <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-[var(--wa-gold)]" />
+      ) : null}
       <span className="text-base leading-none">{icon}</span>
       <span className="font-mono text-[9px] uppercase tracking-[0.14em]">{label}</span>
     </Link>
@@ -134,7 +139,10 @@ function TickerBar() {
       <div className="pointer-events-none absolute left-0 right-0 top-0 h-px bg-gradient-to-r from-transparent via-[var(--wa-gold)] to-transparent opacity-45" />
       <div className="wa-ticker flex h-[30px] items-center whitespace-nowrap">
         {[...items, ...items, ...items].map(([label, value, tone], index) => (
-          <div key={`${label}-${index}`} className="flex h-[30px] items-center gap-2 border-r border-[var(--wa-gold-border)] px-4">
+          <div
+            key={`${label}-${index}`}
+            className="flex h-[30px] items-center gap-2 border-r border-[var(--wa-gold-border)] px-4"
+          >
             <span className="text-[8px] uppercase tracking-[0.18em] text-[var(--wa-dim)]">{label}</span>
             <span className={`font-mono text-[9px] uppercase tracking-[0.06em] ${V2_TONE_TEXT[tone]}`}>{value}</span>
           </div>
@@ -145,7 +153,9 @@ function TickerBar() {
           {now ? now.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "--"}
         </span>
         <span className="font-mono text-[10px] tracking-[0.04em] text-[var(--wa-ivory)]">
-          {now ? now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--:--:--"}
+          {now
+            ? now.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+            : "--:--:--"}
         </span>
         <span className="h-1.5 w-1.5 rounded-full bg-[var(--wa-emerald)] shadow-[0_0_10px_rgba(30,216,126,0.8)]" />
         <span className="text-[9px] uppercase tracking-[0.20em] text-[var(--wa-emerald)]">Live</span>
@@ -175,13 +185,7 @@ export function PageSection({
   );
 }
 
-export function SectionLabel({
-  children,
-  right,
-}: {
-  children: React.ReactNode;
-  right?: React.ReactNode;
-}) {
+export function SectionLabel({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div className="mb-4 flex items-center justify-between gap-3">
       <div className="flex items-center gap-2">
@@ -231,7 +235,9 @@ export function BigMetric({
   return (
     <div className="px-5 py-5 sm:px-6">
       <div className="mb-2 text-[10px] uppercase tracking-[0.26em] text-[rgba(201,168,100,0.50)]">{label}</div>
-      <div className={`font-mono ${huge ? "text-[clamp(2.5rem,7vw,3.25rem)]" : "text-[clamp(1.75rem,4vw,2.125rem)]"} leading-none ${V2_TONE_TEXT[tone]}`}>
+      <div
+        className={`font-mono ${huge ? "text-[clamp(2.5rem,7vw,3.25rem)]" : "text-[clamp(1.75rem,4vw,2.125rem)]"} leading-none ${V2_TONE_TEXT[tone]}`}
+      >
         {value}
       </div>
       {sub ? <div className="mt-2 max-w-[280px] text-[11px] leading-5 text-[var(--wa-mist)]">{sub}</div> : null}
@@ -274,7 +280,9 @@ export function Chip({ children, tone = "mist" }: { children: React.ReactNode; t
               : "border-[rgba(122,130,153,0.18)] bg-[rgba(122,130,153,0.08)] text-[var(--wa-mist)]";
 
   return (
-    <span className={`inline-flex items-center rounded border px-2.5 py-1 text-[9px] uppercase tracking-[0.18em] ${className}`}>
+    <span
+      className={`inline-flex items-center rounded border px-2.5 py-1 text-[9px] uppercase tracking-[0.18em] ${className}`}
+    >
       {children}
     </span>
   );
@@ -288,15 +296,7 @@ export function V2EmptyState({ message }: { message: string }) {
   );
 }
 
-export function V2Expand({
-  expanded,
-  n,
-  onClick,
-}: {
-  expanded: boolean;
-  n: number;
-  onClick: () => void;
-}) {
+export function V2Expand({ expanded, n, onClick }: { expanded: boolean; n: number; onClick: () => void }) {
   return (
     <button
       type="button"
@@ -316,9 +316,15 @@ export function MiniLineChart({
   height?: number;
 }) {
   const width = 1000;
-  const allValues = series.flatMap((item) => item.values).filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  const allValues = series
+    .flatMap((item) => item.values)
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
   if (allValues.length === 0) {
-    return <div className="flex items-center justify-center text-sm text-[var(--wa-dim)]" style={{ height }}>--</div>;
+    return (
+      <div className="flex items-center justify-center text-sm text-[var(--wa-dim)]" style={{ height }}>
+        --
+      </div>
+    );
   }
 
   const min = Math.min(...allValues);
@@ -350,15 +356,38 @@ export function MiniLineChart({
         const value = max - (index / 4) * range;
         return (
           <g key={index}>
-            <line x1={pad.left} y1={y} x2={width - pad.right} y2={y} stroke="rgba(201,168,100,0.07)" strokeWidth="1" strokeDasharray="3,4" />
-            <text x={pad.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="rgba(201,168,100,0.42)" fontFamily="IBM Plex Mono">
+            <line
+              x1={pad.left}
+              y1={y}
+              x2={width - pad.right}
+              y2={y}
+              stroke="rgba(201,168,100,0.07)"
+              strokeWidth="1"
+              strokeDasharray="3,4"
+            />
+            <text
+              x={pad.left - 8}
+              y={y + 4}
+              textAnchor="end"
+              fontSize="10"
+              fill="rgba(201,168,100,0.42)"
+              fontFamily="IBM Plex Mono"
+            >
               {value.toFixed(2)}
             </text>
           </g>
         );
       })}
       {series.map((item) => (
-        <path key={item.key} d={path(item.values)} fill="none" stroke={item.color} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+        <path
+          key={item.key}
+          d={path(item.values)}
+          fill="none"
+          stroke={item.color}
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
       ))}
     </svg>
   );

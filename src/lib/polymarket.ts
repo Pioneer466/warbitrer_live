@@ -14,6 +14,7 @@ import { DEFAULT_POLY_CHAIN_ID, POLY_CLOB_BASE, POLY_DATA_BASE, POLY_GAMMA_BASE 
 import { hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { fetchJson } from "@/lib/fetch-json";
 import { getMarketCatalogEntry, inferPolymarketAsset } from "@/lib/market-catalog";
+import { normalizePolymarketTradeStatus } from "@/lib/polymarket-trade-status";
 import type {
   ChartPriceSurface,
   ExecutionPriceSurface,
@@ -28,6 +29,17 @@ import type {
   VenueOrderResult,
   VenueOrderStatus,
 } from "@/lib/types";
+
+// Orders are intentionally submitted without a builder configuration or builder code.
+export const POLYMARKET_BUILDER_FEES_ENABLED = false;
+
+export function isPolymarketBuilderCodeActive(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+  const normalized = value.trim();
+  return normalized !== "" && !/^0x0{64}$/i.test(normalized);
+}
 
 type GammaMarket = {
   id: string;
@@ -98,6 +110,18 @@ export type PolymarketClobMarketInfo = {
   } | null;
 };
 
+export function derivePolymarketFeeMetadata(clobMarketInfo: PolymarketClobMarketInfo | null | undefined) {
+  const feeData = clobMarketInfo?.fd;
+  if (!feeData || typeof feeData !== "object") {
+    return { feeMetadataPresent: false, feesEnabled: null } as const;
+  }
+  const feeRate = getNumericCandidate(feeData.r ?? null);
+  return {
+    feeMetadataPresent: true,
+    feesEnabled: feeRate === null || feeRate < 0 ? null : feeRate > 0,
+  } as const;
+}
+
 export type PolymarketOrderTruth = {
   orderId: string;
   orderStatus: VenueOrderStatus | null;
@@ -112,6 +136,7 @@ export type PolymarketOrderTruth = {
   expectedSize: number | null;
   expectedSizeSatisfied: boolean;
   hasPendingExposure: boolean;
+  hasUnknownTradeTruth: boolean;
   terminalZeroFill: boolean;
   status: VenueOrderStatus;
 };
@@ -169,6 +194,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
   ]);
   const upQuoteWithFee = applyPolymarketFeeToOutcomeQuote(upQuote, clobMarketInfo);
   const downQuoteWithFee = applyPolymarketFeeToOutcomeQuote(downQuote, clobMarketInfo);
+  const feeMetadata = derivePolymarketFeeMetadata(clobMarketInfo);
 
   return {
     ref: {
@@ -217,6 +243,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     feeRateBps: Math.max(upQuoteWithFee.feeRateBps ?? 0, downQuoteWithFee.feeRateBps ?? 0),
     feeRate: getNumericCandidate(clobMarketInfo?.fd?.r ?? null),
     feeExponent: getNumericCandidate(clobMarketInfo?.fd?.e ?? null) ?? 0,
+    ...feeMetadata,
     negRisk: Boolean(clobMarketInfo?.nr ?? false),
   };
 }
@@ -270,6 +297,10 @@ export function createUnavailablePolymarketQuote(slot: MarketSlot, availabilityR
     observedSlotOpenPriceUsd: null,
     observedSlotOpenCapturedAt: null,
     feeRateBps: 0,
+    feeRate: null,
+    feeExponent: null,
+    feeMetadataPresent: false,
+    feesEnabled: null,
     negRisk: false,
   };
 }
@@ -737,7 +768,9 @@ export function resolvePolymarketOrderTruth(params: {
       ? effectiveFilledSize
       : (params.expectedSize ?? orderOriginalSize);
   const expectedSizeSatisfied = expectedSize !== null && effectiveFilledSize + 1e-6 >= expectedSize;
+  const hasUnknownTradeTruth = tradeLifecycle.unknownTrades.length > 0;
   const hasPendingExposure =
+    hasUnknownTradeTruth ||
     pendingSummary.filledSize > 0 ||
     (params.order !== null && isPolymarketPendingExposureOrderStatus(params.order.status) && effectiveFilledSize > 0);
   const terminalZeroFill =
@@ -745,7 +778,8 @@ export function resolvePolymarketOrderTruth(params: {
     isPolymarketTerminalOrderStatus(orderStatus) &&
     effectiveFilledSize <= 1e-6 &&
     pendingSummary.filledSize <= 0 &&
-    confirmedSummary.filledSize <= 0;
+    confirmedSummary.filledSize <= 0 &&
+    !hasUnknownTradeTruth;
   const status = derivePolymarketTruthStatus({
     orderStatus,
     effectiveFilledSize,
@@ -768,6 +802,7 @@ export function resolvePolymarketOrderTruth(params: {
     expectedSize,
     expectedSizeSatisfied,
     hasPendingExposure,
+    hasUnknownTradeTruth,
     terminalZeroFill,
     status,
   };
@@ -1473,41 +1508,45 @@ export function mapPolymarketTradeToFill(
     outcome: normalizePolymarketOutcome(match.outcome),
     price: match.price,
     size: match.size,
-    feeUsd: match.price * match.size * (match.feeRateBps / 10_000),
+    // V2 applies platform and optional builder fees at match time. The trade
+    // fee-rate field is not the charged amount; accounting replaces this zero
+    // with the exact fee emitted by the Polygon OrderFilled event.
+    feeUsd: 0,
     liquidity: match.liquidity,
     filledAt,
-    raw: trade as unknown as Record<string, unknown>,
+    raw: {
+      ...(trade as unknown as Record<string, unknown>),
+      feeAccounting: "polygon_order_filled_required",
+    },
   };
 }
 
 export function summarizePolymarketTrades(trades: Trade[], orderId?: string) {
   const matches = trades
-    .filter((trade) => trade.status !== "FAILED")
+    .filter((trade) => isConfirmedPolymarketTrade(trade) || isPendingPolymarketTrade(trade))
     .map((trade) => resolvePolymarketTradeOrderMatch(trade, orderId))
     .filter((match): match is PolymarketTradeOrderMatch => match !== null);
   const filledSize = roundToSixDecimals(matches.reduce((sum, match) => sum + match.size, 0));
   const grossCostUsd = matches.reduce((sum, match) => sum + match.size * match.price, 0);
-  const feeUsd = round4(
-    matches.reduce((sum, match) => sum + match.price * match.size * (match.feeRateBps / 10_000), 0),
-  );
 
   return {
     filledSize,
     averageFillPrice: filledSize > 0 ? round4(grossCostUsd / filledSize) : null,
-    feeUsd,
+    feeUsd: 0,
   };
 }
 
 export function isConfirmedPolymarketTrade(trade: Trade) {
-  return trade.status === "CONFIRMED";
+  return normalizePolymarketTradeStatus(trade.status) === "CONFIRMED";
 }
 
 export function isPendingPolymarketTrade(trade: Trade) {
-  return trade.status === "MATCHED" || trade.status === "MINED" || trade.status === "RETRYING";
+  const status = normalizePolymarketTradeStatus(trade.status);
+  return status === "MATCHED" || status === "MINED" || status === "RETRYING";
 }
 
 export function isFailedPolymarketTrade(trade: Trade) {
-  return trade.status === "FAILED";
+  return normalizePolymarketTradeStatus(trade.status) === "FAILED";
 }
 
 export function summarizePolymarketTradeLifecycle(trades: Trade[]) {
@@ -1515,6 +1554,7 @@ export function summarizePolymarketTradeLifecycle(trades: Trade[]) {
     confirmedTrades: trades.filter(isConfirmedPolymarketTrade),
     pendingTrades: trades.filter(isPendingPolymarketTrade),
     failedTrades: trades.filter(isFailedPolymarketTrade),
+    unknownTrades: trades.filter((trade) => normalizePolymarketTradeStatus(trade.status) === null),
   };
 }
 
@@ -1545,7 +1585,6 @@ export function getPolymarketTradeOrderMappingIssue(
 
 type PolymarketTradeOrderMatch = {
   assetId: string;
-  feeRateBps: number;
   liquidity: "TAKER" | "MAKER";
   outcome: string;
   price: number;
@@ -1565,7 +1604,6 @@ function resolvePolymarketTradeOrderMatch(trade: Trade, orderId?: string): Polym
 
   return {
     assetId: makerOrder.asset_id,
-    feeRateBps: Number(makerOrder.fee_rate_bps),
     liquidity: "MAKER",
     outcome: makerOrder.outcome,
     price: Number(makerOrder.price),
@@ -1577,7 +1615,6 @@ function resolvePolymarketTradeOrderMatch(trade: Trade, orderId?: string): Polym
 function buildAggregateTradeMatch(trade: Trade): PolymarketTradeOrderMatch {
   return {
     assetId: trade.asset_id,
-    feeRateBps: Number(trade.fee_rate_bps),
     liquidity: trade.trader_side,
     outcome: trade.outcome,
     price: Number(trade.price),
@@ -1621,11 +1658,10 @@ function derivePolymarketTruthStatus(input: {
   expectedSizeSatisfied: boolean;
   hasPendingExposure: boolean;
 }): VenueOrderStatus {
+  if (input.hasPendingExposure) {
+    return "pending";
+  }
   if (input.effectiveFilledSize > 1e-6) {
-    if (input.hasPendingExposure) {
-      return "pending";
-    }
-
     return input.expectedSizeSatisfied ? "filled" : "partially_filled";
   }
 

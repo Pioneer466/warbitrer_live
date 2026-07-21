@@ -4,13 +4,16 @@ import type { MarketAsset, StrategyConfig } from "@/lib/types";
 
 export const LIVE_EXECUTION_ENV_KEY = "LIVE_EXECUTION_ALLOWED";
 
-type ExecutionEnvironment = Partial<Record<"LIVE_EXECUTION_ALLOWED" | "KALSHI_ENV", string | undefined>>;
+type ExecutionEnvironment = Partial<
+  Record<"LIVE_EXECUTION_ALLOWED" | "KALSHI_ENV" | "POLYGON_RPC_URL", string | undefined>
+>;
 
 export type LiveExecutionSafety = {
   allowed: boolean;
   gateEnabled: boolean;
   kalshiEnvironment: "prod" | "demo" | "missing" | "invalid";
-  reasons: Array<"environment_gate_disabled" | "kalshi_not_production">;
+  polygonRpcConfigured: boolean;
+  reasons: Array<"environment_gate_disabled" | "kalshi_not_production" | "polygon_rpc_missing">;
 };
 
 export class LiveExecutionBlockedError extends Error {
@@ -27,6 +30,7 @@ export class LiveExecutionBlockedError extends Error {
 export function getLiveExecutionSafety(env: ExecutionEnvironment = readExecutionEnvironment()): LiveExecutionSafety {
   const gateEnabled = isTruthyEnv(env.LIVE_EXECUTION_ALLOWED);
   const kalshiEnvironment = normalizeKalshiEnvironment(env.KALSHI_ENV);
+  const polygonRpcConfigured = Boolean(env.POLYGON_RPC_URL?.trim());
   const reasons: LiveExecutionSafety["reasons"] = [];
 
   if (!gateEnabled) {
@@ -35,11 +39,15 @@ export function getLiveExecutionSafety(env: ExecutionEnvironment = readExecution
   if (kalshiEnvironment !== "prod") {
     reasons.push("kalshi_not_production");
   }
+  if (!polygonRpcConfigured) {
+    reasons.push("polygon_rpc_missing");
+  }
 
   return {
     allowed: reasons.length === 0,
     gateEnabled,
     kalshiEnvironment,
+    polygonRpcConfigured,
     reasons,
   };
 }
@@ -86,6 +94,7 @@ export function assertProductionVenueEnvironment(
       allowed: false,
       gateEnabled: isTruthyEnv(process.env.LIVE_EXECUTION_ALLOWED),
       kalshiEnvironment,
+      polygonRpcConfigured: Boolean(process.env.POLYGON_RPC_URL?.trim()),
       reasons: ["kalshi_not_production"],
     });
   }
@@ -105,5 +114,6 @@ function readExecutionEnvironment(): ExecutionEnvironment {
   return {
     LIVE_EXECUTION_ALLOWED: process.env.LIVE_EXECUTION_ALLOWED,
     KALSHI_ENV: process.env.KALSHI_ENV,
+    POLYGON_RPC_URL: process.env.POLYGON_RPC_URL,
   };
 }

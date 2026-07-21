@@ -110,6 +110,10 @@ export function schedulePendingNotificationFlush(limit = 10) {
     });
 }
 
+export async function waitForPendingNotificationFlush() {
+  await flushPromise;
+}
+
 async function flushPendingNotificationDeliveries(limit: number) {
   const config = readTelegramConfig();
   if (!config.enabled || !config.botToken || !config.chatId) {
@@ -167,7 +171,8 @@ async function sendTelegramMessage(config: TelegramConfig, message: string) {
 
 function buildTradeLiveMessage(event: RunEvent) {
   const payload = event.payload as Record<string, unknown>;
-  const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
+  const asset =
+    typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
   const targetNotionalUsd = typeof payload.targetNotionalUsd === "number" ? payload.targetNotionalUsd : null;
   const investedNotionalUsd =
@@ -222,7 +227,8 @@ function formatTelegramUsd(value: number | null) {
 
 function buildManualInterventionMessage(event: RunEvent) {
   const payload = event.payload as Record<string, unknown>;
-  const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
+  const asset =
+    typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
   const slotKey = typeof payload.slotKey === "string" ? payload.slotKey : "--";
   const failureReason = typeof payload.failureReason === "string" ? payload.failureReason : event.message;
@@ -239,7 +245,8 @@ function buildManualInterventionMessage(event: RunEvent) {
 
 function buildIncidentMessage(event: RunEvent) {
   const payload = event.payload as Record<string, unknown>;
-  const asset = typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
+  const asset =
+    typeof payload.asset === "string" ? payload.asset.toUpperCase() : String(event.asset ?? "--").toUpperCase();
   const combination = typeof payload.combination === "string" ? payload.combination : "--";
   const slotKey = typeof payload.slotKey === "string" ? payload.slotKey : "--";
   const reason = typeof payload.reason === "string" ? payload.reason : event.message;

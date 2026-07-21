@@ -7,6 +7,11 @@ import {
   POLY_USDCE_ADDRESS,
 } from "@/lib/constants";
 import { isTruthyEnv, readEnv, readSecretValue, type LiveEnv } from "@/lib/env";
+import {
+  aggregateCircuitBreakerIncidents,
+  isManualKillIncident,
+  shouldPauseExecutionForCircuitBreakerImpact,
+} from "@/lib/circuit-breaker-policy";
 import { MARKET_ASSETS } from "@/lib/market-catalog";
 import {
   getPolymarketRelayerTransaction,
@@ -14,7 +19,7 @@ import {
   readPolymarketSignerAddress,
   submitPolymarketProxyTransactions,
 } from "@/lib/polymarket-relayer";
-import { readCircuitBreakers, readPositions, readRunEvents, writeRunEvent } from "@/lib/storage";
+import { readCurrentCircuitBreakerIncidents, readPositions, readRunEvents, writeRunEvent } from "@/lib/storage";
 import type { PositionSnapshot, RecoveryMarket, RecoveryResponse } from "@/lib/types";
 
 const AUTO_CONVERT_COOLDOWN_MS = 15 * 60 * 1000;
@@ -22,15 +27,16 @@ const AUTO_CONVERT_RETRY_AFTER_FAILURE_MS = 15 * 60 * 1000;
 const AUTO_CONVERT_MAX_PENDING_RELAYER_TX = 1;
 const AUTO_CONVERT_PENDING_TIMEOUT_MS = 10 * 60 * 1000;
 const POLY_COLLATERAL_TOKENS = [POLY_PUSD_ADDRESS, POLY_USDCE_ADDRESS] as const;
-type PolymarketCollateralToken = (typeof POLY_COLLATERAL_TOKENS)[number];
+export type PolymarketCollateralToken = (typeof POLY_COLLATERAL_TOKENS)[number];
+export type PolymarketCollateralPositionCandidate = {
+  collateralToken: PolymarketCollateralToken;
+  tokenIds: Set<string>;
+};
 const CTF_POSITION_ID_ABI = [
   "function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet) view returns (bytes32)",
   "function getPositionId(address collateralToken, bytes32 collectionId) view returns (uint256)",
 ];
-const collateralPositionIdCache = new Map<
-  string,
-  Promise<Array<{ collateralToken: PolymarketCollateralToken; tokenIds: Set<string> }>>
->();
+const collateralPositionIdCache = new Map<string, Promise<PolymarketCollateralPositionCandidate[]>>();
 const POLYMARKET_CONVERT_SUBMITTED_EVENTS = new Set([
   "polymarket.convert.submitted",
   "polymarket.redeem.submitted",
@@ -47,13 +53,13 @@ const POLYMARKET_CONVERT_TERMINAL_EVENTS = new Set([
 
 export async function buildRecoveryResponse(): Promise<RecoveryResponse> {
   const env = readEnv();
-  const [positions, breakers] = await Promise.all([readPositions(), readCircuitBreakers()]);
+  const [positions, breakerIncidents] = await Promise.all([readPositions(), readCurrentCircuitBreakerIncidents()]);
   const walletValidation = buildWalletValidation(env);
   const markets = buildRecoveryMarkets(positions, env, walletValidation.canDirectConversion);
 
   return {
     fetchedAt: Date.now(),
-    globalKillSwitchActive: breakers.some((breaker) => breaker.key === "global" && breaker.active),
+    globalKillSwitchActive: breakerIncidents.some(isManualKillIncident),
     signatureType: env.POLY_SIGNATURE_TYPE ?? "unknown",
     funderAddress: env.POLY_FUNDER_ADDRESS ?? null,
     walletValidation,
@@ -86,8 +92,12 @@ export async function autoConvertPolymarketIfConfigured(positions: PositionSnaps
     return [];
   }
 
-  const breakers = await readCircuitBreakers();
-  if (breakers.some((breaker) => breaker.key === "global" && breaker.active && breaker.reason === "manual")) {
+  const breakerIncidents = await readCurrentCircuitBreakerIncidents();
+  const globalExecutionPaused = aggregateCircuitBreakerIncidents(breakerIncidents, now).some(
+    (aggregate) =>
+      aggregate.scope.type === "global" && shouldPauseExecutionForCircuitBreakerImpact(aggregate.worstImpact),
+  );
+  if (globalExecutionPaused) {
     return [];
   }
 
@@ -154,14 +164,21 @@ export async function reconcilePolymarketProxyConversions(now = Date.now()) {
   const completed: string[] = [];
 
   for (const pending of pendingTransactions) {
-    const relayerTransaction = await getPolymarketRelayerTransaction(pending.relayerTransactionId, env).catch(() => null);
+    const relayerTransaction = await getPolymarketRelayerTransaction(pending.relayerTransactionId, env).catch(
+      () => null,
+    );
 
     if (!relayerTransaction) {
       if (now - pending.event.createdAt >= AUTO_CONVERT_PENDING_TIMEOUT_MS) {
-        await writePolymarketConversionTerminalEvent("failed", pending, {
-          state: "STATE_TIMEOUT",
-          transactionHash: null,
-        }, now);
+        await writePolymarketConversionTerminalEvent(
+          "failed",
+          pending,
+          {
+            state: "STATE_TIMEOUT",
+            transactionHash: null,
+          },
+          now,
+        );
         completed.push(pending.relayerTransactionId);
       }
       continue;
@@ -335,7 +352,11 @@ export function buildRecoveryMarkets(
         market.notes.push(`Full sets mergeables: ${market.mergeableSize.toFixed(6)}`);
       }
     }
-    if (directConversionSupported && env.POLY_SIGNATURE_TYPE === "POLY_PROXY" && (market.redeemable || market.mergeable)) {
+    if (
+      directConversionSupported &&
+      env.POLY_SIGNATURE_TYPE === "POLY_PROXY" &&
+      (market.redeemable || market.mergeable)
+    ) {
       market.notes.push("Proxy wallet: conversion gasless via relayer Polymarket.");
     }
     if (!directConversionSupported && (market.redeemable || market.mergeable)) {
@@ -382,89 +403,113 @@ function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidat
   try {
     signerAddress = readPolymarketSignerAddress(env);
     derivedProxyAddress = derivePolymarketProxyAddress(signerAddress);
-    pushCheck({
-      key: "poly:signer-private-key",
-      label: "Signer private key",
-      status: "ready",
-      details: `Signer detecte: ${signerAddress}`,
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signer-private-key",
+        label: "Signer private key",
+        status: "ready",
+        details: `Signer detecte: ${signerAddress}`,
+        checkedAt: Date.now(),
+      },
+      true,
+    );
   } catch (error) {
-    pushCheck({
-      key: "poly:signer-private-key",
-      label: "Signer private key",
-      status: "blocked",
-      details: error instanceof Error ? error.message : "Cle privee illisible",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signer-private-key",
+        label: "Signer private key",
+        status: "blocked",
+        details: error instanceof Error ? error.message : "Cle privee illisible",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
   }
 
   if (env.POLY_SIGNATURE_TYPE === "EOA") {
-    pushCheck({
-      key: "poly:signature-type",
-      label: "Wallet signature type",
-      status: "ready",
-      details: "POLY_SIGNATURE_TYPE=EOA",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signature-type",
+        label: "Wallet signature type",
+        status: "ready",
+        details: "POLY_SIGNATURE_TYPE=EOA",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
 
     const addressMatches =
       signerAddress !== null &&
       Boolean(env.POLY_FUNDER_ADDRESS) &&
       signerAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
-    pushCheck({
-      key: "poly:eoa-funder",
-      label: "EOA funder address",
-      status: addressMatches ? "ready" : "blocked",
-      details: addressMatches
-        ? "POLY_FUNDER_ADDRESS correspond au signer EOA"
-        : "POLY_FUNDER_ADDRESS doit etre la meme adresse publique que le signer EOA",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:eoa-funder",
+        label: "EOA funder address",
+        status: addressMatches ? "ready" : "blocked",
+        details: addressMatches
+          ? "POLY_FUNDER_ADDRESS correspond au signer EOA"
+          : "POLY_FUNDER_ADDRESS doit etre la meme adresse publique que le signer EOA",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
 
-    pushCheck({
-      key: "poly:eoa-rpc",
-      label: "Polygon RPC",
-      status: env.POLYGON_RPC_URL ? "ready" : "blocked",
-      details: env.POLYGON_RPC_URL
-        ? `RPC configure: ${env.POLYGON_RPC_URL}`
-        : "POLYGON_RPC_URL manquant pour envoyer la transaction on-chain",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:eoa-rpc",
+        label: "Polygon RPC",
+        status: env.POLYGON_RPC_URL ? "ready" : "blocked",
+        details: env.POLYGON_RPC_URL
+          ? `RPC configure: ${env.POLYGON_RPC_URL}`
+          : "POLYGON_RPC_URL manquant pour envoyer la transaction on-chain",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
   } else if (env.POLY_SIGNATURE_TYPE === "POLY_PROXY") {
-    pushCheck({
-      key: "poly:signature-type",
-      label: "Wallet signature type",
-      status: "ready",
-      details: "POLY_SIGNATURE_TYPE=POLY_PROXY",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signature-type",
+        label: "Wallet signature type",
+        status: "ready",
+        details: "POLY_SIGNATURE_TYPE=POLY_PROXY",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
 
     const proxyMatches =
       derivedProxyAddress !== null &&
       Boolean(env.POLY_FUNDER_ADDRESS) &&
       derivedProxyAddress.toLowerCase() === env.POLY_FUNDER_ADDRESS!.toLowerCase();
-    pushCheck({
-      key: "poly:proxy-funder",
-      label: "Proxy funder address",
-      status: proxyMatches ? "ready" : "blocked",
-      details: proxyMatches
-        ? `POLY_FUNDER_ADDRESS correspond au proxy derive: ${derivedProxyAddress}`
-        : derivedProxyAddress
-          ? `POLY_FUNDER_ADDRESS doit etre le proxy wallet derive du signer: ${derivedProxyAddress}`
-          : "Impossible de deriver l'adresse proxy sans signer valide",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:proxy-funder",
+        label: "Proxy funder address",
+        status: proxyMatches ? "ready" : "blocked",
+        details: proxyMatches
+          ? `POLY_FUNDER_ADDRESS correspond au proxy derive: ${derivedProxyAddress}`
+          : derivedProxyAddress
+            ? `POLY_FUNDER_ADDRESS doit etre le proxy wallet derive du signer: ${derivedProxyAddress}`
+            : "Impossible de deriver l'adresse proxy sans signer valide",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
 
-    pushCheck({
-      key: "poly:proxy-relayer-key",
-      label: "Relayer API key",
-      status: env.POLY_RELAYER_API_KEY ? "ready" : "blocked",
-      details: env.POLY_RELAYER_API_KEY
-        ? "RELAYER_API_KEY present pour le relayer gasless"
-        : "Creer une relayer API key dans Polymarket > Settings > API Keys",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:proxy-relayer-key",
+        label: "Relayer API key",
+        status: env.POLY_RELAYER_API_KEY ? "ready" : "blocked",
+        details: env.POLY_RELAYER_API_KEY
+          ? "RELAYER_API_KEY present pour le relayer gasless"
+          : "Creer une relayer API key dans Polymarket > Settings > API Keys",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
 
     pushCheck({
       key: "poly:proxy-rpc",
@@ -476,21 +521,27 @@ function buildWalletValidation(env = readEnv()): RecoveryResponse["walletValidat
       checkedAt: Date.now(),
     });
   } else if (env.POLY_SIGNATURE_TYPE === "POLY_GNOSIS_SAFE") {
-    pushCheck({
-      key: "poly:signature-type",
-      label: "Wallet signature type",
-      status: "degraded",
-      details: "POLY_GNOSIS_SAFE detecte: la conversion in-app n'est pas encore cablee pour ce mode",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signature-type",
+        label: "Wallet signature type",
+        status: "degraded",
+        details: "POLY_GNOSIS_SAFE detecte: la conversion in-app n'est pas encore cablee pour ce mode",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
   } else {
-    pushCheck({
-      key: "poly:signature-type",
-      label: "Wallet signature type",
-      status: "blocked",
-      details: "POLY_SIGNATURE_TYPE manquant ou invalide",
-      checkedAt: Date.now(),
-    }, true);
+    pushCheck(
+      {
+        key: "poly:signature-type",
+        label: "Wallet signature type",
+        status: "blocked",
+        details: "POLY_SIGNATURE_TYPE manquant ou invalide",
+        checkedAt: Date.now(),
+      },
+      true,
+    );
   }
 
   pushCheck({
@@ -848,13 +899,25 @@ async function inferPolymarketCollateralToken(
       .filter((tokenId): tokenId is string => typeof tokenId === "string" && tokenId.length > 0),
   );
 
-  if (heldTokenIds.size === 0 || !utils.isHexString(market.conditionId, 32)) {
-    return POLY_PUSD_ADDRESS;
+  if (heldTokenIds.size === 0) {
+    throw new Error("Unable to identify Polymarket collateral without held position token IDs");
+  }
+  if (!utils.isHexString(market.conditionId, 32)) {
+    throw new Error(`Invalid Polymarket condition id ${market.conditionId}`);
   }
 
-  const candidates = await readCollateralPositionIds(market.conditionId, env).catch(() => []);
+  return selectPolymarketCollateralToken(heldTokenIds, await readCollateralPositionIds(market.conditionId, env));
+}
+
+export function selectPolymarketCollateralToken(
+  heldTokenIds: ReadonlySet<string>,
+  candidates: readonly PolymarketCollateralPositionCandidate[],
+): PolymarketCollateralToken {
   const matched = candidates.find((candidate) => [...heldTokenIds].some((tokenId) => candidate.tokenIds.has(tokenId)));
-  return matched?.collateralToken ?? POLY_PUSD_ADDRESS;
+  if (!matched) {
+    throw new Error("Unable to match held Polymarket positions to a supported collateral token");
+  }
+  return matched.collateralToken;
 }
 
 async function readCollateralPositionIds(conditionId: string, env: LiveEnv) {
@@ -888,6 +951,7 @@ async function readCollateralPositionIds(conditionId: string, env: LiveEnv) {
   })();
 
   collateralPositionIdCache.set(cacheKey, promise);
+  promise.catch(() => collateralPositionIdCache.delete(cacheKey));
   return promise;
 }
 
@@ -1054,7 +1118,8 @@ async function writePolymarketConversionTerminalEvent(
     relayerTransaction,
     ...(pending.event.payload ?? {}),
   };
-  const marketRef = typeof pending.event.payload?.marketRef === "string" ? pending.event.payload.marketRef : "unknown market";
+  const marketRef =
+    typeof pending.event.payload?.marketRef === "string" ? pending.event.payload.marketRef : "unknown market";
   const actionLabel = pending.action === "merge" ? "Merge" : "Redeem";
   const specificEventType = `polymarket.${pending.action}.${status}`;
   const genericEventType = `polymarket.convert.${status}`;

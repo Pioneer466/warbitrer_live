@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import { createApiErrorResponse } from "@/lib/api-error";
 import { authenticateApiMutation } from "@/lib/api-mutation-auth";
@@ -6,6 +7,13 @@ import { buildRecoveryResponse, convertPolymarketMarket } from "@/lib/recovery";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const recoveryMutationSchema = z
+  .object({
+    action: z.enum(["redeem", "convert"]),
+    marketRef: z.string().trim().min(1).max(256),
+  })
+  .strict();
 
 export async function GET() {
   try {
@@ -23,16 +31,12 @@ export async function POST(request: Request) {
   try {
     authenticateApiMutation(request);
 
-    const body = (await request.json()) as {
-      action?: "redeem" | "convert";
-      marketRef?: string;
-    };
-
-    if ((body.action !== "redeem" && body.action !== "convert") || !body.marketRef) {
-      return NextResponse.json({ error: "action=convert|redeem and marketRef are required" }, { status: 400 });
+    const parsed = recoveryMutationSchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
     }
 
-    return NextResponse.json(await convertPolymarketMarket(body.marketRef));
+    return NextResponse.json(await convertPolymarketMarket(parsed.data.marketRef));
   } catch (error) {
     return createApiErrorResponse(error);
   }

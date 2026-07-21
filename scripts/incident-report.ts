@@ -139,9 +139,7 @@ async function main() {
   try {
     const report = await collectReport(pool, options);
     const rendered =
-      options.format === "markdown"
-        ? renderMarkdownReport(report, options)
-        : renderTextReport(report, options);
+      options.format === "markdown" ? renderMarkdownReport(report, options) : renderTextReport(report, options);
 
     if (options.outputPath) {
       fs.writeFileSync(options.outputPath, rendered);
@@ -226,7 +224,11 @@ function analyzeIntent(params: {
   const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi") ?? null;
   const flags: string[] = [];
 
-  if (polyLeg && polyLeg.filledSize > ORDER_SIZE_TOLERANCE && (!kalshiLeg || kalshiLeg.filledSize <= ORDER_SIZE_TOLERANCE)) {
+  if (
+    polyLeg &&
+    polyLeg.filledSize > ORDER_SIZE_TOLERANCE &&
+    (!kalshiLeg || kalshiLeg.filledSize <= ORDER_SIZE_TOLERANCE)
+  ) {
     flags.push("Polymarket exposé sans hedge Kalshi rempli");
   }
 
@@ -527,9 +529,7 @@ function renderTextReport(
     } else {
       lines.push("flags: aucune");
     }
-    lines.push(
-      `resolutions: poly=${intent.polyResolution ?? "--"} · kalshi=${intent.kalshiResolution ?? "--"}`,
-    );
+    lines.push(`resolutions: poly=${intent.polyResolution ?? "--"} · kalshi=${intent.kalshiResolution ?? "--"}`);
 
     lines.push("legs:");
     for (const leg of intent.legs) {
@@ -611,10 +611,18 @@ function renderMarkdownReport(
   lines.push("## P&L");
 
   if (report.windowStartPnl && report.windowEndPnl) {
-    lines.push(`- Equity: ${formatUsd(report.windowStartPnl.equityUsd)} -> ${formatUsd(report.windowEndPnl.equityUsd)} (${formatUsd(report.windowEndPnl.equityUsd - report.windowStartPnl.equityUsd)})`);
-    lines.push(`- Realized: ${formatUsd(report.windowStartPnl.realizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.realizedPnlUsd)} (${formatUsd(report.windowEndPnl.realizedPnlUsd - report.windowStartPnl.realizedPnlUsd)})`);
-    lines.push(`- Unrealized: ${formatUsd(report.windowStartPnl.unrealizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.unrealizedPnlUsd)} (${formatUsd(report.windowEndPnl.unrealizedPnlUsd - report.windowStartPnl.unrealizedPnlUsd)})`);
-    lines.push(`- Fees: ${formatUsd(report.windowStartPnl.feesUsd)} -> ${formatUsd(report.windowEndPnl.feesUsd)} (${formatUsd(report.windowEndPnl.feesUsd - report.windowStartPnl.feesUsd)})`);
+    lines.push(
+      `- Equity: ${formatUsd(report.windowStartPnl.equityUsd)} -> ${formatUsd(report.windowEndPnl.equityUsd)} (${formatUsd(report.windowEndPnl.equityUsd - report.windowStartPnl.equityUsd)})`,
+    );
+    lines.push(
+      `- Realized: ${formatUsd(report.windowStartPnl.realizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.realizedPnlUsd)} (${formatUsd(report.windowEndPnl.realizedPnlUsd - report.windowStartPnl.realizedPnlUsd)})`,
+    );
+    lines.push(
+      `- Unrealized: ${formatUsd(report.windowStartPnl.unrealizedPnlUsd)} -> ${formatUsd(report.windowEndPnl.unrealizedPnlUsd)} (${formatUsd(report.windowEndPnl.unrealizedPnlUsd - report.windowStartPnl.unrealizedPnlUsd)})`,
+    );
+    lines.push(
+      `- Fees: ${formatUsd(report.windowStartPnl.feesUsd)} -> ${formatUsd(report.windowEndPnl.feesUsd)} (${formatUsd(report.windowEndPnl.feesUsd - report.windowStartPnl.feesUsd)})`,
+    );
   } else {
     lines.push("- Snapshots P&L insuffisants sur la fenêtre");
   }
@@ -625,7 +633,9 @@ function renderMarkdownReport(
     lines.push("- Aucun breaker actif ou déclenché sur la fenêtre");
   } else {
     for (const breaker of report.circuitBreakers) {
-      lines.push(`- \`${breaker.key}\` · active=${breaker.active} · reason=${breaker.reason ?? "--"} · triggered=${breaker.triggeredAt ? formatTs(breaker.triggeredAt) : "--"}`);
+      lines.push(
+        `- \`${breaker.key}\` · active=${breaker.active} · reason=${breaker.reason ?? "--"} · triggered=${breaker.triggeredAt ? formatTs(breaker.triggeredAt) : "--"}`,
+      );
     }
   }
 
@@ -653,12 +663,16 @@ function renderMarkdownReport(
 
     lines.push("- Legs:");
     for (const leg of intent.legs) {
-      lines.push(`  - ${leg.venue} ${leg.outcome} ${leg.side} · target ${formatUsd(leg.requestedNotionalUsd)} · req ${formatNum(leg.requestedSize, 4)} @ ${formatNullableNum(leg.requestedPrice, 4)} · filled ${formatNum(leg.filledSize, 4)} @ ${formatNullableNum(leg.filledPrice, 4)} · status ${leg.status}`);
+      lines.push(
+        `  - ${leg.venue} ${leg.outcome} ${leg.side} · target ${formatUsd(leg.requestedNotionalUsd)} · req ${formatNum(leg.requestedSize, 4)} @ ${formatNullableNum(leg.requestedPrice, 4)} · filled ${formatNum(leg.filledSize, 4)} @ ${formatNullableNum(leg.filledPrice, 4)} · status ${leg.status}`,
+      );
     }
 
     lines.push(`- Orders: ${orders.length}`);
     for (const order of orders.slice(0, 6)) {
-      lines.push(`  - ${formatTs(order.createdAt)} · ${order.venue} ${order.side} ${order.orderType} · ${order.status} · req ${formatNum(order.requestedSize, 4)} @ ${formatNullableNum(order.requestedPrice, 4)} · filled ${formatNum(order.filledSize, 4)} @ ${formatNullableNum(order.averageFillPrice, 4)}`);
+      lines.push(
+        `  - ${formatTs(order.createdAt)} · ${order.venue} ${order.side} ${order.orderType} · ${order.status} · req ${formatNum(order.requestedSize, 4)} @ ${formatNullableNum(order.requestedPrice, 4)} · filled ${formatNum(order.filledSize, 4)} @ ${formatNullableNum(order.averageFillPrice, 4)}`,
+      );
     }
     if (orders.length > 6) {
       lines.push(`  - ... ${orders.length - 6} ordres de plus`);
@@ -666,7 +680,9 @@ function renderMarkdownReport(
 
     lines.push(`- Fills: ${fills.length}`);
     for (const fill of fills.slice(0, 8)) {
-      lines.push(`  - ${formatTs(fill.filledAt)} · ${fill.venue} ${fill.side} ${fill.outcome} · ${formatNum(fill.size, 4)} @ ${formatNum(fill.price, 4)} · fee ${formatUsd(fill.feeUsd)}`);
+      lines.push(
+        `  - ${formatTs(fill.filledAt)} · ${fill.venue} ${fill.side} ${fill.outcome} · ${formatNum(fill.size, 4)} @ ${formatNum(fill.price, 4)} · fee ${formatUsd(fill.feeUsd)}`,
+      );
     }
     if (fills.length > 8) {
       lines.push(`  - ... ${fills.length - 8} fills de plus`);
@@ -683,7 +699,9 @@ function renderMarkdownReport(
     if (settlements.length > 0) {
       lines.push(`- Settlements: ${settlements.length}`);
       for (const settlement of settlements.slice(0, 4)) {
-        lines.push(`  - ${formatTs(settlement.settledAt)} · ${settlement.venue} ${settlement.outcome} -> ${settlement.resolvedOutcome ?? "--"} · payout ${formatUsd(settlement.payoutUsd)}`);
+        lines.push(
+          `  - ${formatTs(settlement.settledAt)} · ${settlement.venue} ${settlement.outcome} -> ${settlement.resolvedOutcome ?? "--"} · payout ${formatUsd(settlement.payoutUsd)}`,
+        );
       }
     }
   }
@@ -707,8 +725,7 @@ function mapIntentRow(row: Record<string, unknown>) {
     grossCost: Number(row.gross_cost),
     targetNotionalUsd: Number(row.target_notional_usd),
     failureReason: row.failure_reason === null ? null : String(row.failure_reason),
-    projectedNetProfitUsd:
-      row.projected_net_profit_usd === null ? null : Number(row.projected_net_profit_usd),
+    projectedNetProfitUsd: row.projected_net_profit_usd === null ? null : Number(row.projected_net_profit_usd),
     realizedPnlUsd: row.realized_pnl_usd === null ? null : Number(row.realized_pnl_usd),
     roi: row.roi === null ? null : Number(row.roi),
     polyResolution: (row.poly_resolution as Resolution) ?? null,
@@ -797,10 +814,7 @@ function loadEnvFile(path: string) {
 
     const key = trimmed.slice(0, separatorIndex).trim();
     let value = trimmed.slice(separatorIndex + 1).trim();
-    if (
-      (value.startsWith("\"") && value.endsWith("\"")) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
       value = value.slice(1, -1);
     }
     env[key] = value;
@@ -970,7 +984,9 @@ function normalizeTimestamp(value: unknown) {
 }
 
 function printHelpAndExit(): never {
-  console.log("Usage: npm run incident:report -- [--hours 12] [--since ISO] [--until ISO] [--slot-key KEY] [--limit 50] [--max-intents 12] [--env /etc/warbitrer/warbitrer.env] [--all] [--markdown] [--output incident-report.md]");
+  console.log(
+    "Usage: npm run incident:report -- [--hours 12] [--since ISO] [--until ISO] [--slot-key KEY] [--limit 50] [--max-intents 12] [--env /etc/warbitrer/warbitrer.env] [--all] [--markdown] [--output incident-report.md]",
+  );
   process.exit(0);
 }
 

@@ -76,5 +76,5 @@ function readOption(argv: string[], name: string) {
   }
 
   const index = argv.indexOf(`--${name}`);
-  return index >= 0 ? argv[index + 1] ?? null : null;
+  return index >= 0 ? (argv[index + 1] ?? null) : null;
 }

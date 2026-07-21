@@ -1,3 +1,5 @@
+import type { CircuitBreakerIncident, CircuitBreakerRecoveryProof } from "@/lib/circuit-breaker-policy";
+
 export type MarketAsset = "btc" | "eth" | "sol" | "xrp" | "doge" | "bnb" | "hype";
 export type AssetScoped<T> = Record<MarketAsset, T>;
 export type Venue = "polymarket" | "kalshi";
@@ -158,6 +160,10 @@ export type PolymarketQuote = {
   feeRateBps: number;
   feeRate?: number | null;
   feeExponent?: number | null;
+  /** True only when the CLOB response carried an explicit fee-data object. */
+  feeMetadataPresent?: boolean;
+  /** Exact enabled/disabled state; null or absent means fee provenance is unknown. */
+  feesEnabled?: boolean | null;
   negRisk: boolean;
 };
 
@@ -180,6 +186,12 @@ export type KalshiCfBenchmarkState = {
   finalMinuteAverage15m: KalshiCfBenchmarkWindow | null;
 };
 
+export type KalshiPriceRange = {
+  start: string;
+  end: string;
+  step: string;
+};
+
 export type KalshiQuote = {
   ref: VenueMarketRef;
   status: string;
@@ -199,6 +211,8 @@ export type KalshiQuote = {
   feeType: string;
   lastTradeYesPrice: number | null;
   lastTradeNoPrice: number | null;
+  priceLevelStructure: string | null;
+  priceRanges: KalshiPriceRange[] | null;
   cfBenchmarks?: KalshiCfBenchmarkState | null;
   orderbookLevels?: {
     yesBids: Array<[number, number]>;
@@ -578,7 +592,7 @@ export type LiveOrder = {
   raw: Record<string, unknown>;
 };
 
-export type OrderAttemptStatus = "planned" | "submitted" | "truth_pending" | "confirmed" | "failed";
+export type OrderAttemptStatus = "planned" | "submitting" | "submitted" | "truth_pending" | "confirmed" | "failed";
 
 export type OrderAttempt = {
   id: string;
@@ -595,11 +609,153 @@ export type OrderAttempt = {
   status: OrderAttemptStatus;
   truthStatus: string | null;
   request: Record<string, unknown>;
+  /** SHA-256 of the canonical, complete request payload persisted before submission. */
+  requestSha256?: string | null;
+  /** Absolute database-clock deadline before which this attempt may start submission. */
+  submissionDeadlineAt?: number | null;
+  /** Monotone persistence revision used to fence the final pre-dispatch CAS. */
+  revision?: number;
   result: Record<string, unknown> | null;
   error: string | null;
   createdAt: number;
   updatedAt: number;
 };
+
+export type EntryAdmissionMode = "live" | "shadow";
+
+export type EntryReservation = {
+  scopeKey: string;
+  mode: EntryAdmissionMode;
+  asset: MarketAsset | null;
+  ownerIntentId: string | null;
+  reservedAt: number | null;
+  revision: number;
+};
+
+export type EntryAdmission = {
+  id: string;
+  sequence: number;
+  intentId: string;
+  attemptId: string | null;
+  mode: EntryAdmissionMode;
+  asset: MarketAsset;
+  slotKey: string;
+  combination: PairCombination;
+  grossCost: number;
+  requestSha256: string | null;
+  strategyRevision: number;
+  globalRiskRevision: number;
+  policyEvaluatedAt: number;
+  cutoffAt: number | null;
+  latestSubmissionStartAt: number | null;
+  evidence: Record<string, unknown>;
+  authorizedAt: number;
+};
+
+export type LiveEntryAdmissionInput = {
+  now: number;
+  intent: OrderIntent;
+  plannedAttempt: OrderAttempt;
+  expectedStrategyRevision: number;
+  expectedGlobalRiskRevision: number;
+  policyEvaluatedAt: number;
+  cutoffAt: number;
+  latestSubmissionStartAt: number;
+  evidence: Record<string, unknown>;
+};
+
+export type LiveOrderAttemptClaimInput = {
+  intentId: string;
+  attemptId: string;
+  request: Record<string, unknown>;
+  claimedAt: number;
+};
+
+export type LiveOrderAttemptSubmissionInput = {
+  plannedAttempt: OrderAttempt;
+  submissionDeadlineAt: number;
+};
+
+export type LiveOrderAttemptSubmissionDecision =
+  | {
+      decision: "claimed";
+      fresh: boolean;
+      attempt: OrderAttempt;
+    }
+  | {
+      decision: "rejected";
+      reason: "submission_deadline_expired";
+      attempt: OrderAttempt;
+    }
+  | {
+      decision: "reusable";
+      reason: "venue_order_recorded" | "confirmed_result_recorded";
+      attempt: OrderAttempt;
+    }
+  | {
+      decision: "ambiguous";
+      reason: "submission_in_progress" | "submission_truth_unknown";
+      attempt: OrderAttempt;
+    };
+
+export type LiveOrderAttemptDispatchInput = {
+  intentId: string;
+  attemptId: string;
+  request: Record<string, unknown>;
+  submissionDeadlineAt: number;
+  expectedRevision: number;
+};
+
+export type LiveOrderAttemptDispatchDecision =
+  | {
+      decision: "ready";
+      attempt: OrderAttempt;
+    }
+  | {
+      decision: "expired";
+      reason: "submission_deadline_expired";
+      attempt: OrderAttempt;
+    };
+
+export type ShadowEntryAdmissionInput = {
+  now: number;
+  intent: OrderIntent;
+  expectedStrategyRevision: number;
+  expectedGlobalRiskRevision: number;
+  policyEvaluatedAt: number;
+  evidence: Record<string, unknown>;
+};
+
+export type EntryAdmissionRejectionCode =
+  | "trading_disabled"
+  | "execution_mode_mismatch"
+  | "circuit_breaker_active"
+  | "reservation_conflict"
+  | "shadow_cooldown_active"
+  | "reentry_insufficient_improvement"
+  | "slot_closed"
+  | "submission_window_closed";
+
+export type EntryAdmissionDecision =
+  | {
+      admitted: true;
+      fresh: boolean;
+      reservation: EntryReservation;
+      admission: EntryAdmission;
+      intent: OrderIntent;
+      plannedAttempt: OrderAttempt | null;
+    }
+  | {
+      admitted: false;
+      code: EntryAdmissionRejectionCode;
+      reason: string;
+      blockingIntentId?: string;
+      activeBreakerKeys?: CircuitBreakerKey[];
+      nextEligibleAt?: number;
+      retryAfterMs?: number;
+      previousGrossCost?: number;
+      maximumAllowedCost?: number | null;
+    };
 
 export type LiveFill = {
   id: string;
@@ -619,6 +775,63 @@ export type LiveFill = {
   liquidity: "TAKER" | "MAKER" | null;
   filledAt: number;
   raw: Record<string, unknown>;
+};
+
+export type AccountingHeadState = "open" | "stable" | "quarantined" | "no_exposure" | "legacy_pending";
+
+export type AccountingMutationOperation = "ingest_fill" | "close_no_exposure" | "finalize" | "reaccount";
+
+export type AccountingMutationContext = {
+  actor: string;
+  requestId: string;
+  occurredAt: number;
+};
+
+export type AccountingHead = {
+  intentId: string;
+  state: AccountingHeadState;
+  currentVersion: number | null;
+  currentProofSha256: string | null;
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type AccountingQuarantineReason =
+  "late_terminal_fill" | "fill_identity_conflict" | "fill_economic_conflict" | "head_already_closed";
+
+export type AccountingFillIngestionDecision =
+  | {
+      decision: "recorded" | "replayed";
+      head: AccountingHead;
+      factSha256: string;
+    }
+  | {
+      decision: "quarantined" | "replayed";
+      head: AccountingHead;
+      quarantineId: number;
+      reason: AccountingQuarantineReason;
+    };
+
+export type AccountingMutationResult = {
+  replayed: boolean;
+  head: AccountingHead;
+  version: number | null;
+  proofSha256: string | null;
+};
+
+export type AccountingBacklogSummary = {
+  /** Number of live accounting defects that currently block order dispatch. */
+  total: number;
+  /** Live intents whose mandatory accounting head is missing. */
+  missingHeads: number;
+  /** Blocking legacy heads, excluding terminal history before the current UTC risk day. */
+  legacyPending: number;
+  quarantined: number;
+  terminalOpen: number;
+  /** Visible migration debt that is old enough not to contaminate the current UTC risk day. */
+  historicalLegacyPending: number;
+  oldestIntentId: string | null;
 };
 
 export type RealtimeOrderFill = {
@@ -870,6 +1083,36 @@ export type CircuitBreaker = {
   payload: Record<string, unknown> | null;
 };
 
+export type CircuitBreakerMutationContext = {
+  actor: string;
+  requestId: string;
+};
+
+export type ObserveCircuitBreakerIncidentInput = CircuitBreakerMutationContext & {
+  incident: CircuitBreakerIncident;
+};
+
+export type ResolveOwnedCircuitBreakerIncidentInput = CircuitBreakerMutationContext & {
+  incidentId: string;
+  expectedRevision: number;
+  owner: string;
+  conditionRecovered: boolean;
+  exposureRecoveryProof?: CircuitBreakerRecoveryProof | null;
+};
+
+export type RecordCircuitBreakerExposureRecoveryInput = CircuitBreakerMutationContext & {
+  incidentId: string;
+  expectedRevision: number;
+  owner: string;
+  recoveryProof: CircuitBreakerRecoveryProof;
+};
+
+export type AcknowledgeCircuitBreakerIncidentInput = CircuitBreakerMutationContext & {
+  incidentId: string;
+  expectedRevision: number;
+  operatorId: string;
+};
+
 export type WorkerState = {
   asset: MarketAsset;
   phase: WorkerPhase;
@@ -1065,7 +1308,8 @@ type HealthReadinessPayload = {
   liveExecutionAllowed: boolean;
   liveExecutionGateEnabled: boolean;
   kalshiEnvironment: "prod" | "demo" | "missing" | "invalid";
-  liveExecutionBlockReasons: Array<"environment_gate_disabled" | "kalshi_not_production">;
+  polygonRpcConfigured: boolean;
+  liveExecutionBlockReasons: Array<"environment_gate_disabled" | "kalshi_not_production" | "polygon_rpc_missing">;
   activeBreakers: number;
   tradingEnabledAssets: MarketAsset[];
   assets: HealthAssetStatus[];
@@ -1138,7 +1382,7 @@ export interface VenueAdapter {
   getPositions(now?: number): Promise<PositionSnapshot[]>;
   placeOrder(order: VenueOrderRequest): Promise<VenueOrderResult>;
   cancelOrder(orderId: string): Promise<void>;
-  getOrder(orderId: string): Promise<LiveOrder | null>;
+  getOrder(orderId: string, expectedOrder?: VenueOrderRequest): Promise<LiveOrder | null>;
 }
 
 export interface ExecutionCoordinator {

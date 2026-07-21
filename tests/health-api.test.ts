@@ -2,7 +2,6 @@ import { DEFAULT_STRATEGY_CONFIGS } from "@/lib/constants";
 import { ACTIVE_MARKET_ASSETS, MARKET_ASSETS } from "@/lib/market-catalog";
 import { getCurrentSlot } from "@/lib/slot";
 import type {
-  CircuitBreaker,
   HealthAssetStatus,
   HealthIssueCode,
   HealthReadinessResponse,
@@ -13,10 +12,11 @@ import type {
   VersionedStrategyConfigMap,
   WorkerState,
 } from "@/lib/types";
+import type { CircuitBreakerIncident, CircuitBreakerScope } from "@/lib/circuit-breaker-policy";
 import { vi } from "vitest";
 
 const storageMocks = vi.hoisted(() => ({
-  readCircuitBreakers: vi.fn(),
+  readCurrentCircuitBreakerIncidents: vi.fn(),
   readDatabaseMetrics: vi.fn(),
   readLatestSnapshot: vi.fn(),
   readSettingsMap: vi.fn(),
@@ -35,23 +35,24 @@ describe("health API fail-closed readiness", () => {
   let settings: VersionedStrategyConfigMap;
   let workerStates: Record<MarketAsset, WorkerState>;
   let snapshots: Partial<Record<MarketAsset, OpportunitySnapshot | null>>;
-  let circuitBreakers: CircuitBreaker[];
+  let circuitBreakerIncidents: CircuitBreakerIncident[];
 
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(NOW);
     vi.stubEnv("LIVE_EXECUTION_ALLOWED", "false");
     vi.stubEnv("KALSHI_ENV", "prod");
+    vi.stubEnv("POLYGON_RPC_URL", "https://polygon.example");
     vi.clearAllMocks();
 
     settings = buildSettings();
     workerStates = buildWorkerStates();
     snapshots = Object.fromEntries(ACTIVE_MARKET_ASSETS.map((asset) => [asset, buildSnapshot(asset)]));
-    circuitBreakers = [];
+    circuitBreakerIncidents = [];
 
     storageMocks.readSettingsMap.mockImplementation(async () => settings);
     storageMocks.readWorkerStates.mockImplementation(async () => workerStates);
-    storageMocks.readCircuitBreakers.mockImplementation(async () => circuitBreakers);
+    storageMocks.readCurrentCircuitBreakerIncidents.mockImplementation(async () => circuitBreakerIncidents);
     storageMocks.readLatestSnapshot.mockImplementation(async (asset: MarketAsset) => snapshots[asset] ?? null);
     storageMocks.readDatabaseMetrics.mockResolvedValue(null);
   });
@@ -145,9 +146,13 @@ describe("health API fail-closed readiness", () => {
   it("treats active global, asset, and current-slot breakers as unhealthy", async () => {
     const slotKey = getCurrentSlot("btc", new Date(NOW)).key;
 
-    const relevantKeys: CircuitBreaker["key"][] = ["global", "asset:btc", `slot:${slotKey}` as CircuitBreaker["key"]];
-    for (const key of relevantKeys) {
-      circuitBreakers = [buildBreaker(key)];
+    const relevantScopes: CircuitBreakerScope[] = [
+      { type: "global" },
+      { type: "asset", asset: "btc" },
+      { type: "slot", asset: "btc", slotKey },
+    ];
+    for (const scope of relevantScopes) {
+      circuitBreakerIncidents = [buildBreakerIncident(scope)];
 
       const response = await GET();
       const body = asReadinessResponse(await response.json());
@@ -155,6 +160,29 @@ describe("health API fail-closed readiness", () => {
       expect(response.status).toBe(503);
       expect(reasonCodes(assetHealth(body, "btc"))).toContain("circuit_breaker_active");
     }
+  });
+
+  it("reports every independent cause while counting one affected scope", async () => {
+    const first = buildBreakerIncident({ type: "global" });
+    circuitBreakerIncidents = [
+      first,
+      {
+        ...first,
+        id: "incident:second-global-cause",
+        owner: "second-owner",
+        incidentKey: "second-cause",
+        reason: "rpc_unhealthy",
+      },
+    ];
+
+    const response = await GET();
+    const body = asReadinessResponse(await response.json());
+    const issue = assetHealth(body, "btc").reasons.find((reason) => reason.code === "circuit_breaker_active");
+
+    expect(response.status).toBe(503);
+    expect(body.activeBreakers).toBe(1);
+    expect(issue?.details).toContain("manual, rpc_unhealthy");
+    expect(issue?.details).toContain("2 incident(s)");
   });
 
   it("preserves disabled assets even when workers, snapshots, and breakers are unhealthy", async () => {
@@ -170,7 +198,7 @@ describe("health API fail-closed readiness", () => {
       workerStates[asset] = buildWorkerState(asset, null);
       snapshots[asset] = null;
     }
-    circuitBreakers = [buildBreaker("global")];
+    circuitBreakerIncidents = [buildBreakerIncident({ type: "global" })];
 
     const response = await GET();
     const body = asReadinessResponse(await response.json());
@@ -313,12 +341,26 @@ function buildFeed(asset: MarketAsset, venue: VenueFeedHealth["venue"]): VenueFe
   };
 }
 
-function buildBreaker(key: CircuitBreaker["key"]): CircuitBreaker {
+function buildBreakerIncident(scope: CircuitBreakerScope): CircuitBreakerIncident {
   return {
-    key,
-    active: true,
+    id: `incident:${JSON.stringify(scope)}`,
+    scope,
+    owner: "test-health",
+    incidentKey: "health-test",
     reason: "manual",
-    triggeredAt: NOW - 1_000,
+    impact: "blocked",
+    resolutionPolicy: "owner",
+    intentId: null,
+    exposure: { state: "none" },
+    revision: 1,
+    timestamps: {
+      triggeredAt: NOW - 1_000,
+      updatedAt: NOW - 1_000,
+      lastObservedAt: NOW - 1_000,
+      cooldownUntil: null,
+      acknowledgedAt: null,
+      resolvedAt: null,
+    },
     payload: null,
   };
 }

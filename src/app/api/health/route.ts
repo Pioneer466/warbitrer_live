@@ -1,11 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { getLiveExecutionSafety } from "@/lib/execution-safety";
+import { aggregateCircuitBreakerIncidents, getRelevantCircuitBreakerAggregates } from "@/lib/circuit-breaker-policy";
+import type { CircuitBreakerScopeAggregate } from "@/lib/circuit-breaker-policy";
 import { HEALTH_THRESHOLDS } from "@/lib/health";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
 import { getCurrentSlot } from "@/lib/slot";
 import {
-  readCircuitBreakers,
+  readCurrentCircuitBreakerIncidents,
   readDatabaseMetrics,
   readLatestSnapshot,
   readSettingsMap,
@@ -13,7 +15,6 @@ import {
   storageMode,
 } from "@/lib/storage";
 import type {
-  CircuitBreaker,
   HealthAssetStatus,
   HealthErrorResponse,
   HealthIssue,
@@ -32,21 +33,22 @@ export async function GET() {
     const now = Date.now();
     const liveExecution = getLiveExecutionSafety();
     const slots = ACTIVE_MARKET_ASSETS.map((asset) => getCurrentSlot(asset, new Date(now)));
-    const [workerStates, circuitBreakers, config, latestSnapshots, database] = await Promise.all([
+    const [workerStates, circuitBreakerIncidents, config, latestSnapshots, database] = await Promise.all([
       readWorkerStates(),
-      readCircuitBreakers(),
+      readCurrentCircuitBreakerIncidents(),
       readSettingsMap(),
       Promise.all(slots.map((slot) => readLatestSnapshot(slot.asset, slot.key))),
       readDatabaseMetrics().catch(() => null),
     ]);
 
+    const circuitBreakerAggregates = aggregateCircuitBreakerIncidents(circuitBreakerIncidents, now);
     const assets = slots.map((slot, index) => {
       return buildAssetHealth({
         slot,
         settings: config[slot.asset].config,
         workerState: workerStates[slot.asset],
         snapshot: latestSnapshots[index],
-        circuitBreakers,
+        circuitBreakerAggregates,
         liveExecution,
         now,
       });
@@ -66,8 +68,9 @@ export async function GET() {
       liveExecutionAllowed: liveExecution.allowed,
       liveExecutionGateEnabled: liveExecution.gateEnabled,
       kalshiEnvironment: liveExecution.kalshiEnvironment,
+      polygonRpcConfigured: liveExecution.polygonRpcConfigured,
       liveExecutionBlockReasons: liveExecution.reasons,
-      activeBreakers: circuitBreakers.filter((breaker) => breaker.active).length,
+      activeBreakers: circuitBreakerAggregates.length,
       tradingEnabledAssets: assets.filter((asset) => asset.tradingEnabled).map((asset) => asset.asset),
       assets,
       database,
@@ -105,11 +108,11 @@ function buildAssetHealth(input: {
   settings: StrategyConfig;
   workerState: WorkerState;
   snapshot: OpportunitySnapshot | null;
-  circuitBreakers: CircuitBreaker[];
+  circuitBreakerAggregates: CircuitBreakerScopeAggregate[];
   liveExecution: ReturnType<typeof getLiveExecutionSafety>;
   now: number;
 }): HealthAssetStatus {
-  const { slot, settings, workerState, snapshot, circuitBreakers, liveExecution, now } = input;
+  const { slot, settings, workerState, snapshot, circuitBreakerAggregates, liveExecution, now } = input;
   const feedHealth = snapshot ? [snapshot.polymarket.feedHealth, snapshot.kalshi.feedHealth] : [];
   const workerHeartbeatAgeMs = timestampAgeMs(workerState.loopHealth.updatedAt, now);
   const lastScanAgeMs = timestampAgeMs(workerState.lastScanAt, now);
@@ -181,16 +184,14 @@ function buildAssetHealth(input: {
       }
     }
 
-    for (const breaker of circuitBreakers) {
-      if (breaker.active && isBreakerRelevantToSlot(breaker, slot)) {
-        reasons.push(
-          issue(
-            slot,
-            "circuit_breaker_active",
-            `Active breaker ${breaker.key}${breaker.reason ? ` (${breaker.reason})` : ""}`,
-          ),
-        );
-      }
+    for (const aggregate of getRelevantCircuitBreakerAggregates(circuitBreakerAggregates, slot.asset, slot.key)) {
+      reasons.push(
+        issue(
+          slot,
+          "circuit_breaker_active",
+          `Active breaker ${aggregate.scopeKey} (${aggregate.reasons.join(", ")}; ${aggregate.activeIncidentCount} incident(s))`,
+        ),
+      );
     }
 
     if (!settings.shadowMode && !liveExecution.allowed) {
@@ -234,10 +235,6 @@ function appendTimestampIssue(
   if (input.ageMs > input.maxAgeMs) {
     reasons.push(issue(slot, input.staleCode, `${input.label} is stale: age=${input.ageMs}ms max=${input.maxAgeMs}ms`));
   }
-}
-
-function isBreakerRelevantToSlot(breaker: Pick<CircuitBreaker, "key">, slot: MarketSlot) {
-  return breaker.key === "global" || breaker.key === `asset:${slot.asset}` || breaker.key === `slot:${slot.key}`;
 }
 
 function timestampAgeMs(timestamp: number | null, now: number) {

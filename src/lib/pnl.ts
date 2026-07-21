@@ -34,7 +34,10 @@ export function buildPnlSnapshot({
 }
 
 export function enrichPnlSnapshot(
-  snapshot: Omit<PnlSnapshot, "strategyPnlUsd" | "accountDeltaUsd" | "baselineEquityUsd" | "peakEquityUsd" | "drawdownUsd">,
+  snapshot: Omit<
+    PnlSnapshot,
+    "strategyPnlUsd" | "accountDeltaUsd" | "baselineEquityUsd" | "peakEquityUsd" | "drawdownUsd"
+  >,
   baselineEquityUsd?: number | null,
   peakEquityUsd?: number | null,
 ): PnlSnapshot {

@@ -8,8 +8,11 @@ import type {
   PolymarketQuote,
   Venue,
 } from "@/lib/types";
+import { isKalshiOutcomePriceValid, parseKalshiPriceGrid } from "@/lib/kalshi-price-grid";
 
 export type EntryMode = "live" | "shadow";
+
+export const SHADOW_REENTRY_COOLDOWN_MS = 60_000;
 
 export type InitialEntryLeg = Pick<OrderIntentLeg, "venue" | "outcome" | "marketRef" | "tokenId" | "side">;
 
@@ -35,6 +38,11 @@ export type InitialEntryPolymarketQuote = Pick<
   | "resolution"
   | "tokenIds"
   | "orderbookLevels"
+  | "feeRateBps"
+  | "feeRate"
+  | "feeExponent"
+  | "feeMetadataPresent"
+  | "feesEnabled"
 >;
 
 export type InitialEntryKalshiQuote = Pick<
@@ -50,6 +58,7 @@ export type InitialEntryKalshiQuote = Pick<
   | "outcomes"
   | "resolution"
   | "orderbookLevels"
+  | "priceRanges"
 >;
 
 export type InitialEntryAdmissionInput = {
@@ -80,6 +89,7 @@ export type InitialEntryAdmissionFailureCode =
   | "polymarket_identity_mismatch"
   | "kalshi_identity_mismatch"
   | "invalid_market_tick"
+  | "fee_schedule_unavailable"
   | "feed_identity_mismatch"
   | "feed_not_ready"
   | "feed_not_ws"
@@ -87,13 +97,15 @@ export type InitialEntryAdmissionFailureCode =
   | "book_not_ws"
   | "book_stale"
   | "book_unavailable"
-  | "pair_book_skew";
+  | "pair_book_skew"
+  | "evidence_window_closed";
 
 export type InitialEntryAdmissionDecision =
   | {
       allowed: true;
       cutoffAt: number;
       latestSubmissionStartAt: number;
+      marketEvidenceValidUntil: number;
       polymarketBookUpdatedAt: number;
       kalshiBookUpdatedAt: number;
       pairBookSkewMs: number;
@@ -146,11 +158,11 @@ export function validateInitialEntryAdmission(input: InitialEntryAdmissionInput)
   }
 
   const cutoffAt = slot.endTs - input.entryCutoffSeconds * 1_000;
-  const latestSubmissionStartAt = cutoffAt - input.submissionBudgetMs;
-  if (!Number.isSafeInteger(cutoffAt) || !Number.isSafeInteger(latestSubmissionStartAt)) {
+  const windowLatestSubmissionStartAt = cutoffAt - input.submissionBudgetMs;
+  if (!Number.isSafeInteger(cutoffAt) || !Number.isSafeInteger(windowLatestSubmissionStartAt)) {
     return reject("invalid_input", "The entry deadline cannot be represented safely");
   }
-  if (input.now >= latestSubmissionStartAt) {
+  if (input.now >= windowLatestSubmissionStartAt) {
     return reject("entry_window_closed", "The remaining entry window does not cover the submission budget");
   }
 
@@ -238,6 +250,18 @@ export function validateInitialEntryAdmission(input: InitialEntryAdmissionInput)
   ) {
     return reject("invalid_market_tick", "Selected venue ticks must be finite and strictly between zero and one");
   }
+  if (!hasValidPolymarketFeeSchedule(input.polymarket, selectedPolymarketOutcome)) {
+    return reject(
+      "fee_schedule_unavailable",
+      "Polymarket fee metadata must explicitly and coherently prove whether fees are enabled",
+    );
+  }
+  if (!hasValidKalshiPriceGrid(input.kalshi.priceRanges, selectedKalshiOutcome.buyPrice, expected.kalshi)) {
+    return reject(
+      "invalid_market_tick",
+      "Kalshi price_ranges must be valid, complete, and contain the selected executable price",
+    );
+  }
 
   const polymarketFeedIssue = validateFeed(input, "polymarket");
   if (polymarketFeedIssue) {
@@ -286,14 +310,103 @@ export function validateInitialEntryAdmission(input: InitialEntryAdmissionInput)
     return reject("pair_book_skew", "Venue book observations exceed the allowed pair skew");
   }
 
+  const marketEvidenceValidUntil = deriveMarketEvidenceValidUntil(input, polymarketBookUpdatedAt, kalshiBookUpdatedAt);
+  if (marketEvidenceValidUntil === null) {
+    return reject("invalid_input", "The market evidence deadline cannot be represented safely");
+  }
+  if (input.now >= marketEvidenceValidUntil) {
+    return reject("evidence_window_closed", "Market evidence expires before a live submission can be claimed");
+  }
+  const latestSubmissionStartAt = Math.min(windowLatestSubmissionStartAt, marketEvidenceValidUntil);
+
   return {
     allowed: true,
     cutoffAt,
     latestSubmissionStartAt,
+    marketEvidenceValidUntil,
     polymarketBookUpdatedAt,
     kalshiBookUpdatedAt,
     pairBookSkewMs,
   };
+}
+
+function hasValidPolymarketFeeSchedule(quote: InitialEntryPolymarketQuote, outcome: PolymarketQuote["outcomes"]["up"]) {
+  if (
+    quote.feeMetadataPresent !== true ||
+    typeof quote.feesEnabled !== "boolean" ||
+    !isFiniteNonNegative(quote.feeRateBps) ||
+    !isFiniteNonNegative(outcome.feeRateBps) ||
+    outcome.execution.feeRateBps !== outcome.feeRateBps
+  ) {
+    return false;
+  }
+
+  if (quote.feesEnabled) {
+    return (
+      typeof quote.feeRate === "number" &&
+      Number.isFinite(quote.feeRate) &&
+      quote.feeRate > 0 &&
+      typeof quote.feeExponent === "number" &&
+      Number.isFinite(quote.feeExponent) &&
+      quote.feeExponent >= 0
+    );
+  }
+
+  return (
+    quote.feeRate === 0 &&
+    quote.feeRateBps === 0 &&
+    outcome.feeRateBps === 0 &&
+    (quote.feeExponent === undefined ||
+      quote.feeExponent === null ||
+      (Number.isFinite(quote.feeExponent) && quote.feeExponent >= 0))
+  );
+}
+
+function deriveMarketEvidenceValidUntil(
+  input: InitialEntryAdmissionInput,
+  polymarketBookUpdatedAt: number,
+  kalshiBookUpdatedAt: number,
+) {
+  const observations: Array<readonly [number | null, number]> = [
+    [input.polymarket.lastMessageAt, input.maxFeedAgeMs],
+    [input.polymarket.feedHealth.lastMessageAt, input.maxFeedAgeMs],
+    [input.kalshi.lastMessageAt, input.maxFeedAgeMs],
+    [input.kalshi.feedHealth.lastMessageAt, input.maxFeedAgeMs],
+    [polymarketBookUpdatedAt, input.maxBookAgeMs.polymarket],
+    [kalshiBookUpdatedAt, input.maxBookAgeMs.kalshi],
+  ];
+  let validUntil = Number.MAX_SAFE_INTEGER;
+  for (const [observedAt, maxAgeMs] of observations) {
+    if (!isSafeTimestamp(observedAt)) {
+      return null;
+    }
+    const deadline = observedAt + maxAgeMs;
+    if (!Number.isSafeInteger(deadline)) {
+      return null;
+    }
+    validUntil = Math.min(validUntil, deadline);
+  }
+  return validUntil;
+}
+
+function hasValidKalshiPriceGrid(
+  priceRanges: KalshiQuote["priceRanges"],
+  selectedPrice: number | null,
+  outcome: "YES" | "NO",
+) {
+  if (!priceRanges || selectedPrice === null) {
+    return false;
+  }
+  try {
+    parseKalshiPriceGrid(priceRanges);
+    return isKalshiOutcomePriceValid({
+      price: selectedPrice,
+      outcome,
+      priceRanges,
+    });
+  } catch {
+    return false;
+  }
 }
 
 export type PriceTickNormalizationFailureCode =

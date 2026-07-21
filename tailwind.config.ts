@@ -1,9 +1,7 @@
 import type { Config } from "tailwindcss";
 
 const config: Config = {
-  content: [
-    "./src/**/*.{ts,tsx}",
-  ],
+  content: ["./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
       colors: {
@@ -22,8 +20,7 @@ const config: Config = {
         warm: "0 0 0 1px rgba(255,184,79,0.14), 0 18px 50px rgba(255,184,79,0.12)",
       },
       backgroundImage: {
-        noise:
-          "radial-gradient(circle at 1px 1px, rgba(255,255,255,0.035) 1px, transparent 0)",
+        noise: "radial-gradient(circle at 1px 1px, rgba(255,255,255,0.035) 1px, transparent 0)",
       },
       fontFamily: {
         display: ["Avenir Next", "Satoshi", "Segoe UI", "sans-serif"],

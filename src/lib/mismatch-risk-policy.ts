@@ -1,16 +1,10 @@
-import {
-  calculateHybridClusterBudget,
-  evaluateEconomicMismatchGate,
-} from "@/lib/mismatch-risk";
+import { calculateHybridClusterBudget, evaluateEconomicMismatchGate } from "@/lib/mismatch-risk";
 import type {
   EconomicMismatchGateResult,
   HybridClusterBudgetResult,
   MismatchClusterExposure,
 } from "@/lib/mismatch-risk";
-import {
-  normalizeGlobalRiskConfig,
-  type GlobalRiskConfig,
-} from "@/lib/risk-settings";
+import { normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   LiveOpportunity,
   MismatchRiskEstimate,
@@ -19,13 +13,7 @@ import type {
   OrderIntentStatus,
 } from "@/lib/types";
 
-const TERMINAL_INTENT_STATUSES = new Set<OrderIntentStatus>([
-  "settled",
-  "failed",
-  "skipped",
-  "canceled",
-  "unwound",
-]);
+const TERMINAL_INTENT_STATUSES = new Set<OrderIntentStatus>(["settled", "failed", "skipped", "canceled", "unwound"]);
 
 export type MismatchRiskPolicyReasonCode =
   | "estimate_unavailable"
@@ -47,10 +35,7 @@ export type MismatchRiskPolicyReason = {
 
 export type IntentMismatchExposure = MismatchClusterExposure & {
   intentId: string;
-  fatalLossSource:
-    | "fatal_loss_exposure"
-    | "fatal_mismatch_pnl"
-    | "target_notional";
+  fatalLossSource: "fatal_loss_exposure" | "fatal_mismatch_pnl" | "target_notional";
   probabilitySource: "model" | "conservative_fallback";
 };
 
@@ -100,19 +85,15 @@ export function annotateOpportunityWithMismatchRisk(
   estimate: MismatchRiskEstimate,
 ): LiveOpportunity {
   const modeledFatalPnlUsd = estimate.available ? estimate.fatalPnlUsd : null;
-  const fatalMismatchPnlUsd = modeledFatalPnlUsd === null
-    ? opportunity.fatalMismatchPnlUsd ?? null
-    : Math.min(
-        modeledFatalPnlUsd,
-        opportunity.fatalMismatchPnlUsd ?? modeledFatalPnlUsd,
-      );
+  const fatalMismatchPnlUsd =
+    modeledFatalPnlUsd === null
+      ? (opportunity.fatalMismatchPnlUsd ?? null)
+      : Math.min(modeledFatalPnlUsd, opportunity.fatalMismatchPnlUsd ?? modeledFatalPnlUsd);
   const modeledConservativePnlUsd = estimate.available ? estimate.conservativePnlUsd : null;
-  const conservativeExpectedPnlUsd = modeledConservativePnlUsd === null
-    ? opportunity.conservativeExpectedPnlUsd ?? null
-    : Math.min(
-        modeledConservativePnlUsd,
-        opportunity.conservativeExpectedPnlUsd ?? modeledConservativePnlUsd,
-      );
+  const conservativeExpectedPnlUsd =
+    modeledConservativePnlUsd === null
+      ? (opportunity.conservativeExpectedPnlUsd ?? null)
+      : Math.min(modeledConservativePnlUsd, opportunity.conservativeExpectedPnlUsd ?? modeledConservativePnlUsd);
 
   return {
     ...opportunity,
@@ -154,18 +135,14 @@ export function calculateMismatchClusterExposure(input: {
       fatalLossUsd: fatalLoss.value,
       pFatalUpper95: hasModelProbability ? modelProbability : 1,
       fatalLossSource: fatalLoss.source,
-      probabilitySource: hasModelProbability
-        ? "model"
-        : "conservative_fallback",
+      probabilitySource: hasModelProbability ? "model" : "conservative_fallback",
     });
   }
 
   return { slotEndTs: input.slotEndTs, exposures, invalidIntentIds };
 }
 
-export function recheckMismatchRiskCandidate(
-  input: MismatchRiskPolicyInput,
-): MismatchRiskPolicyCheck {
+export function recheckMismatchRiskCandidate(input: MismatchRiskPolicyInput): MismatchRiskPolicyCheck {
   const mode = input.mode ?? "shadow";
   const diagnosticReasons: MismatchRiskPolicyReason[] = [];
   const blockingReasons: MismatchRiskPolicyReason[] = [];
@@ -187,31 +164,19 @@ export function recheckMismatchRiskCandidate(
     : null;
 
   if (isUncalibratedModelVersion(input.estimate.modelVersion)) {
-    diagnosticReasons.push(
-      policyReason("model_uncalibrated", input.estimate.modelVersion),
-    );
+    diagnosticReasons.push(policyReason("model_uncalibrated", input.estimate.modelVersion));
   }
 
   if (!input.estimate.available) {
-    diagnosticReasons.push(
-      policyReason(
-        "estimate_unavailable",
-        input.estimate.reason ?? "raison inconnue",
-      ),
-    );
+    diagnosticReasons.push(policyReason("estimate_unavailable", input.estimate.reason ?? "raison inconnue"));
   } else if (input.estimate.executionUsable === false) {
     diagnosticReasons.push(
-      policyReason(
-        "execution_reference_unusable",
-        input.estimate.executionReason ?? "références non synchronisées",
-      ),
+      policyReason("execution_reference_unusable", input.estimate.executionReason ?? "références non synchronisées"),
     );
   }
 
   if (input.estimate.available && !economics) {
-    diagnosticReasons.push(
-      policyReason("estimate_invalid", economicsResult.reason ?? "données invalides"),
-    );
+    diagnosticReasons.push(policyReason("estimate_invalid", economicsResult.reason ?? "données invalides"));
   } else if (economicGate && !economicGate.eligible) {
     diagnosticReasons.push(
       policyReason(
@@ -223,12 +188,7 @@ export function recheckMismatchRiskCandidate(
   }
 
   if (clusterExposure.invalidIntentIds.length > 0) {
-    diagnosticReasons.push(
-      policyReason(
-        "cluster_exposure_unavailable",
-        clusterExposure.invalidIntentIds.join(", "),
-      ),
-    );
+    diagnosticReasons.push(policyReason("cluster_exposure_unavailable", clusterExposure.invalidIntentIds.join(", ")));
   }
 
   let normalizedConfig: GlobalRiskConfig | null = null;
@@ -267,21 +227,11 @@ export function recheckMismatchRiskCandidate(
           },
         ],
       });
-      if (
-        clusterBudgetAfter.usedExpectedLossUsd >
-        clusterBudgetAfter.expectedLossBudgetUsd + 1e-9
-      ) {
-        diagnosticReasons.push(
-          policyReason("cluster_expected_budget_exceeded"),
-        );
+      if (clusterBudgetAfter.usedExpectedLossUsd > clusterBudgetAfter.expectedLossBudgetUsd + 1e-9) {
+        diagnosticReasons.push(policyReason("cluster_expected_budget_exceeded"));
       }
-      if (
-        clusterBudgetAfter.usedAbsoluteLossUsd >
-        clusterBudgetAfter.absoluteLossBudgetUsd + 1e-9
-      ) {
-        diagnosticReasons.push(
-          policyReason("cluster_absolute_budget_exceeded"),
-        );
+      if (clusterBudgetAfter.usedAbsoluteLossUsd > clusterBudgetAfter.absoluteLossBudgetUsd + 1e-9) {
+        diagnosticReasons.push(policyReason("cluster_absolute_budget_exceeded"));
       }
     }
   }
@@ -290,11 +240,7 @@ export function recheckMismatchRiskCandidate(
     copyBlockingReasons(
       diagnosticReasons,
       blockingReasons,
-      new Set([
-        "estimate_invalid",
-        "non_positive_aligned_margin",
-        "fatal_probability_above_limit",
-      ]),
+      new Set(["estimate_invalid", "non_positive_aligned_margin", "fatal_probability_above_limit"]),
     );
   } else if (mode === "enforce") {
     copyBlockingReasons(
@@ -329,14 +275,9 @@ export function recheckMismatchRiskCandidate(
   };
 }
 
-export function applyMismatchRiskPolicy(
-  input: MismatchRiskPolicyInput,
-): MismatchRiskPolicyResult {
+export function applyMismatchRiskPolicy(input: MismatchRiskPolicyInput): MismatchRiskPolicyResult {
   const check = recheckMismatchRiskCandidate(input);
-  const annotated = annotateOpportunityWithMismatchRisk(
-    input.opportunity,
-    input.estimate,
-  );
+  const annotated = annotateOpportunityWithMismatchRisk(input.opportunity, input.estimate);
   const blockingMessages = check.blockingReasons.map((reason) => reason.message);
   return {
     ...check,
@@ -356,10 +297,7 @@ function readCandidateEconomics(
     return { economics: null, reason: estimate.reason };
   }
   const pairSize = Math.min(...opportunity.legs.map((leg) => leg.size));
-  const totalCostUsd = opportunity.legs.reduce(
-    (total, leg) => total + leg.targetNotionalUsd + leg.feeEstimateUsd,
-    0,
-  );
+  const totalCostUsd = opportunity.legs.reduce((total, leg) => total + leg.targetNotionalUsd + leg.feeEstimateUsd, 0);
   if (!isPositiveFinite(pairSize)) {
     return { economics: null, reason: "taille appariée invalide" };
   }
@@ -374,10 +312,7 @@ function readCandidateEconomics(
     economics: {
       pairSize,
       totalCostUsd,
-      fatalLossUsd: Math.max(
-        totalCostUsd,
-        Math.abs(Math.min(0, opportunity.fatalMismatchPnlUsd ?? 0)),
-      ),
+      fatalLossUsd: Math.max(totalCostUsd, Math.abs(Math.min(0, opportunity.fatalMismatchPnlUsd ?? 0))),
       pFatalUpper95: estimate.pFatalUpper95,
     },
     reason: null,
@@ -399,9 +334,7 @@ function readIntentFatalLoss(intent: OrderIntent): {
   }
   if (isNonNegativeFinite(intent.targetNotionalUsd)) {
     const conservativeLegCost = (Array.isArray(intent.legs) ? intent.legs : []).reduce((sum, leg) => {
-      const limitNotional = leg.requestedPrice === null
-        ? 0
-        : Math.max(0, leg.requestedSize * leg.requestedPrice);
+      const limitNotional = leg.requestedPrice === null ? 0 : Math.max(0, leg.requestedSize * leg.requestedPrice);
       return sum + Math.max(0, leg.requestedNotionalUsd, limitNotional) + Math.max(0, leg.feeUsd);
     }, 0);
     return {
@@ -412,10 +345,7 @@ function readIntentFatalLoss(intent: OrderIntent): {
   return null;
 }
 
-function policyReason(
-  code: MismatchRiskPolicyReasonCode,
-  details?: string,
-): MismatchRiskPolicyReason {
+function policyReason(code: MismatchRiskPolicyReasonCode, details?: string): MismatchRiskPolicyReason {
   const suffix = details ? ` (${details})` : "";
   switch (code) {
     case "estimate_unavailable":
@@ -457,9 +387,7 @@ function copyBlockingReasons(
   target.push(...source.filter((reason) => blockingCodes.has(reason.code)));
 }
 
-function uniqueReasons(
-  reasons: MismatchRiskPolicyReason[],
-): MismatchRiskPolicyReason[] {
+function uniqueReasons(reasons: MismatchRiskPolicyReason[]): MismatchRiskPolicyReason[] {
   const byCode = new Map<MismatchRiskPolicyReasonCode, MismatchRiskPolicyReason>();
   for (const reason of reasons) {
     if (!byCode.has(reason.code)) {
@@ -474,19 +402,11 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function isProbability(value: unknown): value is number {
-  return (
-    typeof value === "number" &&
-    Number.isFinite(value) &&
-    value >= 0 &&
-    value <= 1
-  );
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 }
 
 function isUncalibratedModelVersion(value: unknown): boolean {
-  return (
-    typeof value === "string" &&
-    value.toLowerCase().includes("uncalibrated")
-  );
+  return typeof value === "string" && value.toLowerCase().includes("uncalibrated");
 }
 
 function isPositiveFinite(value: unknown): value is number {

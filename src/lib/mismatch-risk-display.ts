@@ -9,10 +9,7 @@ import type {
 
 export type MismatchModelDisplayState = "unavailable" | "uncalibrated" | "calibrated";
 
-export type MismatchSettlementClassification =
-  | "aligned"
-  | "double_payout"
-  | "fatal_mismatch";
+export type MismatchSettlementClassification = "aligned" | "double_payout" | "fatal_mismatch";
 
 export type MismatchAuditSummary = {
   auditedCount: number;
@@ -42,9 +39,7 @@ export function getMismatchModelDisplayState(
   return estimate.available ? "calibrated" : "unavailable";
 }
 
-export function selectHighestRiskEstimate(
-  opportunities: LiveOpportunity[],
-): MismatchRiskEstimate | null {
+export function selectHighestRiskEstimate(opportunities: LiveOpportunity[]): MismatchRiskEstimate | null {
   const estimates = opportunities
     .map((opportunity) => opportunity.mismatchRiskEstimate ?? null)
     .filter((estimate): estimate is MismatchRiskEstimate => estimate !== null);
@@ -54,9 +49,7 @@ export function selectHighestRiskEstimate(
       return estimate;
     }
 
-    return readComparableProbability(estimate) > readComparableProbability(selected)
-      ? estimate
-      : selected;
+    return readComparableProbability(estimate) > readComparableProbability(selected) ? estimate : selected;
   }, null);
 }
 
@@ -83,9 +76,7 @@ export function formatRiskAge(value: number | null | undefined) {
   return `${(value / 1_000).toFixed(1)}s`;
 }
 
-export function formatMismatchAuditDecision(
-  decision: MismatchRiskCounterfactualDecision,
-) {
+export function formatMismatchAuditDecision(decision: MismatchRiskCounterfactualDecision) {
   const labels: Record<MismatchRiskCounterfactualDecision, string> = {
     would_allow: "aurait autorisé",
     would_block: "aurait bloqué",
@@ -106,9 +97,7 @@ export function formatMismatchEconomicsBasis(basis: MismatchEconomicsBasis) {
   return labels[basis];
 }
 
-export function isMismatchBlockingDecision(
-  decision: MismatchRiskCounterfactualDecision,
-) {
+export function isMismatchBlockingDecision(decision: MismatchRiskCounterfactualDecision) {
   return decision === "would_block" || decision === "reference_block";
 }
 
@@ -140,14 +129,8 @@ export function readIntentMismatchRiskAudit(intent: OrderIntent) {
   return reconstructMismatchRiskAudit(intent);
 }
 
-export function classifySettledIntentMismatch(
-  intent: OrderIntent,
-): MismatchSettlementClassification | null {
-  if (
-    intent.status !== "settled" ||
-    intent.polyResolution === null ||
-    intent.kalshiResolution === null
-  ) {
+export function classifySettledIntentMismatch(intent: OrderIntent): MismatchSettlementClassification | null {
+  if (intent.status !== "settled" || intent.polyResolution === null || intent.kalshiResolution === null) {
     return null;
   }
 
@@ -158,8 +141,7 @@ export function classifySettledIntentMismatch(
   }
 
   const winningLegCount =
-    Number(polymarketLeg.outcome === intent.polyResolution) +
-    Number(kalshiLeg.outcome === intent.kalshiResolution);
+    Number(polymarketLeg.outcome === intent.polyResolution) + Number(kalshiLeg.outcome === intent.kalshiResolution);
   if (winningLegCount === 0) {
     return "fatal_mismatch";
   }
@@ -169,9 +151,7 @@ export function classifySettledIntentMismatch(
   return "aligned";
 }
 
-export function formatMismatchSettlementClassification(
-  classification: MismatchSettlementClassification,
-) {
+export function formatMismatchSettlementClassification(classification: MismatchSettlementClassification) {
   const labels: Record<MismatchSettlementClassification, string> = {
     aligned: "aligné · 1 payout",
     double_payout: "mismatch favorable · 2 payouts",
@@ -200,9 +180,7 @@ export function formatMismatchAuditSettlementLabel(
   return `${decisionLabels[decision]} + ${settlementLabels[classification]}`;
 }
 
-export function summarizeMismatchRiskAudits(
-  intents: OrderIntent[],
-): MismatchAuditSummary {
+export function summarizeMismatchRiskAudits(intents: OrderIntent[]): MismatchAuditSummary {
   const summary: MismatchAuditSummary = {
     auditedCount: 0,
     allowCount: 0,

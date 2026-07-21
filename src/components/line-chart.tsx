@@ -72,9 +72,7 @@ export function LineChart({ series, labels }: LineChartProps) {
 
         {series.map((line) => {
           const points = line.values
-            .map((value, index) =>
-              value === null ? null : { x: getX(index), y: getY(value) },
-            )
+            .map((value, index) => (value === null ? null : { x: getX(index), y: getY(value) }))
             .filter((value): value is { x: number; y: number } => value !== null);
 
           const linePoints = points.map((point) => `${point.x},${point.y}`).join(" ");
@@ -108,13 +106,7 @@ export function LineChart({ series, labels }: LineChartProps) {
         })}
 
         {!hasData ? (
-          <text
-            x={WIDTH / 2}
-            y={HEIGHT / 2}
-            fill="rgba(143, 152, 179, 0.72)"
-            fontSize="14"
-            textAnchor="middle"
-          >
+          <text x={WIDTH / 2} y={HEIGHT / 2} fill="rgba(143, 152, 179, 0.72)" fontSize="14" textAnchor="middle">
             Pas encore de points pour ce créneau.
           </text>
         ) : null}

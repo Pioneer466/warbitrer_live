@@ -1,25 +1,66 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
 import { createApiErrorResponse } from "@/lib/api-error";
 import { authenticateApiMutation } from "@/lib/api-mutation-auth";
+import { createManualKillIncident } from "@/lib/circuit-breaker-incidents";
 import {
-  OrderIntentRevisionConflictError,
-  readCircuitBreakers,
+  aggregateCircuitBreakerIncidents,
+  getCircuitBreakerScopeKey,
+  isManualKillIncident,
+  projectLegacyCircuitBreakersForUi,
+} from "@/lib/circuit-breaker-policy";
+import type { CircuitBreakerIncident, CircuitBreakerScopeAggregate } from "@/lib/circuit-breaker-policy";
+import {
+  acknowledgeCircuitBreaker,
+  acknowledgeManualKillBreaker,
+  CircuitBreakerIncidentPersistenceError,
+  readCurrentCircuitBreakerIncidents,
   readOpenOrderIntents,
-  writeCircuitBreaker,
-  writeOrderIntent,
+  writeCircuitBreakerIncident,
 } from "@/lib/storage";
-import { isMarketAsset } from "@/lib/market-catalog";
-import type { CircuitBreaker, CircuitBreakerKey, CircuitBreakerReason, OrderIntent } from "@/lib/types";
+import type { CircuitBreaker, CircuitBreakerKey, CircuitBreakerReason } from "@/lib/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+const manualKillMutationSchema = z.discriminatedUnion("active", [
+  z
+    .object({
+      key: z.literal("global"),
+      active: z.literal(true),
+      reason: z.union([z.literal("manual"), z.null()]).optional(),
+      payload: z
+        .object({
+          note: z.unknown().optional(),
+        })
+        .strict()
+        .nullable()
+        .optional(),
+    })
+    .strict(),
+  z
+    .object({
+      key: z.string().trim().min(1).max(512).optional(),
+      active: z.literal(false),
+      reason: z.literal("manual").optional(),
+      incidentId: z.string().trim().min(1).max(256),
+      expectedRevision: z.number().int().positive(),
+    })
+    .strict(),
+]);
+
 export async function GET(request: Request) {
   try {
-    const breakers = await readCircuitBreakers();
+    const now = Date.now();
+    const incidents = await readCurrentCircuitBreakerIncidents();
+    const aggregates = aggregateCircuitBreakerIncidents(incidents, now);
+    const breakers = projectLegacyBreakers(aggregates);
     const url = new URL(request.url);
-    const body = url.searchParams.get("details") === "1" ? await buildDetailedBreakerResponse(breakers) : breakers;
+    const body =
+      url.searchParams.get("details") === "1"
+        ? await buildDetailedBreakerResponse(incidents, aggregates, breakers, now)
+        : breakers;
 
     return NextResponse.json(body, {
       headers: {
@@ -31,172 +72,155 @@ export async function GET(request: Request) {
   }
 }
 
-async function buildDetailedBreakerResponse(breakers: CircuitBreaker[]) {
-  const now = Date.now();
-  const openIntents = await readOpenOrderIntents();
+async function buildDetailedBreakerResponse(
+  incidents: CircuitBreakerIncident[],
+  aggregates: CircuitBreakerScopeAggregate[],
+  breakers: CircuitBreaker[],
+  now: number,
+) {
+  const openIntentIds = new Set((await readOpenOrderIntents()).map((intent) => intent.id));
+  const aggregateByKey = new Map(aggregates.map((aggregate) => [aggregate.scopeKey, aggregate]));
   const detailed = breakers.map((breaker) => {
-    const scope = parseBreakerScope(breaker.key);
+    const aggregate = aggregateByKey.get(breaker.key);
+    const cooldownUntil = aggregate?.cooldownUntil ?? null;
     return {
       ...breaker,
-      scope,
-      requiresManualClear: getPayloadBoolean(breaker.payload, "requiresManualClear"),
-      cooldownUntil: getPayloadNumber(breaker.payload, "cooldownUntil"),
-      cooldownRemainingMs:
-        getPayloadNumber(breaker.payload, "cooldownUntil") === null
-          ? null
-          : Math.max(0, getPayloadNumber(breaker.payload, "cooldownUntil")! - now),
-      unresolvedIntentIds: findUnresolvedIntentIds(scope, openIntents),
+      scope: aggregate?.scope ?? null,
+      activeIncidentCount: aggregate?.activeIncidentCount ?? 0,
+      incidentIds: aggregate?.incidentIds ?? [],
+      intentIds: aggregate?.intentIds ?? [],
+      dominantIncidentId: aggregate?.dominantIncidentId ?? null,
+      manualKillActive: aggregate?.manualKillActive ?? false,
+      requiresManualClear: aggregate?.requiresOperatorAcknowledgement ?? false,
+      cooldownUntil,
+      cooldownRemainingMs: cooldownUntil === null ? null : Math.max(0, cooldownUntil - now),
+      unresolvedIntentIds: (aggregate?.intentIds ?? []).filter((intentId) => openIntentIds.has(intentId)),
     };
   });
+  const manualKillIncident = incidents.find(isManualKillIncident) ?? null;
 
   return {
     fetchedAt: now,
     global: detailed.find((breaker) => breaker.key === "global") ?? null,
-    activeBreakers: detailed.filter((breaker) => breaker.active),
+    manualKillIncident,
+    activeBreakers: detailed,
     breakers: detailed,
+    incidents,
   };
-}
-
-function parseBreakerScope(key: CircuitBreakerKey) {
-  if (key === "global") {
-    return { type: "global" as const, asset: null, slotKey: null };
-  }
-
-  if (key.startsWith("asset:")) {
-    const asset = key.slice("asset:".length);
-    return { type: "asset" as const, asset: isMarketAsset(asset) ? asset : null, slotKey: null };
-  }
-
-  const rest = key.slice("slot:".length);
-  const [asset] = rest.split(":");
-  return {
-    type: "slot" as const,
-    asset: asset && isMarketAsset(asset) ? asset : null,
-    slotKey: rest || null,
-  };
-}
-
-function findUnresolvedIntentIds(scope: ReturnType<typeof parseBreakerScope>, openIntents: OrderIntent[]) {
-  return openIntents.filter((intent) => matchesBreakerScope(scope, intent)).map((intent) => intent.id);
-}
-
-function matchesBreakerScope(
-  scope: ReturnType<typeof parseBreakerScope>,
-  intent: Pick<OrderIntent, "asset" | "slotKey">,
-) {
-  if (scope.type === "global") {
-    return true;
-  }
-  if (scope.asset !== null && intent.asset !== scope.asset) {
-    return false;
-  }
-  return scope.type !== "slot" || scope.slotKey === null || intent.slotKey === scope.slotKey;
-}
-
-function getPayloadBoolean(payload: Record<string, unknown> | null, key: string) {
-  return payload?.[key] === true;
-}
-
-function getPayloadNumber(payload: Record<string, unknown> | null, key: string) {
-  const value = payload?.[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 export async function PUT(request: Request) {
   try {
-    authenticateApiMutation(request);
+    const mutation = authenticateApiMutation(request);
+    const parsed = manualKillMutationSchema.safeParse(await request.json().catch(() => null));
+    if (!parsed.success) {
+      return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
+    }
+    const body = parsed.data;
 
-    const body = (await request.json()) as {
-      key?: CircuitBreakerKey;
-      active?: boolean;
-      reason?: CircuitBreakerReason | null;
-      payload?: Record<string, unknown> | null;
-      closeUnresolvedIntents?: boolean;
-      intentId?: string;
-    };
-
-    if (!body.key || typeof body.active !== "boolean") {
-      return NextResponse.json(
-        {
-          error: "key and active are required",
+    if (body.active) {
+      const triggeredAt = Date.now();
+      const note = sanitizeOperatorNote(body.payload?.note);
+      const incident = createManualKillIncident({
+        triggeredAt,
+        operatorId: mutation.actor,
+        note,
+      });
+      const persisted = await writeCircuitBreakerIncident({
+        incident,
+        actor: mutation.actor,
+        requestId: `api:${mutation.requestId}`,
+      });
+      return NextResponse.json({
+        key: "global",
+        active: true,
+        reason: "manual",
+        triggeredAt: persisted.timestamps.triggeredAt,
+        payload: {
+          projectionVersion: "multi-cause-ui-v1",
+          uiProjectionOnly: true,
+          dominantIncidentId: persisted.id,
+          incidentIds: [persisted.id],
+          intentIds: [],
+          manualKillActive: true,
+          requiresManualClear: true,
+          cooldownUntil: null,
         },
-        { status: 400 },
-      );
+        incidentId: persisted.id,
+        revision: persisted.revision,
+        closedIntentIds: [],
+      });
     }
 
-    const now = Date.now();
-    const existingBreakers = await readCircuitBreakers();
-    const existingBreaker = existingBreakers.find((candidate) => candidate.key === body.key) ?? null;
-    const closedIntentIds =
-      body.active === false && body.closeUnresolvedIntents === true
-        ? await closeBreakerUnresolvedIntents(body.key, existingBreaker, now, body.intentId)
-        : [];
+    const incidents = await readCurrentCircuitBreakerIncidents();
+    const incident = incidents.find((candidate) => candidate.id === body.incidentId) ?? null;
+    if (!incident) {
+      return NextResponse.json({ error: `Open incident ${body.incidentId} not found` }, { status: 404 });
+    }
+    const incidentScopeKey = getCircuitBreakerScopeKey(incident.scope);
+    if (body.key !== undefined && body.key !== incidentScopeKey) {
+      return NextResponse.json({ error: "key does not match the requested incident scope" }, { status: 400 });
+    }
+    const acknowledge = isManualKillIncident(incident) ? acknowledgeManualKillBreaker : acknowledgeCircuitBreaker;
+    const acknowledged = await acknowledge({
+      incidentId: incident.id,
+      expectedRevision: body.expectedRevision,
+      operatorId: mutation.actor,
+      actor: mutation.actor,
+      requestId: `api:${mutation.requestId}`,
+    });
+    const remainingIncidents = await readCurrentCircuitBreakerIncidents();
+    const remainingAggregate = aggregateCircuitBreakerIncidents(remainingIncidents, Date.now()).find(
+      (aggregate) => aggregate.scopeKey === getCircuitBreakerScopeKey(incident.scope),
+    );
+    const remainingBreaker = remainingAggregate ? projectLegacyBreakers([remainingAggregate])[0] : null;
 
-    const breaker = {
-      key: body.key,
-      active: body.active,
-      reason: body.active ? (body.reason ?? "manual") : null,
-      triggeredAt: body.active ? now : null,
-      payload: body.payload ?? null,
-    };
-
-    await writeCircuitBreaker(breaker);
-    return NextResponse.json({ ...breaker, closedIntentIds });
+    return NextResponse.json({
+      key: incidentScopeKey,
+      active: remainingBreaker !== null,
+      reason: remainingBreaker?.reason ?? null,
+      triggeredAt: remainingBreaker?.triggeredAt ?? null,
+      payload: remainingBreaker?.payload ?? null,
+      acknowledgedIncidentId: acknowledged.id,
+      revision: acknowledged.revision,
+      closedIntentIds: [],
+    });
   } catch (error) {
-    if (error instanceof OrderIntentRevisionConflictError) {
+    if (error instanceof CircuitBreakerIncidentPersistenceError) {
+      const status = error.code === "incident_not_found" ? 404 : 409;
       return NextResponse.json(
         {
           error: error.message,
-          status: 409,
+          code: error.code,
+          incidentId: error.incidentId,
+          status,
           timestamp: Date.now(),
         },
-        { status: 409 },
+        { status },
       );
     }
     return createApiErrorResponse(error);
   }
 }
 
-const UNRESOLVED_INTENT_STATUSES = new Set<OrderIntent["status"]>([
-  "executing_primary",
-  "primary_filled",
-  "truth_pending",
-  "rescue_hedge",
-  "hedging",
-  "unwind_required",
-  "manual_required",
-]);
-
-async function closeBreakerUnresolvedIntents(
-  key: CircuitBreakerKey,
-  breaker: CircuitBreaker | null,
-  now: number,
-  requestedIntentId?: string,
-) {
-  const scope = parseBreakerScope(key);
-  const openIntents = await readOpenOrderIntents();
-  const explicitIntentId =
-    typeof requestedIntentId === "string" && requestedIntentId.trim() ? requestedIntentId.trim() : null;
-  const payloadIntentId = typeof breaker?.payload?.intentId === "string" ? breaker.payload.intentId : null;
-  const targetIntentId = explicitIntentId ?? payloadIntentId;
-  const closeableIntents = openIntents.filter((intent) => {
-    if (!UNRESOLVED_INTENT_STATUSES.has(intent.status)) {
-      return false;
-    }
-    if (targetIntentId !== null) {
-      return intent.id === targetIntentId;
-    }
-    return scope.type !== "global" && matchesBreakerScope(scope, intent);
-  });
-
-  for (const intent of closeableIntents) {
-    await writeOrderIntent({
-      ...intent,
-      status: "failed",
-      updatedAt: now,
-      failureReason: "Manually closed unresolved breaker exposure from portfolio clear button",
-    });
+function sanitizeOperatorNote(value: unknown) {
+  if (typeof value !== "string") {
+    return null;
   }
+  return (
+    value
+      .replace(/[\u0000-\u001f\u007f]/g, " ")
+      .trim()
+      .slice(0, 1_024) || null
+  );
+}
 
-  return closeableIntents.map((intent) => intent.id);
+function projectLegacyBreakers(aggregates: CircuitBreakerScopeAggregate[]): CircuitBreaker[] {
+  return projectLegacyCircuitBreakersForUi(aggregates).map((breaker) => ({
+    key: breaker.key as CircuitBreakerKey,
+    active: true,
+    reason: breaker.reason as CircuitBreakerReason,
+    triggeredAt: breaker.triggeredAt,
+    payload: breaker.payload,
+  }));
 }

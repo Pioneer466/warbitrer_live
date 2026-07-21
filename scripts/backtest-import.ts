@@ -12,11 +12,13 @@ function main() {
   });
 
   if (values.help || !values.dump) {
-    console.log([
-      "Usage: npm run backtest:import -- --dump ./backtest-data/warbitrer.dump [--database warbitrer_backtest]",
-      "",
-      "Drops and recreates the local backtest database, then restores the table-filtered dump.",
-    ].join("\n"));
+    console.log(
+      [
+        "Usage: npm run backtest:import -- --dump ./backtest-data/warbitrer.dump [--database warbitrer_backtest]",
+        "",
+        "Drops and recreates the local backtest database, then restores the table-filtered dump.",
+      ].join("\n"),
+    );
     return;
   }
 
@@ -28,15 +30,7 @@ function main() {
 
   run("dropdb", ["--if-exists", database]);
   run("createdb", [database]);
-  run("pg_restore", [
-    "--clean",
-    "--if-exists",
-    "--no-owner",
-    "--no-acl",
-    "--dbname",
-    database,
-    dumpPath,
-  ]);
+  run("pg_restore", ["--clean", "--if-exists", "--no-owner", "--no-acl", "--dbname", database, dumpPath]);
 
   console.log(`Imported ${dumpPath} into local database ${database}.`);
 }

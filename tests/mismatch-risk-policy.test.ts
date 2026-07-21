@@ -5,11 +5,7 @@ import {
   calculateMismatchClusterExposure,
   recheckMismatchRiskCandidate,
 } from "@/lib/mismatch-risk-policy";
-import type {
-  LiveOpportunity,
-  MismatchRiskEstimate,
-  OrderIntent,
-} from "@/lib/types";
+import type { LiveOpportunity, MismatchRiskEstimate, OrderIntent } from "@/lib/types";
 
 const SLOT_END_TS = 1_800_000_900_000;
 
@@ -79,9 +75,7 @@ function opportunity(overrides: Partial<LiveOpportunity> = {}): LiveOpportunity 
   };
 }
 
-function estimate(
-  overrides: Partial<MismatchRiskEstimate> = {},
-): MismatchRiskEstimate {
+function estimate(overrides: Partial<MismatchRiskEstimate> = {}): MismatchRiskEstimate {
   return {
     available: true,
     executionUsable: true,
@@ -209,25 +203,15 @@ describe("mismatch risk policy modes", () => {
     });
 
     for (const mode of ["shadow", "block_only"] as const) {
-      const result = recheckMismatchRiskCandidate(
-        policyInput({ mode, estimate: uncalibrated }),
-      );
+      const result = recheckMismatchRiskCandidate(policyInput({ mode, estimate: uncalibrated }));
       expect(result.allowed).toBe(true);
-      expect(result.diagnosticReasons.map((reason) => reason.code)).toContain(
-        "model_uncalibrated",
-      );
-      expect(result.blockingReasons.map((reason) => reason.code)).not.toContain(
-        "model_uncalibrated",
-      );
+      expect(result.diagnosticReasons.map((reason) => reason.code)).toContain("model_uncalibrated");
+      expect(result.blockingReasons.map((reason) => reason.code)).not.toContain("model_uncalibrated");
     }
 
-    const enforced = recheckMismatchRiskCandidate(
-      policyInput({ mode: "enforce", estimate: uncalibrated }),
-    );
+    const enforced = recheckMismatchRiskCandidate(policyInput({ mode: "enforce", estimate: uncalibrated }));
     expect(enforced.allowed).toBe(false);
-    expect(enforced.blockingReasons.map((reason) => reason.code)).toContain(
-      "model_uncalibrated",
-    );
+    expect(enforced.blockingReasons.map((reason) => reason.code)).toContain("model_uncalibrated");
   });
 
   it("keeps asynchronous diagnostics visible but blocks them in enforce", () => {
@@ -238,33 +222,21 @@ describe("mismatch risk policy modes", () => {
       sourceTimestampSkewMs: 5_000,
     });
 
-    const shadow = recheckMismatchRiskCandidate(
-      policyInput({ mode: "shadow", estimate: diagnosticOnly }),
-    );
+    const shadow = recheckMismatchRiskCandidate(policyInput({ mode: "shadow", estimate: diagnosticOnly }));
     expect(shadow.allowed).toBe(true);
-    expect(shadow.diagnosticReasons.map((reason) => reason.code)).toContain(
-      "execution_reference_unusable",
-    );
+    expect(shadow.diagnosticReasons.map((reason) => reason.code)).toContain("execution_reference_unusable");
 
-    const enforced = recheckMismatchRiskCandidate(
-      policyInput({ mode: "enforce", estimate: diagnosticOnly }),
-    );
+    const enforced = recheckMismatchRiskCandidate(policyInput({ mode: "enforce", estimate: diagnosticOnly }));
     expect(enforced.allowed).toBe(false);
-    expect(enforced.blockingReasons.map((reason) => reason.code)).toContain(
-      "execution_reference_unusable",
-    );
+    expect(enforced.blockingReasons.map((reason) => reason.code)).toContain("execution_reference_unusable");
   });
 
   it("keeps shadow purely observational even when the economic gate fails", () => {
-    const result = applyMismatchRiskPolicy(
-      policyInput({ estimate: estimate({ pFatalUpper95: 0.2 }) }),
-    );
+    const result = applyMismatchRiskPolicy(policyInput({ estimate: estimate({ pFatalUpper95: 0.2 }) }));
 
     expect(result.allowed).toBe(true);
     expect(result.blockingReasons).toEqual([]);
-    expect(result.diagnosticReasons.map((reason) => reason.code)).toContain(
-      "fatal_probability_above_limit",
-    );
+    expect(result.diagnosticReasons.map((reason) => reason.code)).toContain("fatal_probability_above_limit");
     expect(result.opportunity.eligible).toBe(true);
     expect(result.opportunity.reasons).toEqual([]);
   });
@@ -275,11 +247,7 @@ describe("mismatch risk policy modes", () => {
       reason: "insufficient_history",
       pFatalUpper95: null,
     });
-    expect(
-      recheckMismatchRiskCandidate(
-        policyInput({ mode: "block_only", estimate: unavailable }),
-      ).allowed,
-    ).toBe(true);
+    expect(recheckMismatchRiskCandidate(policyInput({ mode: "block_only", estimate: unavailable })).allowed).toBe(true);
 
     const overBudgetButEconomic = recheckMismatchRiskCandidate(
       policyInput({
@@ -297,9 +265,7 @@ describe("mismatch risk policy modes", () => {
       }),
     );
     expect(failedGate.allowed).toBe(false);
-    expect(failedGate.blockingReasons.map((reason) => reason.code)).toEqual([
-      "fatal_probability_above_limit",
-    ]);
+    expect(failedGate.blockingReasons.map((reason) => reason.code)).toEqual(["fatal_probability_above_limit"]);
     expect(failedGate.opportunity.eligible).toBe(false);
   });
 
@@ -315,9 +281,7 @@ describe("mismatch risk policy modes", () => {
       }),
     );
     expect(unavailable.allowed).toBe(false);
-    expect(unavailable.blockingReasons.map((reason) => reason.code)).toContain(
-      "estimate_unavailable",
-    );
+    expect(unavailable.blockingReasons.map((reason) => reason.code)).toContain("estimate_unavailable");
 
     const expectedBudget = recheckMismatchRiskCandidate(
       policyInput({
@@ -330,25 +294,19 @@ describe("mismatch risk policy modes", () => {
       withinBudget: false,
       limitingBudget: "expected",
     });
-    expect(expectedBudget.blockingReasons.map((reason) => reason.code)).toContain(
-      "cluster_expected_budget_exceeded",
-    );
+    expect(expectedBudget.blockingReasons.map((reason) => reason.code)).toContain("cluster_expected_budget_exceeded");
 
     const absoluteBudget = recheckMismatchRiskCandidate(
       policyInput({
         mode: "enforce",
-        openIntents: [
-          intent({ fatalLossExposureUsd: 70, mismatchPFatalUpper: 0.1 }),
-        ],
+        openIntents: [intent({ fatalLossExposureUsd: 70, mismatchPFatalUpper: 0.1 })],
       }),
     );
     expect(absoluteBudget.clusterBudgetAfter).toMatchObject({
       withinBudget: false,
       limitingBudget: "absolute",
     });
-    expect(absoluteBudget.blockingReasons.map((reason) => reason.code)).toContain(
-      "cluster_absolute_budget_exceeded",
-    );
+    expect(absoluteBudget.blockingReasons.map((reason) => reason.code)).toContain("cluster_absolute_budget_exceeded");
   });
 
   it("excludes the candidate intent during an idempotent recheck", () => {

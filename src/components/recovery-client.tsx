@@ -12,9 +12,14 @@ type BreakerDetailsResponse = {
   global: {
     key: string;
     active: boolean;
+    manualKillActive: boolean;
     requiresManualClear: boolean;
     cooldownUntil: number | null;
     unresolvedIntentIds: string[];
+  } | null;
+  manualKillIncident: {
+    id: string;
+    revision: number;
   } | null;
   activeBreakers: Array<{
     key: string;
@@ -44,24 +49,30 @@ export function RecoveryClient() {
   }
 
   if (!recovery.data) {
-    return <PanelMessage title="Erreur" message={recovery.error ?? "Impossible de charger la page Recup."} tone="rose" />;
+    return (
+      <PanelMessage title="Erreur" message={recovery.error ?? "Impossible de charger la page Recup."} tone="rose" />
+    );
   }
 
   const recoveryData = recovery.data;
-  const globalBreakerActive = breakerDetails.data?.global?.active ?? recoveryData.globalKillSwitchActive;
-  const activeNonGlobalBreakers = breakerDetails.data?.activeBreakers.filter((breaker) => breaker.key !== "global") ?? [];
-  const groupedMarkets = ACTIVE_MARKET_ASSETS
-    .map((asset) => ({
-      asset,
-      markets: recoveryData.markets.filter((market) => market.asset === asset),
-    }))
-    .filter((group) => group.markets.length > 0);
+  const globalBreakerActive = breakerDetails.data?.global?.manualKillActive ?? recoveryData.globalKillSwitchActive;
+  const activeNonGlobalBreakers =
+    breakerDetails.data?.activeBreakers.filter((breaker) => breaker.key !== "global") ?? [];
+  const groupedMarkets = ACTIVE_MARKET_ASSETS.map((asset) => ({
+    asset,
+    markets: recoveryData.markets.filter((market) => market.asset === asset),
+  })).filter((group) => group.markets.length > 0);
 
   async function toggleKillSwitch() {
     setBusy("kill-switch");
     setActionMessage(null);
     setManualTx(null);
     try {
+      const nextActive = !globalBreakerActive;
+      const manualKillIncident = breakerDetails.data?.manualKillIncident ?? null;
+      if (!nextActive && !manualKillIncident) {
+        throw new Error("Aucun incident manual-kill actif à acquitter.");
+      }
       const response = await fetch("/api/circuit-breakers", {
         method: "PUT",
         headers: {
@@ -69,8 +80,10 @@ export function RecoveryClient() {
         },
         body: JSON.stringify({
           key: "global",
-          active: !globalBreakerActive,
+          active: nextActive,
           reason: "manual",
+          incidentId: nextActive ? undefined : manualKillIncident?.id,
+          expectedRevision: nextActive ? undefined : manualKillIncident?.revision,
         }),
       });
 
@@ -136,7 +149,9 @@ export function RecoveryClient() {
         const verb = payload.action === "merge" ? "Merge" : "Redeem";
         const amountSuffix = payload.action === "merge" && payload.amount ? ` pour ${payload.amount}` : "";
         const stateSuffix = payload.relayerState ? ` · ${payload.relayerState}` : "";
-        setActionMessage(`${verb} envoye via relayer${amountSuffix}. Id: ${payload.relayerTransactionId}${stateSuffix}`);
+        setActionMessage(
+          `${verb} envoye via relayer${amountSuffix}. Id: ${payload.relayerTransactionId}${stateSuffix}`,
+        );
       } else {
         setActionMessage(payload.reason ?? "Mode manuel requis pour ce wallet.");
         if (payload.tx) {
@@ -156,7 +171,9 @@ export function RecoveryClient() {
         <Surface glow>
           <div className="grid gap-px bg-[var(--wa-gold-border)] xl:grid-cols-2">
             <div className="bg-[var(--wa-bg1)] px-5 py-5 sm:px-6">
-              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">Kill Switch</div>
+              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">
+                Kill Switch
+              </div>
               <div className="text-sm text-[var(--wa-ivory)]">
                 {globalBreakerActive
                   ? "Global actif: aucun nouvel ordre live."
@@ -167,7 +184,9 @@ export function RecoveryClient() {
               {activeNonGlobalBreakers.length > 0 ? (
                 <div className="mt-3 flex flex-wrap gap-2">
                   {activeNonGlobalBreakers.slice(0, 4).map((breaker) => (
-                    <Chip key={breaker.key} tone="rose">{breaker.key}</Chip>
+                    <Chip key={breaker.key} tone="rose">
+                      {breaker.key}
+                    </Chip>
                   ))}
                 </div>
               ) : null}
@@ -186,14 +205,20 @@ export function RecoveryClient() {
             </div>
 
             <div className="bg-[var(--wa-bg1)] px-5 py-5 text-sm text-[var(--wa-mist)] sm:px-6">
-              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">Settlement</div>
+              <div className="mb-2 text-[10px] uppercase tracking-[0.24em] text-[rgba(201,168,100,0.50)]">
+                Settlement
+              </div>
               <div className="text-[var(--wa-ivory)]">Polymarket: redeem ou merge manuel/direct selon le wallet.</div>
               <div className="mt-2">Signature type: {recoveryData.signatureType}</div>
               <div className="mt-1">Kalshi: settlement automatique, aucun claim manuel requis.</div>
             </div>
           </div>
 
-          {actionMessage ? <div className="border-t border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">{actionMessage}</div> : null}
+          {actionMessage ? (
+            <div className="border-t border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
+              {actionMessage}
+            </div>
+          ) : null}
           {manualTx ? (
             <div className="border-t border-[var(--wa-gold-border)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
               <div className="text-[var(--wa-ivory)]">Transaction manuelle preparee</div>
@@ -226,7 +251,9 @@ export function RecoveryClient() {
               <div key={check.key} className="bg-[var(--wa-bg1)] px-5 py-4 text-sm text-[var(--wa-mist)] sm:px-6">
                 <div className="flex items-center justify-between gap-3">
                   <div className="text-[var(--wa-ivory)]">{check.label}</div>
-                  <Chip tone={check.status === "ready" ? "emerald" : check.status === "blocked" ? "rose" : "amber"}>{check.status}</Chip>
+                  <Chip tone={check.status === "ready" ? "emerald" : check.status === "blocked" ? "rose" : "amber"}>
+                    {check.status}
+                  </Chip>
                 </div>
                 <div className="mt-2">{check.details}</div>
               </div>
@@ -247,12 +274,17 @@ export function RecoveryClient() {
                   <div className="flex items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4 sm:px-6">
                     <div>
                       <div className="font-mono text-xl text-[var(--wa-gold)]">{group.asset.toUpperCase()}</div>
-                      <div className="mt-1 text-sm text-[var(--wa-mist)]">{group.markets.length} marché(s) récupérable(s)</div>
+                      <div className="mt-1 text-sm text-[var(--wa-mist)]">
+                        {group.markets.length} marché(s) récupérable(s)
+                      </div>
                     </div>
                   </div>
 
                   {group.markets.map((market) => (
-                    <div key={market.marketRef} className="border-b border-[var(--wa-gold-border)] px-5 py-4 last:border-b-0 sm:px-6">
+                    <div
+                      key={market.marketRef}
+                      className="border-b border-[var(--wa-gold-border)] px-5 py-4 last:border-b-0 sm:px-6"
+                    >
                       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                         <div>
                           <div className="text-sm text-[var(--wa-ivory)]">{market.title}</div>
@@ -271,7 +303,10 @@ export function RecoveryClient() {
 
                       <div className="mt-4 grid gap-3 sm:grid-cols-2">
                         {market.outcomes.map((outcome) => (
-                          <div key={outcome.outcome} className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-3 text-sm text-[var(--wa-mist)]">
+                          <div
+                            key={outcome.outcome}
+                            className="rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-3 text-sm text-[var(--wa-mist)]"
+                          >
                             <div className="font-mono text-[var(--wa-ivory)]">{outcome.outcome}</div>
                             <div className="mt-2">
                               size {formatPrice(outcome.size, 2)} · valeur {formatCurrency(outcome.currentValueUsd)}
@@ -283,7 +318,10 @@ export function RecoveryClient() {
                       {market.notes.length > 0 ? (
                         <div className="mt-3 flex flex-wrap gap-2">
                           {market.notes.map((note) => (
-                            <span key={note} className="rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.06)] px-3 py-1 text-xs text-[var(--wa-mist)]">
+                            <span
+                              key={note}
+                              className="rounded border border-[var(--wa-gold-border)] bg-[rgba(201,168,100,0.06)] px-3 py-1 text-xs text-[var(--wa-mist)]"
+                            >
                               {note}
                             </span>
                           ))}
@@ -344,8 +382,8 @@ function PanelMessage({
   return (
     <Surface className={tone === "rose" ? "border-[rgba(232,80,106,0.28)]" : ""}>
       <div className={`px-5 py-6 text-sm ${tone === "rose" ? "text-[var(--wa-rose)]" : "text-[var(--wa-mist)]"}`}>
-      <div className="text-[var(--wa-ivory)]">{title}</div>
-      <div className="mt-2">{message}</div>
+        <div className="text-[var(--wa-ivory)]">{title}</div>
+        <div className="mt-2">{message}</div>
       </div>
     </Surface>
   );

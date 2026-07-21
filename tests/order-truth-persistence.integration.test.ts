@@ -6,7 +6,7 @@ import {
   DATABASE_MIGRATIONS,
   ImmutableFillConflictError,
   migratePostgresDatabase,
-  upsertFill,
+  upsertLegacyFillProjection,
   upsertOrderAttempt,
   upsertVenueOrder,
 } from "@/lib/postgres-db";
@@ -124,8 +124,13 @@ describePostgres("Postgres order-truth persistence", () => {
         pool,
         buildAttempt({
           status: "confirmed",
-          truthStatus: "filled",
-          result: { filledSize: 5 },
+          truthStatus: "canceled",
+          result: {
+            venue: "polymarket",
+            venueOrderId: "venue-order-1",
+            status: "canceled",
+            filledSize: 5,
+          },
           updatedAt: 300,
         }),
       );
@@ -149,8 +154,13 @@ describePostgres("Postgres order-truth persistence", () => {
       }>("SELECT status, truth_status, result_json, error, revision FROM order_attempts");
       expect(attempt.rows[0]).toEqual({
         status: "confirmed",
-        truth_status: "filled",
-        result_json: { filledSize: 5 },
+        truth_status: "canceled",
+        result_json: {
+          venue: "polymarket",
+          venueOrderId: "venue-order-1",
+          status: "canceled",
+          filledSize: 5,
+        },
         error: null,
         revision: 1,
       });
@@ -160,6 +170,7 @@ describePostgres("Postgres order-truth persistence", () => {
         buildAttempt({
           id: "attempt-retry",
           clientOrderId: "client-order-retry",
+          venueOrderId: null,
           status: "failed",
           truthStatus: "not_submitted",
           error: "definitive zero fill",
@@ -171,6 +182,7 @@ describePostgres("Postgres order-truth persistence", () => {
         buildAttempt({
           id: "attempt-retry",
           clientOrderId: "client-order-retry",
+          venueOrderId: null,
           status: "truth_pending",
           truthStatus: "submission_unknown",
           error: "retry timeout",
@@ -194,19 +206,29 @@ describePostgres("Postgres order-truth persistence", () => {
 
   it("makes fill replay idempotent, rejects mutations, and permits one maker trade across two orders", async () => {
     await withIsolatedSchema(async (pool) => {
-      await migratePostgresDatabase(pool);
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 2));
       await insertIntent(pool);
       const original = buildFill();
 
-      await upsertFill(pool, original);
-      await upsertFill(pool, { ...original, raw: { replay: true } });
-      await upsertFill(pool, { ...original, id: "fill-logical-replay", raw: { replay: "alternate-id" } });
-      await expect(upsertFill(pool, { ...original, feeUsd: 0.5 })).rejects.toBeInstanceOf(ImmutableFillConflictError);
+      await upsertLegacyFillProjection(pool, original);
+      await upsertLegacyFillProjection(pool, { ...original, raw: { replay: true } });
+      await upsertLegacyFillProjection(pool, {
+        ...original,
+        id: "fill-logical-replay",
+        raw: { replay: "alternate-id" },
+      });
+      await expect(upsertLegacyFillProjection(pool, { ...original, feeUsd: 0.5 })).rejects.toBeInstanceOf(
+        ImmutableFillConflictError,
+      );
       await expect(
-        upsertFill(pool, { ...original, id: "fill-logical-conflict", price: original.price + 0.01 }),
+        upsertLegacyFillProjection(pool, {
+          ...original,
+          id: "fill-logical-conflict",
+          price: original.price + 0.01,
+        }),
       ).rejects.toBeInstanceOf(ImmutableFillConflictError);
 
-      await upsertFill(
+      await upsertLegacyFillProjection(
         pool,
         buildFill({
           id: "fill-maker-second-order",
@@ -271,7 +293,14 @@ function buildAttempt(overrides: Partial<OrderAttempt> = {}): OrderAttempt {
     venueOrderId: "venue-order-1",
     status: "planned",
     truthStatus: null,
-    request: { size: 10 },
+    request: {
+      marketRef: "market-1",
+      tokenId: "token-1",
+      outcome: "UP",
+      side: "BUY",
+      orderType: "FOK",
+      size: 10,
+    },
     result: null,
     error: null,
     createdAt: 100,

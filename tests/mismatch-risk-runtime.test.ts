@@ -1,13 +1,5 @@
-import {
-  MISMATCH_RISK_RUNTIME_MODEL_VERSION,
-  MismatchRiskRuntime,
-} from "@/lib/mismatch-risk-runtime";
-import type {
-  KalshiCfBenchmarkWindow,
-  KalshiQuote,
-  MarketAsset,
-  PolymarketQuote,
-} from "@/lib/types";
+import { MISMATCH_RISK_RUNTIME_MODEL_VERSION, MismatchRiskRuntime } from "@/lib/mismatch-risk-runtime";
+import type { KalshiCfBenchmarkWindow, KalshiQuote, MarketAsset, PolymarketQuote } from "@/lib/types";
 
 const ASSET: MarketAsset = "btc";
 const BASE_TS = 1_800_000_000_000;
@@ -65,10 +57,8 @@ function feedHistory(
   let kalshi = kalshiQuote(100.02, startTs);
   for (let index = 0; index < count; index += 1) {
     const now = startTs + index * 1_000;
-    const chainlinkPrice =
-      100 + 0.02 * index + 0.12 * Math.sin(index * 0.73);
-    const cfPrice =
-      chainlinkPrice * 1.0002 + 0.025 * Math.cos(index * 0.61);
+    const chainlinkPrice = 100 + 0.02 * index + 0.12 * Math.sin(index * 0.73);
+    const cfPrice = chainlinkPrice * 1.0002 + 0.025 * Math.cos(index * 0.61);
     polymarket = polymarketQuote(chainlinkPrice, now);
     kalshi = kalshiQuote(cfPrice, now);
     expect(
@@ -124,9 +114,7 @@ describe("MismatchRiskRuntime observations", () => {
     expect(statistics.returnCount).toBe(59);
     expect(statistics.chainlinkLogVolatilityPerSqrtSecond).toBeGreaterThan(0);
     expect(statistics.cfLogVolatilityPerSqrtSecond).toBeGreaterThan(0);
-    expect(Math.abs(statistics.shrunkCorrelation!)).toBeLessThanOrEqual(
-      Math.abs(statistics.rawCorrelation!),
-    );
+    expect(Math.abs(statistics.shrunkCorrelation!)).toBeLessThanOrEqual(Math.abs(statistics.rawCorrelation!));
     expect(statistics.basisBps).toBeGreaterThan(-20);
     expect(statistics.basisBps).toBeLessThan(20);
   });
@@ -334,19 +322,11 @@ describe("MismatchRiskRuntime estimates", () => {
     });
     const highAverage = runtime.estimate({
       ...common,
-      kalshi: kalshiQuote(
-        latest.kalshi.cfBenchmarks!.liveValueUsd,
-        latest.now,
-        window(102),
-      ),
+      kalshi: kalshiQuote(latest.kalshi.cfBenchmarks!.liveValueUsd, latest.now, window(102)),
     });
     const lowAverage = runtime.estimate({
       ...common,
-      kalshi: kalshiQuote(
-        latest.kalshi.cfBenchmarks!.liveValueUsd,
-        latest.now,
-        window(98),
-      ),
+      kalshi: kalshiQuote(latest.kalshi.cfBenchmarks!.liveValueUsd, latest.now, window(98)),
     });
 
     expect(highAverage.available).toBe(true);

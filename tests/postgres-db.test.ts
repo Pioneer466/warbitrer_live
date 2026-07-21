@@ -13,6 +13,7 @@ import {
   assertOrderIntentIdentity,
   findOrderAttemptById,
   getGlobalRiskConfig,
+  hashOrderAttemptRequest,
   insertOrderIntent,
   insertOracleSlotSample,
   listOrderAttemptsForIntent,
@@ -228,6 +229,38 @@ describe("postgres order-truth evidence merging", () => {
     });
   });
 
+  it("advances through submitting monotonically without allowing a stale planned writer to regress it", () => {
+    const submitting = mergeOrderAttemptEvidence(
+      buildOrderAttempt({ status: "planned", truthStatus: null, updatedAt: 100 }),
+      buildOrderAttempt({ status: "submitting", truthStatus: "submission_in_progress", updatedAt: 200 }),
+    );
+    expect(submitting).toMatchObject({
+      status: "submitting",
+      truthStatus: "submission_in_progress",
+      updatedAt: 200,
+    });
+
+    const afterStaleWriter = mergeOrderAttemptEvidence(
+      submitting,
+      buildOrderAttempt({ status: "planned", truthStatus: null, updatedAt: 300 }),
+    );
+    expect(afterStaleWriter).toMatchObject({
+      status: "submitting",
+      truthStatus: "submission_in_progress",
+      updatedAt: 300,
+    });
+
+    const submitted = mergeOrderAttemptEvidence(
+      afterStaleWriter,
+      buildOrderAttempt({ status: "submitted", truthStatus: "venue_acknowledged", updatedAt: 400 }),
+    );
+    expect(submitted).toMatchObject({
+      status: "submitted",
+      truthStatus: "venue_acknowledged",
+      updatedAt: 400,
+    });
+  });
+
   it("does not let a stale failure replace truth_pending", () => {
     const truthPending = buildOrderAttempt({
       status: "truth_pending",
@@ -257,6 +290,15 @@ describe("postgres order-truth evidence merging", () => {
     expect(() => mergeOrderAttemptEvidence(buildOrderAttempt(), buildOrderAttempt({ stage: "hedge" }))).toThrow(
       PersistenceIdentityConflictError,
     );
+  });
+
+  it("hashes canonical request JSON independent of object key insertion order", () => {
+    const original = { price: 0.45, size: 10, nested: { tick: 0.01, tif: "IOC" }, levels: [1, 2] };
+    const reordered = { levels: [1, 2], nested: { tif: "IOC", tick: 0.01 }, size: 10, price: 0.45 };
+
+    expect(hashOrderAttemptRequest(original)).toBe(hashOrderAttemptRequest(reordered));
+    expect(hashOrderAttemptRequest({ ...original, price: 0.46 })).not.toBe(hashOrderAttemptRequest(original));
+    expect(() => hashOrderAttemptRequest({ price: Number.NaN })).toThrow(/must be finite/);
   });
 
   it("treats raw-only fill differences as idempotent but rejects economic differences", () => {

@@ -22,11 +22,13 @@ async function main() {
   });
 
   if (values.help || !values.from || !values.to) {
-    console.log([
-      "Usage: npm run backtest:strategies -- --from 2026-05-01T00:00:00Z --to 2026-05-04T00:00:00Z [--assets all] [--database-url postgres://127.0.0.1/warbitrer_backtest] [--out reports/backtests/run-1]",
-      "",
-      "Runs local-only strategy simulations against an imported backtest database.",
-    ].join("\n"));
+    console.log(
+      [
+        "Usage: npm run backtest:strategies -- --from 2026-05-01T00:00:00Z --to 2026-05-04T00:00:00Z [--assets all] [--database-url postgres://127.0.0.1/warbitrer_backtest] [--out reports/backtests/run-1]",
+        "",
+        "Runs local-only strategy simulations against an imported backtest database.",
+      ].join("\n"),
+    );
     return;
   }
 
@@ -56,17 +58,21 @@ async function main() {
   fs.writeFileSync(path.join(outputDir, "report.md"), result.reportMarkdown);
   fs.writeFileSync(
     path.join(outputDir, "manifest.json"),
-    `${JSON.stringify({
-      generatedAt: result.generatedAt,
-      generatedAtIso: new Date(result.generatedAt).toISOString(),
-      from: result.from,
-      fromIso: new Date(result.from).toISOString(),
-      to: result.to,
-      toIso: new Date(result.to).toISOString(),
-      assets: result.assets,
-      databaseUrl: redactDatabaseUrl(databaseUrl),
-      outputs: ["summary.csv", "trades.csv", "report.md"],
-    }, null, 2)}\n`,
+    `${JSON.stringify(
+      {
+        generatedAt: result.generatedAt,
+        generatedAtIso: new Date(result.generatedAt).toISOString(),
+        from: result.from,
+        fromIso: new Date(result.from).toISOString(),
+        to: result.to,
+        toIso: new Date(result.to).toISOString(),
+        assets: result.assets,
+        databaseUrl: redactDatabaseUrl(databaseUrl),
+        outputs: ["summary.csv", "trades.csv", "report.md"],
+      },
+      null,
+      2,
+    )}\n`,
   );
 
   console.log(`Backtest written to ${outputDir}`);

@@ -5,12 +5,8 @@ import {
   getKalshiPrimaryMultiClipCapacity,
   getVenueExecutableDepth,
 } from "@/lib/fees";
-import {
-  computeKalshiBuyDepthWithinPriceRange,
-  deriveKalshiBuyPriceLevels,
-  KALSHI_ORDER_PRICE_STEP_USD,
-  normalizeKalshiOrderPrice,
-} from "@/lib/kalshi";
+import { computeKalshiBuyDepthWithinPriceRange, deriveKalshiBuyPriceLevels } from "@/lib/kalshi";
+import { moveKalshiOutcomePriceByTicks } from "@/lib/kalshi-price-grid";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import { choosePrimaryVenueForOpportunity } from "@/lib/primary-selection";
 import type {
@@ -235,13 +231,15 @@ function buildSignal({
     reasons.push("Profondeur indisponible");
   }
 
-  const kalshiMaxBuyPrice =
-    kalshiPrice === null
-      ? null
-      : normalizeKalshiOrderPrice(
-          kalshiPrice + settings.kalshiPrimaryPriceTicksSlippage * KALSHI_ORDER_PRICE_STEP_USD,
-          "BUY",
-        );
+  const kalshiMaxBuyPrice = deriveKalshiSignalLimitPrice(
+    kalshiPrice,
+    kalshiOutcome,
+    settings.kalshiPrimaryPriceTicksSlippage,
+    kalshi.priceRanges,
+  );
+  if (kalshiPrice !== null && kalshiMaxBuyPrice === null) {
+    reasons.push("Grille de prix Kalshi indisponible ou invalide");
+  }
   const cumulativeKalshiDepth =
     kalshiPrice === null
       ? null
@@ -548,6 +546,28 @@ function buildSignal({
     kalshiTargetPriceUsd: mismatchGuard.kalshiTargetPriceUsd,
     legs,
   };
+}
+
+function deriveKalshiSignalLimitPrice(
+  price: number | null,
+  outcome: "YES" | "NO",
+  ticks: number,
+  priceRanges: KalshiQuote["priceRanges"],
+) {
+  if (price === null || priceRanges === null) {
+    return null;
+  }
+  try {
+    return moveKalshiOutcomePriceByTicks({
+      price,
+      outcome,
+      side: "BUY",
+      ticks: Math.max(0, Math.trunc(ticks)),
+      priceRanges,
+    }).price;
+  } catch {
+    return null;
+  }
 }
 
 function outcomeMidPrice(outcome: OutcomeQuote): number | null {

@@ -27,22 +27,30 @@ describe("live execution safety", () => {
     process.env = originalEnv;
   });
 
-  it("fails closed unless both the explicit gate and Kalshi production are configured", () => {
+  it("fails closed unless the gate, production venue, and Polygon accounting RPC are configured", () => {
     expect(getLiveExecutionSafety({})).toMatchObject({
       allowed: false,
       kalshiEnvironment: "missing",
-      reasons: ["environment_gate_disabled", "kalshi_not_production"],
+      polygonRpcConfigured: false,
+      reasons: ["environment_gate_disabled", "kalshi_not_production", "polygon_rpc_missing"],
     });
     expect(getLiveExecutionSafety({ LIVE_EXECUTION_ALLOWED: "true", KALSHI_ENV: "demo" })).toMatchObject({
       allowed: false,
       gateEnabled: true,
       kalshiEnvironment: "demo",
-      reasons: ["kalshi_not_production"],
+      reasons: ["kalshi_not_production", "polygon_rpc_missing"],
     });
-    expect(getLiveExecutionSafety({ LIVE_EXECUTION_ALLOWED: "true", KALSHI_ENV: "prod" })).toEqual({
+    expect(
+      getLiveExecutionSafety({
+        LIVE_EXECUTION_ALLOWED: "true",
+        KALSHI_ENV: "prod",
+        POLYGON_RPC_URL: "https://polygon.example",
+      }),
+    ).toEqual({
       allowed: true,
       gateEnabled: true,
       kalshiEnvironment: "prod",
+      polygonRpcConfigured: true,
       reasons: [],
     });
   });
@@ -54,7 +62,11 @@ describe("live execution safety", () => {
   });
 
   it("blocks inactive assets even when the environment permits live execution", () => {
-    const env = { LIVE_EXECUTION_ALLOWED: "true", KALSHI_ENV: "prod" };
+    const env = {
+      LIVE_EXECUTION_ALLOWED: "true",
+      KALSHI_ENV: "prod",
+      POLYGON_RPC_URL: "https://polygon.example",
+    };
     expect(getLiveSettingsBlockReasons("btc", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
     expect(getLiveSettingsBlockReasons("bnb", { enableTrading: true, shadowMode: false }, env)).toEqual([
       "asset_worker_inactive",
@@ -62,9 +74,13 @@ describe("live execution safety", () => {
   });
 
   it("throws a typed error when a new live entry is not authorized", () => {
-    expect(() => assertNewLiveExecutionAllowed({ LIVE_EXECUTION_ALLOWED: "false", KALSHI_ENV: "prod" })).toThrow(
-      LiveExecutionBlockedError,
-    );
+    expect(() =>
+      assertNewLiveExecutionAllowed({
+        LIVE_EXECUTION_ALLOWED: "false",
+        KALSHI_ENV: "prod",
+        POLYGON_RPC_URL: "https://polygon.example",
+      }),
+    ).toThrow(LiveExecutionBlockedError);
   });
 
   it("blocks the Kalshi adapter before order IO when Kalshi is not production", async () => {

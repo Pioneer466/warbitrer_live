@@ -1,8 +1,5 @@
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
-import {
-  calculateKalshiFee,
-  calculatePolymarketLevelFee,
-} from "@/lib/fees";
+import { calculateKalshiFee, calculatePolymarketLevelFee } from "@/lib/fees";
 import type {
   KalshiQuote,
   LiveOpportunity,
@@ -23,18 +20,12 @@ export function deriveMismatchEstimateEconomics(input: {
   kalshi: KalshiQuote;
   settings: Pick<StrategyConfig, "minOrderSize">;
 }): MismatchEstimateEconomics {
-  const executablePairSize = Math.min(
-    input.opportunity.legs[0].size,
-    input.opportunity.legs[1].size,
-  );
+  const executablePairSize = Math.min(input.opportunity.legs[0].size, input.opportunity.legs[1].size);
   const executableTotalCostUsd = input.opportunity.legs.reduce(
     (sum, leg) => sum + leg.targetNotionalUsd + leg.feeEstimateUsd,
     0,
   );
-  if (
-    isPositiveFinite(executablePairSize) &&
-    isPositiveFinite(executableTotalCostUsd)
-  ) {
+  if (isPositiveFinite(executablePairSize) && isPositiveFinite(executableTotalCostUsd)) {
     return {
       basis: "executable",
       pairSize: executablePairSize,
@@ -42,18 +33,11 @@ export function deriveMismatchEstimateEconomics(input: {
     };
   }
 
-  const polymarketLeg = input.opportunity.legs.find(
-    (leg) => leg.venue === "polymarket",
-  );
-  const kalshiLeg = input.opportunity.legs.find(
-    (leg) => leg.venue === "kalshi",
-  );
+  const polymarketLeg = input.opportunity.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = input.opportunity.legs.find((leg) => leg.venue === "kalshi");
   const polymarketPrice = polymarketLeg?.price;
   const kalshiPrice = kalshiLeg?.price;
-  if (
-    !isProbabilityPrice(polymarketPrice) ||
-    !isProbabilityPrice(kalshiPrice)
-  ) {
+  if (!isProbabilityPrice(polymarketPrice) || !isProbabilityPrice(kalshiPrice)) {
     return { basis: "unavailable", pairSize: null, totalCostUsd: null };
   }
 
@@ -75,8 +59,8 @@ export function deriveMismatchEstimateEconomics(input: {
     price: polymarketPrice,
     feeRateBps:
       polymarketLeg?.outcome === "UP"
-        ? input.polymarket.outcomes.up.feeRateBps ?? input.polymarket.feeRateBps
-        : input.polymarket.outcomes.down.feeRateBps ?? input.polymarket.feeRateBps,
+        ? (input.polymarket.outcomes.up.feeRateBps ?? input.polymarket.feeRateBps)
+        : (input.polymarket.outcomes.down.feeRateBps ?? input.polymarket.feeRateBps),
     feeRate: input.polymarket.feeRate ?? undefined,
     feeExponent: input.polymarket.feeExponent ?? undefined,
   });
@@ -85,10 +69,7 @@ export function deriveMismatchEstimateEconomics(input: {
     price: kalshiPrice,
     feeMultiplier: input.kalshi.feeMultiplier,
   });
-  const totalCostUsd =
-    referencePairSize * (polymarketPrice + kalshiPrice) +
-    polymarketFeeUsd +
-    kalshiFeeUsd;
+  const totalCostUsd = referencePairSize * (polymarketPrice + kalshiPrice) + polymarketFeeUsd + kalshiFeeUsd;
 
   return {
     basis: "reference",

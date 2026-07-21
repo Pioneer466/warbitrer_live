@@ -165,9 +165,7 @@ describe("live fee and sizing helpers", () => {
       feeExponent: 1,
     });
 
-    expect(
-      calculatePolymarketLevelFee({ shares: 5, price: 0.3, feeRate: 0.02, feeExponent: 1 }),
-    ).toBe(0.021);
+    expect(calculatePolymarketLevelFee({ shares: 5, price: 0.3, feeRate: 0.02, feeExponent: 1 })).toBe(0.021);
     expect(quote).toMatchObject({
       size: 10,
       notionalUsd: 3.1,

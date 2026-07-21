@@ -1,11 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { deriveMismatchEstimateEconomics } from "@/lib/mismatch-reference-economics";
-import type {
-  KalshiQuote,
-  LiveOpportunity,
-  PolymarketQuote,
-} from "@/lib/types";
+import type { KalshiQuote, LiveOpportunity, PolymarketQuote } from "@/lib/types";
 
 describe("mismatch reference economics", () => {
   it("uses executable candidate economics when a paired size exists", () => {

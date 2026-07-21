@@ -4,6 +4,7 @@ import WebSocket from "ws";
 import { POLY_MARKET_WS_BASE, POLY_RTDS_WS_BASE, POLY_USER_WS_BASE } from "@/lib/constants";
 import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
 import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
+import { normalizePolymarketTradeStatus } from "@/lib/polymarket-trade-status";
 import {
   deriveKalshiOutcomeQuotes,
   deriveKalshiOutcomeQuotesFromMarketWithSource,
@@ -14,6 +15,7 @@ import {
   fetchKalshiSeries,
   fetchKalshiTrades,
   getKalshiWsUrls,
+  normalizeKalshiMarketPriceRanges,
   normalizeKalshiNumericOrderbookLevels,
   resolveKalshiMarketForSlot,
   type KalshiMarketSummary,
@@ -23,6 +25,7 @@ import {
 import {
   buildPolymarketOutcomeQuoteFromBook,
   createUnavailablePolymarketQuote,
+  derivePolymarketFeeMetadata,
   derivePolymarketOutcomeTokens,
   extractPolymarketResolution,
   fetchPolymarketBook,
@@ -484,11 +487,9 @@ function parsePolymarketTradeEvent(event: Record<string, unknown>, capturedAt: n
     return [];
   }
 
-  const status = String(event.status ?? "").toUpperCase();
-  if (status === "FAILED") {
-    return [];
-  }
-  if (status && !["MATCHED", "MINED", "CONFIRMED", "RETRYING"].includes(status)) {
+  const rawStatus = String(event.status ?? "").trim();
+  const status = normalizePolymarketTradeStatus(rawStatus);
+  if (status === null || status === "FAILED") {
     return [];
   }
 
@@ -716,6 +717,12 @@ class RealtimeOrderFillTracker {
     }
   }
 
+  clearAllWaiters() {
+    for (const waiter of [...this.waiters.values()]) {
+      this.settleWaiter(waiter, null);
+    }
+  }
+
   private settleWaiter(waiter: PrivateFillWaiter, fill: RealtimeOrderFill | null) {
     if (!this.waiters.delete(waiter.id)) {
       return;
@@ -795,6 +802,7 @@ class PolymarketRealtimeFeed {
   private userWsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private priceWsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private marketReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private userReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private priceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private bootstrapPromise: Promise<void> | null = null;
   private resyncPromise: Promise<void> | null = null;
@@ -812,9 +820,13 @@ class PolymarketRealtimeFeed {
   private reconnectAttempt = 0;
   private priceReconnectAttempt = 0;
   private userReconnectAttempt = 0;
+  private stopped = false;
   private subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
+    if (this.stopped) {
+      return;
+    }
     if (this.slotKey !== slot.key) {
       await this.reset();
       this.slotKey = slot.key;
@@ -891,6 +903,7 @@ class PolymarketRealtimeFeed {
         )
       : createUnavailablePolymarketQuote(slot, "Orderbook Polymarket indisponible").outcomes.down;
 
+    const feeMetadata = derivePolymarketFeeMetadata(this.clobMarketInfo);
     const quote: PolymarketQuote = {
       ref: {
         asset: slot.asset,
@@ -926,6 +939,7 @@ class PolymarketRealtimeFeed {
       feeRateBps: Math.max(upOutcome.feeRateBps ?? 0, downOutcome.feeRateBps ?? 0),
       feeRate: parseNumeric(this.clobMarketInfo?.fd?.r) ?? null,
       feeExponent: parseNumeric(this.clobMarketInfo?.fd?.e) ?? 0,
+      ...feeMetadata,
       negRisk: Boolean(this.clobMarketInfo?.nr ?? false),
     };
 
@@ -1010,7 +1024,7 @@ class PolymarketRealtimeFeed {
   }
 
   private ensureWs(now: number) {
-    if (!this.tokenIds) {
+    if (this.stopped || !this.tokenIds) {
       return;
     }
 
@@ -1338,8 +1352,9 @@ class PolymarketRealtimeFeed {
         details: "user channel ferme, reconcile REST conserve",
       });
       const delay = nextReconnectDelay(this.userReconnectAttempt++);
-      setTimeout(() => {
-        if (this.slotKey && hasPolymarketCredentials()) {
+      this.userReconnectTimer = setTimeout(() => {
+        this.userReconnectTimer = null;
+        if (!this.stopped && this.slotKey && hasPolymarketCredentials()) {
           this.connectUserWs(Date.now());
         }
       }, delay);
@@ -1611,6 +1626,10 @@ class PolymarketRealtimeFeed {
       this.onPrivateFeedReset("polymarket", userMarketRef);
     }
     this.clearMarketReconnectTimer();
+    if (this.userReconnectTimer) {
+      clearTimeout(this.userReconnectTimer);
+      this.userReconnectTimer = null;
+    }
     marketWs?.close();
     userWs?.close();
     this.priceWs?.close();
@@ -1639,6 +1658,20 @@ class PolymarketRealtimeFeed {
     this.priceReconnectAttempt = 0;
     this.userReconnectAttempt = 0;
     this.subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
+  }
+
+  async shutdown() {
+    if (this.stopped) {
+      return;
+    }
+
+    this.stopped = true;
+    this.slotKey = null;
+    const pending = [this.bootstrapPromise, this.resyncPromise].filter(
+      (promise): promise is Promise<void> => promise !== null,
+    );
+    await this.reset();
+    await Promise.allSettled(pending);
   }
 }
 
@@ -1698,11 +1731,15 @@ class KalshiRealtimeFeed {
   private resyncBackoffUntil: number | null = null;
   private resyncBackoffMs = KALSHI_REST_BACKOFF_INITIAL_MS;
   private reconnectAttempt = 0;
+  private stopped = false;
   private subscriptions = emptySubscriptions(KALSHI_WS_CHANNELS, "rest-bootstrap");
   private subscriptionCommands = new Map<number, string>();
   private nextSubscriptionId = 1;
 
   async ensureSlot(slot: MarketSlot, now = Date.now()) {
+    if (this.stopped) {
+      return;
+    }
     if (this.slotKey !== slot.key) {
       await this.reset();
       this.asset = slot.asset;
@@ -1727,6 +1764,7 @@ class KalshiRealtimeFeed {
   buildState(slot: MarketSlot, now = Date.now()): LiveMarketState<KalshiQuote> {
     const lastMessageAt =
       [this.lastWsMessageAt, this.lastRestSyncAt].filter(Boolean).sort((a, b) => b! - a!)[0] ?? null;
+    const priceRanges = normalizeKalshiMarketPriceRanges(this.market?.price_ranges);
     const feedHealth = buildFeedHealth({
       asset: slot.asset,
       venue: "kalshi",
@@ -1734,8 +1772,11 @@ class KalshiRealtimeFeed {
       lastMessageAt,
       lastWsMessageAt: this.lastWsMessageAt,
       lastRestSyncAt: this.lastRestSyncAt,
-      dataReady: Boolean(this.market && this.series && this.orderbookInSync),
-      details: this.describeFeedDetails(now),
+      dataReady: Boolean(this.market && this.series && this.orderbookInSync && priceRanges),
+      details: [
+        ...this.describeFeedDetails(now),
+        ...(this.market && !priceRanges ? ["Kalshi price_ranges manquant ou invalide"] : []),
+      ],
       subscriptions: this.subscriptions,
     });
 
@@ -1763,6 +1804,7 @@ class KalshiRealtimeFeed {
           },
           this.isLiveOrderbook(now) ? "ws" : "rest-fallback",
           this.orderbook.lastUpdatedAt,
+          priceRanges,
         )
       : null;
     const orderbookLevels = this.orderbook
@@ -1789,7 +1831,7 @@ class KalshiRealtimeFeed {
       },
       status: this.market.status,
       slotAligned: true,
-      availabilityReason: null,
+      availabilityReason: priceRanges ? null : "Kalshi price_ranges manquant ou invalide",
       feedHealth,
       lastMessageAt,
       stalenessMs: feedHealth.stalenessMs,
@@ -1800,6 +1842,8 @@ class KalshiRealtimeFeed {
       feeType: this.series.fee_type,
       lastTradeYesPrice: tradePrices.yes,
       lastTradeNoPrice: tradePrices.no,
+      priceLevelStructure: this.market.price_level_structure ?? null,
+      priceRanges,
       cfBenchmarks: this.cfBenchmarks,
       orderbookLevels,
       resolution: null,
@@ -1953,6 +1997,9 @@ class KalshiRealtimeFeed {
   }
 
   private ensureWs() {
+    if (this.stopped) {
+      return;
+    }
     const hasCredentials = hasKalshiCredentialsSafe();
     if (!this.market || this.ws || this.wsReconnectTimer || !hasCredentials) {
       if (!hasCredentials) {
@@ -2006,7 +2053,7 @@ class KalshiRealtimeFeed {
       const delay = nextReconnectDelay(this.reconnectAttempt++);
       this.wsReconnectTimer = setTimeout(() => {
         this.wsReconnectTimer = null;
-        if (this.slotKey) {
+        if (!this.stopped && this.slotKey) {
           this.ensureWs();
         }
       }, delay);
@@ -2185,7 +2232,7 @@ class KalshiRealtimeFeed {
       const delay = nextReconnectDelay(this.reconnectAttempt++);
       this.wsReconnectTimer = setTimeout(() => {
         this.wsReconnectTimer = null;
-        if (this.slotKey) {
+        if (!this.stopped && this.slotKey) {
           this.ensureWs();
         }
       }, delay);
@@ -2652,6 +2699,20 @@ class KalshiRealtimeFeed {
     this.subscriptions = emptySubscriptions(KALSHI_WS_CHANNELS, "rest-bootstrap");
   }
 
+  async shutdown() {
+    if (this.stopped) {
+      return;
+    }
+
+    this.stopped = true;
+    this.slotKey = null;
+    const pending = [this.bootstrapPromise, this.resyncPromise].filter(
+      (promise): promise is Promise<void> => promise !== null,
+    );
+    await this.reset();
+    await Promise.allSettled(pending);
+  }
+
   private isLiveOrderbook(now: number) {
     if (
       !this.orderbook ||
@@ -2723,6 +2784,7 @@ export class MarketDataSupervisor {
       kalshi: KalshiRealtimeFeed;
     }
   >;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor() {
     const recordFill: PrivateFillListener = (fill) => {
@@ -2762,6 +2824,23 @@ export class MarketDataSupervisor {
     const kalshi = feeds.kalshi.buildState(slot, now);
     return { polymarket, kalshi };
   }
+
+  shutdown() {
+    if (!this.shutdownPromise) {
+      this.fillTracker.clearAllWaiters();
+      this.shutdownPromise = Promise.allSettled(
+        Object.values(this.feeds).flatMap((feeds) => [feeds.polymarket.shutdown(), feeds.kalshi.shutdown()]),
+      ).then((results) => {
+        const failures = results
+          .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+          .map((result) => result.reason);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "Market-data shutdown failed");
+        }
+      });
+    }
+    return this.shutdownPromise;
+  }
 }
 
 let singleton: MarketDataSupervisor | null = null;
@@ -2772,6 +2851,14 @@ export function getMarketDataSupervisor() {
   }
 
   return singleton;
+}
+
+export async function shutdownMarketDataSupervisor() {
+  const supervisor = singleton;
+  await supervisor?.shutdown();
+  if (singleton === supervisor) {
+    singleton = null;
+  }
 }
 
 function createPolymarketBookState(
@@ -2969,6 +3056,8 @@ function createBlockedKalshiQuote(
     feeType: series?.fee_type ?? "unknown",
     lastTradeYesPrice: null,
     lastTradeNoPrice: null,
+    priceLevelStructure: null,
+    priceRanges: null,
     cfBenchmarks: null,
     orderbookLevels: null,
     resolution: null,

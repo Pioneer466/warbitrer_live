@@ -10,12 +10,13 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 - clé privée Kalshi dans `/etc/warbitrer/kalshi-private-key.pem`
 - clé privée Polymarket dans `/etc/warbitrer/polymarket-private-key.txt`
 - web servi sur `127.0.0.1:3000`
-- HTTPS géré par Caddy avec `basicauth`
+- authentification applicative configurée avec `APP_BASIC_AUTH_USER` et `APP_BASIC_AUTH_PASSWORD`
+- HTTPS géré par Caddy avec un second `basicauth` externe
+- accès SSH par mot de passe conservé; une clé SSH reste optionnelle
 
 ## Fichiers
 
 - `warbitrer-web.service`
-- `warbitrer-worker.service`
 - `warbitrer-asset@.service`
 - `warbitrer-reconciler.service`
 - `warbitrer-notifier.service`
@@ -46,12 +47,12 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 7. Après un backup vérifié, charger `/etc/warbitrer/warbitrer.env` sans afficher son contenu, puis exécuter `npm run db:migrate` et `npm run db:status` en tant que `warbitrer` comme décrit dans `docs/codex/deployment.md`.
 8. Copier les services:
    - `sudo cp deploy/vps/warbitrer-web.service /etc/systemd/system/`
-   - `sudo cp deploy/vps/warbitrer-worker.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-asset@.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-reconciler.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-notifier.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.service /etc/systemd/system/`
    - `sudo cp deploy/vps/warbitrer-postgres-backup.timer /etc/systemd/system/`
+   - sur une ancienne installation uniquement: désactiver `warbitrer-worker`, supprimer `/etc/systemd/system/warbitrer-worker.service`, puis exécuter `sudo systemctl daemon-reload`
 9. Recharger et activer:
    - `sudo systemctl daemon-reload`
    - `sudo systemctl enable --now warbitrer-web`
@@ -153,17 +154,19 @@ Variables optionnelles:
 
 ## Important sécurité
 
-L’interface n’a pas encore d’auth applicative native.
+En production, l’application refuse les accès protégés si l’une des deux variables `APP_BASIC_AUTH_USER` ou `APP_BASIC_AUTH_PASSWORD` manque. Les routes de mutation vérifient à nouveau cette authentification et refusent les requêtes navigateur cross-site.
 
-Ne l’expose pas publiquement sans au minimum:
+Conserver plusieurs couches:
 
-- `basicauth` côté Caddy
-- ou un accès privé via SSH tunnel / Tailscale
-- ou une règle IP très restrictive
+- `basicauth` applicative obligatoire
+- `basicauth` côté Caddy comme défense externe indépendante
+- HTTPS, Tailscale, tunnel SSH ou règle IP restrictive selon l’exposition
 
-Le template `Caddyfile` fourni contient déjà un bloc `basicauth` à remplacer.
+Le template `Caddyfile` fourni contient un bloc `basicauth` à remplacer. La protection Caddy ne remplace pas l’authentification applicative.
 
 Pour un accès par IP publique sans domaine, utiliser `deploy/vps/Caddyfile.public-ip` au lieu du template domaine.
+
+Les scripts de ce dépôt ne modifient ni `sshd`, ni `PasswordAuthentication`, ni les identifiants système. L’opérateur doit pouvoir continuer à se connecter par mot de passe; l’ajout d’une clé SSH est facultatif et peut coexister avec ce mode.
 
 ## Temps réel
 
@@ -176,13 +179,26 @@ Le worker maintient maintenant une couche market data persistante:
 
 ## Upgrade
 
-Après un `git pull`, lancer:
+Avant toute mise à jour, conserver `LIVE_EXECUTION_ALLOWED=false` et vérifier qu’il ne reste aucun intent live, order attempt live ou exposition en capital non terminale. Reporter le déploiement tant que la vérité venue n’est pas réconciliée; ne pas fermer ni modifier ces lignes directement en base. Cette précondition est impérative lorsqu’une version change la génération des client order IDs, car un processus ancien et un processus nouveau ne doivent pas reprendre la même soumission avec des identifiants différents.
 
-`bash deploy/vps/deploy.sh`
+Après un `git pull --ff-only` propre effectué en tant que `warbitrer`, lancer:
 
-Pour relancer après un `hedge_failure` sans toucher la DB à la main:
+`sudo bash deploy/vps/deploy.sh`
 
-`cd /opt/warbitrer-live/app && sudo -u warbitrer npm run breaker:clear-hedge-failures`
+Le script corrigé:
+
+1. refuse un working tree sale
+2. exige un fichier d’environnement lisible
+3. exécute un premier préflight avec l’exécution live désactivée
+4. arrête le web et les sept services de worker, puis rejoue le préflight pour fermer la course avec l’arrêt
+5. crée et attend un backup Postgres cohérent pendant que l’application est arrêtée
+6. exécute audit, lint, format, typecheck, tests et les deux builds
+7. applique les migrations versionnées V1-V8, exige un `db:status` prêt, puis rejoue le préflight
+8. redémarre et vérifie les huit services applicatifs ainsi que le timer de backup
+
+Il ne lance pas `git pull` et ne remplace pas les contrôles opérateur préalables. Une erreur après l’arrêt laisse les services applicatifs arrêtés afin d’éviter une reprise sur un état non validé.
+
+Après un `hedge_failure`, utiliser la vue détaillée des incidents et résoudre chaque incident exact depuis l’interface ou l’API authentifiée. L’exposition doit d’abord être prouvée récupérée; ne jamais effacer globalement les breakers ni modifier leurs lignes directement en base.
 
 ## Séquence recommandée
 
@@ -191,7 +207,7 @@ Pour relancer après un `hedge_failure` sans toucher la DB à la main:
 3. vérifier dashboard, intents, fills synthétiques, balances, positions
 4. financer Kalshi et Polymarket
 5. vérifier que les credentials et allowances sont valides
-6. passer à `enableTrading=true` et `shadowMode=false`
+6. après validation explicite, passer à `enableTrading=true` et `shadowMode=false` puis autoriser séparément le runtime avec `LIVE_EXECUTION_ALLOWED=true`
 
 ## Ce qui doit être prêt avant le live réel
 
@@ -200,8 +216,11 @@ Pour relancer après un `hedge_failure` sans toucher la DB à la main:
 - API key L2 Polymarket valide
 - allowance collateral Polymarket suffisante
 - Postgres opérationnel
+- `npm run db:status` prêt sur les migrations V1-V8
+- `POLYGON_RPC_URL` configuré sur Polygon mainnet (chain ID 137) pour la preuve exacte des fills Polymarket
 - aucune erreur dans `/api/health`
 - aucun circuit breaker actif
+- aucun intent, order attempt ou exposition live non terminale avant un déploiement
 
 ## Wallet Polymarket
 
@@ -221,5 +240,5 @@ En mode `EOA` futur:
 - `POLY_SIGNATURE_TYPE=EOA`
 - `POLY_AUTO_CONVERT=true` pour activer la conversion automatique `redeem + merge`
 - `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
-- `POLYGON_RPC_URL` doit être renseigné pour le redeem/merge direct
+- `POLYGON_RPC_URL` doit être renseigné pour toute exécution live et pour le redeem/merge direct
 - la page `/recovery` vérifie déjà si la migration EOA est techniquement prête

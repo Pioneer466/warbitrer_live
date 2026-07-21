@@ -16,9 +16,8 @@ let dashboardCache: {
 export async function GET() {
   try {
     const now = Date.now();
-    let payload = dashboardCache && now - dashboardCache.capturedAt <= DASHBOARD_CACHE_TTL_MS
-      ? dashboardCache.payload
-      : null;
+    let payload =
+      dashboardCache && now - dashboardCache.capturedAt <= DASHBOARD_CACHE_TTL_MS ? dashboardCache.payload : null;
     if (!payload) {
       payload = await readPortfolioDashboard(getCurrentSlots());
       dashboardCache = { capturedAt: now, payload };

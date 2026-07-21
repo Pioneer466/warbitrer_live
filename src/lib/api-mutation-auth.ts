@@ -1,13 +1,16 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 
 export type ApiMutationAuthErrorCode =
-  "api_mutation_auth_required" | "api_mutation_auth_not_configured" | "api_mutation_auth_misconfigured";
+  | "api_mutation_auth_required"
+  | "api_mutation_auth_not_configured"
+  | "api_mutation_auth_misconfigured"
+  | "api_mutation_cross_site_forbidden";
 
 export class ApiMutationAuthError extends Error {
   readonly name = "ApiMutationAuthError";
 
   constructor(
-    readonly status: 401 | 503,
+    readonly status: 401 | 403 | 503,
     readonly code: ApiMutationAuthErrorCode,
     message: string,
   ) {
@@ -82,10 +85,38 @@ export function authenticateApiMutation(
     throw new ApiMutationAuthError(401, "api_mutation_auth_required", "API mutation authentication is required");
   }
 
+  assertSameSiteMutation(request.headers);
+
   return {
     actor: `basic:${configuredUser}`,
     requestId: requestIdFactory(),
   };
+}
+
+function assertSameSiteMutation(headers: Pick<Headers, "get">) {
+  const fetchSite = headers.get("sec-fetch-site")?.trim().toLowerCase();
+  if (fetchSite && fetchSite !== "same-origin" && fetchSite !== "same-site" && fetchSite !== "none") {
+    throw new ApiMutationAuthError(403, "api_mutation_cross_site_forbidden", "Cross-site API mutations are forbidden");
+  }
+
+  const origin = headers.get("origin");
+  if (!origin) {
+    return;
+  }
+
+  const forwardedHost = headers.get("x-forwarded-host")?.split(",", 1)[0]?.trim();
+  const requestHost = forwardedHost || headers.get("host")?.trim();
+  if (!requestHost) {
+    return;
+  }
+
+  try {
+    if (origin === "null" || new URL(origin).host.toLowerCase() !== requestHost.toLowerCase()) {
+      throw new Error("origin mismatch");
+    }
+  } catch {
+    throw new ApiMutationAuthError(403, "api_mutation_cross_site_forbidden", "Cross-site API mutations are forbidden");
+  }
 }
 
 function normalizeConfiguredCredential(value: string | undefined) {

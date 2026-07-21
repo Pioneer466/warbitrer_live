@@ -1,11 +1,5 @@
-import {
-  DEFAULT_DATABASE_MAINTENANCE_CONFIG,
-  readDatabaseMaintenanceConfig,
-} from "@/lib/db-maintenance";
-import {
-  ORACLE_SAMPLE_RETENTION_MS,
-  SLOT_RESOLUTION_RETENTION_MS,
-} from "@/lib/oracle-history";
+import { DEFAULT_DATABASE_MAINTENANCE_CONFIG, readDatabaseMaintenanceConfig } from "@/lib/db-maintenance";
+import { ORACLE_SAMPLE_RETENTION_MS, SLOT_RESOLUTION_RETENTION_MS } from "@/lib/oracle-history";
 
 describe("database maintenance config", () => {
   const originalEnv = process.env;

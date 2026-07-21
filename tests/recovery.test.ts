@@ -8,6 +8,7 @@ import {
   buildRedeemTxData,
   classifyPolymarketRelayerTerminalState,
   resolvePolymarketConversionFinality,
+  selectPolymarketCollateralToken,
 } from "@/lib/recovery";
 import type { LiveEnv } from "@/lib/env";
 import type { PositionSnapshot } from "@/lib/types";
@@ -53,6 +54,18 @@ describe("recovery helpers", () => {
     expect(decoded._asset).toBe(POLY_USDCE_ADDRESS);
     expect(decoded._to.toLowerCase()).toBe(recipient);
     expect(decoded._amount.toString()).toBe("7000000");
+  });
+
+  it("selects collateral only from an exact held position-token match", () => {
+    const candidates = [
+      { collateralToken: POLY_PUSD_ADDRESS, tokenIds: new Set(["p-usd-up", "p-usd-down"]) },
+      { collateralToken: POLY_USDCE_ADDRESS, tokenIds: new Set(["legacy-up", "legacy-down"]) },
+    ] as const;
+
+    expect(selectPolymarketCollateralToken(new Set(["legacy-up"]), candidates)).toBe(POLY_USDCE_ADDRESS);
+    expect(() => selectPolymarketCollateralToken(new Set(["unknown-token"]), candidates)).toThrow(
+      "Unable to match held Polymarket positions",
+    );
   });
 
   it("classifies Polymarket relayer terminal states according to the docs", () => {

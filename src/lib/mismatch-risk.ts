@@ -1,6 +1,4 @@
-export type MismatchCombination =
-  | "POLY_UP_KALSHI_NO"
-  | "POLY_DOWN_KALSHI_YES";
+export type MismatchCombination = "POLY_UP_KALSHI_NO" | "POLY_DOWN_KALSHI_YES";
 
 export type CfFinalAverageConditioningInput = {
   observedAverage: number;
@@ -57,11 +55,7 @@ export type MismatchRiskModelInput = JointGaussianOutcomeInput & {
 };
 
 export type MismatchRiskUnavailableReason =
-  | "invalid_input"
-  | "chainlink_stale"
-  | "cf_stale"
-  | "chainlink_timestamp_in_future"
-  | "cf_timestamp_in_future";
+  "invalid_input" | "chainlink_stale" | "cf_stale" | "chainlink_timestamp_in_future" | "cf_timestamp_in_future";
 
 export type MismatchRiskModelResult =
   | {
@@ -139,9 +133,7 @@ const DEFAULT_CF_SAMPLE_COUNT = 60;
 const DEFAULT_MAX_FUTURE_SKEW_MS = 1_000;
 const PROBABILITY_TOLERANCE = 1e-9;
 
-export function conditionCfFinalAverage(
-  input: CfFinalAverageConditioningInput,
-): CfFinalAverageConditioningResult {
+export function conditionCfFinalAverage(input: CfFinalAverageConditioningInput): CfFinalAverageConditioningResult {
   const totalSampleCount = input.totalSampleCount ?? DEFAULT_CF_SAMPLE_COUNT;
 
   assertPositiveInteger(totalSampleCount, "totalSampleCount");
@@ -160,8 +152,7 @@ export function conditionCfFinalAverage(
   const remainingSampleCount = totalSampleCount - input.observedSampleCount;
   const observedWeight = input.observedSampleCount / totalSampleCount;
   const remainingWeight = remainingSampleCount / totalSampleCount;
-  const finalAverageMean =
-    input.observedAverage * observedWeight + input.remainingMean * remainingWeight;
+  const finalAverageMean = input.observedAverage * observedWeight + input.remainingMean * remainingWeight;
   const finalAverageStdDev = input.remainingMeanStdDev * remainingWeight;
 
   return {
@@ -174,9 +165,7 @@ export function conditionCfFinalAverage(
     requiredRemainingMeanToReachStrike:
       input.strike === undefined || remainingSampleCount === 0
         ? null
-        : (totalSampleCount * input.strike -
-            input.observedSampleCount * input.observedAverage) /
-          remainingSampleCount,
+        : (totalSampleCount * input.strike - input.observedSampleCount * input.observedAverage) / remainingSampleCount,
   };
 }
 
@@ -194,10 +183,7 @@ export function calculateJointGaussianOutcomeProbabilities(
 
   if (input.chainlinkTerminalStdDev === 0) {
     const polyUp = input.chainlinkTerminalMean >= input.chainlinkStartPrice;
-    const pKalshiNo = normalCdf(
-      (input.kalshiStrikePrice - input.cfFinalAverageMean) /
-        input.cfFinalAverageStdDev,
-    );
+    const pKalshiNo = normalCdf((input.kalshiStrikePrice - input.cfFinalAverageMean) / input.cfFinalAverageStdDev);
     return polyUp
       ? normalizeQuadrants({
           polyUpKalshiYes: 1 - pKalshiNo,
@@ -216,8 +202,7 @@ export function calculateJointGaussianOutcomeProbabilities(
   if (input.cfFinalAverageStdDev === 0) {
     const kalshiYes = input.cfFinalAverageMean >= input.kalshiStrikePrice;
     const pPolyDown = normalCdf(
-      (input.chainlinkStartPrice - input.chainlinkTerminalMean) /
-        input.chainlinkTerminalStdDev,
+      (input.chainlinkStartPrice - input.chainlinkTerminalMean) / input.chainlinkTerminalStdDev,
     );
     return kalshiYes
       ? normalizeQuadrants({
@@ -234,19 +219,11 @@ export function calculateJointGaussianOutcomeProbabilities(
         });
   }
 
-  const chainlinkBoundary =
-    (input.chainlinkStartPrice - input.chainlinkTerminalMean) /
-    input.chainlinkTerminalStdDev;
-  const kalshiBoundary =
-    (input.kalshiStrikePrice - input.cfFinalAverageMean) /
-    input.cfFinalAverageStdDev;
+  const chainlinkBoundary = (input.chainlinkStartPrice - input.chainlinkTerminalMean) / input.chainlinkTerminalStdDev;
+  const kalshiBoundary = (input.kalshiStrikePrice - input.cfFinalAverageMean) / input.cfFinalAverageStdDev;
   const pPolyDown = normalCdf(chainlinkBoundary);
   const pKalshiNo = normalCdf(kalshiBoundary);
-  const pPolyDownKalshiNo = bivariateNormalCdf(
-    chainlinkBoundary,
-    kalshiBoundary,
-    input.correlation,
-  );
+  const pPolyDownKalshiNo = bivariateNormalCdf(chainlinkBoundary, kalshiBoundary, input.correlation);
 
   return normalizeQuadrants({
     polyUpKalshiYes: 1 - pPolyDown - pKalshiNo + pPolyDownKalshiNo,
@@ -264,14 +241,8 @@ export function calculateMismatchOutcomeProbabilities(
   assertQuadrants(quadrants);
 
   const pAligned = quadrants.polyUpKalshiYes + quadrants.polyDownKalshiNo;
-  const pFatal =
-    combination === "POLY_UP_KALSHI_NO"
-      ? quadrants.polyDownKalshiYes
-      : quadrants.polyUpKalshiNo;
-  const pDouble =
-    combination === "POLY_UP_KALSHI_NO"
-      ? quadrants.polyUpKalshiNo
-      : quadrants.polyDownKalshiYes;
+  const pFatal = combination === "POLY_UP_KALSHI_NO" ? quadrants.polyDownKalshiYes : quadrants.polyUpKalshiNo;
+  const pDouble = combination === "POLY_UP_KALSHI_NO" ? quadrants.polyUpKalshiNo : quadrants.polyDownKalshiYes;
 
   return {
     combination,
@@ -337,18 +308,12 @@ export function calculateMismatchAdjustedPnl(input: MismatchAdjustedPnlInput) {
   assertProbability(input.probabilities.pDouble, "pDouble");
   assertProbability(input.pFatalUpper95, "pFatalUpper95");
 
-  const probabilitySum =
-    input.probabilities.pFatal +
-    input.probabilities.pAligned +
-    input.probabilities.pDouble;
+  const probabilitySum = input.probabilities.pFatal + input.probabilities.pAligned + input.probabilities.pDouble;
   if (Math.abs(probabilitySum - 1) > 1e-7) {
     throw new RangeError("mismatch outcome probabilities must sum to one");
   }
 
-  const effectiveFatalProbabilityUpper95 = Math.max(
-    input.probabilities.pFatal,
-    input.pFatalUpper95,
-  );
+  const effectiveFatalProbabilityUpper95 = Math.max(input.probabilities.pFatal, input.pFatalUpper95);
   const fatalPnlUsd = -input.totalCostUsd;
   const alignedPnlUsd = input.pairSize - input.totalCostUsd;
   const doublePnlUsd = 2 * input.pairSize - input.totalCostUsd;
@@ -358,19 +323,13 @@ export function calculateMismatchAdjustedPnl(input: MismatchAdjustedPnlInput) {
     alignedPnlUsd,
     doublePnlUsd,
     expectedPnlUsd:
-      input.pairSize *
-        (1 - input.probabilities.pFatal + input.probabilities.pDouble) -
-      input.totalCostUsd,
-    conservativePnlUsd:
-      input.pairSize * (1 - effectiveFatalProbabilityUpper95) -
-      input.totalCostUsd,
+      input.pairSize * (1 - input.probabilities.pFatal + input.probabilities.pDouble) - input.totalCostUsd,
+    conservativePnlUsd: input.pairSize * (1 - effectiveFatalProbabilityUpper95) - input.totalCostUsd,
     effectiveFatalProbabilityUpper95,
   };
 }
 
-export function calculateFatalProbabilityCalibration(
-  input: FatalProbabilityCalibrationInput,
-) {
+export function calculateFatalProbabilityCalibration(input: FatalProbabilityCalibrationInput) {
   const priorAlpha = input.priorAlpha ?? 0.5;
   const priorBeta = input.priorBeta ?? 0.5;
   const confidence = input.confidence ?? 0.95;
@@ -399,27 +358,18 @@ export function calculateFatalProbabilityCalibration(
   };
 }
 
-export function evaluateEconomicMismatchGate(
-  input: EconomicMismatchGateInput,
-): EconomicMismatchGateResult {
+export function evaluateEconomicMismatchGate(input: EconomicMismatchGateInput): EconomicMismatchGateResult {
   const safetyFractionOfBreakEven = input.safetyFractionOfBreakEven ?? 0.5;
 
   assertPositiveFinite(input.pairSize, "pairSize");
   assertNonNegativeFinite(input.totalCostUsd, "totalCostUsd");
   assertProbability(input.pFatalUpper95, "pFatalUpper95");
-  if (
-    !Number.isFinite(safetyFractionOfBreakEven) ||
-    safetyFractionOfBreakEven <= 0 ||
-    safetyFractionOfBreakEven > 1
-  ) {
+  if (!Number.isFinite(safetyFractionOfBreakEven) || safetyFractionOfBreakEven <= 0 || safetyFractionOfBreakEven > 1) {
     throw new RangeError("safetyFractionOfBreakEven must be in (0, 1]");
   }
 
   const pBreakEven = 1 - input.totalCostUsd / input.pairSize;
-  const maximumAllowedFatalProbability = Math.max(
-    0,
-    safetyFractionOfBreakEven * pBreakEven,
-  );
+  const maximumAllowedFatalProbability = Math.max(0, safetyFractionOfBreakEven * pBreakEven);
   const probabilityHeadroom = maximumAllowedFatalProbability - input.pFatalUpper95;
 
   if (pBreakEven <= 0) {
@@ -434,27 +384,18 @@ export function evaluateEconomicMismatchGate(
 
   return {
     eligible: probabilityHeadroom >= -PROBABILITY_TOLERANCE,
-    reason:
-      probabilityHeadroom >= -PROBABILITY_TOLERANCE
-        ? "eligible"
-        : "fatal_probability_above_limit",
+    reason: probabilityHeadroom >= -PROBABILITY_TOLERANCE ? "eligible" : "fatal_probability_above_limit",
     pBreakEven,
     maximumAllowedFatalProbability,
     probabilityHeadroom,
   };
 }
 
-export function calculateHybridClusterBudget(
-  input: HybridClusterBudgetInput,
-): HybridClusterBudgetResult {
-  const expectedRiskFraction =
-    input.expectedRiskFraction ?? DEFAULT_EXPECTED_CLUSTER_RISK_FRACTION;
-  const expectedRiskCapUsd =
-    input.expectedRiskCapUsd ?? DEFAULT_EXPECTED_CLUSTER_RISK_CAP_USD;
-  const absoluteRiskFraction =
-    input.absoluteRiskFraction ?? DEFAULT_ABSOLUTE_CLUSTER_RISK_FRACTION;
-  const absoluteRiskCapUsd =
-    input.absoluteRiskCapUsd ?? DEFAULT_ABSOLUTE_CLUSTER_RISK_CAP_USD;
+export function calculateHybridClusterBudget(input: HybridClusterBudgetInput): HybridClusterBudgetResult {
+  const expectedRiskFraction = input.expectedRiskFraction ?? DEFAULT_EXPECTED_CLUSTER_RISK_FRACTION;
+  const expectedRiskCapUsd = input.expectedRiskCapUsd ?? DEFAULT_EXPECTED_CLUSTER_RISK_CAP_USD;
+  const absoluteRiskFraction = input.absoluteRiskFraction ?? DEFAULT_ABSOLUTE_CLUSTER_RISK_FRACTION;
+  const absoluteRiskCapUsd = input.absoluteRiskCapUsd ?? DEFAULT_ABSOLUTE_CLUSTER_RISK_CAP_USD;
 
   assertNonNegativeFinite(input.capitalUsd, "capitalUsd");
   assertRiskLimit(expectedRiskFraction, "expectedRiskFraction", true);
@@ -471,14 +412,8 @@ export function calculateHybridClusterBudget(
     usedAbsoluteLossUsd += exposure.fatalLossUsd;
   }
 
-  const expectedLossBudgetUsd = Math.min(
-    input.capitalUsd * expectedRiskFraction,
-    expectedRiskCapUsd,
-  );
-  const absoluteLossBudgetUsd = Math.min(
-    input.capitalUsd * absoluteRiskFraction,
-    absoluteRiskCapUsd,
-  );
+  const expectedLossBudgetUsd = Math.min(input.capitalUsd * expectedRiskFraction, expectedRiskCapUsd);
+  const absoluteLossBudgetUsd = Math.min(input.capitalUsd * absoluteRiskFraction, absoluteRiskCapUsd);
   const exceedsExpected = usedExpectedLossUsd > expectedLossBudgetUsd + 1e-9;
   const exceedsAbsolute = usedAbsoluteLossUsd > absoluteLossBudgetUsd + 1e-9;
 
@@ -502,10 +437,7 @@ export function calculateHybridClusterBudget(
 }
 
 export function calculateMaximumAdditionalFatalLossUsd(
-  budget: Pick<
-    HybridClusterBudgetResult,
-    "remainingExpectedLossUsd" | "remainingAbsoluteLossUsd"
-  >,
+  budget: Pick<HybridClusterBudgetResult, "remainingExpectedLossUsd" | "remainingAbsoluteLossUsd">,
   pFatalUpper95: number,
 ) {
   assertNonNegativeFinite(budget.remainingExpectedLossUsd, "remainingExpectedLossUsd");
@@ -513,9 +445,7 @@ export function calculateMaximumAdditionalFatalLossUsd(
   assertProbability(pFatalUpper95, "pFatalUpper95");
 
   const expectedLimitedLoss =
-    pFatalUpper95 === 0
-      ? Number.POSITIVE_INFINITY
-      : budget.remainingExpectedLossUsd / pFatalUpper95;
+    pFatalUpper95 === 0 ? Number.POSITIVE_INFINITY : budget.remainingExpectedLossUsd / pFatalUpper95;
   return Math.max(0, Math.min(budget.remainingAbsoluteLossUsd, expectedLimitedLoss));
 }
 
@@ -576,10 +506,7 @@ function assertQuadrants(quadrants: JointOutcomeProbabilities) {
 }
 
 function assertCombination(combination: string): asserts combination is MismatchCombination {
-  if (
-    combination !== "POLY_UP_KALSHI_NO" &&
-    combination !== "POLY_DOWN_KALSHI_YES"
-  ) {
+  if (combination !== "POLY_UP_KALSHI_NO" && combination !== "POLY_DOWN_KALSHI_YES") {
     throw new RangeError("unsupported mismatch combination");
   }
 }
@@ -637,10 +564,7 @@ function normalCdf(value: number) {
   const t = 1 / (1 + 0.2316419 * absolute);
   const density = Math.exp((-absolute * absolute) / 2) / Math.sqrt(2 * Math.PI);
   const tail =
-    density *
-    t *
-    (0.31938153 +
-      t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+    density * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
   return value >= 0 ? 1 - tail : tail;
 }
 
@@ -666,27 +590,16 @@ function bivariateNormalCdf(a: number, b: number, correlation: number) {
   }
 
   const conditionalStdDev = Math.sqrt(1 - correlation * correlation);
-  const integrand = (x: number) =>
-    normalPdf(x) * normalCdf((b - correlation * x) / conditionalStdDev);
+  const integrand = (x: number) => normalPdf(x) * normalCdf((b - correlation * x) / conditionalStdDev);
   const lower = -8;
   const upper = Math.min(a, 8);
   const midpoint = (lower + upper) / 2;
   const whole = simpson(integrand, lower, upper, midpoint);
-  return clampProbability(
-    adaptiveSimpson(integrand, lower, upper, 1e-9, whole, 18),
-  );
+  return clampProbability(adaptiveSimpson(integrand, lower, upper, 1e-9, whole, 18));
 }
 
-function simpson(
-  fn: (value: number) => number,
-  lower: number,
-  upper: number,
-  midpoint: number,
-) {
-  return (
-    ((upper - lower) / 6) *
-    (fn(lower) + 4 * fn(midpoint) + fn(upper))
-  );
+function simpson(fn: (value: number) => number, lower: number, upper: number, midpoint: number) {
+  return ((upper - lower) / 6) * (fn(lower) + 4 * fn(midpoint) + fn(upper));
 }
 
 function adaptiveSimpson(
@@ -739,11 +652,7 @@ function regularizedIncompleteBeta(value: number, alpha: number, beta: number) {
   }
 
   const factor = Math.exp(
-    logGamma(alpha + beta) -
-      logGamma(alpha) -
-      logGamma(beta) +
-      alpha * Math.log(value) +
-      beta * Math.log1p(-value),
+    logGamma(alpha + beta) - logGamma(alpha) - logGamma(beta) + alpha * Math.log(value) + beta * Math.log1p(-value),
   );
 
   if (value < (alpha + 1) / (alpha + beta + 2)) {
@@ -762,13 +671,11 @@ function betaContinuedFraction(value: number, alpha: number, beta: number) {
   const qam = alpha - 1;
   let c = 1;
   let d = 1 - (qab * value) / qap;
-  d = 1 / Math.max(Math.abs(d), floor) * Math.sign(d || 1);
+  d = (1 / Math.max(Math.abs(d), floor)) * Math.sign(d || 1);
   let result = d;
 
   for (let index = 1; index <= maxIterations; index += 1) {
-    const evenCoefficient =
-      (index * (beta - index) * value) /
-      ((qam + 2 * index) * (alpha + 2 * index));
+    const evenCoefficient = (index * (beta - index) * value) / ((qam + 2 * index) * (alpha + 2 * index));
     d = 1 + evenCoefficient * d;
     d = Math.abs(d) < floor ? floor : d;
     c = 1 + evenCoefficient / c;
@@ -776,9 +683,7 @@ function betaContinuedFraction(value: number, alpha: number, beta: number) {
     d = 1 / d;
     result *= d * c;
 
-    const oddCoefficient =
-      (-(alpha + index) * (qab + index) * value) /
-      ((alpha + 2 * index) * (qap + 2 * index));
+    const oddCoefficient = (-(alpha + index) * (qab + index) * value) / ((alpha + 2 * index) * (qap + 2 * index));
     d = 1 + oddCoefficient * d;
     d = Math.abs(d) < floor ? floor : d;
     c = 1 + oddCoefficient / c;
@@ -797,14 +702,8 @@ function betaContinuedFraction(value: number, alpha: number, beta: number) {
 
 function logGamma(value: number): number {
   const coefficients = [
-    676.5203681218851,
-    -1259.1392167224028,
-    771.3234287776531,
-    -176.6150291621406,
-    12.507343278686905,
-    -0.13857109526572012,
-    9.984369578019572e-6,
-    1.5056327351493116e-7,
+    676.5203681218851, -1259.1392167224028, 771.3234287776531, -176.6150291621406, 12.507343278686905,
+    -0.13857109526572012, 9.984369578019572e-6, 1.5056327351493116e-7,
   ];
 
   if (value < 0.5) {
@@ -817,10 +716,5 @@ function logGamma(value: number): number {
     series += coefficients[index] / (shifted + index + 1);
   }
   const t = shifted + coefficients.length - 0.5;
-  return (
-    0.5 * Math.log(2 * Math.PI) +
-    (shifted + 0.5) * Math.log(t) -
-    t +
-    Math.log(series)
-  );
+  return 0.5 * Math.log(2 * Math.PI) + (shifted + 0.5) * Math.log(t) - t + Math.log(series);
 }

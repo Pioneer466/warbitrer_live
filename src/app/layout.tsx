@@ -4,8 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Warbitrer Live Multi-Asset 15m",
-  description:
-    "Cockpit live pour la stratégie d'arbitrage crypto 15 minutes entre Polymarket et Kalshi.",
+  description: "Cockpit live pour la stratégie d'arbitrage crypto 15 minutes entre Polymarket et Kalshi.",
 };
 
 export default function RootLayout({

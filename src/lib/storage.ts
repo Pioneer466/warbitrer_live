@@ -1,5 +1,14 @@
 import * as postgres from "@/lib/postgres-db";
-export { ConfigurationRevisionConflictError, OrderIntentRevisionConflictError } from "@/lib/postgres-db";
+export {
+  AccountingPersistenceError,
+  CircuitBreakerIncidentPersistenceError,
+  ConfigurationRevisionConflictError,
+  EntryAdmissionConflictError,
+  hashOrderAttemptRequest,
+  LiveOrderAttemptClaimError,
+  LiveOrderAttemptSubmissionError,
+  OrderIntentRevisionConflictError,
+} from "@/lib/postgres-db";
 import { isMarketAsset } from "@/lib/market-catalog";
 import { queueRunEventNotification } from "@/lib/notifications";
 import type { OracleSlotSample, SlotResolutionRecord } from "@/lib/oracle-history";
@@ -7,6 +16,7 @@ import type { GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   MarketAsset,
   BridgeTransfer,
+  AcknowledgeCircuitBreakerIncidentInput,
   CircuitBreaker,
   ConfigurationMutationContext,
   DatabaseMaintenanceSummary,
@@ -14,19 +24,26 @@ import type {
   ExecutionCandidate,
   DashboardResponse,
   HistoryPoint,
-  LiveFill,
+  LiveEntryAdmissionInput,
+  LiveOrderAttemptClaimInput,
+  LiveOrderAttemptDispatchInput,
+  LiveOrderAttemptSubmissionInput,
   LiveOpportunity,
   LiveOrder,
   MarketSlot,
   MarketFillQualityEvent,
   NotificationDelivery,
+  ObserveCircuitBreakerIncidentInput,
   OpportunitySnapshot,
   OrderAttempt,
   OrderIntent,
   PortfolioDashboardResponse,
   PnlSnapshot,
   PositionSnapshot,
+  RecordCircuitBreakerExposureRecoveryInput,
+  ResolveOwnedCircuitBreakerIncidentInput,
   RunEvent,
+  ShadowEntryAdmissionInput,
   StrategyConfigMapUpdate,
   StrategyConfigUpdate,
   TradesResponse,
@@ -37,6 +54,10 @@ import type {
 
 export function storageMode() {
   return "postgres";
+}
+
+export async function closeStorage() {
+  return postgres.closePgDb();
 }
 
 async function db() {
@@ -123,6 +144,10 @@ export async function readLastEntryCosts(asset: MarketAsset, slotKey: string) {
   return postgres.getLastEntryCosts(await db(), asset, slotKey);
 }
 
+export async function readLastAuthorizedEntryCosts(asset: MarketAsset, slotKey: string, mode: "live" | "shadow") {
+  return postgres.getLastAuthorizedEntryCosts(await db(), asset, slotKey, mode);
+}
+
 export async function writeVenueBalance(balance: VenueBalance) {
   return postgres.upsertVenueBalance(await db(), balance);
 }
@@ -133,6 +158,26 @@ export async function readVenueBalances() {
 
 export async function insertOrderIntent(intent: OrderIntent) {
   return postgres.insertOrderIntent(await db(), intent);
+}
+
+export async function admitLiveEntry(input: LiveEntryAdmissionInput) {
+  return postgres.admitLiveEntryAtomically(await db(), input);
+}
+
+export async function admitShadowEntry(input: ShadowEntryAdmissionInput) {
+  return postgres.admitShadowEntryAtomically(await db(), input);
+}
+
+export async function claimAdmittedLiveOrderAttempt(input: LiveOrderAttemptClaimInput) {
+  return postgres.claimAdmittedLiveOrderAttemptAtomically(await db(), input);
+}
+
+export async function claimLiveOrderAttemptForSubmission(input: LiveOrderAttemptSubmissionInput) {
+  return postgres.claimLiveOrderAttemptForSubmissionAtomically(await db(), input);
+}
+
+export async function revalidateLiveOrderAttemptBeforeDispatch(input: LiveOrderAttemptDispatchInput) {
+  return postgres.revalidateLiveOrderAttemptBeforeDispatchAtomically(await db(), input);
 }
 
 export async function writeOrderIntent(intent: OrderIntent) {
@@ -199,8 +244,44 @@ export async function findVenueOrder(venue: string, venueOrderId: string) {
   return postgres.findVenueOrderByExchangeId(await db(), venue, venueOrderId);
 }
 
-export async function writeFill(fill: LiveFill) {
-  return postgres.upsertFill(await db(), fill);
+export async function ingestVenueFillAccounting(input: postgres.IngestVenueFillAccountingInput) {
+  return postgres.ingestVenueFillAtomically(await db(), input);
+}
+
+export async function closeIntentAccountingWithoutExposure(input: postgres.CloseIntentWithoutExposureInput) {
+  return postgres.closeIntentWithoutExposureAtomically(await db(), input);
+}
+
+export async function finalizeIntentAccounting(input: postgres.FinalizeIntentAccountingInput) {
+  return postgres.finalizeIntentAccountingAtomically(await db(), input);
+}
+
+export async function reaccountIntent(input: postgres.ReaccountIntentInput) {
+  return postgres.reaccountIntentAtomically(await db(), input);
+}
+
+export async function readAccountingHead(intentId: string) {
+  return postgres.getAccountingHead(await db(), intentId);
+}
+
+export async function readAccountingFillEvidenceForIntent(intentId: string) {
+  return postgres.listAccountingFillEvidenceForIntent(await db(), intentId);
+}
+
+export async function readLiveAccountingBacklog() {
+  return postgres.getLiveAccountingBacklog(await db());
+}
+
+export async function readAccountingRealizedPnlForUtcDay(dayStart: number, shadow = false) {
+  return postgres.sumAccountingRealizedPnlForUtcDay(await db(), dayStart, shadow);
+}
+
+export async function readAllTimeAccountingLedger(shadow = false) {
+  return postgres.sumAllTimeAccountingLedger(await db(), shadow);
+}
+
+export async function readStableAccountingProjectionBacklog(limit = 100) {
+  return postgres.listStableAccountingProjectionBacklog(await db(), limit);
 }
 
 export async function readRecentFills(limit?: number, asset?: MarketAsset) {
@@ -223,10 +304,6 @@ export async function readPositions(asset?: MarketAsset) {
   return postgres.listPositions(await db(), asset);
 }
 
-export async function writeSettlement(settlement: Parameters<typeof postgres.upsertSettlement>[1]) {
-  return postgres.upsertSettlement(await db(), settlement);
-}
-
 export async function writePnlSnapshot(snapshot: PnlSnapshot) {
   return postgres.insertPnlSnapshot(await db(), snapshot);
 }
@@ -245,14 +322,6 @@ export async function writeStablePnlChange(intent: OrderIntent, changedAt: numbe
 
 export async function updateStablePnlChangeFromIntent(intent: OrderIntent) {
   return postgres.updateStablePnlChangeFromIntent(await db(), intent);
-}
-
-export async function readLiveRealizedPnlUsd() {
-  return postgres.getLiveRealizedPnlUsd(await db());
-}
-
-export async function readLiveFeesUsd() {
-  return postgres.getLiveFeesUsd(await db());
 }
 
 export async function writeBridgeTransfer(transfer: BridgeTransfer) {
@@ -320,6 +389,30 @@ export async function writeCircuitBreaker(breaker: CircuitBreaker) {
 
 export async function readCircuitBreakers() {
   return postgres.listCircuitBreakers(await db());
+}
+
+export async function writeCircuitBreakerIncident(input: ObserveCircuitBreakerIncidentInput) {
+  return postgres.observeCircuitBreakerIncident(await db(), input);
+}
+
+export async function readCurrentCircuitBreakerIncidents(options?: { includeResolved?: boolean }) {
+  return postgres.listCurrentCircuitBreakerIncidents(await db(), options);
+}
+
+export async function writeCircuitBreakerExposureRecovery(input: RecordCircuitBreakerExposureRecoveryInput) {
+  return postgres.recordCircuitBreakerExposureRecovery(await db(), input);
+}
+
+export async function resolveCircuitBreakerIncident(input: ResolveOwnedCircuitBreakerIncidentInput) {
+  return postgres.resolveOwnedCircuitBreakerIncident(await db(), input);
+}
+
+export async function acknowledgeCircuitBreaker(input: AcknowledgeCircuitBreakerIncidentInput) {
+  return postgres.acknowledgeCircuitBreakerIncident(await db(), input);
+}
+
+export async function acknowledgeManualKillBreaker(input: AcknowledgeCircuitBreakerIncidentInput) {
+  return postgres.acknowledgeManualKillCircuitBreaker(await db(), input);
 }
 
 export async function writeExecutionCandidate(candidate: ExecutionCandidate) {
