@@ -1073,7 +1073,7 @@ describe("market data helpers", () => {
       id: "market-1",
       question: "BTC up/down 15m",
       slug: slot.polymarketSlug,
-      startDate: slot.startIso,
+      startDate: new Date(slot.startTs - 24 * 60 * 60_000).toISOString(),
       endDate: slot.endIso,
       conditionId: "condition-1",
       closed: false,
@@ -1133,6 +1133,8 @@ describe("market data helpers", () => {
 
     const state = feed.buildState(slot, 1770000005000);
 
+    expect(state.quote.ref.startTime).toBe(slot.startIso);
+    expect(state.quote.ref.endTime).toBe(slot.endIso);
     expect(state.quote.outcomes.up.buyPrice).toBe(0.53);
     expect(state.quote.outcomes.up.sellPrice).toBe(0.52);
     expect(state.quote.outcomes.up.chart.price).toBe(0.53);

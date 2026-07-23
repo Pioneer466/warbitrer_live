@@ -150,3 +150,20 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 ```text
 Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Preserve password-based VPS SSH access. Do not deploy or enable live trading without explicit approval. Continue from the current review branch and verify the complete diff before committing.
 ```
+
+## Shadow Admission Verification - 2026-07-23
+
+Production inspection confirmed that `LIVE_EXECUTION_ALLOWED=false` does not stop shadow orchestration and that the
+39 blocking `legacy_pending` accounting heads are checked only by live PostgreSQL admission. A disposable
+PostgreSQL integration test reproduced one blocking `legacy_pending` head: live admission was rejected with
+`circuit_breaker_active`, while shadow admission was accepted in the same durable state.
+
+The inspection also found a separate systematic blocker. Gamma `startDate` is the recurring market listing creation
+timestamp, currently about one day before the actual 15-minute slot for all seven assets. The final identity policy
+therefore rejected every eligible candidate as `polymarket_identity_mismatch`; BNB recorded 22 such shadow rejections
+between 14:23:58 and 14:24:15 UTC.
+
+The fix normalizes tradable Polymarket reference times from the canonical slot while retaining exact Gamma slug and
+end-time validation. Unit coverage exercises the real shifted `startDate` shape and verifies final feed references.
+The focused unit suite and isolated PostgreSQL proof pass. Deployment must keep the live gate false; no accounting row
+or trading threshold needs to change.

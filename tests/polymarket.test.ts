@@ -1,6 +1,7 @@
 import { Side, type Trade } from "@polymarket/clob-client-v2";
 
 import {
+  buildCanonicalPolymarketMarketRef,
   buildPolymarketClobOrderPlan,
   derivePolymarketConfirmationRequestTimeoutMs,
   derivePolymarketDepth,
@@ -30,6 +31,7 @@ import {
   summarizePolymarketTrades,
 } from "@/lib/polymarket";
 import { vi } from "vitest";
+import type { MarketSlot } from "@/lib/types";
 
 describe("Polymarket helpers", () => {
   afterEach(() => {
@@ -129,6 +131,42 @@ describe("Polymarket helpers", () => {
     expect(extractPolymarketResolution('["1","0"]')).toBe("UP");
     expect(extractPolymarketResolution('["0","1"]')).toBe("DOWN");
     expect(extractPolymarketResolution('["0.61","0.39"]')).toBeNull();
+  });
+
+  it("uses canonical slot times when Gamma startDate is the listing creation time", () => {
+    const slot: MarketSlot = {
+      asset: "bnb",
+      key: "bnb:1784816100000",
+      startTs: 1784816100000,
+      endTs: 1784817000000,
+      startIso: "2026-07-23T14:15:00.000Z",
+      endIso: "2026-07-23T14:30:00.000Z",
+      label: "Jul 23, 10:15 AM - Jul 23, 10:30 AM",
+      polymarketSlug: "bnb-updown-15m-1784816100",
+      secondsRemaining: 600,
+    };
+    const market = {
+      id: "3029431",
+      conditionId: "condition-bnb",
+      question: "BNB Up or Down",
+      slug: slot.polymarketSlug,
+      startDate: "2026-07-22T14:23:02.516274Z",
+      endDate: "2026-07-23T14:30:00Z",
+    };
+
+    expect(buildCanonicalPolymarketMarketRef(slot, market)).toMatchObject({
+      slotKey: slot.key,
+      slug: slot.polymarketSlug,
+      conditionId: "condition-bnb",
+      startTime: slot.startIso,
+      endTime: slot.endIso,
+    });
+    expect(() =>
+      buildCanonicalPolymarketMarketRef(slot, {
+        ...market,
+        endDate: "2026-07-23T14:45:00Z",
+      }),
+    ).toThrow("end time does not match");
   });
 
   it("falls back to Gamma events for historical recurring markets missing from /markets", async () => {

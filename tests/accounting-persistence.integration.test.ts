@@ -9,6 +9,7 @@ import {
   AccountingPersistenceError,
   acquireAccountingTransactionLock,
   admitLiveEntryAtomically,
+  admitShadowEntryAtomically,
   claimAdmittedLiveOrderAttemptAtomically,
   claimLiveOrderAttemptForSubmissionAtomically,
   closeIntentWithoutExposureAtomically,
@@ -29,13 +30,20 @@ import {
   sumAccountingRealizedPnlForUtcDay,
   upsertLegacyFillProjection,
 } from "@/lib/postgres-db";
-import type { LiveEntryAdmissionInput, LiveFill, LiveOrder, OrderAttempt, OrderIntent } from "@/lib/types";
+import type {
+  LiveEntryAdmissionInput,
+  LiveFill,
+  LiveOrder,
+  OrderAttempt,
+  OrderIntent,
+  ShadowEntryAdmissionInput,
+} from "@/lib/types";
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
 
 describePostgres("Postgres accounting persistence", () => {
-  it("backfills historical heads as legacy_pending and blocks a new live admission", async () => {
+  it("backfills historical heads as legacy_pending, blocks live, and permits shadow admission", async () => {
     await withIsolatedSchema(async (pool) => {
       await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
       const historical = buildIntent("legacy-accounting", "failed");
@@ -68,6 +76,14 @@ describePostgres("Postgres accounting persistence", () => {
         [admission.intent.id],
       );
       expect(stored.rows).toEqual([{ total: 0 }]);
+
+      await setShadowStrategy(pool);
+      await expect(
+        admitShadowEntryAtomically(pool, buildShadowAdmission("shadow-ignores-accounting-backlog")),
+      ).resolves.toMatchObject({
+        admitted: true,
+        fresh: true,
+      });
     });
   }, 30_000);
 
@@ -2144,10 +2160,36 @@ function buildLiveAdmission(id: string): LiveEntryAdmissionInput {
   };
 }
 
+function buildShadowAdmission(id: string): ShadowEntryAdmissionInput {
+  const {
+    intent,
+    plannedAttempt: _plannedAttempt,
+    cutoffAt: _cutoffAt,
+    latestSubmissionStartAt: _latest,
+    ...input
+  } = buildLiveAdmission(id);
+  return {
+    ...input,
+    intent: {
+      ...intent,
+      shadow: true,
+      status: "pending",
+    },
+  };
+}
+
 async function setLiveStrategy(pool: Pool) {
   await pool.query(`
     UPDATE strategy_configs
     SET payload = jsonb_set(jsonb_set(payload, '{enableTrading}', 'true'), '{shadowMode}', 'false')
+    WHERE asset = 'btc'
+  `);
+}
+
+async function setShadowStrategy(pool: Pool) {
+  await pool.query(`
+    UPDATE strategy_configs
+    SET payload = jsonb_set(jsonb_set(payload, '{enableTrading}', 'true'), '{shadowMode}', 'true')
     WHERE asset = 'btc'
   `);
 }

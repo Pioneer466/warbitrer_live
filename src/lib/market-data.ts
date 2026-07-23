@@ -23,6 +23,7 @@ import {
   type KalshiTrade,
 } from "@/lib/kalshi";
 import {
+  buildCanonicalPolymarketMarketRef,
   buildPolymarketOutcomeQuoteFromBook,
   createUnavailablePolymarketQuote,
   derivePolymarketFeeMetadata,
@@ -905,18 +906,7 @@ class PolymarketRealtimeFeed {
 
     const feeMetadata = derivePolymarketFeeMetadata(this.clobMarketInfo);
     const quote: PolymarketQuote = {
-      ref: {
-        asset: slot.asset,
-        venue: "polymarket",
-        id: this.market.id,
-        slotKey: slot.key,
-        slug: this.market.slug,
-        conditionId: this.market.conditionId ?? this.market.id,
-        title: this.market.question,
-        url: `https://polymarket.com/event/${this.market.slug}`,
-        startTime: this.market.startDate,
-        endTime: this.market.endDate,
-      },
+      ref: buildCanonicalPolymarketMarketRef(slot, this.market),
       conditionId: this.market.conditionId ?? this.market.id,
       status: this.market.closed ? "closed" : "open",
       slotAligned: true,
@@ -960,6 +950,7 @@ class PolymarketRealtimeFeed {
         if (!market) {
           throw new Error(`Polymarket market ${slot.polymarketSlug} introuvable`);
         }
+        buildCanonicalPolymarketMarketRef(slot, market);
 
         const tokenIds = derivePolymarketOutcomeTokens(market);
         const conditionId = market.conditionId ?? market.id;
@@ -1009,6 +1000,7 @@ class PolymarketRealtimeFeed {
         this.books.set(tokenIds.down, createPolymarketBookState(tokenIds.down, downBook, now));
         const freshMarket = await fetchPolymarketMarket(slot.polymarketSlug).catch(() => null);
         if (freshMarket) {
+          buildCanonicalPolymarketMarketRef(slot, freshMarket);
           this.market = freshMarket;
         }
         this.lastRestSyncAt = now;

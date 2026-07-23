@@ -24,6 +24,7 @@ import type {
   MarketSlot,
   OutcomeQuote,
   PolymarketQuote,
+  VenueMarketRef,
   VenueAdapter,
   VenueOrderRequest,
   VenueOrderResult,
@@ -179,6 +180,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
   if (!market) {
     throw new Error(`Polymarket market ${slot.polymarketSlug} introuvable`);
   }
+  const marketRef = buildCanonicalPolymarketMarketRef(slot, market);
 
   const outcomes = JSON.parse(market.outcomes) as Array<"Up" | "Down">;
   const tokenIds = JSON.parse(market.clobTokenIds) as [string, string];
@@ -197,18 +199,7 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
   const feeMetadata = derivePolymarketFeeMetadata(clobMarketInfo);
 
   return {
-    ref: {
-      asset: slot.asset,
-      venue: "polymarket",
-      id: market.id,
-      slotKey: slot.key,
-      slug: market.slug,
-      conditionId,
-      title: market.question,
-      url: `https://polymarket.com/event/${market.slug}`,
-      startTime: market.startDate,
-      endTime: market.endDate,
-    },
+    ref: marketRef,
     conditionId,
     status: market.closed ? "closed" : "open",
     slotAligned: true,
@@ -245,6 +236,37 @@ export async function fetchPolymarketQuote(slot: MarketSlot): Promise<Polymarket
     feeExponent: getNumericCandidate(clobMarketInfo?.fd?.e ?? null) ?? 0,
     ...feeMetadata,
     negRisk: Boolean(clobMarketInfo?.nr ?? false),
+  };
+}
+
+export function buildCanonicalPolymarketMarketRef(
+  slot: MarketSlot,
+  market: Pick<GammaMarket, "id" | "conditionId" | "question" | "slug" | "endDate">,
+): VenueMarketRef {
+  if (market.slug !== slot.polymarketSlug) {
+    throw new Error(`Polymarket market slug ${market.slug} does not match slot ${slot.polymarketSlug}`);
+  }
+  if (Date.parse(market.endDate) !== Date.parse(slot.endIso)) {
+    throw new Error(`Polymarket market ${market.slug} end time does not match slot ${slot.key}`);
+  }
+
+  const conditionId = market.conditionId ?? market.id;
+  if (!conditionId.trim()) {
+    throw new Error(`Polymarket market ${market.slug} has no condition identity`);
+  }
+
+  return {
+    asset: slot.asset,
+    venue: "polymarket",
+    id: market.id,
+    slotKey: slot.key,
+    slug: market.slug,
+    conditionId,
+    title: market.question,
+    url: `https://polymarket.com/event/${market.slug}`,
+    // Gamma startDate is the listing creation timestamp for recurring crypto markets.
+    startTime: slot.startIso,
+    endTime: slot.endIso,
   };
 }
 
