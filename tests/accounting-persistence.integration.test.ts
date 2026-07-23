@@ -19,7 +19,7 @@ import {
   ingestVenueFillAtomically,
   insertOrderIntent,
   listAccountingFillEvidenceForIntent,
-  listHistoricalSettledLegacyPendingIntentIds,
+  listHistoricalTerminalLegacyPendingIntentIds,
   listStableAccountingProjectionBacklog,
   migratePostgresDatabase,
   reaccountIntentAtomically,
@@ -121,7 +121,7 @@ describePostgres("Postgres accounting persistence", () => {
     });
   }, 30_000);
 
-  it("isolates only prior-day settled legacy debt with durable venue resolutions from reconciliation", async () => {
+  it("isolates prior-day terminal legacy debt from continuous runtime reconciliation", async () => {
     await withIsolatedSchema(async (pool) => {
       await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
       const dayStart = utcDayStart(Date.now());
@@ -145,13 +145,13 @@ describePostgres("Postgres accounting persistence", () => {
       await runDatabaseMigrations(pool, DATABASE_MIGRATIONS);
 
       await expect(
-        listHistoricalSettledLegacyPendingIntentIds(pool, [
+        listHistoricalTerminalLegacyPendingIntentIds(pool, [
           currentSettled.id,
           historicalFailed.id,
           historicalSettled.id,
           historicalSettled.id,
         ]),
-      ).resolves.toEqual([historicalSettled.id]);
+      ).resolves.toEqual([historicalFailed.id, historicalSettled.id]);
     });
   }, 30_000);
 

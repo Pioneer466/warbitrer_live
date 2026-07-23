@@ -155,7 +155,7 @@ import {
   readGlobalRiskConfig,
   readAccountingHead,
   readAccountingFillEvidenceForIntent,
-  readHistoricalSettledLegacyPendingIntentIds,
+  readHistoricalTerminalLegacyPendingIntentIds,
   readAccountingRealizedPnlForUtcDay,
   readAllTimeAccountingLedger,
   readOpenOrderIntents,
@@ -8556,10 +8556,10 @@ async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedConte
   const candidateRecentOrders = sharedContext.recentVenueOrders
     ? sharedContext.recentVenueOrders.filter((order) => order.asset === asset).slice(0, 200)
     : await readRecentVenueOrders(200, asset);
-  const historicalSettledIntentIds = new Set(
-    await readHistoricalSettledLegacyPendingIntentIds(candidateRecentOrders.map((order) => order.intentId)),
+  const historicalTerminalIntentIds = new Set(
+    await readHistoricalTerminalLegacyPendingIntentIds(candidateRecentOrders.map((order) => order.intentId)),
   );
-  const recentOrders = candidateRecentOrders.filter((order) => !historicalSettledIntentIds.has(order.intentId));
+  const recentOrders = candidateRecentOrders.filter((order) => !historicalTerminalIntentIds.has(order.intentId));
   const reconcileData = sharedContext.venueOrderReconcileData ?? (await prefetchVenueOrderReconcileData());
   const { polyOpenOrders, kalshiOrders, polyTrades, kalshiFills } = reconcileData;
   const recentOrderByVenueId = new Map(recentOrders.map((order) => [`${order.venue}:${order.venueOrderId}`, order]));

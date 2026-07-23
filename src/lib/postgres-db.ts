@@ -7311,7 +7311,7 @@ export async function getAccountingHead(pool: Pool, intentId: string): Promise<A
   return result.rows[0] ? mapAccountingHeadRow(result.rows[0]) : null;
 }
 
-export async function listHistoricalSettledLegacyPendingIntentIds(
+export async function listHistoricalTerminalLegacyPendingIntentIds(
   pool: PgQueryable,
   intentIds: readonly string[],
 ): Promise<string[]> {
@@ -7338,11 +7338,8 @@ export async function listHistoricalSettledLegacyPendingIntentIds(
       JOIN accounting_heads AS head ON head.intent_id = intent.id
       CROSS JOIN accounting_clock
       WHERE intent.id = ANY($1::text[])
-        AND intent.status = 'settled'
-        AND intent.resolved_at IS NOT NULL
-        AND intent.resolved_at < accounting_clock.utc_day_start
-        AND intent.poly_resolution IS NOT NULL
-        AND intent.kalshi_resolution IS NOT NULL
+        AND intent.status IN ('settled', 'unwound', 'failed', 'skipped', 'canceled')
+        AND COALESCE(intent.resolved_at, intent.slot_end_ts) < accounting_clock.utc_day_start
         AND head.state = 'legacy_pending'
       ORDER BY intent.id ASC
     `,

@@ -264,8 +264,8 @@ export async function readAccountingHead(intentId: string) {
   return postgres.getAccountingHead(await db(), intentId);
 }
 
-export async function readHistoricalSettledLegacyPendingIntentIds(intentIds: readonly string[]) {
-  return postgres.listHistoricalSettledLegacyPendingIntentIds(await db(), intentIds);
+export async function readHistoricalTerminalLegacyPendingIntentIds(intentIds: readonly string[]) {
+  return postgres.listHistoricalTerminalLegacyPendingIntentIds(await db(), intentIds);
 }
 
 export async function readAccountingFillEvidenceForIntent(intentId: string) {
