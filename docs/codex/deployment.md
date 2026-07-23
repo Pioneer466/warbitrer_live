@@ -102,7 +102,7 @@ Use local authenticated access without placing credentials in shell history when
 - worker bundle rebuilt after that commit
 - all services active
 - Postgres reachable
-- schema ready at V8 with the expected checksums
+- schema ready at V9 with the expected checksums
 - current snapshots for every active asset
 - both venue feeds fresh
 - `POLYGON_RPC_URL` connected to Polygon mainnet chain ID 137 with receipt access
