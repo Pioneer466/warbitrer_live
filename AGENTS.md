@@ -25,12 +25,11 @@ Do not assume the generic recommendations in old prompts are implemented. The co
 - State: Postgres only. There is no Docker or SQLite runtime.
 - Market data: Polymarket and Kalshi WebSockets with REST bootstrap/resync.
 - Worker topology: one `asset-live` process per active asset, plus a reconciler and notifier.
-- Active worker assets: BTC, ETH, SOL, XRP, DOGE.
-- BNB and HYPE exist in the catalog/UI/config but are not in `ACTIVE_MARKET_ASSETS`.
+- Active worker assets: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE.
 - Strategy configuration is stored in Postgres, not environment variables.
 - Production deployment: `systemd` + Caddy + local Postgres on a VPS.
 - Database schema changes are checksummed, forward-only migrations defined in `src/lib/postgres-db.ts`.
-- Migrations V1-V8 are applied explicitly with `npm run db:migrate` and verified with `npm run db:status`; runtime processes only verify compatibility.
+- Migrations V1-V9 are applied explicitly with `npm run db:migrate` and verified with `npm run db:status`; runtime processes only verify compatibility.
 
 ## Standard workflow
 
@@ -144,6 +143,8 @@ Canonical services:
 - `warbitrer-asset@sol`
 - `warbitrer-asset@xrp`
 - `warbitrer-asset@doge`
+- `warbitrer-asset@bnb`
+- `warbitrer-asset@hype`
 - `warbitrer-reconciler`
 - `warbitrer-notifier`
 - `warbitrer-postgres-backup.timer`

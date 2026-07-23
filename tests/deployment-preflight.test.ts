@@ -193,6 +193,8 @@ describe("VPS deployment ordering", () => {
 
   it("locks deployment, checks every service, and verifies process liveness", () => {
     expect(source).toContain("flock --nonblock 9");
+    expect(source).toContain("warbitrer-asset@bnb.service");
+    expect(source).toContain("warbitrer-asset@hype.service");
     expect(source).toContain('systemctl is-active --quiet "$LEGACY_UNIT"');
     expect(source).toContain('systemctl is-enabled --quiet "$LEGACY_UNIT"');
     expect(source).toContain("run_as_app npm run format:check");

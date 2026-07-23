@@ -56,7 +56,7 @@ Ce dossier contient un pack minimal pour déployer Warbitrer sur un VPS classiqu
 9. Recharger et activer:
    - `sudo systemctl daemon-reload`
    - `sudo systemctl enable --now warbitrer-web`
-   - `sudo systemctl enable --now warbitrer-asset@btc warbitrer-asset@eth warbitrer-asset@sol warbitrer-asset@xrp warbitrer-asset@doge`
+   - `sudo systemctl enable --now warbitrer-asset@btc warbitrer-asset@eth warbitrer-asset@sol warbitrer-asset@xrp warbitrer-asset@doge warbitrer-asset@bnb warbitrer-asset@hype`
    - `sudo systemctl enable --now warbitrer-reconciler warbitrer-notifier`
    - `sudo systemctl enable --now warbitrer-postgres-backup.timer`
 10. Configurer Caddy avec `deploy/vps/Caddyfile`

@@ -12,6 +12,8 @@ SERVICE_UNITS=(
   warbitrer-asset@sol.service
   warbitrer-asset@xrp.service
   warbitrer-asset@doge.service
+  warbitrer-asset@bnb.service
+  warbitrer-asset@hype.service
   warbitrer-reconciler.service
   warbitrer-notifier.service
 )

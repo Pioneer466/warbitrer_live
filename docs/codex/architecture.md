@@ -170,7 +170,7 @@ Shadow execution uses a separate per-asset/slot advisory lock, while shadow admi
 
 - `engine.ts`, `postgres-db.ts`, and `market-data.ts` remain large, high-blast-radius modules.
 - V1 is intentionally large because it snapshots the former bootstrap; later migrations must remain focused and additive.
-- BNB and HYPE catalog support intentionally exceeds the active production worker set.
+- The seven active asset workers increase feed, REST, database, and process load; production capacity and rate-limit health must be observed after topology changes.
 - Passing deterministic tests cannot reproduce all venue latency, outage, rate-limit, or market-microstructure behavior.
 
 Use `docs/codex/session-handoff.md` and the current review iteration for date-specific rollout state. Do not infer deployment or live-canary approval from this architecture document.

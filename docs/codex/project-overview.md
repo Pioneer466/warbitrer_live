@@ -15,15 +15,7 @@ The system can observe markets, simulate paired execution, or submit real taker 
 
 The catalog contains BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE.
 
-The production worker set contains:
-
-- BTC
-- ETH
-- SOL
-- XRP
-- DOGE
-
-BNB and HYPE have catalog, UI, and configuration support but are not included in `ACTIVE_MARKET_ASSETS` or the VPS service list. Live settings for assets without an active worker are rejected.
+The production worker set contains BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE. Each asset has an isolated worker and versioned strategy configuration.
 
 ## Capabilities
 

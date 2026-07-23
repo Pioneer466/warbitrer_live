@@ -13,6 +13,8 @@ systemd:
   warbitrer-asset@sol
   warbitrer-asset@xrp
   warbitrer-asset@doge
+  warbitrer-asset@bnb
+  warbitrer-asset@hype
   warbitrer-reconciler
   warbitrer-notifier
   warbitrer-postgres-backup.timer
@@ -31,7 +33,7 @@ There is no Docker deployment.
 - Polymarket key: `/etc/warbitrer/polymarket-private-key.txt`
 - Backups: `/opt/warbitrer-live/backups/postgres` by default
 
-`PG_POOL_MAX` must be at least 2 because advisory-lock callbacks can need a second application connection. The default split topology has eight app processes, so `PG_POOL_MAX=3` budgets up to 24 app connections; leave additional Postgres capacity for migrations, backups, and operator sessions. Never run the legacy worker alongside the split topology.
+`PG_POOL_MAX` must be at least 2 because advisory-lock callbacks can need a second application connection. The default split topology has ten app processes, so `PG_POOL_MAX=3` budgets up to 30 app connections; leave additional Postgres capacity for migrations, backups, and operator sessions. Never run the legacy worker alongside the split topology.
 
 Run `git` and `npm` as `warbitrer`. Running them as root creates ownership failures in `.git`, `node_modules`, `.next`, and `dist`.
 

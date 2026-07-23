@@ -71,6 +71,8 @@ sudo systemctl restart \
   warbitrer-asset@sol \
   warbitrer-asset@xrp \
   warbitrer-asset@doge \
+  warbitrer-asset@bnb \
+  warbitrer-asset@hype \
   warbitrer-reconciler \
   warbitrer-notifier
 
@@ -81,6 +83,8 @@ sudo systemctl --quiet is-active \
   warbitrer-asset@sol \
   warbitrer-asset@xrp \
   warbitrer-asset@doge \
+  warbitrer-asset@bnb \
+  warbitrer-asset@hype \
   warbitrer-reconciler \
   warbitrer-notifier
 ```

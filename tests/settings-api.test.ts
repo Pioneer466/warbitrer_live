@@ -157,14 +157,18 @@ describe("settings API revision contract and live gate", () => {
     expect(storageMocks.writeSettings).toHaveBeenCalledOnce();
   });
 
-  it("rejects live for an asset without an active worker", async () => {
+  it("recognizes the restored BNB worker as active", async () => {
     process.env.LIVE_EXECUTION_ALLOWED = "true";
     const response = await putAssetSettings(request(assetUpdate({ enableTrading: true, shadowMode: false })), {
       params: Promise.resolve({ asset: "bnb" }),
     });
 
-    expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ reasons: ["asset_worker_inactive"] });
+    expect(response.status).toBe(200);
+    expect(storageMocks.writeSettings).toHaveBeenCalledWith(
+      "bnb",
+      assetUpdate({ enableTrading: true, shadowMode: false }),
+      expect.objectContaining({ actor: "local-dev", requestId: expect.any(String) }),
+    );
   });
 
   it("rejects a bulk update atomically before any write when one asset requests blocked live", async () => {

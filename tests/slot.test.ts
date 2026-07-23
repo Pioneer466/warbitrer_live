@@ -42,6 +42,6 @@ describe("slot resolver", () => {
   it("returns active current slots in canonical asset order", () => {
     const slots = getCurrentSlots(new Date("2026-03-30T19:37:10.000Z"));
 
-    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp", "doge"]);
+    expect(slots.map((slot) => slot.asset)).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
   });
 });

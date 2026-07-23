@@ -2,18 +2,25 @@
 
 ## Current State
 
-- Date: 2026-07-21, Europe/Paris
+- Date: 2026-07-23, Europe/Paris
 - Branch: `review/global-hardening-2026-07-19`
 - Base before the current dirty review set: `e5b637f`
-- Target runtime: Node 22, Next.js 15.5.20, PostgreSQL 18
-- Production topology: web, five asset workers, reconciler, notifier, Postgres, and Caddy
-- Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE
-- BNB and HYPE remain catalog/configuration assets without production worker units
+- Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
+- Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
+- Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: production rollout explicitly approved; source commit `53624a1` is pulled on the VPS, while the reviewed runtime rollout remains in progress
-- Live authorization: keep `LIVE_EXECUTION_ALLOWED=false` until a separate production rollout and approval
+- Deployment status: V9 and the reconciliation hardening are deployed at `4023e85`; BNB/HYPE shadow reactivation is pending validation and rollout
+- Live authorization: keep `LIVE_EXECUTION_ALLOWED=false`; BNB/HYPE must start with `enableTrading=true` and `shadowMode=true`
 
 The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
+
+## Rollout Note - BNB/HYPE Shadow Reactivation
+
+BNB and HYPE are restored to `ACTIVE_MARKET_ASSETS` and the canonical VPS service list to collect current opportunity,
+execution-simulation, and mismatch evidence. Their initial production configuration must remain shadow-only. The
+independent environment gate remains false, and the historical accounting backlog still prevents live admission.
+Observe feed readiness, REST/WS rate limits, CPU, memory, Postgres connections, snapshot cadence, and worker restarts
+before considering any further mode change.
 
 ## Rollout Note - Legacy V0 Preflight
 
@@ -72,6 +79,7 @@ The exact checksummed sequence is:
 6. V6 `order_attempt_submission_deadline`
 7. V7 `accounting_ledger`
 8. V8 `accounting_evidence_hardening`
+9. V9 `inactive_legacy_slot_breaker_repair`
 
 V1-V7 are frozen. Any later schema change requires V9. V8 is part of the current unshipped review set and its final checksum is documented in iteration 07.
 
@@ -82,11 +90,11 @@ Production audit       0 high, 0 moderate, 17 low
 ESLint                 passed, zero warnings
 Prettier               passed repository-wide
 TypeScript             passed
-Tests with Postgres    62 files, 1007 tests passed
+Unit/runtime tests     55 files, 897 tests passed
 Coverage               54.03% lines, 74.53% branches, 67.93% functions
 Next.js build          passed
 Worker bundle          passed
-Fresh PG18 migration   V8/V8 ready
+Production PG18 schema V9/V9 ready
 Shell syntax           passed
 git diff --check       passed
 ```
@@ -101,7 +109,7 @@ Use `deploy/vps/README.md` and `docs/codex/deployment.md`. The deploy script per
 2. live-state preflight before shutdown
 3. stopped-service preflight and quiescent Postgres backup
 4. install, audit, lint, format, typecheck, tests, and both builds
-5. explicit V1-V8 migration and read-only schema status
+5. explicit V1-V9 migration and read-only schema status
 6. post-migration preflight
 7. split-service restart with repeated stability checks
 
@@ -120,10 +128,11 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 
 ## Next Actions
 
-1. Keep `LIVE_EXECUTION_ALLOWED=false` throughout the approved production rollout.
-2. Complete the canonical deploy flow without skipping any preflight or backup.
-3. Validate V8 status, service topology, health, Polygon chain 137, venue feeds, incidents, order truth, and accounting backlog.
-4. Observe scan-only and shadow across several slots before a separate live decision.
+1. Keep `LIVE_EXECUTION_ALLOWED=false`.
+2. Deploy the seven-worker topology through the canonical deploy flow.
+3. Enable BNB/HYPE only as `enableTrading=true`, `shadowMode=true`.
+4. Validate V9 status, all worker services, feed health, incidents, order truth, and accounting backlog.
+5. Observe shadow results and resource/rate-limit health across several slots before a separate live decision.
 
 ## Resume Prompt
 

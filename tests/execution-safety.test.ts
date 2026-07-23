@@ -61,16 +61,22 @@ describe("live execution safety", () => {
     expect(requestsLiveExecution({ enableTrading: true, shadowMode: false })).toBe(true);
   });
 
-  it("blocks inactive assets even when the environment permits live execution", () => {
+  it("allows every active asset and blocks unknown worker identities", () => {
     const env = {
       LIVE_EXECUTION_ALLOWED: "true",
       KALSHI_ENV: "prod",
       POLYGON_RPC_URL: "https://polygon.example",
     };
     expect(getLiveSettingsBlockReasons("btc", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
-    expect(getLiveSettingsBlockReasons("bnb", { enableTrading: true, shadowMode: false }, env)).toEqual([
-      "asset_worker_inactive",
-    ]);
+    expect(getLiveSettingsBlockReasons("bnb", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
+    expect(getLiveSettingsBlockReasons("hype", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
+    expect(
+      getLiveSettingsBlockReasons(
+        "inactive" as Parameters<typeof getLiveSettingsBlockReasons>[0],
+        { enableTrading: true, shadowMode: false },
+        env,
+      ),
+    ).toEqual(["asset_worker_inactive"]);
   });
 
   it("throws a typed error when a new live entry is not authorized", () => {
