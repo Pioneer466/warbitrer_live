@@ -9,7 +9,7 @@
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: V9 and the reconciliation hardening are deployed at `4023e85`; BNB/HYPE shadow reactivation is pending validation and rollout
+- Deployment status: seven-worker shadow topology deployed from `beb45c9`; V9 ready and all ten application services stable
 - Live authorization: keep `LIVE_EXECUTION_ALLOWED=false`; BNB/HYPE must start with `enableTrading=true` and `shadowMode=true`
 
 The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
@@ -21,6 +21,17 @@ execution-simulation, and mismatch evidence. Their initial production configurat
 independent environment gate remains false, and the historical accounting backlog still prevents live admission.
 Observe feed readiness, REST/WS rate limits, CPU, memory, Postgres connections, snapshot cadence, and worker restarts
 before considering any further mode change.
+
+Production activation completed with both assets at configuration revision 1:
+
+- `enableTrading=true`, `shadowMode=true`
+- Polymarket and Kalshi feeds `ready` from WebSocket data
+- fresh scan, execution, heartbeat, and snapshot timestamps
+- roughly 100 snapshots per asset during the first observation window
+- no open breaker incident and no service restart
+- no initial shadow intent because all four combinations failed the configured economics or depth requirements
+- `LIVE_EXECUTION_ALLOWED=false` and password-based SSH access preserved
+- verified quiescent backup `warbitrer_live_20260723T140511Z.dump`
 
 ## Rollout Note - Legacy V0 Preflight
 
@@ -129,10 +140,10 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 ## Next Actions
 
 1. Keep `LIVE_EXECUTION_ALLOWED=false`.
-2. Deploy the seven-worker topology through the canonical deploy flow.
-3. Enable BNB/HYPE only as `enableTrading=true`, `shadowMode=true`.
-4. Validate V9 status, all worker services, feed health, incidents, order truth, and accounting backlog.
-5. Observe shadow results and resource/rate-limit health across several slots before a separate live decision.
+2. Observe BNB/HYPE shadow results and resource/rate-limit health across several slots.
+3. Review qualified and rejected opportunities without lowering safety thresholds merely to create trades.
+4. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair.
+5. Require a separate explicit live decision after the accounting backlog is clean.
 
 ## Resume Prompt
 
