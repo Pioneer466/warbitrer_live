@@ -38,6 +38,8 @@ const envSchema = z.object({
   POLY_AUTO_CONVERT: z.string().optional(),
   POLY_AUTO_REDEEM: z.string().optional(),
   POLYGON_RPC_URL: z.string().min(1).optional(),
+  CHAINLINK_DATA_STREAMS_API_KEY: z.string().min(1).optional(),
+  CHAINLINK_DATA_STREAMS_USER_SECRET: z.string().min(1).optional(),
 });
 
 export type LiveEnv = z.infer<typeof envSchema>;
@@ -59,6 +61,23 @@ export function hasPolymarketCredentials(env = readEnv()) {
     env.POLY_FUNDER_ADDRESS &&
     env.POLY_SIGNATURE_TYPE,
   );
+}
+
+export function readChainlinkDataStreamsCredentials(env = readEnv()) {
+  const apiKey = env.CHAINLINK_DATA_STREAMS_API_KEY;
+  const userSecret = env.CHAINLINK_DATA_STREAMS_USER_SECRET;
+
+  if (!apiKey && !userSecret) {
+    return null;
+  }
+
+  if (!apiKey || !userSecret) {
+    throw new Error(
+      "CHAINLINK_DATA_STREAMS_API_KEY et CHAINLINK_DATA_STREAMS_USER_SECRET doivent etre configures ensemble",
+    );
+  }
+
+  return { apiKey, userSecret };
 }
 
 export function readSecretValue(options: { inline?: string; path?: string; label: string }) {

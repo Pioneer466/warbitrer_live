@@ -1,8 +1,19 @@
 import crypto from "node:crypto";
 import WebSocket from "ws";
 
+import {
+  connectChainlinkDataStream,
+  type ChainlinkDataStreamConnection,
+  type ChainlinkPriceObservation,
+} from "@/lib/chainlink-data-streams";
 import { POLY_MARKET_WS_BASE, POLY_RTDS_WS_BASE, POLY_USER_WS_BASE } from "@/lib/constants";
-import { hasKalshiCredentials, hasPolymarketCredentials, readEnv, readSecretValue } from "@/lib/env";
+import {
+  hasKalshiCredentials,
+  hasPolymarketCredentials,
+  readChainlinkDataStreamsCredentials,
+  readEnv,
+  readSecretValue,
+} from "@/lib/env";
 import { getMarketCatalogEntry, MARKET_ASSETS } from "@/lib/market-catalog";
 import { normalizePolymarketTradeStatus } from "@/lib/polymarket-trade-status";
 import {
@@ -802,6 +813,9 @@ class PolymarketRealtimeFeed {
   private ws: WebSocket | null = null;
   private userWs: WebSocket | null = null;
   private priceWs: WebSocket | null = null;
+  private directPriceStream: ChainlinkDataStreamConnection | null = null;
+  private directPriceConnectPromise: Promise<void> | null = null;
+  private directPriceGeneration = 0;
   private wsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private userWsHeartbeat: ReturnType<typeof setInterval> | null = null;
   private priceWsHeartbeat: ReturnType<typeof setInterval> | null = null;
@@ -1026,7 +1040,9 @@ class PolymarketRealtimeFeed {
     if (!this.ws) {
       this.connectMarketWs(now);
     }
-    if (!this.priceWs) {
+    if (getMarketCatalogEntry(this.marketAsset()).chainlinkDataStreamsFeedId) {
+      this.ensureDirectPriceStream();
+    } else if (!this.priceWs) {
       this.connectPriceWs();
     }
     if (hasPolymarketCredentials()) {
@@ -1257,6 +1273,95 @@ class PolymarketRealtimeFeed {
     });
   }
 
+  private ensureDirectPriceStream() {
+    if (this.directPriceStream || this.directPriceConnectPromise || this.stopped || !this.slotKey) {
+      return;
+    }
+
+    try {
+      if (!readChainlinkDataStreamsCredentials()) {
+        this.markDirectPriceUnavailable("Identifiants Chainlink Data Streams absents");
+        return;
+      }
+    } catch (error) {
+      this.markDirectPriceUnavailable(
+        error instanceof Error ? error.message : "Configuration Chainlink Data Streams invalide",
+      );
+      return;
+    }
+
+    const asset = this.marketAsset();
+    const generation = this.directPriceGeneration;
+    const connecting = connectChainlinkDataStream({
+      asset,
+      onObservation: (observation) => {
+        if (generation === this.directPriceGeneration && asset === this.marketAsset()) {
+          this.applyDirectPriceObservation(observation);
+        }
+      },
+      onStatus: (status, details) => {
+        if (generation !== this.directPriceGeneration || asset !== this.marketAsset()) {
+          return;
+        }
+        if (status === "subscribed") {
+          this.clearPriceReconnectTimer();
+          this.priceReconnectAttempt = 0;
+        }
+        this.lastChainlinkError = status === "error" ? details : null;
+        this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+          status,
+          source: status === "closed" && this.lastPriceMessageAt === null ? "unavailable" : "ws",
+          details,
+        });
+      },
+    })
+      .then(async (connection) => {
+        if (generation !== this.directPriceGeneration || this.stopped || asset !== this.marketAsset()) {
+          await connection.close();
+          return;
+        }
+        this.directPriceStream = connection;
+      })
+      .catch((error) => {
+        if (generation !== this.directPriceGeneration) {
+          return;
+        }
+        this.lastChainlinkError =
+          error instanceof Error ? error.message : "Connexion Chainlink Data Streams impossible";
+        this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+          status: "error",
+          source: "unavailable",
+          details: this.lastChainlinkError,
+        });
+        this.schedulePriceReconnect();
+      })
+      .finally(() => {
+        if (this.directPriceConnectPromise === connecting) {
+          this.directPriceConnectPromise = null;
+        }
+      });
+
+    this.directPriceConnectPromise = connecting;
+  }
+
+  private markDirectPriceUnavailable(details: string) {
+    this.lastChainlinkError = details;
+    this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
+      status: "error",
+      source: "unavailable",
+      details,
+    });
+  }
+
+  private applyDirectPriceObservation(observation: ChainlinkPriceObservation) {
+    this.applyChainlinkPrice(
+      observation.priceUsd,
+      observation.sourceTimestampMs,
+      observation.receivedAt,
+      `Chainlink Data Streams ${observation.asset.toUpperCase()} ${observation.priceUsd.toFixed(4)}`,
+    );
+  }
+
   private connectUserWs(_now: number) {
     if (this.userWs) {
       return;
@@ -1453,7 +1558,12 @@ class PolymarketRealtimeFeed {
     const delay = nextReconnectDelay(this.priceReconnectAttempt++);
     this.priceReconnectTimer = setTimeout(() => {
       this.priceReconnectTimer = null;
-      if (this.slotKey && !this.priceWs) {
+      if (!this.slotKey) {
+        return;
+      }
+      if (getMarketCatalogEntry(this.marketAsset()).chainlinkDataStreamsFeedId) {
+        this.ensureDirectPriceStream();
+      } else if (!this.priceWs) {
         this.connectPriceWs();
       }
     }, delay);
@@ -1473,16 +1583,23 @@ class PolymarketRealtimeFeed {
     }
 
     const priceTs = parseTimestamp(payload?.timestamp) ?? now;
+    this.applyChainlinkPrice(price, priceTs, now, `Chainlink ${symbol} ${price.toFixed(4)}`);
+  }
+
+  private applyChainlinkPrice(price: number, priceTs: number, receivedAt: number, details: string) {
+    this.captureObservedSlotOpenPrice(price, priceTs);
+    if (this.chainlinkLivePriceCapturedAt !== null && priceTs < this.chainlinkLivePriceCapturedAt) {
+      return;
+    }
     this.chainlinkLivePriceUsd = price;
     this.chainlinkLivePriceCapturedAt = priceTs;
-    this.lastPriceMessageAt = now;
+    this.lastPriceMessageAt = receivedAt;
     this.lastChainlinkError = null;
-    this.captureObservedSlotOpenPrice(price, priceTs);
     this.subscriptions[2] = toSubscriptionState(this.subscriptions[2], {
       status: "subscribed",
       source: "ws",
-      lastMessageAt: now,
-      details: `Chainlink ${symbol} ${price.toFixed(4)}`,
+      lastMessageAt: receivedAt,
+      details,
     });
   }
 
@@ -1615,6 +1732,10 @@ class PolymarketRealtimeFeed {
     const marketWs = this.ws;
     const userWs = this.userWs;
     const userMarketRef = this.market?.conditionId ?? this.market?.id ?? null;
+    const directPriceStream = this.directPriceStream;
+    this.directPriceGeneration += 1;
+    this.directPriceStream = null;
+    this.directPriceConnectPromise = null;
     this.ws = null;
     this.userWs = null;
     if (userWs) {
@@ -1653,6 +1774,7 @@ class PolymarketRealtimeFeed {
     this.priceReconnectAttempt = 0;
     this.userReconnectAttempt = 0;
     this.subscriptions = emptySubscriptions(["market", "user", "chainlink_price"], "rest-bootstrap");
+    await directPriceStream?.close();
   }
 
   async shutdown() {
@@ -1662,7 +1784,7 @@ class PolymarketRealtimeFeed {
 
     this.stopped = true;
     this.slotKey = null;
-    const pending = [this.bootstrapPromise, this.resyncPromise].filter(
+    const pending = [this.bootstrapPromise, this.resyncPromise, this.directPriceConnectPromise].filter(
       (promise): promise is Promise<void> => promise !== null,
     );
     await this.reset();

@@ -7,6 +7,7 @@ export type MarketCatalogEntry = {
   aliases: string[];
   polymarketSlugPrefix: string;
   polymarketChainlinkSymbol: string;
+  chainlinkDataStreamsFeedId: string | null;
   kalshiSeriesTicker: string;
   kalshiEventPath: string;
   coinbaseProductId: string;
@@ -20,6 +21,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["bitcoin", "btc"],
     polymarketSlugPrefix: "btc-updown-15m",
     polymarketChainlinkSymbol: "btc/usd",
+    chainlinkDataStreamsFeedId: null,
     kalshiSeriesTicker: "KXBTC15M",
     kalshiEventPath: "kxbtc15m/bitcoin-price-up-down",
     coinbaseProductId: "BTC-USD",
@@ -31,6 +33,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["ethereum", "eth"],
     polymarketSlugPrefix: "eth-updown-15m",
     polymarketChainlinkSymbol: "eth/usd",
+    chainlinkDataStreamsFeedId: null,
     kalshiSeriesTicker: "KXETH15M",
     kalshiEventPath: "kxeth15m/eth-15m-price-up-down",
     coinbaseProductId: "ETH-USD",
@@ -42,6 +45,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["solana", "sol"],
     polymarketSlugPrefix: "sol-updown-15m",
     polymarketChainlinkSymbol: "sol/usd",
+    chainlinkDataStreamsFeedId: null,
     kalshiSeriesTicker: "KXSOL15M",
     kalshiEventPath: "kxsol15m/solana-15-minutes",
     coinbaseProductId: "SOL-USD",
@@ -53,6 +57,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["xrp", "ripple"],
     polymarketSlugPrefix: "xrp-updown-15m",
     polymarketChainlinkSymbol: "xrp/usd",
+    chainlinkDataStreamsFeedId: null,
     kalshiSeriesTicker: "KXXRP15M",
     kalshiEventPath: "kxxrp15m/xrp-15-minute",
     coinbaseProductId: "XRP-USD",
@@ -64,6 +69,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["dogecoin", "doge"],
     polymarketSlugPrefix: "doge-updown-15m",
     polymarketChainlinkSymbol: "doge/usd",
+    chainlinkDataStreamsFeedId: null,
     kalshiSeriesTicker: "KXDOGE15M",
     kalshiEventPath: "kxdoge15m/dogecoin-15-minute",
     coinbaseProductId: "DOGE-USD",
@@ -75,6 +81,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["bnb", "binance coin"],
     polymarketSlugPrefix: "bnb-updown-15m",
     polymarketChainlinkSymbol: "bnb/usd",
+    chainlinkDataStreamsFeedId: "0x000335fd3f3ffa06cfd9297b97367f77145d7a5f132e84c736cc471dd98621fe",
     kalshiSeriesTicker: "KXBNB15M",
     kalshiEventPath: "kxbnb15m/bnb-15-minute",
     coinbaseProductId: "BNB-USD",
@@ -86,6 +93,7 @@ export const MARKET_CATALOG: Record<MarketAsset, MarketCatalogEntry> = {
     aliases: ["hype", "hyperliquid"],
     polymarketSlugPrefix: "hype-updown-15m",
     polymarketChainlinkSymbol: "hype/usd",
+    chainlinkDataStreamsFeedId: "0x0003d34539af562867c3cb309b59efccf40e74b404fb415eeb7699d61322aed9",
     kalshiSeriesTicker: "KXHYPE15M",
     kalshiEventPath: "kxhype15m/hype-15-minute",
     coinbaseProductId: "HYPE-USD",

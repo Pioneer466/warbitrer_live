@@ -1,4 +1,9 @@
-import { hasKalshiCredentials, hasPolymarketCredentials, readEnv } from "@/lib/env";
+import {
+  hasKalshiCredentials,
+  hasPolymarketCredentials,
+  readChainlinkDataStreamsCredentials,
+  readEnv,
+} from "@/lib/env";
 
 describe("env parsing", () => {
   const originalEnv = process.env;
@@ -30,6 +35,8 @@ describe("env parsing", () => {
     process.env.POLY_RELAYER_URL = "";
     process.env.POLY_FUNDER_ADDRESS = "";
     process.env.POLY_SIGNATURE_TYPE = "";
+    process.env.CHAINLINK_DATA_STREAMS_API_KEY = "";
+    process.env.CHAINLINK_DATA_STREAMS_USER_SECRET = "";
 
     const env = readEnv();
 
@@ -48,6 +55,8 @@ describe("env parsing", () => {
     expect(env.POLY_RELAYER_URL).toBeUndefined();
     expect(env.POLY_FUNDER_ADDRESS).toBeUndefined();
     expect(env.POLY_SIGNATURE_TYPE).toBeUndefined();
+    expect(env.CHAINLINK_DATA_STREAMS_API_KEY).toBeUndefined();
+    expect(env.CHAINLINK_DATA_STREAMS_USER_SECRET).toBeUndefined();
   });
 
   it("does not report credentials present when required fields are blank", () => {
@@ -64,5 +73,20 @@ describe("env parsing", () => {
 
     expect(hasKalshiCredentials()).toBe(false);
     expect(hasPolymarketCredentials()).toBe(false);
+  });
+
+  it("requires both Chainlink Data Streams credential fields", () => {
+    process.env.CHAINLINK_DATA_STREAMS_API_KEY = "api-key";
+    delete process.env.CHAINLINK_DATA_STREAMS_USER_SECRET;
+
+    expect(() => readChainlinkDataStreamsCredentials()).toThrow(
+      "CHAINLINK_DATA_STREAMS_API_KEY et CHAINLINK_DATA_STREAMS_USER_SECRET",
+    );
+
+    process.env.CHAINLINK_DATA_STREAMS_USER_SECRET = "user-secret";
+    expect(readChainlinkDataStreamsCredentials()).toEqual({
+      apiKey: "api-key",
+      userSecret: "user-secret",
+    });
   });
 });

@@ -49,6 +49,7 @@
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""
   },
   "dependencies": {
+    "@chainlink/data-streams-sdk": "^1.2.1",
     "@polymarket/builder-relayer-client": "^0.0.10",
     "@polymarket/clob-client-v2": "^1.1.0",
     "ethers": "^5.8.0",
