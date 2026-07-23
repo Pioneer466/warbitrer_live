@@ -1,9 +1,29 @@
-import { ACTIVE_MARKET_ASSETS, inferKalshiAsset, inferPolymarketAsset, MARKET_ASSETS } from "@/lib/market-catalog";
+import {
+  ACTIVE_MARKET_ASSETS,
+  inferKalshiAsset,
+  inferPolymarketAsset,
+  MARKET_ASSETS,
+  MARKET_CATALOG,
+} from "@/lib/market-catalog";
 
 describe("market catalog", () => {
   it("keeps assets in canonical order", () => {
     expect(MARKET_ASSETS).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
     expect(ACTIVE_MARKET_ASSETS).toEqual(["btc", "eth", "sol", "xrp", "doge", "bnb", "hype"]);
+  });
+
+  it("maps every active asset to its exact Polymarket Chainlink symbol", () => {
+    expect(
+      Object.fromEntries(MARKET_ASSETS.map((asset) => [asset, MARKET_CATALOG[asset].polymarketChainlinkSymbol])),
+    ).toEqual({
+      btc: "btc/usd",
+      eth: "eth/usd",
+      sol: "sol/usd",
+      xrp: "xrp/usd",
+      doge: "doge/usd",
+      bnb: "bnb/usd",
+      hype: "hype/usd",
+    });
   });
 
   it("infers assets from Kalshi series tickers", () => {

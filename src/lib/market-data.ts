@@ -80,12 +80,14 @@ const PRIVATE_FILL_WAITER_LIMIT = 256;
 const PRIVATE_FILL_MAX_WAIT_MS = 30_000;
 const PRIVATE_FILL_RETENTION_MS = 5 * 60_000;
 
-export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Partial<Record<MarketAsset, KalshiCfBenchmarkIndexId>> = {
+export const KALSHI_CF_BENCHMARK_INDEX_BY_ASSET: Record<MarketAsset, KalshiCfBenchmarkIndexId> = {
   btc: "BRTI",
   eth: "ETHUSD_RTI",
   sol: "SOLUSD_RTI",
   xrp: "XRPUSD_RTI",
   doge: "DOGEUSD_RTI",
+  bnb: "BNBUSD_RTI",
+  hype: "HYPEUSD_RTI",
 };
 
 type LevelMap = Map<string, number>;

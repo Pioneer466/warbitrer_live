@@ -436,6 +436,32 @@ describe("market data helpers", () => {
       sol: "SOLUSD_RTI",
       xrp: "XRPUSD_RTI",
       doge: "DOGEUSD_RTI",
+      bnb: "BNBUSD_RTI",
+      hype: "HYPEUSD_RTI",
+    });
+  });
+
+  it.each([
+    ["bnb", "BNBUSD_RTI"],
+    ["hype", "HYPEUSD_RTI"],
+  ] as const)("subscribes %s to its dedicated CF Benchmarks index", (asset, indexId) => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    const slot = buildSlot(asset);
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor, asset);
+    primeKalshiFeed(feed, slot, slot.startTs + 1_000);
+    feed.asset = asset;
+    const ws = { send: vi.fn() };
+
+    feed.subscribe(ws, "cfbenchmarks_value", feed.market.ticker, KALSHI_CF_BENCHMARK_INDEX_BY_ASSET[asset]);
+
+    expect(JSON.parse(ws.send.mock.calls[0][0])).toEqual({
+      id: 1,
+      cmd: "subscribe",
+      params: {
+        channels: ["cfbenchmarks_value"],
+        index_ids: [indexId],
+      },
     });
   });
 

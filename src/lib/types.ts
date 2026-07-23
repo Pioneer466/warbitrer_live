@@ -167,7 +167,8 @@ export type PolymarketQuote = {
   negRisk: boolean;
 };
 
-export type KalshiCfBenchmarkIndexId = "BRTI" | "ETHUSD_RTI" | "SOLUSD_RTI" | "XRPUSD_RTI" | "DOGEUSD_RTI";
+export type KalshiCfBenchmarkIndexId =
+  "BRTI" | "ETHUSD_RTI" | "SOLUSD_RTI" | "XRPUSD_RTI" | "DOGEUSD_RTI" | "BNBUSD_RTI" | "HYPEUSD_RTI";
 
 export type KalshiCfBenchmarkWindow = {
   valueUsd: number;
