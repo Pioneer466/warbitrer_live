@@ -11662,12 +11662,13 @@ export function updateIntentLeg(
       const incomingHasNoFillAgainstExistingFill = leg.filledSize > 0 && order.filledSize <= 0;
       const preserveExistingEvidence = incomingFillRegresses || incomingHasNoFillAgainstExistingFill;
       const mergedStatus = mergeIntentLegStatus(leg.status, status, leg.filledSize, order.filledSize);
+      const filledAt = order.filledSize > 0 ? Math.max(leg.filledAt ?? 0, order.updatedAt) : leg.filledAt;
       return {
         ...leg,
         venueOrderId: preserveExistingEvidence ? leg.venueOrderId : order.venueOrderId,
         filledSize,
         filledPrice: preserveExistingEvidence ? leg.filledPrice : (order.averageFillPrice ?? leg.filledPrice),
-        filledAt: order.filledSize > 0 ? Math.max(leg.filledAt ?? 0, order.updatedAt) : leg.filledAt,
+        ...(filledAt === undefined ? {} : { filledAt }),
         feeUsd: Math.max(leg.feeUsd, order.feeUsd ?? 0),
         status: mergedStatus,
       };
@@ -11814,6 +11815,7 @@ function mergePostSubmissionIntentEvidence(canonical: OrderIntent, observed: Ord
       const incomingFillAdvances = incoming.filledSize > leg.filledSize;
       const preserveExistingEvidence =
         incoming.filledSize < leg.filledSize || (leg.filledSize > 0 && incoming.filledSize <= 0);
+      const filledAt = Math.max(leg.filledAt ?? 0, incoming.filledAt ?? 0);
       return {
         ...leg,
         venueOrderId:
@@ -11822,7 +11824,7 @@ function mergePostSubmissionIntentEvidence(canonical: OrderIntent, observed: Ord
             : (incoming.venueOrderId ?? leg.venueOrderId),
         filledSize: Math.max(leg.filledSize, incoming.filledSize),
         filledPrice: incomingFillAdvances || leg.filledPrice === null ? incoming.filledPrice : leg.filledPrice,
-        filledAt: Math.max(leg.filledAt ?? 0, incoming.filledAt ?? 0) || undefined,
+        ...(filledAt === 0 ? {} : { filledAt }),
         feeUsd: Math.max(leg.feeUsd, incoming.feeUsd),
         status: mergeIntentLegStatus(leg.status, incoming.status, leg.filledSize, incoming.filledSize),
       };
@@ -11897,13 +11899,14 @@ function accumulateIntentLegOrder(
       const nextFilledSize = roundToSixDecimals(leg.filledSize + order.filledSize);
       const nextGrossNotionalUsd =
         leg.filledSize * (leg.filledPrice ?? 0) + order.filledSize * (order.averageFillPrice ?? 0);
+      const filledAt = order.filledSize > 0 ? Math.max(leg.filledAt ?? 0, order.updatedAt) : leg.filledAt;
 
       return {
         ...leg,
         venueOrderId: order.venueOrderId,
         filledSize: nextFilledSize,
         filledPrice: nextFilledSize > 0 ? round4(nextGrossNotionalUsd / nextFilledSize) : leg.filledPrice,
-        filledAt: order.filledSize > 0 ? Math.max(leg.filledAt ?? 0, order.updatedAt) : leg.filledAt,
+        ...(filledAt === undefined ? {} : { filledAt }),
         feeUsd: round4(leg.feeUsd + (order.feeUsd ?? 0)),
         status,
       };
@@ -11926,12 +11929,13 @@ function updateIntentLegFromFillSummary(
       }
 
       const filledSize = Math.max(leg.filledSize, summary.filledSize);
+      const filledAt = summary.filledSize > 0 ? Math.max(leg.filledAt ?? 0, summary.lastFilledAt ?? now) : leg.filledAt;
       return {
         ...leg,
         venueOrderId: summary.venueOrderId ?? leg.venueOrderId,
         filledSize,
         filledPrice: summary.filledSize >= leg.filledSize ? summary.averageFillPrice : leg.filledPrice,
-        filledAt: summary.filledSize > 0 ? Math.max(leg.filledAt ?? 0, summary.lastFilledAt ?? now) : leg.filledAt,
+        ...(filledAt === undefined ? {} : { filledAt }),
         feeUsd: Math.max(leg.feeUsd, summary.feeUsd),
         status:
           leg.status === "unwound"

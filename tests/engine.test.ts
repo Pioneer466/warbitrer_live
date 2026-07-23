@@ -407,6 +407,41 @@ describe("order-intent concurrency safety", () => {
       status: "filled",
       venueOrderId: "kalshi-current-order",
     });
+    expect(
+      Object.hasOwn(
+        noFillEvidence.legs.find((leg) => leg.venue === "kalshi")!,
+        "filledAt",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps zero-fill leg evidence canonical JSON for accounting closure", () => {
+    const intent = buildIntent();
+    const updated = updateIntentLeg(
+      intent,
+      "kalshi",
+      buildOrder({
+        venue: "kalshi",
+        venueOrderId: "shadow-zero-fill",
+        tokenId: undefined,
+        side: "BUY",
+        outcome: "YES",
+        marketRef: "kalshi-market",
+        filledSize: 0,
+        averageFillPrice: null,
+      }),
+      "failed",
+      4,
+    );
+    const leg = updated.legs.find((candidate) => candidate.venue === "kalshi")!;
+
+    expect(leg).toMatchObject({
+      filledSize: 0,
+      filledPrice: null,
+      status: "failed",
+      venueOrderId: "shadow-zero-fill",
+    });
+    expect(Object.hasOwn(leg, "filledAt")).toBe(false);
   });
 
   it("allows late positive fill and recovery transitions", () => {
