@@ -59,6 +59,7 @@ const FEED_BLOCKED_MS = 10_000;
 const FEED_HEALTHY_REVALIDATE_MS = 60_000;
 const POLYMARKET_REST_FALLBACK_RESYNC_MS = 4_000;
 const KALSHI_REST_FALLBACK_RESYNC_MS = 4_000;
+const KALSHI_MISSING_STRIKE_RESYNC_MS = 4_000;
 const POLYMARKET_WS_HEARTBEAT_MS = 3_000;
 const POLYMARKET_RTDS_HEARTBEAT_MS = 5_000;
 export const POLYMARKET_CHAINLINK_SILENCE_TIMEOUT_MS = 15_000;
@@ -1745,11 +1746,16 @@ class KalshiRealtimeFeed {
         return;
       }
       await this.bootstrap(slot, now);
-    } else if (
-      shouldRestResync(this.lastRestSyncAt, this.lastWsMessageAt, now, KALSHI_REST_FALLBACK_RESYNC_MS) &&
-      !this.isRestBackoffActive("resync", now)
-    ) {
-      void this.resync(now);
+    } else {
+      const strikeMissing = parseNumeric(this.market.floor_strike) === null;
+      const resyncIntervalMs = strikeMissing ? KALSHI_MISSING_STRIKE_RESYNC_MS : KALSHI_REST_FALLBACK_RESYNC_MS;
+      const healthyIntervalMs = strikeMissing ? KALSHI_MISSING_STRIKE_RESYNC_MS : FEED_HEALTHY_REVALIDATE_MS;
+      if (
+        shouldRestResync(this.lastRestSyncAt, this.lastWsMessageAt, now, resyncIntervalMs, healthyIntervalMs) &&
+        !this.isRestBackoffActive("resync", now)
+      ) {
+        void this.resync(now);
+      }
     }
 
     this.ensureWs();

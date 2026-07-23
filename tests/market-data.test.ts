@@ -1496,6 +1496,40 @@ describe("market data helpers", () => {
     expect(state.quote.targetPriceUsd).toBe(101234.56);
   });
 
+  it("refreshes Kalshi metadata promptly when the opening strike is still pending", async () => {
+    const slot = buildSlot();
+    const now = slot.startTs + 5_000;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
+
+    primeKalshiFeed(feed, slot, now - 4_000);
+    delete feed.market.floor_strike;
+    feed.lastWsMessageAt = now;
+    feed.ensureWs = vi.fn();
+    feed.resync = vi.fn().mockResolvedValue(undefined);
+
+    await feed.ensureSlot(slot, now);
+
+    expect(feed.resync).toHaveBeenCalledOnce();
+    expect(feed.resync).toHaveBeenCalledWith(now);
+  });
+
+  it("keeps the normal Kalshi revalidation cadence once the strike is available", async () => {
+    const slot = buildSlot();
+    const now = slot.startTs + 5_000;
+    const supervisor = inspectSupervisor();
+    const feed = inspectKalshiFeed(supervisor);
+
+    primeKalshiFeed(feed, slot, now - 4_000);
+    feed.lastWsMessageAt = now;
+    feed.ensureWs = vi.fn();
+    feed.resync = vi.fn().mockResolvedValue(undefined);
+
+    await feed.ensureSlot(slot, now);
+
+    expect(feed.resync).not.toHaveBeenCalled();
+  });
+
   it("keeps the existing Polymarket state when background resync fails", async () => {
     const slot = buildSlot();
 
