@@ -514,6 +514,7 @@ const CIRCUIT_BREAKER_INCIDENTS_CHECKSUM = "1b843990961a3a5ce81b9c6051ffaebbe181
 const ORDER_ATTEMPT_SUBMISSION_DEADLINE_CHECKSUM = "fb9086c655b1efe98cb05d0a94c464e5119ad9b308c06a0fcc069e73bc8c4412";
 const ACCOUNTING_LEDGER_CHECKSUM = "90f7ef7b35ef7efcb0f895527b752da480b6f7118f9dc91f71d0e68ae5bcf2ce";
 const ACCOUNTING_EVIDENCE_HARDENING_CHECKSUM = "1c5e4723bacc609c33da378ac214aca26e2583f68055e4c9443ad3b6c5ea2432";
+const INACTIVE_LEGACY_SLOT_BREAKER_REPAIR_CHECKSUM = "dd5f0940e2ad014b4c88878d5720c67cf8a80c6c88ce0eaef7886bb2407beac0";
 
 export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   {
@@ -563,6 +564,12 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     name: "accounting_evidence_hardening",
     checksum: ACCOUNTING_EVIDENCE_HARDENING_CHECKSUM,
     up: applyAccountingEvidenceHardeningMigration,
+  },
+  {
+    version: 9,
+    name: "inactive_legacy_slot_breaker_repair",
+    checksum: INACTIVE_LEGACY_SLOT_BREAKER_REPAIR_CHECKSUM,
+    up: applyInactiveLegacySlotBreakerRepairMigration,
   },
 ];
 
@@ -3740,6 +3747,127 @@ async function applyAccountingEvidenceHardeningMigration(db: PgQueryable) {
   `);
 }
 /* migration-checksum:end:8 */
+
+/* migration-checksum:start:9 */
+type MigrationV9InactiveLegacySlotIncidentRow = {
+  id: string;
+  incident_key: string;
+  revision: number;
+  triggered_at: number;
+  legacy_key: string;
+};
+
+async function applyInactiveLegacySlotBreakerRepairMigration(db: PgQueryable) {
+  const client = db as PoolClient;
+  const clock = await client.query<{ now_ms: number }>(
+    "SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint AS now_ms",
+  );
+  const confirmedAt = Number(clock.rows[0]?.now_ms);
+  if (!Number.isSafeInteger(confirmedAt) || confirmedAt < 0) {
+    throw new Error("Migration 9 refused: PostgreSQL returned an invalid clock");
+  }
+
+  const eligible = await client.query<MigrationV9InactiveLegacySlotIncidentRow>(`
+    SELECT
+      current.id,
+      current.incident_key,
+      current.revision,
+      current.triggered_at,
+      current.payload_json ->> 'legacyKey' AS legacy_key
+    FROM circuit_breaker_incident_current AS current
+    JOIN circuit_breakers_legacy AS legacy
+      ON legacy.key = current.payload_json ->> 'legacyKey'
+    WHERE current.scope_key = 'global'
+      AND current.owner = 'migration-v5'
+      AND current.reason = 'readiness_failed'
+      AND current.impact = 'blocked'
+      AND current.resolution_policy = 'operator'
+      AND current.intent_id IS NULL
+      AND current.status = 'open'
+      AND current.revision = 1
+      AND current.initial_exposure_json = '{"state":"unresolved"}'::jsonb
+      AND current.exposure_json = '{"state":"unresolved"}'::jsonb
+      AND current.initial_payload_json = current.payload_json
+      AND current.payload_json = jsonb_build_object(
+        'migrationVersion', 5,
+        'legacyKey', legacy.key,
+        'issues', jsonb_build_array('invalid_key')
+      )
+      AND legacy.key ~ '^slot:[0-9]+$'
+      AND legacy.active = false
+      AND legacy.reason IS NULL
+      AND legacy.triggered_at IS NULL
+      AND (legacy.payload_json IS NULL OR legacy.payload_json = 'null'::jsonb)
+    ORDER BY legacy.key ASC, current.id ASC
+  `);
+
+  for (const row of eligible.rows) {
+    const sourceDigest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          schema: "warbitrer.inactive-legacy-slot-breaker-repair.v1",
+          incidentId: row.id,
+          legacyKey: row.legacy_key,
+          active: false,
+          reason: null,
+          triggeredAt: null,
+          payload: null,
+        }),
+        "utf8",
+      )
+      .digest("hex");
+    const malformedDigest = createHash("sha256")
+      .update(JSON.stringify({ key: row.legacy_key, issues: ["invalid_key"] }), "utf8")
+      .digest("hex");
+    if (
+      row.id !== `cbi:v5:malformed:${malformedDigest}` ||
+      row.incident_key !== `malformed-legacy:${malformedDigest}` ||
+      row.revision !== 1 ||
+      row.triggered_at > confirmedAt
+    ) {
+      throw new Error(`Migration 9 refused: legacy incident identity mismatch for ${row.legacy_key}`);
+    }
+
+    const proven = await recordCircuitBreakerExposureRecovery(client, {
+      incidentId: row.id,
+      expectedRevision: row.revision,
+      owner: "migration-v5",
+      recoveryProof: {
+        owner: "migration-v5",
+        confirmedAt,
+        evidenceId: `migration-v9:inactive-legacy-slot:${sourceDigest}`,
+      },
+      actor: "migration-v5",
+      requestId: `migration-v9:prove:${sourceDigest}`,
+    });
+    await acknowledgeCircuitBreakerIncident(client, {
+      incidentId: row.id,
+      expectedRevision: proven.revision,
+      operatorId: "migration-v9",
+      actor: "migration-v9",
+      requestId: `migration-v9:ack:${sourceDigest}`,
+    });
+  }
+
+  const remaining = await client.query<{ total: number }>(`
+    SELECT count(*)::integer AS total
+    FROM circuit_breaker_incident_current AS current
+    JOIN circuit_breakers_legacy AS legacy
+      ON legacy.key = current.payload_json ->> 'legacyKey'
+    WHERE current.status = 'open'
+      AND current.owner = 'migration-v5'
+      AND current.payload_json -> 'issues' = '["invalid_key"]'::jsonb
+      AND legacy.key ~ '^slot:[0-9]+$'
+      AND legacy.active = false
+      AND legacy.reason IS NULL
+      AND legacy.triggered_at IS NULL
+      AND (legacy.payload_json IS NULL OR legacy.payload_json = 'null'::jsonb)
+  `);
+  if (Number(remaining.rows[0]?.total ?? 0) !== 0) {
+    throw new Error("Migration 9 refused: eligible inactive legacy slot breakers remain open");
+  }
+}
+/* migration-checksum:end:9 */
 
 export function buildBootstrapStrategyConfigs(
   legacyStrategyPayload: StrategyConfig,
@@ -7181,6 +7309,46 @@ export async function acquireAccountingTransactionLock(db: PgQueryable) {
 export async function getAccountingHead(pool: Pool, intentId: string): Promise<AccountingHead | null> {
   const result = await pool.query<AccountingHeadRow>("SELECT * FROM accounting_heads WHERE intent_id = $1", [intentId]);
   return result.rows[0] ? mapAccountingHeadRow(result.rows[0]) : null;
+}
+
+export async function listHistoricalSettledLegacyPendingIntentIds(
+  pool: PgQueryable,
+  intentIds: readonly string[],
+): Promise<string[]> {
+  const uniqueIntentIds = [...new Set(intentIds.map((intentId) => intentId.trim()).filter(Boolean))];
+  if (uniqueIntentIds.length === 0) {
+    return [];
+  }
+  if (uniqueIntentIds.length > 1_000) {
+    throw new AccountingPersistenceError(
+      "invalid_input",
+      `Historical accounting lookup is limited to 1000 intents, received ${uniqueIntentIds.length}`,
+    );
+  }
+
+  const result = await pool.query<{ intent_id: string }>(
+    `
+      WITH accounting_clock AS (
+        SELECT floor(extract(epoch FROM (
+          date_trunc('day', clock_timestamp() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+        )) * 1000)::bigint AS utc_day_start
+      )
+      SELECT intent.id AS intent_id
+      FROM order_intents AS intent
+      JOIN accounting_heads AS head ON head.intent_id = intent.id
+      CROSS JOIN accounting_clock
+      WHERE intent.id = ANY($1::text[])
+        AND intent.status = 'settled'
+        AND intent.resolved_at IS NOT NULL
+        AND intent.resolved_at < accounting_clock.utc_day_start
+        AND intent.poly_resolution IS NOT NULL
+        AND intent.kalshi_resolution IS NOT NULL
+        AND head.state = 'legacy_pending'
+      ORDER BY intent.id ASC
+    `,
+    [uniqueIntentIds],
+  );
+  return result.rows.map((row) => row.intent_id);
 }
 
 export async function listAccountingFillEvidenceForIntent(

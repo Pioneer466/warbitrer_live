@@ -6,7 +6,7 @@ import type { AccountingBacklogSummary } from "@/lib/types";
 const MINIMUM_PREFLIGHT_SCHEMA_VERSION = 1;
 const ACCOUNTING_SCHEMA_VERSION = 7;
 const ACCOUNTING_EVIDENCE_SCHEMA_VERSION = 8;
-export const DEPLOYMENT_PREFLIGHT_REVIEWED_SCHEMA_VERSION = 8;
+export const DEPLOYMENT_PREFLIGHT_REVIEWED_SCHEMA_VERSION = 9;
 
 export const DEPLOYMENT_PREFLIGHT_REQUIRED_COLUMNS = {
   order_intents: ["id", "asset", "shadow", "status", "legs_json"],

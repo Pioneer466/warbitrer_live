@@ -24,6 +24,8 @@ import {
   getMismatchModelDisplayState,
   isMismatchBlockingDecision,
 } from "@/lib/mismatch-risk-display";
+import { selectAcknowledgeableBreakerIncident, shouldListOperationalBreaker } from "@/lib/circuit-breaker-ui";
+import type { CircuitBreakerIncident } from "@/lib/circuit-breaker-policy";
 import type { GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   CircuitBreaker,
@@ -38,18 +40,9 @@ import type {
   VersionedConfiguration,
 } from "@/lib/types";
 
-type BreakerIncidentDetails = {
-  id: string;
-  revision: number;
-  resolutionPolicy: "owner" | "operator";
-  incidentKey: string;
-  intentId: string | null;
-  scope: { type: "global" } | { type: "asset"; asset: string } | { type: "slot"; asset: string; slotKey: string };
-};
-
 type BreakerDetailsResponse = {
-  manualKillIncident: BreakerIncidentDetails | null;
-  incidents: BreakerIncidentDetails[];
+  manualKillIncident: CircuitBreakerIncident | null;
+  incidents: CircuitBreakerIncident[];
 };
 
 export function PortfolioClient() {
@@ -70,7 +63,7 @@ export function PortfolioClient() {
   const { assets, pnl, stablePnlChanges, openPositionsCount, venueBalances, activeBreakers, manualRequiredIntents } =
     portfolio.data;
   const globalBreaker = activeBreakers.find((breaker) => breaker.key === "global") ?? null;
-  const nonGlobalBreakers = activeBreakers.filter((breaker) => breaker.key !== "global");
+  const operationalBreakers = activeBreakers.filter(shouldListOperationalBreaker);
   const globalBreakerActive = globalBreaker?.payload?.manualKillActive === true;
   const readyCount = assets.filter((asset) => asset.workerState.readinessStatus === "ready").length;
   const liveCount = assets.filter((asset) => asset.config.enableTrading && !asset.config.shadowMode).length;
@@ -150,14 +143,9 @@ export function PortfolioClient() {
         throw new Error(await detailsResponse.text());
       }
       const details = (await detailsResponse.json()) as BreakerDetailsResponse;
-      const incident = details.incidents.find(
-        (candidate) =>
-          circuitBreakerIncidentScopeKey(candidate) === key &&
-          candidate.resolutionPolicy === "operator" &&
-          (intentId === undefined || candidate.intentId === intentId),
-      );
+      const incident = selectAcknowledgeableBreakerIncident(details.incidents, key, intentId);
       if (!incident) {
-        throw new Error(`Aucun incident opérateur acquittable trouvé pour ${key}.`);
+        throw new Error(`Aucun incident opérateur avec exposition résolue n'est acquittable pour ${key}.`);
       }
       const response = await fetch("/api/circuit-breakers", {
         method: "PUT",
@@ -262,8 +250,12 @@ export function PortfolioClient() {
             onClear={clearManualIntervention}
           />
         ) : null}
-        {nonGlobalBreakers.length > 0 ? (
-          <ActiveBreakerList breakers={nonGlobalBreakers} busyKey={breakerClearBusyKey} onClear={acknowledgeBreaker} />
+        {operationalBreakers.length > 0 ? (
+          <ActiveBreakerList
+            breakers={operationalBreakers}
+            busyKey={breakerClearBusyKey}
+            onClear={acknowledgeBreaker}
+          />
         ) : null}
 
         <Surface glow>
@@ -440,7 +432,7 @@ function ActiveBreakerList({
   return (
     <div className="mb-4 rounded-lg border border-[rgba(232,80,106,0.22)] bg-[rgba(232,80,106,0.06)] px-5 py-4">
       <div className="mb-3 text-[10px] font-semibold uppercase tracking-[0.22em] text-[var(--wa-rose)]">
-        Breakers slot / asset actifs
+        Breakers opérationnels actifs
       </div>
       <div className="flex flex-col gap-2">
         {breakers.map((breaker) => (
@@ -799,16 +791,6 @@ function findBreakerForIntent(breakers: CircuitBreaker[], intent: OrderIntent) {
     breakers.find((breaker) => breaker.active && breaker.key === "global") ??
     null
   );
-}
-
-function circuitBreakerIncidentScopeKey(incident: BreakerIncidentDetails) {
-  if (incident.scope.type === "global") {
-    return "global";
-  }
-  if (incident.scope.type === "asset") {
-    return `asset:${incident.scope.asset}`;
-  }
-  return `slot:${incident.scope.slotKey}`;
 }
 
 function formatSignedUsd(value: number | null | undefined) {

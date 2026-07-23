@@ -19,6 +19,7 @@ import {
   ingestVenueFillAtomically,
   insertOrderIntent,
   listAccountingFillEvidenceForIntent,
+  listHistoricalSettledLegacyPendingIntentIds,
   listStableAccountingProjectionBacklog,
   migratePostgresDatabase,
   reaccountIntentAtomically,
@@ -117,6 +118,40 @@ describePostgres("Postgres accounting persistence", () => {
         legacyPending: 0,
         historicalLegacyPending: 1,
       });
+    });
+  }, 30_000);
+
+  it("isolates only prior-day settled legacy debt with durable venue resolutions from reconciliation", async () => {
+    await withIsolatedSchema(async (pool) => {
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS.slice(0, 6));
+      const dayStart = utcDayStart(Date.now());
+      const historicalSettled = buildIntent("legacy-settled-prior-day", "settled");
+      historicalSettled.slotStartTs = dayStart - 30 * 60_000;
+      historicalSettled.slotEndTs = dayStart - 15 * 60_000;
+      historicalSettled.createdAt = historicalSettled.slotStartTs + 10;
+      historicalSettled.updatedAt = dayStart - 1_000;
+      historicalSettled.resolvedAt = dayStart - 1_000;
+      const historicalFailed = buildIntent("legacy-failed-prior-day", "failed");
+      historicalFailed.slotStartTs = historicalSettled.slotStartTs;
+      historicalFailed.slotEndTs = historicalSettled.slotEndTs;
+      historicalFailed.createdAt = historicalSettled.createdAt;
+      historicalFailed.updatedAt = historicalSettled.updatedAt;
+      historicalFailed.resolvedAt = historicalSettled.resolvedAt;
+      const currentSettled = buildIntent("legacy-settled-current-day", "settled");
+
+      await insertOrderIntent(pool, historicalSettled);
+      await insertOrderIntent(pool, historicalFailed);
+      await insertOrderIntent(pool, currentSettled);
+      await runDatabaseMigrations(pool, DATABASE_MIGRATIONS);
+
+      await expect(
+        listHistoricalSettledLegacyPendingIntentIds(pool, [
+          currentSettled.id,
+          historicalFailed.id,
+          historicalSettled.id,
+          historicalSettled.id,
+        ]),
+      ).resolves.toEqual([historicalSettled.id]);
     });
   }, 30_000);
 

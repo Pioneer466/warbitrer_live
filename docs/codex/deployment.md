@@ -49,13 +49,13 @@ The zero-in-flight requirement is mandatory when client-order-ID generation chan
 
 ## Versioned schema
 
-The schema is managed by checksummed, forward-only migrations V1-V8 defined in `src/lib/postgres-db.ts`. Applied migration source is immutable: add a new migration instead of editing an existing one.
+The schema is managed by checksummed, forward-only migrations V1-V9 defined in `src/lib/postgres-db.ts`. Applied migration source is immutable: add a new migration instead of editing an existing one.
 
 - `npm run db:migrate` serializes and applies pending migrations.
 - `npm run db:status` verifies the exact version, name, order, and checksum history without applying DDL.
 - Runtime services run `db:status` before startup and fail closed against a pending, unknown, reordered, or modified history.
 
-Keep every application service stopped while migrations run. Do not restart until status is ready at V8.
+Keep every application service stopped while migrations run. Do not restart until status is ready at V9.
 
 The first V0-to-V8 production upgrade may require the audited one-time legacy repair when exact old Polymarket
 FOK/FAK fills contradict their stale order projection. Run it only with every application service stopped, a verified

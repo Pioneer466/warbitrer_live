@@ -477,6 +477,61 @@ describePostgres("circuit-breaker migration backfill", () => {
       });
     });
   }, 30_000);
+
+  it("repairs only inactive numeric slot keys with immutable legacy evidence", async () => {
+    await withIsolatedSchema(async (pool) => {
+      await runDatabaseMigrations(
+        pool,
+        DATABASE_MIGRATIONS.filter((migration) => migration.version <= 4),
+      );
+      const legacyKey = "slot:1784547900000";
+      await pool.query(
+        `
+          INSERT INTO circuit_breakers (key, active, reason, triggered_at, payload_json)
+          VALUES ($1, false, NULL, NULL, 'null'::jsonb)
+        `,
+        [legacyKey],
+      );
+
+      await migratePostgresDatabase(pool);
+
+      const openIncidents = await listCurrentCircuitBreakerIncidents(pool);
+      const allIncidents = await listCurrentCircuitBreakerIncidents(pool, { includeResolved: true });
+      const repaired = allIncidents.find(
+        (incident) => incident.owner === "migration-v5" && incident.payload?.legacyKey === legacyKey,
+      );
+      const events = await pool.query<{ event_type: string; status: string; actor: string }>(
+        `
+          SELECT event_type, status, actor
+          FROM circuit_breaker_incident_events
+          WHERE incident_id = $1
+          ORDER BY revision ASC
+        `,
+        [repaired?.id],
+      );
+      const legacy = await pool.query<{ active: boolean; reason: string | null; payload_json: unknown }>(
+        "SELECT active, reason, payload_json FROM circuit_breakers_legacy WHERE key = $1",
+        [legacyKey],
+      );
+
+      expect(openIncidents.some((incident) => incident.id === repaired?.id)).toBe(false);
+      expect(repaired).toMatchObject({
+        owner: "migration-v5",
+        revision: 3,
+        exposure: {
+          state: "resolved",
+          confirmedBy: "migration-v5",
+        },
+      });
+      expect(repaired?.timestamps.resolvedAt).not.toBeNull();
+      expect(events.rows).toEqual([
+        { event_type: "observed", status: "open", actor: "migration-v5" },
+        { event_type: "exposure_resolved", status: "open", actor: "migration-v5" },
+        { event_type: "operator_acknowledged", status: "resolved", actor: "migration-v9" },
+      ]);
+      expect(legacy.rows).toEqual([{ active: false, reason: null, payload_json: null }]);
+    });
+  }, 30_000);
 });
 
 function observation<T extends Parameters<typeof observeCircuitBreakerIncident>[1]["incident"]>(

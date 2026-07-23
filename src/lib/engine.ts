@@ -155,6 +155,7 @@ import {
   readGlobalRiskConfig,
   readAccountingHead,
   readAccountingFillEvidenceForIntent,
+  readHistoricalSettledLegacyPendingIntentIds,
   readAccountingRealizedPnlForUtcDay,
   readAllTimeAccountingLedger,
   readOpenOrderIntents,
@@ -8552,9 +8553,13 @@ async function markIntentHedgedAfterEconomicCheck(
 }
 
 async function reconcileVenueOrders(asset: MarketAsset, now: number, sharedContext: TickSharedContext = {}) {
-  const recentOrders = sharedContext.recentVenueOrders
+  const candidateRecentOrders = sharedContext.recentVenueOrders
     ? sharedContext.recentVenueOrders.filter((order) => order.asset === asset).slice(0, 200)
     : await readRecentVenueOrders(200, asset);
+  const historicalSettledIntentIds = new Set(
+    await readHistoricalSettledLegacyPendingIntentIds(candidateRecentOrders.map((order) => order.intentId)),
+  );
+  const recentOrders = candidateRecentOrders.filter((order) => !historicalSettledIntentIds.has(order.intentId));
   const reconcileData = sharedContext.venueOrderReconcileData ?? (await prefetchVenueOrderReconcileData());
   const { polyOpenOrders, kalshiOrders, polyTrades, kalshiFills } = reconcileData;
   const recentOrderByVenueId = new Map(recentOrders.map((order) => [`${order.venue}:${order.venueOrderId}`, order]));
@@ -10458,6 +10463,18 @@ async function syncActiveSlotExecutionBreakers(now: number) {
 }
 
 export function isIntentExposureDurablyResolved(intent: OrderIntent) {
+  if (intent.status === "settled") {
+    const hasDurableVenueResolutions =
+      intent.polyResolution !== null &&
+      intent.kalshiResolution !== null &&
+      intent.legs.every((leg) => {
+        const venueResolution = leg.venue === "polymarket" ? intent.polyResolution : intent.kalshiResolution;
+        return leg.resolvedOutcome === venueResolution;
+      });
+    if (hasDurableVenueResolutions) {
+      return true;
+    }
+  }
   if (intent.status === "hedged" || intent.status === "settled") {
     const [first, second] = intent.legs;
     return Boolean(

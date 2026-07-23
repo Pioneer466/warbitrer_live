@@ -700,6 +700,32 @@ describe("ambiguous submission safety", () => {
     expect(isIntentExposureDurablyResolved(buildIntent({ status: "failed" }))).toBe(false);
     expect(isIntentExposureDurablyResolved(buildIntent({ status: "hedged" }))).toBe(false);
     expect(isIntentExposureDurablyResolved(buildIntent({ status: "manual_required" }))).toBe(false);
+
+    const settledWithUnequalFills = buildIntent({
+      status: "settled",
+      resolvedAt: 10,
+      polyResolution: "UP",
+      kalshiResolution: "YES",
+      legs: [
+        {
+          ...base.legs[0],
+          filledSize: 5.104165,
+          resolvedOutcome: "UP",
+        },
+        {
+          ...base.legs[1],
+          filledSize: 5,
+          resolvedOutcome: "YES",
+        },
+      ],
+    });
+    expect(isIntentExposureDurablyResolved(settledWithUnequalFills)).toBe(true);
+    expect(
+      isIntentExposureDurablyResolved({
+        ...settledWithUnequalFills,
+        legs: [settledWithUnequalFills.legs[0], { ...settledWithUnequalFills.legs[1], resolvedOutcome: null }],
+      }),
+    ).toBe(false);
   });
 
   it("fails closed for transport errors on both venues until venue truth is authoritative", () => {
