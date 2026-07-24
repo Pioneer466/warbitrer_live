@@ -151,6 +151,7 @@ Variables optionnelles:
 
 - `BACKUP_DIR`
 - `BACKUP_RETENTION_DAYS`
+- `BACKUP_RETENTION_COUNT` (defaults to `3`, including deploy-time backups)
 
 ## Important sécurité
 
