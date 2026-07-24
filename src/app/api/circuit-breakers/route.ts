@@ -11,13 +11,19 @@ import {
   projectLegacyCircuitBreakersForUi,
 } from "@/lib/circuit-breaker-policy";
 import type { CircuitBreakerIncident, CircuitBreakerScopeAggregate } from "@/lib/circuit-breaker-policy";
+import { isShadowAccountingTerminalizationIncident } from "@/lib/circuit-breaker-ui";
 import {
   acknowledgeCircuitBreaker,
   acknowledgeManualKillBreaker,
   CircuitBreakerIncidentPersistenceError,
+  findOrderIntent,
   readCurrentCircuitBreakerIncidents,
   readOpenOrderIntents,
+  readOrderAttemptsForIntent,
+  readVenueOrdersForIntent,
+  writeCircuitBreakerExposureRecovery,
   writeCircuitBreakerIncident,
+  writeOrderIntent,
 } from "@/lib/storage";
 import type { CircuitBreaker, CircuitBreakerKey, CircuitBreakerReason } from "@/lib/types";
 
@@ -161,10 +167,15 @@ export async function PUT(request: Request) {
     if (body.key !== undefined && body.key !== incidentScopeKey) {
       return NextResponse.json({ error: "key does not match the requested incident scope" }, { status: 400 });
     }
+    const shadowRecovery = await recoverShadowAccountingIncidentForAcknowledgement(
+      incident,
+      body.expectedRevision,
+      mutation.requestId,
+    );
     const acknowledge = isManualKillIncident(incident) ? acknowledgeManualKillBreaker : acknowledgeCircuitBreaker;
     const acknowledged = await acknowledge({
       incidentId: incident.id,
-      expectedRevision: body.expectedRevision,
+      expectedRevision: shadowRecovery.incident.revision,
       operatorId: mutation.actor,
       actor: mutation.actor,
       requestId: `api:${mutation.requestId}`,
@@ -183,7 +194,7 @@ export async function PUT(request: Request) {
       payload: remainingBreaker?.payload ?? null,
       acknowledgedIncidentId: acknowledged.id,
       revision: acknowledged.revision,
-      closedIntentIds: [],
+      closedIntentIds: shadowRecovery.recoveredIntentId ? [shadowRecovery.recoveredIntentId] : [],
     });
   } catch (error) {
     if (error instanceof CircuitBreakerIncidentPersistenceError) {
@@ -201,6 +212,82 @@ export async function PUT(request: Request) {
     }
     return createApiErrorResponse(error);
   }
+}
+
+async function recoverShadowAccountingIncidentForAcknowledgement(
+  incident: CircuitBreakerIncident,
+  expectedRevision: number,
+  requestId: string,
+) {
+  if (!isShadowAccountingTerminalizationIncident(incident)) {
+    return { incident, recoveredIntentId: null };
+  }
+  if (incident.revision !== expectedRevision) {
+    throw new CircuitBreakerIncidentPersistenceError(
+      "revision_conflict",
+      `Expected circuit-breaker revision ${expectedRevision}, found ${incident.revision}`,
+      incident.id,
+    );
+  }
+  if (!incident.intentId) {
+    throwShadowRecoveryDenied(incident.id, "Shadow accounting incident is missing its intent");
+  }
+
+  const intent = await findOrderIntent(incident.intentId);
+  const needsIntentRepair =
+    intent?.status === "manual_required" &&
+    intent.failureReason?.startsWith("Stable accounting evidence is incomplete (");
+  const alreadyRepaired = intent?.status === "hedged" && intent.failureReason === null;
+  if (
+    !intent ||
+    !intent.shadow ||
+    (!needsIntentRepair && !alreadyRepaired) ||
+    intent.legs.length !== 2 ||
+    intent.legs.some((leg) => leg.filledSize <= 0)
+  ) {
+    throwShadowRecoveryDenied(incident.id, "Intent is not an eligible shadow accounting false positive");
+  }
+
+  const [attempts, orders] = await Promise.all([
+    readOrderAttemptsForIntent(intent.id),
+    readVenueOrdersForIntent(intent.id),
+  ]);
+  if (attempts.some((attempt) => !attempt.shadow) || orders.some((order) => !order.shadow)) {
+    throwShadowRecoveryDenied(incident.id, "Live execution evidence exists for this intent");
+  }
+
+  let recoveredIncident = incident;
+  if (incident.exposure.state === "unresolved") {
+    const confirmedAt = Date.now();
+    recoveredIncident = await writeCircuitBreakerExposureRecovery({
+      incidentId: incident.id,
+      expectedRevision: incident.revision,
+      owner: incident.owner,
+      recoveryProof: {
+        owner: incident.owner,
+        confirmedAt,
+        evidenceId: `shadow-intent:${intent.id}:no-live-execution`,
+      },
+      actor: incident.owner,
+      requestId: `api-shadow-proof:${requestId}`,
+    });
+  }
+
+  if (needsIntentRepair) {
+    await writeOrderIntent({
+      ...intent,
+      status: "hedged",
+      failureReason: null,
+      resolvedAt: null,
+      updatedAt: Date.now(),
+    });
+  }
+
+  return { incident: recoveredIncident, recoveredIntentId: intent.id };
+}
+
+function throwShadowRecoveryDenied(incidentId: string, message: string): never {
+  throw new CircuitBreakerIncidentPersistenceError("invalid_recovery_proof", message, incidentId);
 }
 
 function sanitizeOperatorNote(value: unknown) {

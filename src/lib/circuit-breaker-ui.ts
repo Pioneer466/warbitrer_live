@@ -22,6 +22,7 @@ export function selectAcknowledgeableBreakerIncident(
   incidents: readonly CircuitBreakerIncident[],
   key: CircuitBreakerKey,
   intentId?: string,
+  allowUnresolvedShadowAccounting = false,
 ) {
   return (
     incidents.find(
@@ -29,8 +30,19 @@ export function selectAcknowledgeableBreakerIncident(
         getCircuitBreakerScopeKey(incident.scope) === key &&
         incident.resolutionPolicy === "operator" &&
         !isManualKillIncident(incident) &&
-        incident.exposure.state !== "unresolved" &&
+        (incident.exposure.state !== "unresolved" ||
+          (allowUnresolvedShadowAccounting && isShadowAccountingTerminalizationIncident(incident))) &&
         (intentId === undefined || incident.intentId === intentId),
     ) ?? null
+  );
+}
+
+export function isShadowAccountingTerminalizationIncident(incident: CircuitBreakerIncident) {
+  return (
+    incident.owner === "execution" &&
+    incident.reason === "hedge_failure" &&
+    incident.payload?.disposition === "manual_intervention" &&
+    typeof incident.payload?.stage === "string" &&
+    incident.payload.stage.startsWith("accounting_terminalization_")
   );
 }

@@ -125,7 +125,11 @@ export function PortfolioClient() {
     }
   }
 
-  async function acknowledgeBreaker(key: CircuitBreakerKey, intentId?: string) {
+  async function acknowledgeBreaker(
+    key: CircuitBreakerKey,
+    intentId?: string,
+    allowUnresolvedShadowAccounting = false,
+  ) {
     const breaker = activeBreakers.find((candidate) => candidate.key === key);
     if (!breaker?.active) {
       return;
@@ -143,7 +147,12 @@ export function PortfolioClient() {
         throw new Error(await detailsResponse.text());
       }
       const details = (await detailsResponse.json()) as BreakerDetailsResponse;
-      const incident = selectAcknowledgeableBreakerIncident(details.incidents, key, intentId);
+      const incident = selectAcknowledgeableBreakerIncident(
+        details.incidents,
+        key,
+        intentId,
+        allowUnresolvedShadowAccounting,
+      );
       if (!incident) {
         throw new Error(`Aucun incident opérateur avec exposition résolue n'est acquittable pour ${key}.`);
       }
@@ -183,7 +192,7 @@ export function PortfolioClient() {
       setGlobalBreakerMessage(`Aucun breaker actif trouvé pour l'intent ${intent.id}.`);
       return;
     }
-    await acknowledgeBreaker(breaker.key, intent.id);
+    await acknowledgeBreaker(breaker.key, intent.id, intent.shadow);
   }
 
   return (

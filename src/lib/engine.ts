@@ -8286,6 +8286,7 @@ async function finalizeTerminalIntentWithAccounting(input: {
   stage: string;
   stability: Record<string, unknown>;
 }) {
+  const { mutationNow, terminalIntent } = normalizeTerminalAccountingMutation(input);
   const head = await readAccountingHead(input.intent.id);
   if (!head) {
     throw new Error(`Accounting head missing for intent ${input.intent.id}`);
@@ -8296,11 +8297,11 @@ async function finalizeTerminalIntentWithAccounting(input: {
   try {
     const fills = await readAccountingFillEvidenceForIntent(input.intent.id);
     const accounting = buildTerminalAccountingProjection({
-      terminalIntent: input.terminalIntent,
+      terminalIntent,
       fills,
       version: operation === "finalize" ? 1 : (head.currentVersion ?? 0) + 1,
-      capturedAt: input.now,
-      settlementObservedAt: input.now,
+      capturedAt: mutationNow,
+      settlementObservedAt: mutationNow,
     });
     projectedTerminalIntent = accounting.terminalIntent;
     const persistenceInput = {
@@ -8313,7 +8314,7 @@ async function finalizeTerminalIntentWithAccounting(input: {
           accounting.projection.proofSha256,
           input.stability,
         ),
-        occurredAt: input.now,
+        occurredAt: mutationNow,
       },
       expectedHeadRevision: head.revision,
       expectedIntentRevision: input.intent.revision,
@@ -8322,7 +8323,7 @@ async function finalizeTerminalIntentWithAccounting(input: {
       stability: {
         schema: "warbitrer.accounting-stability.v1",
         stage: input.stage,
-        observedAt: input.now,
+        observedAt: mutationNow,
         ...input.stability,
       },
     };
@@ -8358,7 +8359,7 @@ async function finalizeTerminalIntentWithAccounting(input: {
           accountingProofSha256: concurrentHead.currentProofSha256,
           observedError: toErrorMessage(error),
         },
-        createdAt: input.now,
+        createdAt: mutationNow,
       });
       return concurrentIntent;
     }
@@ -8369,21 +8370,38 @@ async function finalizeTerminalIntentWithAccounting(input: {
       message: `Accounting ${operation} blocked for intent ${input.intent.id}`,
       payload: {
         intentId: input.intent.id,
-        requestedStatus: input.terminalIntent.status,
+        requestedStatus: terminalIntent.status,
         stage: input.stage,
         accountingCode,
         error: toErrorMessage(error),
       },
-      createdAt: input.now,
+      createdAt: mutationNow,
     });
+    if (!shouldEscalateAccountingTerminalizationFailure(input.intent)) {
+      await writeRunEvent({
+        asset: input.intent.asset,
+        level: "warn",
+        eventType: "accounting.terminalization.shadow_deferred",
+        message: `Shadow accounting terminalization deferred for intent ${input.intent.id}`,
+        payload: {
+          intentId: input.intent.id,
+          requestedStatus: terminalIntent.status,
+          stage: input.stage,
+          accountingCode,
+          error: toErrorMessage(error),
+        },
+        createdAt: mutationNow,
+      });
+      return concurrentIntent ?? input.intent;
+    }
     if (input.intent.status !== "settled" && input.intent.status !== "unwound") {
       return markIntentManualRequired(
         input.intent,
-        input.now,
+        mutationNow,
         `accounting_terminalization_${input.stage}`,
         `Stable accounting evidence is incomplete (${toErrorMessage(error)})`,
         {
-          requestedStatus: input.terminalIntent.status,
+          requestedStatus: terminalIntent.status,
           accountingCode,
         },
       );
@@ -8397,7 +8415,7 @@ async function finalizeTerminalIntentWithAccounting(input: {
         reason: "venue_error",
         disposition: "manual_intervention",
         venue: input.intent.primaryVenue,
-        triggeredAt: input.now,
+        triggeredAt: mutationNow,
       }),
     );
     return input.intent;
@@ -8408,6 +8426,30 @@ async function finalizeTerminalIntentWithAccounting(input: {
     throw new Error(`Intent ${input.intent.id} disappeared after accounting ${operation}`);
   }
   return persisted;
+}
+
+export function normalizeTerminalAccountingMutation(input: {
+  intent: Pick<OrderIntent, "updatedAt">;
+  terminalIntent: OrderIntent;
+  now: number;
+}) {
+  const mutationNow = Math.max(
+    input.now,
+    input.intent.updatedAt,
+    input.terminalIntent.updatedAt,
+    input.terminalIntent.resolvedAt ?? 0,
+  );
+  return {
+    mutationNow,
+    terminalIntent: {
+      ...input.terminalIntent,
+      updatedAt: mutationNow,
+    },
+  };
+}
+
+export function shouldEscalateAccountingTerminalizationFailure(intent: Pick<OrderIntent, "shadow">) {
+  return !intent.shadow;
 }
 
 export function isStableAccountingTerminalConcordant(
@@ -9458,7 +9500,7 @@ async function refreshIntentFromStoredFills(intent: OrderIntent, now: number) {
 
   return {
     ...refreshed,
-    updatedAt: now,
+    updatedAt: Math.max(now, refreshed.updatedAt),
   };
 }
 

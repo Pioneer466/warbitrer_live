@@ -240,6 +240,10 @@ export async function readRecentVenueOrders(limit?: number, asset?: MarketAsset)
   return postgres.listRecentVenueOrders(await db(), limit, asset);
 }
 
+export async function readVenueOrdersForIntent(intentId: string) {
+  return postgres.listVenueOrdersForIntentIds(await db(), [intentId]);
+}
+
 export async function findVenueOrder(venue: string, venueOrderId: string) {
   return postgres.findVenueOrderByExchangeId(await db(), venue, venueOrderId);
 }

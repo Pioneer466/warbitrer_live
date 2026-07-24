@@ -1,5 +1,9 @@
 import type { CircuitBreakerIncident, CircuitBreakerIncidentTimestamps } from "@/lib/circuit-breaker-policy";
-import { selectAcknowledgeableBreakerIncident, shouldListOperationalBreaker } from "@/lib/circuit-breaker-ui";
+import {
+  isShadowAccountingTerminalizationIncident,
+  selectAcknowledgeableBreakerIncident,
+  shouldListOperationalBreaker,
+} from "@/lib/circuit-breaker-ui";
 import type { CircuitBreaker } from "@/lib/types";
 
 const TIMESTAMPS: CircuitBreakerIncidentTimestamps = {
@@ -91,5 +95,27 @@ describe("circuit-breaker UI policy", () => {
     );
     expect(selectAcknowledgeableBreakerIncident([manualKill, unresolved], "global", "intent-1")).toBeNull();
     expect(selectAcknowledgeableBreakerIncident([resolved], "global", "another-intent")).toBeNull();
+  });
+
+  it("allows only the explicit shadow accounting recovery flow to select unresolved exposure", () => {
+    const accounting = incident({
+      id: "shadow-accounting",
+      reason: "hedge_failure",
+      exposure: { state: "unresolved" },
+      payload: {
+        stage: "accounting_terminalization_venue_settlement",
+        disposition: "manual_intervention",
+      },
+    });
+    const unrelated = incident({
+      id: "unrelated",
+      exposure: { state: "unresolved" },
+      payload: { stage: "late_fill", disposition: "manual_intervention" },
+    });
+
+    expect(isShadowAccountingTerminalizationIncident(accounting)).toBe(true);
+    expect(selectAcknowledgeableBreakerIncident([accounting], "global", "intent-1")).toBeNull();
+    expect(selectAcknowledgeableBreakerIncident([unrelated], "global", "intent-1", true)).toBeNull();
+    expect(selectAcknowledgeableBreakerIncident([accounting], "global", "intent-1", true)).toBe(accounting);
   });
 });

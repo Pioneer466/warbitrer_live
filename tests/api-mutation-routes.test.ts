@@ -12,9 +12,14 @@ const storageMocks = vi.hoisted(() => ({
   },
   acknowledgeCircuitBreaker: vi.fn(),
   acknowledgeManualKillBreaker: vi.fn(),
+  findOrderIntent: vi.fn(),
   readCurrentCircuitBreakerIncidents: vi.fn(),
   readOpenOrderIntents: vi.fn(),
+  readOrderAttemptsForIntent: vi.fn(),
+  readVenueOrdersForIntent: vi.fn(),
+  writeCircuitBreakerExposureRecovery: vi.fn(),
   writeCircuitBreakerIncident: vi.fn(),
+  writeOrderIntent: vi.fn(),
 }));
 
 const recoveryMocks = vi.hoisted(() => ({
@@ -33,7 +38,11 @@ vi.mock("@/lib/engine", () => engineMocks);
 import { PUT as updateCircuitBreaker } from "@/app/api/circuit-breakers/route";
 import { POST as recoverPolymarketMarket } from "@/app/api/recovery/route";
 import { POST as repairSettlements } from "@/app/api/recovery/settlements/route";
-import { createManualKillIncident, createPolygonRpcIncident } from "@/lib/circuit-breaker-incidents";
+import {
+  createExecutionIncident,
+  createManualKillIncident,
+  createPolygonRpcIncident,
+} from "@/lib/circuit-breaker-incidents";
 
 const NOW = 1_800_000_000_000;
 const AUTHORIZATION = `Basic ${Buffer.from("ops:secret", "utf8").toString("base64")}`;
@@ -286,6 +295,127 @@ describe("PUT /api/circuit-breakers exact incident semantics", () => {
     expect(incident.payload.note).toHaveLength(1_024);
     expect(incident.payload.note).not.toMatch(/[\u0000-\u001f\u007f]/);
     expect(incident.payload.note).toMatch(/^investigate x/);
+  });
+
+  it("proves and repairs an exact shadow accounting false positive before acknowledgement", async () => {
+    const incident = createExecutionIncident({
+      asset: "xrp",
+      slotKey: "xrp:1800000000000",
+      intentId: "intent-shadow",
+      stage: "accounting_terminalization_venue_settlement",
+      reason: "hedge_failure",
+      disposition: "manual_intervention",
+      venue: "kalshi",
+      triggeredAt: NOW - 1_000,
+    });
+    const proven = {
+      ...incident,
+      revision: 2,
+      exposure: {
+        state: "resolved" as const,
+        confirmedBy: "execution",
+        confirmedAt: NOW,
+        evidenceId: "shadow-intent:intent-shadow:no-live-execution",
+      },
+    };
+    storageMocks.readCurrentCircuitBreakerIncidents.mockResolvedValueOnce([incident]).mockResolvedValueOnce([]);
+    storageMocks.findOrderIntent.mockResolvedValue({
+      id: "intent-shadow",
+      shadow: true,
+      status: "manual_required",
+      failureReason: "Stable accounting evidence is incomplete (timestamp); manual intervention required",
+      resolvedAt: null,
+      updatedAt: NOW - 1_000,
+      legs: [{ filledSize: 10 }, { filledSize: 10 }],
+    });
+    storageMocks.readOrderAttemptsForIntent.mockResolvedValue([]);
+    storageMocks.readVenueOrdersForIntent.mockResolvedValue([]);
+    storageMocks.writeCircuitBreakerExposureRecovery.mockResolvedValue(proven);
+    storageMocks.writeOrderIntent.mockImplementation(async (intent) => intent);
+    storageMocks.acknowledgeCircuitBreaker.mockResolvedValue({
+      ...proven,
+      revision: 3,
+      timestamps: { ...proven.timestamps, acknowledgedAt: NOW, resolvedAt: NOW },
+    });
+
+    const { request } = mutationRequest(
+      {
+        key: "global",
+        active: false,
+        incidentId: incident.id,
+        expectedRevision: incident.revision,
+      },
+      AUTHORIZATION,
+    );
+    const response = await updateCircuitBreaker(request);
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      active: false,
+      acknowledgedIncidentId: incident.id,
+      closedIntentIds: ["intent-shadow"],
+    });
+    expect(storageMocks.writeCircuitBreakerExposureRecovery).toHaveBeenCalledWith(
+      expect.objectContaining({
+        incidentId: incident.id,
+        expectedRevision: 1,
+        owner: "execution",
+        actor: "execution",
+      }),
+    );
+    expect(storageMocks.writeOrderIntent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: "intent-shadow",
+        status: "hedged",
+        failureReason: null,
+        resolvedAt: null,
+      }),
+    );
+    expect(storageMocks.acknowledgeCircuitBreaker).toHaveBeenCalledWith(
+      expect.objectContaining({ incidentId: incident.id, expectedRevision: 2 }),
+    );
+  });
+
+  it("refuses shadow incident recovery when live execution evidence exists", async () => {
+    const incident = createExecutionIncident({
+      asset: "xrp",
+      slotKey: "xrp:1800000000000",
+      intentId: "intent-shadow",
+      stage: "accounting_terminalization_venue_settlement",
+      reason: "hedge_failure",
+      disposition: "manual_intervention",
+      venue: "kalshi",
+      triggeredAt: NOW - 1_000,
+    });
+    storageMocks.readCurrentCircuitBreakerIncidents.mockResolvedValue([incident]);
+    storageMocks.findOrderIntent.mockResolvedValue({
+      id: "intent-shadow",
+      shadow: true,
+      status: "manual_required",
+      failureReason: "Stable accounting evidence is incomplete (timestamp); manual intervention required",
+      resolvedAt: null,
+      updatedAt: NOW - 1_000,
+      legs: [{ filledSize: 10 }, { filledSize: 10 }],
+    });
+    storageMocks.readOrderAttemptsForIntent.mockResolvedValue([{ shadow: false }]);
+    storageMocks.readVenueOrdersForIntent.mockResolvedValue([]);
+
+    const { request } = mutationRequest(
+      {
+        key: "global",
+        active: false,
+        incidentId: incident.id,
+        expectedRevision: incident.revision,
+      },
+      AUTHORIZATION,
+    );
+    const response = await updateCircuitBreaker(request);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: "invalid_recovery_proof" });
+    expect(storageMocks.writeCircuitBreakerExposureRecovery).not.toHaveBeenCalled();
+    expect(storageMocks.writeOrderIntent).not.toHaveBeenCalled();
+    expect(storageMocks.acknowledgeCircuitBreaker).not.toHaveBeenCalled();
   });
 });
 

@@ -55,6 +55,7 @@ import {
   mergePolymarketTradeObservationStatus,
   immediatePartialOrderType,
   isPrimaryFillSizeHedgable,
+  normalizeTerminalAccountingMutation,
   primaryImmediateOrderType,
   persistPostSubmissionIntentEvidence,
   persistPostSubmissionLegEvidence,
@@ -64,6 +65,7 @@ import {
   resolveAccountingLegForFill,
   resolveKalshiPrimaryMultiClipRetryPlan,
   shouldManageFeedHealthBreaker,
+  shouldEscalateAccountingTerminalizationFailure,
   shouldKeepPolymarketLegForResolution,
   shouldHoldHedgeRescueOrderPendingTruth,
   shouldHoldDestructiveReconcileForVenueTruth,
@@ -1822,6 +1824,28 @@ describe("execution candidate arbitration", () => {
 });
 
 describe("settlement venue resolutions", () => {
+  it("keeps terminal accounting timestamps monotonic after fill synchronization", () => {
+    const intent = buildIntent({ updatedAt: 1_005 });
+    const terminalIntent = buildIntent({
+      status: "settled",
+      updatedAt: 1_000,
+      resolvedAt: 1_000,
+    });
+
+    expect(normalizeTerminalAccountingMutation({ intent, terminalIntent, now: 1_000 })).toMatchObject({
+      mutationNow: 1_005,
+      terminalIntent: {
+        updatedAt: 1_005,
+        resolvedAt: 1_000,
+      },
+    });
+  });
+
+  it("never escalates a shadow accounting failure into an operational breaker", () => {
+    expect(shouldEscalateAccountingTerminalizationFailure({ shadow: true })).toBe(false);
+    expect(shouldEscalateAccountingTerminalizationFailure({ shadow: false })).toBe(true);
+  });
+
   it("reaccounts settled intents when immutable fill accounting is quarantined", () => {
     const current = buildIntent({
       status: "settled",
