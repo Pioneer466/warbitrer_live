@@ -1040,11 +1040,7 @@ class PolymarketRealtimeFeed {
     if (!this.ws) {
       this.connectMarketWs(now);
     }
-    if (getMarketCatalogEntry(this.marketAsset()).chainlinkDataStreamsFeedId) {
-      this.ensureDirectPriceStream();
-    } else if (!this.priceWs) {
-      this.connectPriceWs();
-    }
+    this.ensurePriceStream();
     if (hasPolymarketCredentials()) {
       this.connectUserWs(now);
     }
@@ -1271,6 +1267,26 @@ class PolymarketRealtimeFeed {
       });
       this.schedulePriceReconnect();
     });
+  }
+
+  private ensurePriceStream() {
+    if (this.priceWs || this.directPriceStream || this.directPriceConnectPromise || this.stopped || !this.slotKey) {
+      return;
+    }
+
+    const directFeedId = getMarketCatalogEntry(this.marketAsset()).chainlinkDataStreamsFeedId;
+    try {
+      if (directFeedId && readChainlinkDataStreamsCredentials()) {
+        this.ensureDirectPriceStream();
+        return;
+      }
+    } catch {
+      // Preserve the explicit partial-credential error emitted by the direct connector.
+      this.ensureDirectPriceStream();
+      return;
+    }
+
+    this.connectPriceWs();
   }
 
   private ensureDirectPriceStream() {
@@ -1561,11 +1577,7 @@ class PolymarketRealtimeFeed {
       if (!this.slotKey) {
         return;
       }
-      if (getMarketCatalogEntry(this.marketAsset()).chainlinkDataStreamsFeedId) {
-        this.ensureDirectPriceStream();
-      } else if (!this.priceWs) {
-        this.connectPriceWs();
-      }
+      this.ensurePriceStream();
     }, delay);
   }
 

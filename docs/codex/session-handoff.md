@@ -14,6 +14,40 @@
 
 The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
 
+## Production Configuration Change - 2026-07-25
+
+The production `entryCutoffSeconds` setting was changed atomically through the authenticated bulk settings API to
+`60` for BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE. BTC through DOGE previously used `180`; BNB and HYPE previously
+used `300`. No other strategy field changed.
+
+The mutation ran against production `main` commit `35e8fcc1503d` with a clean tree. Before the change, the V9
+deployment preflight confirmed `LIVE_EXECUTION_ALLOWED=false`, zero unresolved current live order attempts, zero
+open live venue orders, zero economically active live positions, and zero owned live reservations. The 39 known
+historical `legacy_pending` accounting heads remain visible and continue to block runtime live admission.
+
+After the change, all seven configurations remained `enableTrading=true` and `shadowMode=true`; the application
+reported healthy with no active breaker, and the web, seven asset workers, reconciler, and notifier were all active.
+No code, service, environment, SSH, database row outside the versioned configuration transaction, or deployment
+artifact was changed.
+
+## BNB/HYPE Public Price Stream Fix - 2026-07-25
+
+BNB and HYPE mismatch diagnostics were blocked by `chainlink_unavailable` even though their Polymarket and Kalshi
+market feeds were healthy. The workers selected the direct Chainlink Data Streams transport solely because the
+catalog entries contained direct feed IDs; production intentionally has no direct Chainlink credentials. A
+read-only probe from the VPS confirmed that Polymarket's public RTDS endpoint publishes both `bnb/usd` and
+`hype/usd` without credentials, with 14 valid updates for each single-symbol subscription over 15 seconds.
+
+`src/lib/market-data.ts` now prefers the optional direct transport only when both direct credentials are present and
+otherwise uses the public Polymarket RTDS relay for every asset. Partial direct credentials still follow the
+fail-closed direct configuration error path. `tests/market-data.test.ts` covers the credential-free BNB/HYPE fallback
+and retention of the fully configured direct path. The environment examples now describe direct credentials as
+optional.
+
+Focused market-data, direct-stream, and environment tests passed (49 tests). The full verification also passed:
+production dependency audit, lint, format check, typecheck, 916 tests, Next.js build, and worker build. Eight
+database integration suites remain skipped locally because `TEST_DATABASE_URL` is not configured.
+
 ## Rollout Note - BNB/HYPE Shadow Reactivation
 
 BNB and HYPE are restored to `ACTIVE_MARKET_ASSETS` and the canonical VPS service list to collect current opportunity,

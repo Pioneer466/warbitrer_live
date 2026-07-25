@@ -58,6 +58,8 @@ type PolymarketFeedTestHarness = {
   ws: unknown;
   userWs: unknown;
   priceWs: unknown;
+  directPriceStream: unknown;
+  directPriceConnectPromise: Promise<void> | null;
   wsHeartbeat: ReturnType<typeof setInterval> | null;
   userWsHeartbeat: ReturnType<typeof setInterval> | null;
   priceWsHeartbeat: ReturnType<typeof setInterval> | null;
@@ -71,7 +73,10 @@ type PolymarketFeedTestHarness = {
   subscriptions: VenueSubscriptionState[];
   ensureSlot: (slot: MarketSlot, now?: number) => Promise<void>;
   ensureWs: (now?: number) => void;
+  ensurePriceStream: () => void;
+  ensureDirectPriceStream: () => void;
   connectMarketWs: (now: number) => void;
+  connectPriceWs: () => void;
   handleMarketWsClose: (ws: unknown) => void;
   scheduleMarketReconnect: () => void;
   applyUserEvent: (event: unknown, now: number) => void;
@@ -230,6 +235,41 @@ describe("market data helpers", () => {
     expect(isChainlinkPriceStreamSilent(null, 1_000, 16_001)).toBe(true);
     expect(isChainlinkPriceStreamSilent(14_000, 1_000, 20_000)).toBe(false);
     expect(isChainlinkPriceStreamSilent(2_000, 14_000, 20_000)).toBe(false);
+  });
+
+  it.each(["bnb", "hype"] as const)(
+    "uses the public Polymarket Chainlink RTDS for %s when direct credentials are absent",
+    (asset) => {
+      vi.stubEnv("DATABASE_URL", "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live");
+      vi.stubEnv("CHAINLINK_DATA_STREAMS_API_KEY", "");
+      vi.stubEnv("CHAINLINK_DATA_STREAMS_USER_SECRET", "");
+      const supervisor = inspectSupervisor();
+      const feed = inspectPolymarketFeed(supervisor, asset);
+      feed.slotKey = buildSlot(asset).key;
+      const connectPriceWs = vi.spyOn(feed, "connectPriceWs").mockImplementation(() => {});
+      const ensureDirectPriceStream = vi.spyOn(feed, "ensureDirectPriceStream").mockImplementation(() => {});
+
+      feed.ensurePriceStream();
+
+      expect(connectPriceWs).toHaveBeenCalledOnce();
+      expect(ensureDirectPriceStream).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the direct BNB Chainlink stream available when both credentials are configured", () => {
+    vi.stubEnv("DATABASE_URL", "postgres://warbitrer:secret@127.0.0.1:5432/warbitrer_live");
+    vi.stubEnv("CHAINLINK_DATA_STREAMS_API_KEY", "api-key");
+    vi.stubEnv("CHAINLINK_DATA_STREAMS_USER_SECRET", "user-secret");
+    const supervisor = inspectSupervisor();
+    const feed = inspectPolymarketFeed(supervisor, "bnb");
+    feed.slotKey = buildSlot("bnb").key;
+    const connectPriceWs = vi.spyOn(feed, "connectPriceWs").mockImplementation(() => {});
+    const ensureDirectPriceStream = vi.spyOn(feed, "ensureDirectPriceStream").mockImplementation(() => {});
+
+    feed.ensurePriceStream();
+
+    expect(ensureDirectPriceStream).toHaveBeenCalledOnce();
+    expect(connectPriceWs).not.toHaveBeenCalled();
   });
 
   it("ignores stale Polymarket market socket closes and deduplicates reconnect timers", async () => {
