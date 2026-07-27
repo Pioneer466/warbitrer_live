@@ -48,6 +48,33 @@ Focused market-data, direct-stream, and environment tests passed (49 tests). The
 production dependency audit, lint, format check, typecheck, 916 tests, Next.js build, and worker build. Eight
 database integration suites remain skipped locally because `TEST_DATABASE_URL` is not configured.
 
+The application fix was committed as `6b5e55936cd66d7f762e50ea4b59f2b53187bbe6`, pushed to `main`, and deployed
+on 2026-07-25 with the canonical VPS script. An initial invocation was refused safely at the first preflight because
+the root `sudo -E` invocation did not preserve the historical-shadow override; no service had stopped. The corrected
+root invocation passed all three V9 preflights, created a fresh Postgres backup, repeated the production audit, lint,
+format check, typecheck, 916 tests, both builds, migration/status checks, and four service-stability rounds.
+
+Post-deployment health was `healthy` with no active breaker, all ten application services had zero restarts, the
+backup timer was active, `LIVE_EXECUTION_ALLOWED=false`, and every asset remained shadow-only with a 60-second entry
+cutoff. BNB and HYPE immediately subscribed to the public RTDS relay and accumulated observations. Because the
+restart occurred after the current slot began, that slot correctly reported `chainlink_start_unavailable`; at the
+next 15-minute rollover both assets captured a non-null Chainlink opening price, returned `reason=null`, and produced
+non-null P-fatal and conservative P&L estimates.
+
+A later 45-second production sample on 2026-07-27 found the diagnostic available for all 30/30 snapshots, no
+subscription failure, and strict execution freshness usable for 26/30 BNB and 25/30 HYPE snapshots. The remaining
+snapshots were conservatively rejected as `chainlink_stale` when a public RTDS tick exceeded the unchanged 2.5-second
+execution threshold. The same control sample produced 22/30 for BTC and 28/30 for ETH, confirming that this
+inter-tick fail-closed behavior is common to the public relay and not a BNB/HYPE transport defect. No oracle
+freshness threshold was loosened.
+
+The backup completed with the configured three-file retention, but the 40 GB root volume remained 90% used with
+about 4.1 GB free and 4.0 GB of Postgres dumps; monitor capacity before future large backups. A read-only
+`systemctl status` diagnostic also exposed the Postgres connection credential in the private operator transcript
+because `pg_dump` received the URL on its command line. Do not copy that value into issues or documentation. Rotate
+the production database password and update the protected environment file in a separately authorized maintenance
+window; no credential was changed during this rollout.
+
 ## Rollout Note - BNB/HYPE Shadow Reactivation
 
 BNB and HYPE are restored to `ACTIVE_MARKET_ASSETS` and the canonical VPS service list to collect current opportunity,
