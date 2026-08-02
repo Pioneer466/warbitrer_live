@@ -269,6 +269,32 @@ describe("mismatch risk policy modes", () => {
     expect(failedGate.opportunity.eligible).toBe(false);
   });
 
+  it("uses the configured fatal-probability fraction as the authoritative economic limit", () => {
+    const candidate = opportunity();
+    const risk = estimate({ pFatalUpper95: 0.06, maximumAllowedFatalProbability: 0.05 });
+
+    const defaultFraction = applyMismatchRiskPolicy(
+      policyInput({ mode: "block_only", opportunity: candidate, estimate: risk }),
+    );
+    const configuredFraction = applyMismatchRiskPolicy(
+      policyInput({
+        mode: "block_only",
+        opportunity: candidate,
+        estimate: risk,
+        globalRiskConfig: {
+          ...DEFAULT_GLOBAL_RISK_CONFIG,
+          mismatchFatalBudgetFractionOfAlignedMargin: 0.8,
+        },
+      }),
+    );
+
+    expect(defaultFraction.economicGate?.maximumAllowedFatalProbability).toBeCloseTo(0.05);
+    expect(defaultFraction.allowed).toBe(false);
+    expect(configuredFraction.economicGate?.maximumAllowedFatalProbability).toBeCloseTo(0.08);
+    expect(configuredFraction.allowed).toBe(true);
+    expect(configuredFraction.opportunity.eligible).toBe(true);
+  });
+
   it("fails closed in enforce and applies both hybrid cluster budgets", () => {
     const unavailable = recheckMismatchRiskCandidate(
       policyInput({

@@ -1555,4 +1555,53 @@ describe("live signal engine", () => {
     expect(signal.legs[1].size).toBe(signal.legs[0].size);
     expect(signal.reasons.join(" | ")).not.toContain("Modèle mismatch indisponible");
   });
+
+  it("does not apply a stale first-pass mismatch limit before the final policy recheck", () => {
+    const estimate = {
+      available: true,
+      executionUsable: true,
+      executionReason: null,
+      modelVersion: "structural-ewma-gaussian-v1-calibrated",
+      reason: null,
+      pFatal: 0.04,
+      pFatalUpper95: 0.06,
+      pAligned: 0.92,
+      pDouble: 0.04,
+      expectedPnlUsd: null,
+      conservativePnlUsd: null,
+      fatalPnlUsd: null,
+      breakEvenFatalProbability: 0.1,
+      // This is deliberately the estimator's stale 50%-fraction limit. The final
+      // executable economics and configured 80% fraction are authoritative instead.
+      maximumAllowedFatalProbability: 0.05,
+      chainlinkAgeMs: 10,
+      cfAgeMs: 10,
+      observationCount: 1_000,
+    };
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899060000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket(),
+      kalshi: tradableKalshi(),
+      settings: buildV3Settings({
+        mismatchGuardEnabled: false,
+        mismatchRiskMode: "block_only",
+      }),
+      balances,
+      lastEntryCosts: {},
+      mismatchRiskEstimates: {
+        POLY_UP_KALSHI_NO: estimate,
+        POLY_DOWN_KALSHI_YES: estimate,
+      },
+      riskBudget: {
+        remainingExpectedFatalLossUsd: 25,
+        remainingAbsoluteFatalLossUsd: 75,
+        fatalProbabilityBudgetFractionOfAlignedMargin: 0.8,
+      },
+    });
+
+    expect(signal.eligible).toBe(true);
+    expect(signal.reasons.join(" | ")).not.toContain("Risque mismatch non économique");
+  });
 });

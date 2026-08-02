@@ -36,6 +36,10 @@ import {
 } from "@/lib/circuit-breaker-policy";
 import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
 import { normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
+import {
+  evaluateMismatchCalibrationActivationEligibility,
+  verifyMismatchCalibrationArtifact,
+} from "@/lib/mismatch-calibration";
 import { SLOT_RESOLUTION_RETENTION_MS, type OracleSlotSample, type SlotResolutionRecord } from "@/lib/oracle-history";
 import type {
   MarketAsset,
@@ -260,6 +264,8 @@ type EntryAdmissionRow = {
   request_sha256: string | null;
   strategy_revision: number;
   global_risk_revision: number;
+  mismatch_calibration_artifact_id: string | null;
+  mismatch_calibration_revision: number;
   policy_evaluated_at: number;
   cutoff_at: number | null;
   latest_submission_start_at: number | null;
@@ -455,6 +461,95 @@ type GlobalRiskConfigRow = {
   updated_at: number;
 };
 
+export type EntryExecutionProbeRecord = {
+  probeKey: string;
+  asset: MarketAsset;
+  slotKey: string;
+  slotStartTs: number;
+  slotEndTs: number;
+  combination: PairCombination;
+  probeKind: "candidate_preflight" | "late_probe";
+  targetSecondsRemaining: 55 | 45 | 35 | 25 | 15 | 5 | null;
+  signalCapturedAt: number;
+  restStartedAt: number;
+  restCapturedAt: number;
+  decision: string;
+  firstRejectionStage: "signal" | "base" | "rest" | "risk" | "admission" | "primary" | "hedge" | "settled" | null;
+  firstRejectionCode: string | null;
+  strategyRevision: number;
+  globalRiskRevision: number;
+  signal: Record<string, unknown>;
+  rest: Record<string, unknown>;
+  risk: Record<string, unknown>;
+  variants: Array<Record<string, unknown>>;
+  evidenceSha256?: string;
+  recordedAt: number;
+};
+
+export type MismatchCalibrationArtifactRecord = {
+  id: string;
+  schemaVersion: number;
+  baseModelVersion: string;
+  trainingStartedAt: number;
+  trainingEndedAt: number;
+  artifact: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  artifactSha256?: string;
+  createdAt: number;
+};
+
+export type MismatchCalibrationActivation = {
+  artifact: MismatchCalibrationArtifactRecord | null;
+  revision: number;
+  updatedAt: number;
+};
+
+export type MismatchCalibrationActivationRequest = {
+  artifactId: string | null;
+  expectedRevision: number;
+  requestId: string;
+  actor: string;
+  reason: string;
+  occurredAt: number;
+};
+
+type EntryExecutionProbeRow = {
+  probe_key: string;
+  asset: MarketAsset;
+  slot_key: string;
+  slot_start_ts: number;
+  slot_end_ts: number;
+  combination: PairCombination;
+  probe_kind: EntryExecutionProbeRecord["probeKind"];
+  target_seconds_remaining: EntryExecutionProbeRecord["targetSecondsRemaining"];
+  signal_captured_at: number;
+  rest_started_at: number;
+  rest_captured_at: number;
+  decision: string;
+  first_rejection_stage: EntryExecutionProbeRecord["firstRejectionStage"];
+  first_rejection_code: string | null;
+  strategy_revision: number;
+  global_risk_revision: number;
+  signal_json: Record<string, unknown>;
+  rest_json: Record<string, unknown>;
+  risk_json: Record<string, unknown>;
+  variants_json: Array<Record<string, unknown>>;
+  evidence_sha256: string;
+  recorded_at: number;
+};
+
+type MismatchCalibrationArtifactRow = {
+  id: string;
+  schema_version: number;
+  base_model_version: string;
+  training_started_at: number;
+  training_ended_at: number;
+  artifact_json: Record<string, unknown>;
+  metrics_json: Record<string, unknown>;
+  artifact_sha256: string;
+  created_at: number;
+};
+
 type CircuitBreakerIncidentCurrentRow = {
   id: string;
   scope_key: string;
@@ -515,6 +610,7 @@ const ORDER_ATTEMPT_SUBMISSION_DEADLINE_CHECKSUM = "fb9086c655b1efe98cb05d0a94c4
 const ACCOUNTING_LEDGER_CHECKSUM = "90f7ef7b35ef7efcb0f895527b752da480b6f7118f9dc91f71d0e68ae5bcf2ce";
 const ACCOUNTING_EVIDENCE_HARDENING_CHECKSUM = "1c5e4723bacc609c33da378ac214aca26e2583f68055e4c9443ad3b6c5ea2432";
 const INACTIVE_LEGACY_SLOT_BREAKER_REPAIR_CHECKSUM = "dd5f0940e2ad014b4c88878d5720c67cf8a80c6c88ce0eaef7886bb2407beac0";
+const MISMATCH_CALIBRATION_EVIDENCE_CHECKSUM = "d165c2d5bf3cbd93ad4d684b90e03ea4cc77409f9d0f163ac0e98912650fa375";
 
 export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
   {
@@ -570,6 +666,12 @@ export const DATABASE_MIGRATIONS: readonly DatabaseMigration[] = [
     name: "inactive_legacy_slot_breaker_repair",
     checksum: INACTIVE_LEGACY_SLOT_BREAKER_REPAIR_CHECKSUM,
     up: applyInactiveLegacySlotBreakerRepairMigration,
+  },
+  {
+    version: 10,
+    name: "mismatch_calibration_evidence",
+    checksum: MISMATCH_CALIBRATION_EVIDENCE_CHECKSUM,
+    up: applyMismatchCalibrationEvidenceMigration,
   },
 ];
 
@@ -3869,6 +3971,224 @@ async function applyInactiveLegacySlotBreakerRepairMigration(db: PgQueryable) {
 }
 /* migration-checksum:end:9 */
 
+/* migration-checksum:start:10 */
+async function applyMismatchCalibrationEvidenceMigration(db: PgQueryable) {
+  await db.query(`
+    CREATE TABLE entry_execution_probes (
+      probe_key TEXT PRIMARY KEY CHECK (length(btrim(probe_key)) > 0),
+      asset TEXT NOT NULL CHECK (asset IN ('btc', 'eth', 'sol', 'xrp', 'doge', 'bnb', 'hype')),
+      slot_key TEXT NOT NULL CHECK (length(btrim(slot_key)) > 0),
+      slot_start_ts BIGINT NOT NULL CHECK (slot_start_ts >= 0),
+      slot_end_ts BIGINT NOT NULL CHECK (slot_end_ts > slot_start_ts),
+      combination TEXT NOT NULL CHECK (
+        combination IN ('POLY_UP_KALSHI_NO', 'POLY_DOWN_KALSHI_YES')
+      ),
+      probe_kind TEXT NOT NULL CHECK (probe_kind IN ('candidate_preflight', 'late_probe')),
+      target_seconds_remaining INTEGER CHECK (
+        target_seconds_remaining IS NULL OR target_seconds_remaining IN (55, 45, 35, 25, 15, 5)
+      ),
+      signal_captured_at BIGINT NOT NULL CHECK (signal_captured_at >= 0),
+      rest_started_at BIGINT NOT NULL CHECK (rest_started_at >= signal_captured_at),
+      rest_captured_at BIGINT NOT NULL CHECK (rest_captured_at >= rest_started_at),
+      decision TEXT NOT NULL CHECK (length(btrim(decision)) > 0),
+      first_rejection_stage TEXT CHECK (
+        first_rejection_stage IS NULL OR first_rejection_stage IN (
+          'signal', 'base', 'rest', 'risk', 'admission', 'primary', 'hedge', 'settled'
+        )
+      ),
+      first_rejection_code TEXT,
+      strategy_revision BIGINT NOT NULL CHECK (strategy_revision >= 0),
+      global_risk_revision BIGINT NOT NULL CHECK (global_risk_revision >= 0),
+      signal_json JSONB NOT NULL CHECK (jsonb_typeof(signal_json) = 'object'),
+      rest_json JSONB NOT NULL CHECK (jsonb_typeof(rest_json) = 'object'),
+      risk_json JSONB NOT NULL CHECK (jsonb_typeof(risk_json) = 'object'),
+      variants_json JSONB NOT NULL CHECK (jsonb_typeof(variants_json) = 'array'),
+      evidence_sha256 TEXT NOT NULL CHECK (evidence_sha256 ~ '^[0-9a-f]{64}$'),
+      recorded_at BIGINT NOT NULL CHECK (recorded_at >= rest_captured_at),
+      CHECK (
+        (probe_kind = 'late_probe' AND target_seconds_remaining IS NOT NULL) OR
+        (probe_kind = 'candidate_preflight' AND target_seconds_remaining IS NULL)
+      )
+    );
+
+    CREATE INDEX entry_execution_probes_asset_slot_idx
+      ON entry_execution_probes(asset, slot_key, rest_captured_at DESC);
+    CREATE INDEX entry_execution_probes_asset_captured_idx
+      ON entry_execution_probes(asset, rest_captured_at DESC, probe_key);
+    CREATE INDEX entry_execution_probes_captured_idx
+      ON entry_execution_probes(rest_captured_at DESC);
+    CREATE INDEX entry_execution_probes_funnel_idx
+      ON entry_execution_probes(first_rejection_stage, first_rejection_code, rest_captured_at DESC);
+
+    CREATE FUNCTION reject_entry_execution_probe_update()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    BEGIN
+      RAISE EXCEPTION 'entry execution probes are immutable' USING ERRCODE = '55000';
+    END;
+    $migration$;
+
+    CREATE TRIGGER entry_execution_probes_immutable
+    BEFORE UPDATE OR TRUNCATE ON entry_execution_probes
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_entry_execution_probe_update();
+
+    CREATE TABLE mismatch_calibration_artifacts (
+      id TEXT PRIMARY KEY CHECK (length(btrim(id)) > 0),
+      schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+      base_model_version TEXT NOT NULL CHECK (length(btrim(base_model_version)) > 0),
+      training_started_at BIGINT NOT NULL CHECK (training_started_at >= 0),
+      training_ended_at BIGINT NOT NULL CHECK (training_ended_at >= training_started_at),
+      artifact_json JSONB NOT NULL CHECK (jsonb_typeof(artifact_json) = 'object'),
+      metrics_json JSONB NOT NULL CHECK (jsonb_typeof(metrics_json) = 'object'),
+      artifact_sha256 TEXT NOT NULL UNIQUE CHECK (artifact_sha256 ~ '^[0-9a-f]{64}$'),
+      created_at BIGINT NOT NULL CHECK (created_at >= training_ended_at)
+    );
+
+    CREATE TABLE mismatch_calibration_activation (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      artifact_id TEXT REFERENCES mismatch_calibration_artifacts(id) ON DELETE RESTRICT,
+      revision BIGINT NOT NULL CHECK (revision >= 0),
+      updated_at BIGINT NOT NULL CHECK (updated_at >= 0)
+    );
+
+    INSERT INTO mismatch_calibration_activation (id, artifact_id, revision, updated_at)
+    VALUES (1, NULL, 0, floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint);
+
+    CREATE TABLE mismatch_calibration_activation_events (
+      id BIGSERIAL PRIMARY KEY,
+      request_id UUID NOT NULL UNIQUE,
+      request_sha256 TEXT NOT NULL CHECK (request_sha256 ~ '^[0-9a-f]{64}$'),
+      request_json JSONB NOT NULL CHECK (jsonb_typeof(request_json) = 'object'),
+      previous_artifact_id TEXT REFERENCES mismatch_calibration_artifacts(id) ON DELETE RESTRICT,
+      artifact_id TEXT REFERENCES mismatch_calibration_artifacts(id) ON DELETE RESTRICT,
+      previous_revision BIGINT NOT NULL CHECK (previous_revision >= 0),
+      revision BIGINT NOT NULL UNIQUE CHECK (revision = previous_revision + 1),
+      actor TEXT NOT NULL CHECK (length(btrim(actor)) > 0),
+      reason TEXT NOT NULL CHECK (length(btrim(reason)) > 0),
+      occurred_at BIGINT NOT NULL CHECK (occurred_at >= 0),
+      recorded_at BIGINT NOT NULL CHECK (recorded_at >= occurred_at)
+    );
+
+    CREATE FUNCTION reject_mismatch_calibration_fact_mutation()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    BEGIN
+      RAISE EXCEPTION 'mismatch calibration facts are append-only' USING ERRCODE = '55000';
+    END;
+    $migration$;
+
+    CREATE FUNCTION validate_mismatch_calibration_activation_event()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    DECLARE
+      current_activation mismatch_calibration_activation%ROWTYPE;
+    BEGIN
+      SELECT * INTO STRICT current_activation
+      FROM mismatch_calibration_activation
+      WHERE id = 1
+      FOR UPDATE;
+      IF NEW.previous_revision <> current_activation.revision
+        OR NEW.previous_artifact_id IS DISTINCT FROM current_activation.artifact_id
+        OR NEW.revision <> current_activation.revision + 1
+        OR NEW.recorded_at <= current_activation.updated_at
+      THEN
+        RAISE EXCEPTION 'mismatch calibration activation event does not extend current state'
+          USING ERRCODE = '55000';
+      END IF;
+      RETURN NEW;
+    END;
+    $migration$;
+
+    CREATE FUNCTION require_mismatch_calibration_activation_event()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    BEGIN
+      IF NEW.id <> OLD.id
+        OR NEW.revision <> OLD.revision + 1
+        OR NEW.updated_at <= OLD.updated_at
+        OR NOT EXISTS (
+          SELECT 1
+          FROM mismatch_calibration_activation_events AS event
+          WHERE event.previous_revision = OLD.revision
+            AND event.revision = NEW.revision
+            AND event.previous_artifact_id IS NOT DISTINCT FROM OLD.artifact_id
+            AND event.artifact_id IS NOT DISTINCT FROM NEW.artifact_id
+            AND event.recorded_at = NEW.updated_at
+        )
+      THEN
+        RAISE EXCEPTION 'mismatch calibration activation update lacks matching event'
+          USING ERRCODE = '55000';
+      END IF;
+      RETURN NEW;
+    END;
+    $migration$;
+
+    CREATE FUNCTION require_mismatch_calibration_activation_state()
+    RETURNS trigger
+    LANGUAGE plpgsql
+    AS $migration$
+    DECLARE
+      current_activation mismatch_calibration_activation%ROWTYPE;
+    BEGIN
+      SELECT * INTO STRICT current_activation
+      FROM mismatch_calibration_activation
+      WHERE id = 1;
+      IF current_activation.revision < NEW.revision
+        OR (
+          current_activation.revision = NEW.revision
+          AND current_activation.artifact_id IS DISTINCT FROM NEW.artifact_id
+        )
+      THEN
+        RAISE EXCEPTION 'mismatch calibration activation event is not reflected in current state'
+          USING ERRCODE = '55000';
+      END IF;
+      RETURN NULL;
+    END;
+    $migration$;
+
+    CREATE TRIGGER mismatch_calibration_activation_event_chain
+    BEFORE INSERT ON mismatch_calibration_activation_events
+    FOR EACH ROW EXECUTE FUNCTION validate_mismatch_calibration_activation_event();
+
+    CREATE TRIGGER mismatch_calibration_activation_update_guard
+    BEFORE UPDATE ON mismatch_calibration_activation
+    FOR EACH ROW EXECUTE FUNCTION require_mismatch_calibration_activation_event();
+
+    CREATE CONSTRAINT TRIGGER mismatch_calibration_activation_event_state_guard
+    AFTER INSERT ON mismatch_calibration_activation_events
+    DEFERRABLE INITIALLY DEFERRED
+    FOR EACH ROW EXECUTE FUNCTION require_mismatch_calibration_activation_state();
+
+    CREATE TRIGGER mismatch_calibration_activation_singleton_guard
+    BEFORE DELETE OR TRUNCATE ON mismatch_calibration_activation
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mismatch_calibration_fact_mutation();
+
+    CREATE TRIGGER mismatch_calibration_artifacts_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON mismatch_calibration_artifacts
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mismatch_calibration_fact_mutation();
+    CREATE TRIGGER mismatch_calibration_activation_events_append_only
+    BEFORE UPDATE OR DELETE OR TRUNCATE ON mismatch_calibration_activation_events
+    FOR EACH STATEMENT EXECUTE FUNCTION reject_mismatch_calibration_fact_mutation();
+
+    ALTER TABLE entry_admissions
+      ADD COLUMN mismatch_calibration_artifact_id TEXT
+        REFERENCES mismatch_calibration_artifacts(id) ON DELETE RESTRICT,
+      ADD COLUMN mismatch_calibration_revision BIGINT NOT NULL DEFAULT 0
+        CHECK (mismatch_calibration_revision >= 0),
+      ADD CONSTRAINT entry_admissions_mismatch_calibration_state_valid CHECK (
+        mismatch_calibration_artifact_id IS NULL OR mismatch_calibration_revision > 0
+      );
+
+    ALTER TABLE entry_admissions
+      ALTER COLUMN mismatch_calibration_revision DROP DEFAULT;
+  `);
+}
+/* migration-checksum:end:10 */
+
 export function buildBootstrapStrategyConfigs(
   legacyStrategyPayload: StrategyConfig,
   existingEthStrategyPayload?: Partial<StrategyConfig> | null,
@@ -3951,12 +4271,16 @@ export async function getExecutionConfiguration(
 ): Promise<{
   strategy: VersionedStrategyConfig;
   globalRisk: VersionedConfiguration<GlobalRiskConfig>;
+  mismatchCalibration: { artifactId: string | null; revision: number; updatedAt: number };
 }> {
   const result = await pool.query<
     StrategyConfigRow & {
       global_payload: Partial<GlobalRiskConfig>;
       global_revision: number;
       global_updated_at: number;
+      mismatch_calibration_artifact_id: string | null;
+      mismatch_calibration_revision: number;
+      mismatch_calibration_updated_at: number;
     }
   >(
     `
@@ -3967,11 +4291,16 @@ export async function getExecutionConfiguration(
         strategy.updated_at,
         global_risk.payload AS global_payload,
         global_risk.revision AS global_revision,
-        global_risk.updated_at AS global_updated_at
+        global_risk.updated_at AS global_updated_at,
+        mismatch_calibration.artifact_id AS mismatch_calibration_artifact_id,
+        mismatch_calibration.revision AS mismatch_calibration_revision,
+        mismatch_calibration.updated_at AS mismatch_calibration_updated_at
       FROM strategy_configs strategy
       CROSS JOIN global_risk_config global_risk
+      CROSS JOIN mismatch_calibration_activation mismatch_calibration
       WHERE strategy.asset = $1
         AND global_risk.id = 1
+        AND mismatch_calibration.id = 1
       LIMIT 1
     `,
     [asset],
@@ -3980,6 +4309,8 @@ export async function getExecutionConfiguration(
   if (!row) {
     throw new Error(`Missing execution configuration for ${asset}`);
   }
+  assertStoredConfigurationRevision("mismatch_calibration", "active", Number(row.mismatch_calibration_revision));
+  assertStoredConfigurationTimestamp("mismatch_calibration", "active", Number(row.mismatch_calibration_updated_at));
   return {
     strategy: mapStrategyConfigRow(row),
     globalRisk: mapGlobalRiskConfigRow({
@@ -3987,6 +4318,11 @@ export async function getExecutionConfiguration(
       revision: row.global_revision,
       updated_at: row.global_updated_at,
     }),
+    mismatchCalibration: {
+      artifactId: row.mismatch_calibration_artifact_id,
+      revision: Number(row.mismatch_calibration_revision),
+      updatedAt: Number(row.mismatch_calibration_updated_at),
+    },
   };
 }
 
@@ -4768,6 +5104,370 @@ export async function getOpportunitySnapshotsForSlot(pool: Pool, asset: MarketAs
   return result.rows.map(mapOpportunitySnapshotRow);
 }
 
+export function hashEntryExecutionProbe(input: Omit<EntryExecutionProbeRecord, "evidenceSha256">) {
+  return createHash("sha256").update(canonicalizeJson(input), "utf8").digest("hex");
+}
+
+export async function insertEntryExecutionProbe(pool: Pool, probe: EntryExecutionProbeRecord) {
+  const { evidenceSha256: providedEvidenceSha256, ...evidence } = probe;
+  const evidenceSha256 = hashEntryExecutionProbe(evidence);
+  if (providedEvidenceSha256 !== undefined && providedEvidenceSha256 !== evidenceSha256) {
+    throw new Error(`Entry execution probe ${probe.probeKey} evidence checksum mismatch`);
+  }
+
+  const values = [
+    probe.probeKey,
+    probe.asset,
+    probe.slotKey,
+    probe.slotStartTs,
+    probe.slotEndTs,
+    probe.combination,
+    probe.probeKind,
+    probe.targetSecondsRemaining,
+    probe.signalCapturedAt,
+    probe.restStartedAt,
+    probe.restCapturedAt,
+    probe.decision,
+    probe.firstRejectionStage,
+    probe.firstRejectionCode,
+    probe.strategyRevision,
+    probe.globalRiskRevision,
+    JSON.stringify(probe.signal),
+    JSON.stringify(probe.rest),
+    JSON.stringify(probe.risk),
+    JSON.stringify(probe.variants),
+    evidenceSha256,
+    probe.recordedAt,
+  ];
+  const inserted = await pool.query<EntryExecutionProbeRow>(
+    `
+      INSERT INTO entry_execution_probes (
+        probe_key, asset, slot_key, slot_start_ts, slot_end_ts, combination, probe_kind,
+        target_seconds_remaining, signal_captured_at, rest_started_at, rest_captured_at,
+        decision, first_rejection_stage, first_rejection_code, strategy_revision, global_risk_revision,
+        signal_json, rest_json, risk_json, variants_json, evidence_sha256, recorded_at
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6, $7,
+        $8, $9, $10, $11,
+        $12, $13, $14, $15, $16,
+        $17::jsonb, $18::jsonb, $19::jsonb, $20::jsonb, $21, $22
+      )
+      ON CONFLICT (probe_key) DO NOTHING
+      RETURNING *
+    `,
+    values,
+  );
+  if (inserted.rows[0]) {
+    return mapEntryExecutionProbeRow(inserted.rows[0]);
+  }
+
+  const existing = await pool.query<EntryExecutionProbeRow>(
+    "SELECT * FROM entry_execution_probes WHERE probe_key = $1 LIMIT 1",
+    [probe.probeKey],
+  );
+  const row = existing.rows[0];
+  if (!row || row.evidence_sha256 !== evidenceSha256) {
+    throw new Error(`Entry execution probe ${probe.probeKey} conflicts with immutable evidence`);
+  }
+  return mapEntryExecutionProbeRow(row);
+}
+
+export async function listEntryExecutionProbes(
+  pool: Pool,
+  input: { since: number; until: number; asset?: MarketAsset; limit?: number },
+) {
+  const limit = Math.max(1, Math.min(50_000, Math.floor(input.limit ?? 10_000)));
+  const result = await pool.query<EntryExecutionProbeRow>(
+    `
+      SELECT *
+      FROM entry_execution_probes
+      WHERE rest_captured_at >= $1
+        AND rest_captured_at < $2
+        AND ($3::text IS NULL OR asset = $3)
+      ORDER BY rest_captured_at ASC, probe_key ASC
+      LIMIT $4
+    `,
+    [input.since, input.until, input.asset ?? null, limit],
+  );
+  return result.rows.map(mapEntryExecutionProbeRow);
+}
+
+export async function insertMismatchCalibrationArtifact(pool: Pool, artifact: MismatchCalibrationArtifactRecord) {
+  const verification = verifyMismatchCalibrationArtifact(artifact.artifact);
+  if (!verification.valid) {
+    throw new Error(`Mismatch calibration artifact ${artifact.id} is invalid: ${verification.reason}`);
+  }
+  if (
+    artifact.schemaVersion !== verification.artifact.schemaVersion ||
+    artifact.baseModelVersion !== verification.artifact.baseModelVersion
+  ) {
+    throw new Error(`Mismatch calibration artifact ${artifact.id} metadata contradicts its payload`);
+  }
+  const calculatedSha256 = verification.artifact.payloadSha256;
+  if (artifact.artifactSha256 !== undefined && artifact.artifactSha256 !== calculatedSha256) {
+    throw new Error(`Mismatch calibration artifact ${artifact.id} checksum mismatch`);
+  }
+  const inserted = await pool.query<MismatchCalibrationArtifactRow>(
+    `
+      INSERT INTO mismatch_calibration_artifacts (
+        id, schema_version, base_model_version, training_started_at, training_ended_at,
+        artifact_json, metrics_json, artifact_sha256, created_at
+      ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9)
+      ON CONFLICT (id) DO NOTHING
+      RETURNING *
+    `,
+    [
+      artifact.id,
+      artifact.schemaVersion,
+      artifact.baseModelVersion,
+      artifact.trainingStartedAt,
+      artifact.trainingEndedAt,
+      JSON.stringify(artifact.artifact),
+      JSON.stringify(artifact.metrics),
+      calculatedSha256,
+      artifact.createdAt,
+    ],
+  );
+  if (inserted.rows[0]) {
+    return mapMismatchCalibrationArtifactRow(inserted.rows[0]);
+  }
+  const existing = await pool.query<MismatchCalibrationArtifactRow>(
+    "SELECT * FROM mismatch_calibration_artifacts WHERE id = $1 LIMIT 1",
+    [artifact.id],
+  );
+  const row = existing.rows[0];
+  if (
+    !row ||
+    row.artifact_sha256 !== calculatedSha256 ||
+    Number(row.schema_version) !== artifact.schemaVersion ||
+    row.base_model_version !== artifact.baseModelVersion ||
+    Number(row.training_started_at) !== artifact.trainingStartedAt ||
+    Number(row.training_ended_at) !== artifact.trainingEndedAt ||
+    canonicalizeJson(row.artifact_json) !== canonicalizeJson(artifact.artifact) ||
+    canonicalizeJson(row.metrics_json) !== canonicalizeJson(artifact.metrics) ||
+    Number(row.created_at) !== artifact.createdAt
+  ) {
+    throw new Error(`Mismatch calibration artifact ${artifact.id} conflicts with immutable evidence`);
+  }
+  return mapMismatchCalibrationArtifactRow(row);
+}
+
+export async function getActiveMismatchCalibration(pool: PgQueryable): Promise<MismatchCalibrationActivation> {
+  const result = await pool.query<
+    MismatchCalibrationArtifactRow & {
+      active_artifact_id: string | null;
+      activation_revision: number;
+      activation_updated_at: number;
+    }
+  >(`
+    SELECT
+      artifact.*,
+      activation.artifact_id AS active_artifact_id,
+      activation.revision AS activation_revision,
+      activation.updated_at AS activation_updated_at
+    FROM mismatch_calibration_activation AS activation
+    LEFT JOIN mismatch_calibration_artifacts AS artifact ON artifact.id = activation.artifact_id
+    WHERE activation.id = 1
+    LIMIT 1
+  `);
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error("Missing mismatch calibration activation state");
+  }
+  const revision = Number(row.activation_revision);
+  const updatedAt = Number(row.activation_updated_at);
+  assertStoredConfigurationRevision("mismatch_calibration", "active", revision);
+  assertStoredConfigurationTimestamp("mismatch_calibration", "active", updatedAt);
+  if (row.active_artifact_id === null) {
+    return { artifact: null, revision, updatedAt };
+  }
+  if (revision === 0) {
+    throw new Error("Active mismatch calibration artifact cannot have revision zero");
+  }
+  const artifact = mapMismatchCalibrationArtifactRow(row);
+  const eligibility = evaluateMismatchCalibrationActivationEligibility({
+    artifact: artifact.artifact,
+    schemaVersion: artifact.schemaVersion,
+    baseModelVersion: artifact.baseModelVersion,
+    trainingStartedAt: artifact.trainingStartedAt,
+    trainingEndedAt: artifact.trainingEndedAt,
+    createdAt: artifact.createdAt,
+    metrics: artifact.metrics,
+    activationAt: updatedAt,
+  });
+  if (!eligibility.eligible) {
+    throw new Error(
+      `Active mismatch calibration artifact ${artifact.id} is not activation-eligible: ${eligibility.reasons.join(", ")}`,
+    );
+  }
+  return {
+    artifact,
+    revision,
+    updatedAt,
+  };
+}
+
+export function hashMismatchCalibrationActivationRequest(input: MismatchCalibrationActivationRequest) {
+  return createHash("sha256").update(canonicalizeJson(input), "utf8").digest("hex");
+}
+
+export async function activateMismatchCalibrationArtifact(
+  pool: Pool,
+  input: MismatchCalibrationActivationRequest,
+): Promise<MismatchCalibrationActivation> {
+  const request: MismatchCalibrationActivationRequest = {
+    artifactId: input.artifactId,
+    expectedRevision: input.expectedRevision,
+    requestId: input.requestId,
+    actor: input.actor,
+    reason: input.reason,
+    occurredAt: input.occurredAt,
+  };
+  assertValidMismatchCalibrationActivationRequest(request);
+  const requestSha256 = hashMismatchCalibrationActivationRequest(request);
+  return withConfigurationTransaction(pool, async (client) => {
+    const replay = await client.query<{
+      artifact_id: string | null;
+      revision: number;
+      recorded_at: number;
+      request_sha256: string;
+      request_json: Record<string, unknown>;
+    }>(
+      `SELECT artifact_id, revision, recorded_at, request_sha256, request_json
+       FROM mismatch_calibration_activation_events
+       WHERE request_id = $1::uuid
+       LIMIT 1`,
+      [request.requestId],
+    );
+    if (replay.rows[0]) {
+      const storedRequestSha256 = createHash("sha256")
+        .update(canonicalizeJson(replay.rows[0].request_json), "utf8")
+        .digest("hex");
+      if (replay.rows[0].request_sha256 !== requestSha256 || storedRequestSha256 !== requestSha256) {
+        throw new Error(`Mismatch calibration activation request ${request.requestId} was reused`);
+      }
+      const replayArtifact =
+        request.artifactId === null
+          ? null
+          : await client.query<MismatchCalibrationArtifactRow>(
+              "SELECT * FROM mismatch_calibration_artifacts WHERE id = $1 LIMIT 1",
+              [request.artifactId],
+            );
+      return {
+        artifact:
+          replayArtifact && replayArtifact.rows[0] ? mapMismatchCalibrationArtifactRow(replayArtifact.rows[0]) : null,
+        revision: Number(replay.rows[0].revision),
+        updatedAt: Number(replay.rows[0].recorded_at),
+      };
+    }
+
+    const current = await client.query<{
+      artifact_id: string | null;
+      revision: number;
+      updated_at: number;
+    }>("SELECT artifact_id, revision, updated_at FROM mismatch_calibration_activation WHERE id = 1 FOR UPDATE");
+    const row = current.rows[0];
+    if (!row) {
+      throw new Error("Missing mismatch calibration activation state");
+    }
+    if (Number(row.revision) !== request.expectedRevision) {
+      throw new ConfigurationRevisionConflictError([
+        buildConfigurationRevisionConflict(
+          "mismatch_calibration",
+          "active",
+          request.expectedRevision,
+          Number(row.revision),
+        ),
+      ]);
+    }
+    let requestedArtifactRow: MismatchCalibrationArtifactRow | null = null;
+    if (request.artifactId !== null) {
+      const artifact = await client.query<MismatchCalibrationArtifactRow>(
+        "SELECT * FROM mismatch_calibration_artifacts WHERE id = $1 FOR SHARE",
+        [request.artifactId],
+      );
+      requestedArtifactRow = artifact.rows[0] ?? null;
+      if (!requestedArtifactRow) {
+        throw new Error(`Mismatch calibration artifact ${request.artifactId} does not exist`);
+      }
+    }
+
+    assertStoredConfigurationRevision("mismatch_calibration", "active", Number(row.revision));
+    assertStoredConfigurationTimestamp("mismatch_calibration", "active", Number(row.updated_at));
+    const databaseNow = await readDatabaseClockMs(client);
+    const recordedAt = Math.max(databaseNow, Number(row.updated_at) + 1);
+    assertStoredConfigurationTimestamp("mismatch_calibration", "active", recordedAt);
+    const occurredAt = Math.min(recordedAt, request.occurredAt);
+    if (requestedArtifactRow) {
+      const eligibility = evaluateMismatchCalibrationActivationEligibility({
+        artifact: requestedArtifactRow.artifact_json,
+        schemaVersion: Number(requestedArtifactRow.schema_version),
+        baseModelVersion: requestedArtifactRow.base_model_version,
+        trainingStartedAt: Number(requestedArtifactRow.training_started_at),
+        trainingEndedAt: Number(requestedArtifactRow.training_ended_at),
+        createdAt: Number(requestedArtifactRow.created_at),
+        metrics: requestedArtifactRow.metrics_json,
+        activationAt: recordedAt,
+      });
+      if (!eligibility.eligible) {
+        throw new Error(
+          `Mismatch calibration artifact ${requestedArtifactRow.id} is not activation-eligible: ${eligibility.reasons.join(", ")}`,
+        );
+      }
+    }
+    const revision = Number(row.revision) + 1;
+    await client.query(
+      `
+        INSERT INTO mismatch_calibration_activation_events (
+          request_id, request_sha256, request_json, previous_artifact_id, artifact_id, previous_revision,
+          revision, actor, reason, occurred_at, recorded_at
+        ) VALUES ($1::uuid, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11)
+      `,
+      [
+        request.requestId,
+        requestSha256,
+        JSON.stringify(request),
+        row.artifact_id,
+        request.artifactId,
+        row.revision,
+        revision,
+        request.actor,
+        request.reason,
+        occurredAt,
+        recordedAt,
+      ],
+    );
+    await client.query(
+      `UPDATE mismatch_calibration_activation SET artifact_id = $1, revision = $2, updated_at = $3 WHERE id = 1`,
+      [request.artifactId, revision, recordedAt],
+    );
+    return {
+      artifact: requestedArtifactRow ? mapMismatchCalibrationArtifactRow(requestedArtifactRow) : null,
+      revision,
+      updatedAt: recordedAt,
+    };
+  });
+}
+
+function assertValidMismatchCalibrationActivationRequest(input: MismatchCalibrationActivationRequest) {
+  if (
+    !(input.artifactId === null || isCanonicalNonEmptyString(input.artifactId)) ||
+    !Number.isSafeInteger(input.expectedRevision) ||
+    input.expectedRevision < 0 ||
+    !UUID_PATTERN.test(input.requestId) ||
+    !isCanonicalNonEmptyString(input.actor) ||
+    !isCanonicalNonEmptyString(input.reason) ||
+    !Number.isSafeInteger(input.occurredAt) ||
+    input.occurredAt < 0
+  ) {
+    throw new Error("Invalid mismatch calibration activation request");
+  }
+}
+
+function isCanonicalNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.trim() === value;
+}
+
 export async function upsertVenueBalance(pool: Pool, balance: VenueBalance) {
   await pool.query(
     `
@@ -4927,7 +5627,16 @@ async function admitEntryAtomically(
         input.expectedGlobalRiskRevision,
         configuration.globalRisk.revision,
       ),
+      buildConfigurationRevisionConflict(
+        "mismatch_calibration",
+        "active",
+        input.expectedMismatchCalibrationRevision,
+        configuration.mismatchCalibration.revision,
+      ),
     ]);
+    if (input.expectedMismatchCalibrationArtifactId !== configuration.mismatchCalibration.artifactId) {
+      throw new EntryAdmissionConflictError(input.intent.id, ["mismatchCalibrationArtifactId"]);
+    }
 
     if (!configuration.strategy.config.enableTrading) {
       return rejectEntryAdmission("trading_disabled", `Trading is disabled for ${input.intent.asset}`);
@@ -5013,12 +5722,13 @@ async function admitEntryAtomically(
       `
         INSERT INTO entry_admissions (
           id, intent_id, attempt_id, mode, asset, slot_key, combination, gross_cost,
-          request_sha256, strategy_revision, global_risk_revision, policy_evaluated_at,
+          request_sha256, strategy_revision, global_risk_revision,
+          mismatch_calibration_artifact_id, mismatch_calibration_revision, policy_evaluated_at,
           cutoff_at, latest_submission_start_at, evidence_json, authorized_at
         )
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8,
-          $9, $10, $11, $12, $13, $14, $15::jsonb, $16
+          $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18
         )
         RETURNING *
       `,
@@ -5034,6 +5744,8 @@ async function admitEntryAtomically(
         requestSha256,
         configuration.strategy.revision,
         configuration.globalRisk.revision,
+        configuration.mismatchCalibration.artifactId,
+        configuration.mismatchCalibration.revision,
         input.policyEvaluatedAt,
         liveInput?.cutoffAt ?? null,
         liveInput?.latestSubmissionStartAt ?? null,
@@ -5139,9 +5851,30 @@ async function lockEntryAdmissionConfiguration(client: PoolClient, asset: Market
   if (!globalRiskRow) {
     throw new Error("Missing global risk configuration");
   }
+  const mismatchCalibrationResult = await client.query<{
+    artifact_id: string | null;
+    revision: number;
+    updated_at: number;
+  }>(`
+    SELECT artifact_id, revision, updated_at
+    FROM mismatch_calibration_activation
+    WHERE id = 1
+    FOR SHARE
+  `);
+  const mismatchCalibrationRow = mismatchCalibrationResult.rows[0];
+  if (!mismatchCalibrationRow) {
+    throw new Error("Missing mismatch calibration activation state");
+  }
+  assertStoredConfigurationRevision("mismatch_calibration", "active", Number(mismatchCalibrationRow.revision));
+  assertStoredConfigurationTimestamp("mismatch_calibration", "active", Number(mismatchCalibrationRow.updated_at));
   return {
     strategy: mapStrategyConfigRow(strategyRow),
     globalRisk: mapGlobalRiskConfigRow(globalRiskRow),
+    mismatchCalibration: {
+      artifactId: mismatchCalibrationRow.artifact_id,
+      revision: Number(mismatchCalibrationRow.revision),
+      updatedAt: Number(mismatchCalibrationRow.updated_at),
+    },
   };
 }
 
@@ -5357,6 +6090,16 @@ async function loadIdempotentEntryAdmission(
     ["grossCost", Number(admission.gross_cost), input.intent.grossCost],
     ["strategyRevision", Number(admission.strategy_revision), input.expectedStrategyRevision],
     ["globalRiskRevision", Number(admission.global_risk_revision), input.expectedGlobalRiskRevision],
+    [
+      "mismatchCalibrationArtifactId",
+      admission.mismatch_calibration_artifact_id,
+      input.expectedMismatchCalibrationArtifactId,
+    ],
+    [
+      "mismatchCalibrationRevision",
+      Number(admission.mismatch_calibration_revision),
+      input.expectedMismatchCalibrationRevision,
+    ],
     ["policyEvaluatedAt", Number(admission.policy_evaluated_at), input.policyEvaluatedAt],
     ["evidence", canonicalizeJson(admission.evidence_json ?? {}), canonicalizeJson(input.evidence)],
   ]);
@@ -5414,6 +6157,16 @@ function assertValidEntryAdmissionInput(
   assertValidOrderIntentIdentityShape(input.intent);
   assertExpectedConfigurationRevision(input.expectedStrategyRevision, "strategy", input.intent.asset);
   assertExpectedConfigurationRevision(input.expectedGlobalRiskRevision, "global_risk", "global");
+  assertExpectedConfigurationRevision(input.expectedMismatchCalibrationRevision, "mismatch_calibration", "active");
+  if (
+    input.expectedMismatchCalibrationArtifactId !== null &&
+    (typeof input.expectedMismatchCalibrationArtifactId !== "string" ||
+      input.expectedMismatchCalibrationArtifactId.length === 0 ||
+      input.expectedMismatchCalibrationArtifactId.trim() !== input.expectedMismatchCalibrationArtifactId ||
+      input.expectedMismatchCalibrationRevision === 0)
+  ) {
+    throw new Error("Invalid expected mismatch calibration artifact identity");
+  }
   if (input.intent.revision !== 0) {
     throw new Error(`New entry intent ${input.intent.id} must start at revision 0`);
   }
@@ -5766,6 +6519,7 @@ export type LiveOrderAttemptClaimErrorCode =
   | "attempt_not_planned"
   | "strategy_revision_changed"
   | "global_risk_revision_changed"
+  | "mismatch_calibration_revision_changed"
   | "trading_disabled"
   | "execution_mode_mismatch"
   | "circuit_breaker_active"
@@ -6955,6 +7709,18 @@ async function assertLiveOrderAttemptClaimAuthorization(
       input.attemptId,
       attempt.status,
       `expected revision ${admission.global_risk_revision}, found ${configuration.globalRisk.revision}`,
+    );
+  }
+  if (
+    configuration.mismatchCalibration.revision !== Number(admission.mismatch_calibration_revision) ||
+    configuration.mismatchCalibration.artifactId !== admission.mismatch_calibration_artifact_id
+  ) {
+    throw new LiveOrderAttemptClaimError(
+      "mismatch_calibration_revision_changed",
+      input.intentId,
+      input.attemptId,
+      attempt.status,
+      `expected revision ${admission.mismatch_calibration_revision} and artifact ${admission.mismatch_calibration_artifact_id ?? "none"}, found revision ${configuration.mismatchCalibration.revision} and artifact ${configuration.mismatchCalibration.artifactId ?? "none"}`,
     );
   }
   if (!configuration.strategy.config.enableTrading) {
@@ -10175,6 +10941,7 @@ export async function runDatabaseMaintenance(
     snapshots: 0,
     oracleSamples: 0,
     slotResolutions: 0,
+    entryExecutionProbes: 0,
     pnlSnapshots: 0,
     runEvents: 0,
     fills: 0,
@@ -10279,6 +11046,16 @@ export async function runDatabaseMaintenance(
     `
     DELETE FROM opportunity_snapshots
     WHERE captured_at < $1
+  `,
+  );
+
+  deleted.entryExecutionProbes = await deleteBefore(
+    pool,
+    config.retention.entryExecutionProbesMs,
+    now,
+    `
+    DELETE FROM entry_execution_probes
+    WHERE rest_captured_at < $1
   `,
   );
 
@@ -11827,6 +12604,50 @@ function mapOpportunitySnapshotRow(row: OpportunitySnapshotRow): OpportunitySnap
   };
 }
 
+function mapEntryExecutionProbeRow(row: EntryExecutionProbeRow): EntryExecutionProbeRecord {
+  return {
+    probeKey: row.probe_key,
+    asset: row.asset,
+    slotKey: row.slot_key,
+    slotStartTs: Number(row.slot_start_ts),
+    slotEndTs: Number(row.slot_end_ts),
+    combination: row.combination,
+    probeKind: row.probe_kind,
+    targetSecondsRemaining:
+      row.target_seconds_remaining === null
+        ? null
+        : (Number(row.target_seconds_remaining) as 55 | 45 | 35 | 25 | 15 | 5),
+    signalCapturedAt: Number(row.signal_captured_at),
+    restStartedAt: Number(row.rest_started_at),
+    restCapturedAt: Number(row.rest_captured_at),
+    decision: row.decision,
+    firstRejectionStage: row.first_rejection_stage,
+    firstRejectionCode: row.first_rejection_code,
+    strategyRevision: Number(row.strategy_revision),
+    globalRiskRevision: Number(row.global_risk_revision),
+    signal: row.signal_json ?? {},
+    rest: row.rest_json ?? {},
+    risk: row.risk_json ?? {},
+    variants: row.variants_json ?? [],
+    evidenceSha256: row.evidence_sha256,
+    recordedAt: Number(row.recorded_at),
+  };
+}
+
+function mapMismatchCalibrationArtifactRow(row: MismatchCalibrationArtifactRow): MismatchCalibrationArtifactRecord {
+  return {
+    id: row.id,
+    schemaVersion: Number(row.schema_version),
+    baseModelVersion: row.base_model_version,
+    trainingStartedAt: Number(row.training_started_at),
+    trainingEndedAt: Number(row.training_ended_at),
+    artifact: row.artifact_json ?? {},
+    metrics: row.metrics_json ?? {},
+    artifactSha256: row.artifact_sha256,
+    createdAt: Number(row.created_at),
+  };
+}
+
 function mapSlotResolutionRow(row: SlotResolutionRow): SlotResolutionRecord {
   return {
     asset: row.asset,
@@ -11966,6 +12787,8 @@ function mapEntryAdmissionRow(row: EntryAdmissionRow): EntryAdmission {
     requestSha256: row.request_sha256,
     strategyRevision: Number(row.strategy_revision),
     globalRiskRevision: Number(row.global_risk_revision),
+    mismatchCalibrationArtifactId: row.mismatch_calibration_artifact_id,
+    mismatchCalibrationRevision: Number(row.mismatch_calibration_revision),
     policyEvaluatedAt: Number(row.policy_evaluated_at),
     cutoffAt: row.cutoff_at === null ? null : Number(row.cutoff_at),
     latestSubmissionStartAt: row.latest_submission_start_at === null ? null : Number(row.latest_submission_start_at),

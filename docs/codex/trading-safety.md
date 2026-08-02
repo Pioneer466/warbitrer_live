@@ -29,7 +29,7 @@ Application HTTP authentication is unrelated to VPS login. Repository code and d
 Before any real execution:
 
 - Verify the intended server, branch, commit, builds, and split worker topology.
-- Verify `npm run db:status` reports the exact V1-V9 migration history.
+- Verify `npm run db:status` reports the exact V1-V10 migration history.
 - Verify application authentication, Caddy, HTTPS, and localhost-only Next.js binding.
 - Verify credentials by presence and readability without printing their values.
 - Verify `POLYGON_RPC_URL` resolves Polygon mainnet chain ID 137 and can read transaction receipts.

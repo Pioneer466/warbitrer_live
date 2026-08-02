@@ -8,6 +8,7 @@ import type { CircuitBreakerIncident } from "@/lib/circuit-breaker-policy";
 import {
   admitLiveEntryAtomically,
   admitShadowEntryAtomically,
+  activateMismatchCalibrationArtifact,
   claimAdmittedLiveOrderAttemptAtomically,
   claimLiveOrderAttemptForSubmissionAtomically,
   revalidateLiveOrderAttemptBeforeDispatchAtomically,
@@ -35,6 +36,7 @@ import type {
 
 const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
 const describePostgres = TEST_DATABASE_URL ? describe : describe.skip;
+const FINAL_DISPATCH_TEST_WINDOW_MS = 5_000;
 const DEFAULT_TEST_NOW = Date.now();
 const DEFAULT_TEST_SLOT_DURATION_MS = 15 * 60_000;
 
@@ -789,6 +791,50 @@ describePostgres("Postgres entry admission", () => {
     });
   }, 30_000);
 
+  it("fences both admission and claim on the active calibration revision", async () => {
+    await withIsolatedSchema(async (pool) => {
+      await migratePostgresDatabase(pool);
+      await setStrategyMode(pool, ["btc"], "live");
+
+      await activateMismatchCalibrationArtifact(pool, {
+        artifactId: null,
+        expectedRevision: 0,
+        requestId: randomUUID(),
+        actor: "entry-admission-integration",
+        reason: "advance calibration fence before admission",
+        occurredAt: Date.now(),
+      });
+      await expect(
+        admitLiveEntryAtomically(pool, buildLiveInput({ id: "stale-calibration-admission" })),
+      ).rejects.toBeInstanceOf(ConfigurationRevisionConflictError);
+
+      const input = buildLiveInput({ id: "claim-calibration-revoked" });
+      input.expectedMismatchCalibrationRevision = 1;
+      await expect(admitLiveEntryAtomically(pool, input)).resolves.toMatchObject({ admitted: true, fresh: true });
+      await activateMismatchCalibrationArtifact(pool, {
+        artifactId: null,
+        expectedRevision: 1,
+        requestId: randomUUID(),
+        actor: "entry-admission-integration",
+        reason: "advance calibration fence after admission",
+        occurredAt: Date.now(),
+      });
+
+      await expect(
+        claimAdmittedLiveOrderAttemptAtomically(pool, {
+          intentId: input.intent.id,
+          attemptId: input.plannedAttempt.id,
+          request: input.plannedAttempt.request,
+          claimedAt: Date.now(),
+        }),
+      ).rejects.toMatchObject({
+        code: "mismatch_calibration_revision_changed",
+        actualStatus: "planned",
+      });
+      await expectAttemptToRemainUnclaimed(pool, input.plannedAttempt.id);
+    });
+  }, 30_000);
+
   it("waits for an in-flight configuration revision before deciding", async () => {
     await withIsolatedSchema(async (pool) => {
       await migratePostgresDatabase(pool);
@@ -1228,8 +1274,8 @@ describePostgres("Postgres generic live order submission claims", () => {
       const input = buildLiveInput({
         id: "initial-final-deadline",
         now,
-        cutoffAt: now + 1_000,
-        latestSubmissionStartAt: now + 300,
+        cutoffAt: now + FINAL_DISPATCH_TEST_WINDOW_MS + 1_000,
+        latestSubmissionStartAt: now + FINAL_DISPATCH_TEST_WINDOW_MS,
       });
       const admission = await admitLiveEntryAtomically(pool, input);
       expect(admission).toMatchObject({ admitted: true });
@@ -1269,7 +1315,7 @@ describePostgres("Postgres generic live order submission claims", () => {
       const now = Date.now();
       const intent = buildIntent({ id: "recovery-final-deadline", mode: "live", status: "primary_filled", now });
       const attempt = buildRecoveryAttempt(intent);
-      const deadline = now + 300;
+      const deadline = now + FINAL_DISPATCH_TEST_WINDOW_MS;
       await insertOrderIntent(pool, intent);
       const claim = await claimLiveOrderAttemptForSubmissionAtomically(pool, {
         plannedAttempt: attempt,
@@ -1670,6 +1716,8 @@ function buildLiveInput(overrides: {
     plannedAttempt: buildAttempt(intent),
     expectedStrategyRevision: 0,
     expectedGlobalRiskRevision: 0,
+    expectedMismatchCalibrationArtifactId: null,
+    expectedMismatchCalibrationRevision: 0,
     policyEvaluatedAt: now - 1,
     cutoffAt,
     latestSubmissionStartAt,
@@ -1693,6 +1741,8 @@ function buildShadowInput(overrides: {
     intent: buildIntent({ ...overrides, now, slotStartTs, slotEndTs, mode: "shadow", status: "pending" }),
     expectedStrategyRevision: 0,
     expectedGlobalRiskRevision: 0,
+    expectedMismatchCalibrationArtifactId: null,
+    expectedMismatchCalibrationRevision: 0,
     policyEvaluatedAt: now - 1,
     evidence: { source: "integration", books: { polymarket: now - 5, kalshi: now - 4 } },
   };

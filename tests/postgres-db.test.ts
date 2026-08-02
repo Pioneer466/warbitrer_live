@@ -707,7 +707,7 @@ describe("postgres mismatch-risk persistence", () => {
     );
   });
 
-  it("applies the oracle and resolution retention windows during maintenance", async () => {
+  it("applies the oracle, resolution, and entry-probe retention windows during maintenance", async () => {
     const { pool, query } = createMockPool();
     query.mockResolvedValue({ rows: [], rowCount: 1 });
     const now = 20_000_000_000;
@@ -716,10 +716,15 @@ describe("postgres mismatch-risk persistence", () => {
 
     expect(summary.deleted.oracleSamples).toBe(1);
     expect(summary.deleted.slotResolutions).toBe(1);
+    expect(summary.deleted.entryExecutionProbes).toBe(1);
     const oracleDelete = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM oracle_slot_samples"));
     const resolutionDelete = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM slot_resolutions"));
+    const probeDelete = query.mock.calls.find(([sql]) => String(sql).includes("DELETE FROM entry_execution_probes"));
     expect(oracleDelete?.[1]).toEqual([now - ORACLE_SAMPLE_RETENTION_MS]);
     expect(resolutionDelete?.[1]).toEqual([now - SLOT_RESOLUTION_RETENTION_MS]);
+    expect(probeDelete?.[1]).toEqual([
+      now - (DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.entryExecutionProbesMs ?? 0),
+    ]);
   });
 });
 

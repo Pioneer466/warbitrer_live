@@ -302,7 +302,7 @@ export type ConfigurationMutationContext = {
 };
 
 export type ConfigurationRevisionConflict = {
-  configurationType: "strategy" | "global_risk";
+  configurationType: "strategy" | "global_risk" | "mismatch_calibration";
   key: string;
   expectedRevision: number;
   actualRevision: number;
@@ -428,6 +428,14 @@ export type MismatchRiskEstimate = {
   executionUsable?: boolean;
   executionReason?: string | null;
   modelVersion: string;
+  rawModelVersion?: string | null;
+  rawPFatal?: number | null;
+  rawPFatalUpper95?: number | null;
+  calibrationArtifactId?: string | null;
+  calibrationArtifactSha256?: string | null;
+  calibrationRevision?: number | null;
+  calibrationLabelCount?: number | null;
+  calibrationReason?: string | null;
   reason: string | null;
   pFatal: number | null;
   pFatalUpper95: number | null;
@@ -499,6 +507,34 @@ export type OrderIntentLeg = {
   resolvedOutcome: Resolution | null;
 };
 
+export type ShadowPreparedRestExecutionProof = {
+  schemaVersion: "rest-paired-preflight-proof-v2";
+  modelVersion: "rest-paired-preflight-v3";
+  intentId: string;
+  asset: MarketAsset;
+  slotKey: string;
+  combination: PairCombination;
+  capturedAt: number;
+  filledPairSize: number;
+  realizedGrossCost: number;
+  realizedTotalCostUsd: number;
+  projectedNetProfitUsd: number;
+  legs: Array<{
+    legId: string;
+    venue: Venue;
+    outcome: Resolution;
+    requestedSize: number;
+    executableSize: number;
+    limitPrice: number;
+    /** Canonical executed notional used by durable accounting. */
+    notionalUsd: number;
+    vwapPrice: number;
+    feeUsd: number;
+    /** Canonical notional plus fee used by durable accounting. */
+    totalCostUsd: number;
+  }>;
+};
+
 export type ShadowExecutionAudit = {
   modelVersion: string;
   status: "scheduled" | "filled" | "no_fill";
@@ -520,6 +556,8 @@ export type ShadowExecutionAudit = {
   projectedNetProfitUsd: number | null;
   reasonCode: string | null;
   reason: string | null;
+  /** Exact REST completion evidence persisted atomically with a new v3 shadow admission. */
+  preparedRestExecution?: ShadowPreparedRestExecutionProof | null;
   legs: Array<{
     venue: Venue;
     outcome: Resolution;
@@ -646,6 +684,8 @@ export type EntryAdmission = {
   requestSha256: string | null;
   strategyRevision: number;
   globalRiskRevision: number;
+  mismatchCalibrationArtifactId: string | null;
+  mismatchCalibrationRevision: number;
   policyEvaluatedAt: number;
   cutoffAt: number | null;
   latestSubmissionStartAt: number | null;
@@ -659,6 +699,8 @@ export type LiveEntryAdmissionInput = {
   plannedAttempt: OrderAttempt;
   expectedStrategyRevision: number;
   expectedGlobalRiskRevision: number;
+  expectedMismatchCalibrationArtifactId: string | null;
+  expectedMismatchCalibrationRevision: number;
   policyEvaluatedAt: number;
   cutoffAt: number;
   latestSubmissionStartAt: number;
@@ -723,6 +765,8 @@ export type ShadowEntryAdmissionInput = {
   intent: OrderIntent;
   expectedStrategyRevision: number;
   expectedGlobalRiskRevision: number;
+  expectedMismatchCalibrationArtifactId: string | null;
+  expectedMismatchCalibrationRevision: number;
   policyEvaluatedAt: number;
   evidence: Record<string, unknown>;
 };
@@ -1066,6 +1110,7 @@ export type DatabaseMaintenanceSummary = {
     snapshots: number;
     oracleSamples: number;
     slotResolutions: number;
+    entryExecutionProbes: number;
     pnlSnapshots: number;
     runEvents: number;
     fills: number;

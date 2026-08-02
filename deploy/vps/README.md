@@ -191,11 +191,11 @@ Le script corrigé:
 1. refuse un working tree sale
 2. exige un fichier d’environnement lisible
 3. exécute un premier préflight avec l’exécution live désactivée
-4. arrête le web et les sept services de worker, puis rejoue le préflight pour fermer la course avec l’arrêt
+4. arrête le web, les sept workers asset, le reconciler et le notifier, puis rejoue le préflight pour fermer la course avec l’arrêt
 5. crée et attend un backup Postgres cohérent pendant que l’application est arrêtée
 6. exécute audit, lint, format, typecheck, tests et les deux builds
-7. applique les migrations versionnées V1-V9, exige un `db:status` prêt, puis rejoue le préflight
-8. redémarre et vérifie les huit services applicatifs ainsi que le timer de backup
+7. applique les migrations versionnées V1-V10, exige un `db:status` prêt, puis rejoue le préflight
+8. redémarre et vérifie les dix services applicatifs ainsi que le timer de backup
 
 Il ne lance pas `git pull` et ne remplace pas les contrôles opérateur préalables. Une erreur après l’arrêt laisse les services applicatifs arrêtés afin d’éviter une reprise sur un état non validé.
 
@@ -232,7 +232,7 @@ Après un `hedge_failure`, utiliser la vue détaillée des incidents et résoudr
 - API key L2 Polymarket valide
 - allowance collateral Polymarket suffisante
 - Postgres opérationnel
-- `npm run db:status` prêt sur les migrations V1-V9
+- `npm run db:status` prêt sur les migrations V1-V10
 - `POLYGON_RPC_URL` configuré sur Polygon mainnet (chain ID 137) pour la preuve exacte des fills Polymarket
 - aucune erreur dans `/api/health`
 - aucun circuit breaker actif

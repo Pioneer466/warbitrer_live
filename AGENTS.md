@@ -29,7 +29,7 @@ Do not assume the generic recommendations in old prompts are implemented. The co
 - Strategy configuration is stored in Postgres, not environment variables.
 - Production deployment: `systemd` + Caddy + local Postgres on a VPS.
 - Database schema changes are checksummed, forward-only migrations defined in `src/lib/postgres-db.ts`.
-- Migrations V1-V9 are applied explicitly with `npm run db:migrate` and verified with `npm run db:status`; runtime processes only verify compatibility.
+- Migrations V1-V10 are applied explicitly with `npm run db:migrate` and verified with `npm run db:status`; runtime processes only verify compatibility.
 
 ## Standard workflow
 

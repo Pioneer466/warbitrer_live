@@ -4,11 +4,13 @@ import {
   buildScheduledShadowAudit,
   deriveShadowPairExecution,
   getShadowReentryCooldownRemainingMs,
+  LEGACY_SHADOW_REST_REFETCH_MODEL_VERSION,
+  planShadowRestRecovery,
   SHADOW_EXECUTION_MODEL_VERSION,
   SHADOW_MIN_COMPLETION_DELAY_MS,
   SHADOW_REENTRY_COOLDOWN_MS,
 } from "@/lib/shadow-execution";
-import type { OpportunitySnapshot, OrderIntent } from "@/lib/types";
+import type { OpportunitySnapshot, OrderIntent, ShadowPreparedRestExecutionProof } from "@/lib/types";
 
 describe("REST shadow execution", () => {
   it("records the immediate REST start without an artificial delay", () => {
@@ -57,6 +59,60 @@ describe("REST shadow execution", () => {
       filledPairSize: 10,
       fillRatio: 1,
       realizedGrossCost: 0.88,
+    });
+  });
+
+  it("preserves a legacy audit model version instead of relabeling its evidence as v3", () => {
+    const intent = buildIntent();
+    const legacyIntent: OrderIntent = {
+      ...intent,
+      shadowExecution: {
+        ...buildScheduledShadowAudit(intent, intent.createdAt + 10),
+        modelVersion: "rest-orderbook-v2",
+      },
+    };
+    const decision = deriveShadowPairExecution({
+      intent: legacyIntent,
+      snapshot: buildSnapshot({ polyAsks: [[0.4, 20]], kalshiYesBids: [[0.52, 20]] }),
+      settings: { ...DEFAULT_STRATEGY_CONFIG },
+    });
+
+    const audit = buildCompletedShadowAudit(legacyIntent, decision, intent.createdAt + 1_000, {
+      startedAt: intent.createdAt + 10,
+      capturedAt: intent.createdAt + 20,
+    });
+
+    expect(audit.modelVersion).toBe("rest-orderbook-v2");
+  });
+
+  it("routes REST recovery through an explicit model allowlist and never refetches v3 evidence", () => {
+    const scheduled = buildScheduledShadowAudit(buildIntent());
+    const placeholderProof = {} as ShadowPreparedRestExecutionProof;
+
+    expect(planShadowRestRecovery({ ...scheduled, preparedRestExecution: placeholderProof })).toEqual({
+      action: "prepared_proof",
+    });
+    expect(planShadowRestRecovery(scheduled)).toMatchObject({
+      action: "fail_closed",
+      reasonCode: "prepared_rest_proof_unavailable",
+    });
+    expect(
+      planShadowRestRecovery({
+        ...scheduled,
+        modelVersion: LEGACY_SHADOW_REST_REFETCH_MODEL_VERSION,
+        preparedRestExecution: null,
+      }),
+    ).toEqual({ action: "legacy_rest_refetch" });
+    expect(
+      planShadowRestRecovery({
+        ...scheduled,
+        modelVersion: LEGACY_SHADOW_REST_REFETCH_MODEL_VERSION,
+        preparedRestExecution: placeholderProof,
+      }),
+    ).toMatchObject({ action: "fail_closed", reasonCode: "unsupported_shadow_model_version" });
+    expect(planShadowRestRecovery({ ...scheduled, modelVersion: "rest-orderbook-v99" })).toMatchObject({
+      action: "fail_closed",
+      reasonCode: "unsupported_shadow_model_version",
     });
   });
 

@@ -136,6 +136,33 @@ export async function readPendingSlotResolutions(now: number, limit?: number) {
   return postgres.listPendingSlotResolutions(await db(), now, limit);
 }
 
+export async function writeEntryExecutionProbe(probe: postgres.EntryExecutionProbeRecord) {
+  return postgres.insertEntryExecutionProbe(await db(), probe);
+}
+
+export async function readEntryExecutionProbes(input: {
+  since: number;
+  until: number;
+  asset?: MarketAsset;
+  limit?: number;
+}) {
+  return postgres.listEntryExecutionProbes(await db(), input);
+}
+
+export async function writeMismatchCalibrationArtifact(artifact: postgres.MismatchCalibrationArtifactRecord) {
+  return postgres.insertMismatchCalibrationArtifact(await db(), artifact);
+}
+
+export async function readActiveMismatchCalibration() {
+  return postgres.getActiveMismatchCalibration(await db());
+}
+
+export async function activateMismatchCalibrationArtifact(
+  input: Parameters<typeof postgres.activateMismatchCalibrationArtifact>[1],
+) {
+  return postgres.activateMismatchCalibrationArtifact(await db(), input);
+}
+
 export async function readLatestSnapshot(asset: MarketAsset, slotKey?: string): Promise<OpportunitySnapshot | null> {
   return postgres.getLatestOpportunitySnapshot(await db(), asset, slotKey);
 }

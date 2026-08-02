@@ -51,13 +51,13 @@ The zero-in-flight requirement is mandatory when client-order-ID generation chan
 
 ## Versioned schema
 
-The schema is managed by checksummed, forward-only migrations V1-V9 defined in `src/lib/postgres-db.ts`. Applied migration source is immutable: add a new migration instead of editing an existing one.
+The schema is managed by checksummed, forward-only migrations V1-V10 defined in `src/lib/postgres-db.ts`. Applied migration source is immutable: add a new migration instead of editing an existing one.
 
 - `npm run db:migrate` serializes and applies pending migrations.
 - `npm run db:status` verifies the exact version, name, order, and checksum history without applying DDL.
 - Runtime services run `db:status` before startup and fail closed against a pending, unknown, reordered, or modified history.
 
-Keep every application service stopped while migrations run. Do not restart until status is ready at V9.
+Keep every application service stopped while migrations run. Do not restart until status is ready at V10.
 
 The first V0-to-V8 production upgrade may require the audited one-time legacy repair when exact old Polymarket
 FOK/FAK fills contradict their stale order projection. Run it only with every application service stopped, a verified
@@ -104,7 +104,7 @@ Use local authenticated access without placing credentials in shell history when
 - worker bundle rebuilt after that commit
 - all services active
 - Postgres reachable
-- schema ready at V9 with the expected checksums
+- schema ready at V10 with the expected checksums
 - current snapshots for every active asset
 - both venue feeds fresh
 - `POLYGON_RPC_URL` connected to Polygon mainnet chain ID 137 with receipt access

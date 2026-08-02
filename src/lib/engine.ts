@@ -104,12 +104,31 @@ import {
 } from "@/lib/risk";
 import {
   buildCompletedShadowAudit,
+  buildCompletedShadowAuditFromPreparedRestExecution,
+  buildPreparedShadowRestExecutionProof,
   buildScheduledShadowAudit,
+  applyRestPairedPreflightToIntent,
+  deriveRestPairedPreflight,
   deriveShadowPairExecution,
+  getPreparedShadowRestFillEconomics,
+  getShadowRestAdmissionRejection,
   getShadowReentryCooldownRemainingMs,
+  planShadowRestRecovery,
   SHADOW_EXECUTION_MODEL_VERSION,
+  type RestPairedPreflightDecision,
   type ShadowPairExecutionDecision,
 } from "@/lib/shadow-execution";
+import {
+  buildLateEntryProbeCombinationKey,
+  ENTRY_PROBE_VARIANTS,
+  getEntryProbeEstimateReadinessRejection,
+  getLateEntryProbeCaptureRejection,
+  getMissingLateEntryProbeCombinations,
+  nextLateEntryProbeIdentity,
+  summarizeRawBookLevelsForProbe,
+  summarizeRestPairedPreflightForProbe,
+  type LateEntryProbeIdentity,
+} from "@/lib/entry-probes";
 import { buildSignals } from "@/lib/signals";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import { fetchVenueSettlementResolutions } from "@/lib/settlement-finality";
@@ -130,11 +149,12 @@ import {
   calculateMismatchAdjustedPnl,
   evaluateEconomicMismatchGate,
 } from "@/lib/mismatch-risk";
+import { applyActiveMismatchCalibrationToEstimate } from "@/lib/mismatch-calibration";
 import { deriveMismatchEstimateEconomics } from "@/lib/mismatch-reference-economics";
 import { MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS, MismatchRiskRuntime } from "@/lib/mismatch-risk-runtime";
 import { buildMismatchRiskAudit } from "@/lib/mismatch-risk-audit";
 import { applyMismatchRiskPolicy, recheckMismatchRiskCandidate } from "@/lib/mismatch-risk-policy";
-import { DEFAULT_GLOBAL_RISK_CONFIG, type GlobalRiskConfig } from "@/lib/risk-settings";
+import { DEFAULT_GLOBAL_RISK_CONFIG, getMismatchFatalBudgetFraction, type GlobalRiskConfig } from "@/lib/risk-settings";
 import {
   findOrderIntent,
   findVenueOrder,
@@ -149,10 +169,12 @@ import {
   readCurrentCircuitBreakerIncidents,
   readExecutionConfiguration,
   readExecutionCandidates,
+  readEntryExecutionProbes,
   readFillsForIntentVenue,
   readLastAuthorizedEntryCosts,
   readLatestSnapshot,
   readGlobalRiskConfig,
+  readActiveMismatchCalibration,
   readAccountingHead,
   readAccountingFillEvidenceForIntent,
   readHistoricalTerminalLegacyPendingIntentIds,
@@ -183,6 +205,7 @@ import {
   writeCircuitBreakerIncident,
   writeCircuitBreakerExposureRecovery,
   writeExecutionCandidate,
+  writeEntryExecutionProbe,
   ingestVenueFillAccounting,
   reaccountIntent,
   writeMarketFillQualityEvent,
@@ -303,16 +326,24 @@ const lastEntryCostsCache = new Map<
   string,
   { value: Awaited<ReturnType<typeof readLastAuthorizedEntryCosts>>; capturedAt: number }
 >();
+const lateEntryProbeIdentitiesByAsset: Partial<Record<MarketAsset, LateEntryProbeIdentity[]>> = {};
+const lateEntryProbeCaptureInFlightByAsset: Partial<Record<MarketAsset, Promise<void>>> = {};
 const lastOracleSampleAtBySlot = new Map<string, number>();
 const observedResolutionSlots = new Map<string, string>();
 const oraclePersistenceInFlightByAsset: Partial<Record<MarketAsset, Promise<void>>> = {};
 let observedSlotResolutionReconcileInFlight = false;
 const mismatchRiskRuntime = new MismatchRiskRuntime();
 let globalRiskConfigCache: { value: VersionedConfiguration<GlobalRiskConfig>; capturedAt: number } | null = null;
+type ActiveMismatchCalibration = Awaited<ReturnType<typeof readActiveMismatchCalibration>>;
+let mismatchCalibrationCache: { value: ActiveMismatchCalibration; capturedAt: number } | null = null;
 
 export type ExecutionConfigurationSnapshot = {
   strategyRevision: number;
   globalRisk: VersionedConfiguration<GlobalRiskConfig>;
+  mismatchCalibration: {
+    artifactId: string | null;
+    revision: number;
+  };
 };
 
 type RealtimeScanState = {
@@ -458,6 +489,7 @@ type TickSharedContext = {
     fetchStates: VenueReconcileFetchStates;
   };
   executionConfiguration?: ExecutionConfigurationSnapshot;
+  mismatchCalibration?: ActiveMismatchCalibration;
 };
 
 export async function processTick(now = new Date()) {
@@ -471,9 +503,10 @@ export async function processScanTick(now = new Date()) {
   const scanStartedAt = Date.now();
   const errors: string[] = [];
   const snapshots: OpportunitySnapshot[] = [];
-  const [settingsMap, globalRisk, sharedVenueBalances, sharedOpenIntents] = await Promise.all([
+  const [settingsMap, globalRisk, mismatchCalibration, sharedVenueBalances, sharedOpenIntents] = await Promise.all([
     readCachedSettingsMap(nowTs),
     getCachedGlobalRiskConfig(nowTs),
+    getCachedMismatchCalibration(nowTs),
     readCachedVenueBalances(nowTs),
     readCachedOpenIntents(nowTs),
   ]);
@@ -487,6 +520,7 @@ export async function processScanTick(now = new Date()) {
         const snapshot = await scanAsset(asset, slot, settings, globalRisk, nowTs, {
           venueBalances: sharedVenueBalances,
           openIntents: sharedOpenIntents,
+          mismatchCalibration,
           lastEntryCosts: await readCachedLastEntryCosts(
             asset,
             slot.key,
@@ -527,14 +561,16 @@ export async function processScanTick(now = new Date()) {
 export async function processAssetScanTick(asset: MarketAsset, now = new Date()) {
   const nowTs = now.getTime();
   const slot = getCurrentSlot(asset, now);
-  const [settings, globalRisk] = await Promise.all([
+  const [settings, globalRisk, mismatchCalibration] = await Promise.all([
     readCachedSettings(asset, nowTs),
     getCachedGlobalRiskConfig(nowTs),
+    getCachedMismatchCalibration(nowTs),
   ]);
   try {
     return await scanAsset(asset, slot, settings, globalRisk, nowTs, {
       venueBalances: await readCachedVenueBalances(nowTs),
       openIntents: await readCachedOpenIntents(nowTs),
+      mismatchCalibration,
       lastEntryCosts: await readCachedLastEntryCosts(
         asset,
         slot.key,
@@ -570,6 +606,10 @@ async function scanAsset(
   const executionConfiguration = {
     strategyRevision: settingsRecord.revision,
     globalRisk,
+    mismatchCalibration: {
+      artifactId: sharedContext.mismatchCalibration?.artifact?.id ?? null,
+      revision: sharedContext.mismatchCalibration?.revision ?? -1,
+    },
   };
   const coordinator = createExecutionCoordinator(asset, settings, {
     ...sharedContext,
@@ -1068,6 +1108,27 @@ async function getCachedGlobalRiskConfig(
   return value;
 }
 
+async function getCachedMismatchCalibration(now: number): Promise<ActiveMismatchCalibration> {
+  if (mismatchCalibrationCache && now - mismatchCalibrationCache.capturedAt <= SETTINGS_CACHE_TTL_MS) {
+    return mismatchCalibrationCache.value;
+  }
+
+  try {
+    const value = await readActiveMismatchCalibration();
+    mismatchCalibrationCache = { value, capturedAt: now };
+    return value;
+  } catch (error) {
+    console.warn(
+      `[risk] mismatch calibration unavailable, retaining uncalibrated diagnostics: ${toErrorMessage(error)}`,
+    );
+    return {
+      artifact: null,
+      revision: -1,
+      updatedAt: 0,
+    };
+  }
+}
+
 function estimateMismatchRiskByCombination(input: {
   asset: MarketAsset;
   slotStartTs: number;
@@ -1078,6 +1139,7 @@ function estimateMismatchRiskByCombination(input: {
   opportunities: LiveOpportunity[];
   oracleMaxAgeMs: number;
   settings: StrategyConfig;
+  mismatchCalibration: ActiveMismatchCalibration;
 }): Partial<Record<PairCombination, MismatchRiskEstimate>> {
   const estimates: Partial<Record<PairCombination, MismatchRiskEstimate>> = {};
   const diagnosticMaxSourceAgeMs = Math.max(input.oracleMaxAgeMs, MISMATCH_DIAGNOSTIC_MAX_SOURCE_AGE_MS);
@@ -1103,7 +1165,7 @@ function estimateMismatchRiskByCombination(input: {
       pairSize: economics.pairSize ?? 0,
       totalCostUsd: economics.totalCostUsd ?? 0,
     });
-    estimates[opportunity.combination] = {
+    const estimateWithEconomics: MismatchRiskEstimate = {
       ...estimate,
       reason:
         economics.basis === "unavailable" && estimate.reason === "economics_unavailable"
@@ -1113,6 +1175,12 @@ function estimateMismatchRiskByCombination(input: {
       economicsPairSize: economics.pairSize,
       economicsTotalCostUsd: economics.totalCostUsd,
     };
+    estimates[opportunity.combination] = applyActiveMismatchCalibrationToEstimate({
+      estimate: estimateWithEconomics,
+      activation: input.mismatchCalibration,
+      combination: opportunity.combination,
+      secondsRemaining: Math.max(0, (input.slotEndTs - input.now) / 1_000),
+    });
   }
   return estimates;
 }
@@ -1170,6 +1238,7 @@ function deriveRiskCapitalUsd(balances: VenueBalance[], now: number, config: Glo
 function rescaleMismatchEstimate(
   opportunity: LiveOpportunity,
   estimate: MismatchRiskEstimate | null,
+  safetyFractionOfBreakEven = 0.5,
 ): MismatchRiskEstimate | null {
   if (
     !estimate?.available ||
@@ -1205,6 +1274,7 @@ function rescaleMismatchEstimate(
     pairSize,
     totalCostUsd,
     pFatalUpper95: estimate.pFatalUpper95,
+    safetyFractionOfBreakEven,
   });
   return {
     ...estimate,
@@ -1233,6 +1303,8 @@ async function recheckMismatchRiskForExecution(input: {
     kalshi: { quote: OpportunitySnapshot["kalshi"] };
   };
   balances?: VenueBalance[];
+  /** The supplied opportunity already contains exact REST limit-price worst-fill costs. */
+  usePrecomputedWorstFillEconomics?: boolean;
 }): Promise<
   | { allowed: true; opportunity: LiveOpportunity }
   | {
@@ -1258,15 +1330,17 @@ async function recheckMismatchRiskForExecution(input: {
     input.marketState ?? marketDataSupervisor.readSlotState(input.slot, input.now),
     input.balances ?? readCachedVenueBalances(input.now),
   ]);
-  const candidateOpportunity = input.intent
-    ? buildWorstFillRiskOpportunity({
-        opportunity: input.opportunity,
-        intent: input.intent,
-        polymarket: polymarket.quote,
-        kalshi: kalshi.quote,
-        settings: input.settings,
-      })
-    : input.opportunity;
+  const candidateOpportunity = input.usePrecomputedWorstFillEconomics
+    ? input.opportunity
+    : input.intent
+      ? buildWorstFillRiskOpportunity({
+          opportunity: input.opportunity,
+          intent: input.intent,
+          polymarket: polymarket.quote,
+          kalshi: kalshi.quote,
+          settings: input.settings,
+        })
+      : input.opportunity;
   if (!candidateOpportunity) {
     return {
       allowed: false,
@@ -1318,12 +1392,27 @@ async function recheckMismatchRiskForExecution(input: {
     pairSize,
     totalCostUsd,
   });
-  const estimate: MismatchRiskEstimate = {
+  let executionCalibration: ActiveMismatchCalibration;
+  try {
+    executionCalibration = await readActiveMismatchCalibration();
+  } catch {
+    executionCalibration = { artifact: null, revision: -1, updatedAt: 0 };
+  }
+  const estimateWithEconomics: MismatchRiskEstimate = {
     ...rawEstimate,
     economicsBasis: pairSize > 0 && totalCostUsd > 0 ? "executable" : "unavailable",
     economicsPairSize: pairSize > 0 ? pairSize : null,
     economicsTotalCostUsd: totalCostUsd > 0 ? totalCostUsd : null,
   };
+  const calibratedEstimate = applyActiveMismatchCalibrationToEstimate({
+    estimate: estimateWithEconomics,
+    activation: executionCalibration,
+    combination: candidateOpportunity.combination,
+    secondsRemaining: Math.max(0, (input.slot.endTs - input.now) / 1_000),
+  });
+  const estimate =
+    rescaleMismatchEstimate(candidateOpportunity, calibratedEstimate, getMismatchFatalBudgetFraction(config)) ??
+    calibratedEstimate;
 
   const policyInput = {
     opportunity: riskBoundedOpportunity,
@@ -1344,6 +1433,7 @@ async function recheckMismatchRiskForExecution(input: {
     policy: blockOnlyPolicy,
     evaluatedAt: input.now,
     source: "execution",
+    safetyFractionOfBreakEven: getMismatchFatalBudgetFraction(config),
   });
   const policy = applyMismatchRiskPolicy({
     ...policyInput,
@@ -1854,6 +1944,7 @@ export function createExecutionCoordinator(
       });
       const globalRiskConfig =
         sharedContext.executionConfiguration?.globalRisk.config ?? (await getCachedGlobalRiskConfig(now)).config;
+      const mismatchCalibration = sharedContext.mismatchCalibration ?? (await getCachedMismatchCalibration(now));
       const mismatchRiskEstimates = estimateMismatchRiskByCombination({
         asset: slot.asset,
         slotStartTs: slot.startTs,
@@ -1864,6 +1955,7 @@ export function createExecutionCoordinator(
         opportunities: baseOpportunities,
         oracleMaxAgeMs: globalRiskConfig.oracleMaxAgeMs,
         settings,
+        mismatchCalibration,
       });
       const clusterBudget =
         settings.mismatchRiskMode === "enforce"
@@ -1882,11 +1974,16 @@ export function createExecutionCoordinator(
           ? {
               remainingExpectedFatalLossUsd: clusterBudget.remainingExpectedLossUsd,
               remainingAbsoluteFatalLossUsd: clusterBudget.remainingAbsoluteLossUsd,
+              fatalProbabilityBudgetFractionOfAlignedMargin: getMismatchFatalBudgetFraction(globalRiskConfig),
             }
           : null,
       });
       const opportunities = riskSizedOpportunities.map((opportunity) => {
-        const estimate = rescaleMismatchEstimate(opportunity, mismatchRiskEstimates[opportunity.combination] ?? null);
+        const estimate = rescaleMismatchEstimate(
+          opportunity,
+          mismatchRiskEstimates[opportunity.combination] ?? null,
+          getMismatchFatalBudgetFraction(globalRiskConfig),
+        );
         if (!estimate) {
           return opportunity;
         }
@@ -1908,6 +2005,7 @@ export function createExecutionCoordinator(
           policy: blockOnlyPolicy,
           evaluatedAt: now,
           source: "scan",
+          safetyFractionOfBreakEven: getMismatchFatalBudgetFraction(globalRiskConfig),
         });
         const configuredPolicy = applyMismatchRiskPolicy({
           ...policyInput,
@@ -1955,6 +2053,17 @@ export function createExecutionCoordinator(
         kalshi,
         opportunities,
       };
+
+      if (settings.shadowMode && sharedContext.executionConfiguration) {
+        scheduleLateEntryProbeCapture({
+          snapshot: nextSnapshot,
+          slot,
+          settings,
+          globalRiskConfig,
+          strategyRevision: sharedContext.executionConfiguration.strategyRevision,
+          globalRiskRevision: sharedContext.executionConfiguration.globalRisk.revision,
+        });
+      }
 
       latestScanSnapshot = nextSnapshot;
       return nextSnapshot;
@@ -2130,40 +2239,44 @@ export function createExecutionCoordinator(
             });
             continue;
           }
-          const mismatchRecheckAt = Date.now();
-          const mismatchRecheck = await recheckMismatchRiskForExecution({
-            opportunity,
-            intent: preparedIntent.intent,
-            slot,
-            settings,
-            openIntents: currentOpenIntents,
-            venueExposureUsd: exposureUsd,
-            now: mismatchRecheckAt,
-            globalRiskConfig: currentConfiguration.globalRisk.config,
-          });
-          if (!mismatchRecheck.allowed) {
-            await writeRunEvent({
-              asset: slot.asset,
-              level: "warn",
-              eventType: "intent.skipped.mismatch_risk_recheck",
-              message: `Prepared opportunity ${opportunity.combination} rejected by execution-time mismatch risk check`,
-              payload: {
-                slotKey: slot.key,
-                combination: opportunity.combination,
-                reason: mismatchRecheck.reason,
-                estimate: mismatchRecheck.estimate,
-                mismatchRiskAudit: mismatchRecheck.opportunity?.mismatchRiskAudit ?? null,
-              },
-              createdAt: mismatchRecheckAt,
+          let executionOpportunity = opportunity;
+          let draftIntent = preparedIntent.intent;
+          if (!settings.shadowMode) {
+            const mismatchRecheckAt = Date.now();
+            const mismatchRecheck = await recheckMismatchRiskForExecution({
+              opportunity,
+              intent: preparedIntent.intent,
+              slot,
+              settings,
+              openIntents: currentOpenIntents,
+              venueExposureUsd: exposureUsd,
+              now: mismatchRecheckAt,
+              globalRiskConfig: currentConfiguration.globalRisk.config,
             });
-            continue;
+            if (!mismatchRecheck.allowed) {
+              await writeRunEvent({
+                asset: slot.asset,
+                level: "warn",
+                eventType: "intent.skipped.mismatch_risk_recheck",
+                message: `Prepared opportunity ${opportunity.combination} rejected by execution-time mismatch risk check`,
+                payload: {
+                  slotKey: slot.key,
+                  combination: opportunity.combination,
+                  reason: mismatchRecheck.reason,
+                  estimate: mismatchRecheck.estimate,
+                  mismatchRiskAudit: mismatchRecheck.opportunity?.mismatchRiskAudit ?? null,
+                },
+                createdAt: mismatchRecheckAt,
+              });
+              continue;
+            }
+            executionOpportunity = mismatchRecheck.opportunity;
+            draftIntent = applyRiskCheckedOpportunityToIntent(
+              preparedIntent.intent,
+              executionOpportunity,
+              mismatchRecheckAt,
+            );
           }
-          const executionOpportunity = mismatchRecheck.opportunity;
-          const draftIntent = applyRiskCheckedOpportunityToIntent(
-            preparedIntent.intent,
-            executionOpportunity,
-            mismatchRecheckAt,
-          );
 
           const executed = settings.shadowMode
             ? await admitAndExecuteShadowIntent(
@@ -2374,7 +2487,9 @@ export function executionConfigurationMatches(
 ) {
   return (
     expected.strategyRevision === actual.strategy.revision &&
-    expected.globalRisk.revision === actual.globalRisk.revision
+    expected.globalRisk.revision === actual.globalRisk.revision &&
+    expected.mismatchCalibration.revision === actual.mismatchCalibration.revision &&
+    expected.mismatchCalibration.artifactId === actual.mismatchCalibration.artifactId
   );
 }
 
@@ -2400,6 +2515,10 @@ async function writeConfigurationRevisionChangedEvent(input: {
       actualStrategyRevision: input.actual.strategy.revision,
       expectedGlobalRiskRevision: input.expected.globalRisk.revision,
       actualGlobalRiskRevision: input.actual.globalRisk.revision,
+      expectedMismatchCalibrationRevision: input.expected.mismatchCalibration.revision,
+      actualMismatchCalibrationRevision: input.actual.mismatchCalibration.revision,
+      expectedMismatchCalibrationArtifactId: input.expected.mismatchCalibration.artifactId,
+      actualMismatchCalibrationArtifactId: input.actual.mismatchCalibration.artifactId,
     },
     createdAt: input.now,
   });
@@ -2456,6 +2575,8 @@ async function persistOracleObservation(snapshot: OpportunitySnapshot) {
   }
 
   const cf = snapshot.kalshi.cfBenchmarks ?? null;
+  const mismatchEstimate =
+    snapshot.opportunities.find((opportunity) => opportunity.mismatchRiskEstimate)?.mismatchRiskEstimate ?? null;
   try {
     await writeOracleSlotSample({
       asset: snapshot.asset,
@@ -2475,9 +2596,7 @@ async function persistOracleObservation(snapshot: OpportunitySnapshot) {
       cfFinalMinuteAverageUsd: cf?.finalMinuteAverage15m?.valueUsd ?? null,
       cfFinalMinuteWindowSize: cf?.finalMinuteAverage15m?.windowSize ?? null,
       kalshiTargetPriceUsd: snapshot.kalshi.targetPriceUsd,
-      modelVersion:
-        snapshot.opportunities.find((opportunity) => opportunity.mismatchRiskEstimate)?.mismatchRiskEstimate
-          ?.modelVersion ?? null,
+      modelVersion: mismatchEstimate?.rawModelVersion ?? mismatchEstimate?.modelVersion ?? null,
       riskByCombination: Object.fromEntries(
         snapshot.opportunities.map((opportunity) => [
           opportunity.combination,
@@ -3202,6 +3321,478 @@ async function writeAdmittedIntentCreatedEvent(
   });
 }
 
+function findMismatchEstimate(snapshot: OpportunitySnapshot, combination: PairCombination) {
+  return (
+    snapshot.opportunities.find((opportunity) => opportunity.combination === combination)?.mismatchRiskEstimate ?? null
+  );
+}
+
+async function writeCandidateEntryProbe(input: {
+  intent: OrderIntent;
+  signalSnapshot: OpportunitySnapshot;
+  restCapture: ShadowRestCapture;
+  restPreflight: RestPairedPreflightDecision;
+  settings: StrategyConfig;
+  expectedConfiguration: ExecutionConfigurationSnapshot;
+  riskEstimate: MismatchRiskEstimate | null;
+  decision: string;
+  firstRejectionStage: "rest" | "risk" | "admission" | null;
+  firstRejectionCode: string | null;
+  restStartedAt: number;
+}) {
+  await writeEntryExecutionProbe({
+    probeKey: `candidate-preflight-v1:${input.intent.id}`,
+    asset: input.intent.asset,
+    slotKey: input.intent.slotKey,
+    slotStartTs: input.intent.slotStartTs,
+    slotEndTs: input.intent.slotEndTs,
+    combination: input.intent.combination,
+    probeKind: "candidate_preflight",
+    targetSecondsRemaining: null,
+    signalCapturedAt: input.signalSnapshot.capturedAt,
+    restStartedAt: input.restStartedAt,
+    restCapturedAt: input.restCapture.capturedAt,
+    decision: input.decision,
+    firstRejectionStage: input.firstRejectionStage,
+    firstRejectionCode: input.firstRejectionCode,
+    strategyRevision: input.expectedConfiguration.strategyRevision,
+    globalRiskRevision: input.expectedConfiguration.globalRisk.revision,
+    signal: buildProbeSignalEvidence(input.signalSnapshot, input.intent.combination),
+    rest: buildProbeRestEvidence(input.intent, input.restCapture, input.restPreflight),
+    risk: toJsonRecord({ estimate: input.riskEstimate }),
+    variants: buildEntryProbeVariants(input.intent, input.restCapture.snapshot, input.settings, input.riskEstimate),
+    recordedAt: Math.max(Date.now(), input.restCapture.capturedAt),
+  });
+}
+
+function scheduleLateEntryProbeCapture(input: {
+  snapshot: OpportunitySnapshot;
+  slot: MarketSlot;
+  settings: StrategyConfig;
+  globalRiskConfig: GlobalRiskConfig;
+  strategyRevision: number;
+  globalRiskRevision: number;
+}) {
+  const asset = input.slot.asset;
+  if (lateEntryProbeCaptureInFlightByAsset[asset]) {
+    return;
+  }
+  const previous = (lateEntryProbeIdentitiesByAsset[asset] ?? []).filter(
+    (identity) => identity.slotKey === input.slot.key,
+  );
+  lateEntryProbeIdentitiesByAsset[asset] = previous;
+  const identity = nextLateEntryProbeIdentity({
+    asset,
+    slotKey: input.slot.key,
+    secondsRemaining: input.slot.secondsRemaining,
+    seen: previous,
+  });
+  if (!identity) {
+    return;
+  }
+
+  const task = captureLateEntryProbe({ ...input, identity })
+    .then(() => {
+      previous.push(identity);
+    })
+    .catch((error) => {
+      console.warn(
+        `[entry-probe] ${asset} ${identity.slotKey} t-${identity.targetSeconds}s failed: ${toErrorMessage(error)}`,
+      );
+    })
+    .finally(() => {
+      delete lateEntryProbeCaptureInFlightByAsset[asset];
+    });
+  lateEntryProbeCaptureInFlightByAsset[asset] = task;
+}
+
+type LateEntryProbeCaptureInput = {
+  snapshot: OpportunitySnapshot;
+  slot: MarketSlot;
+  settings: StrategyConfig;
+  globalRiskConfig: GlobalRiskConfig;
+  strategyRevision: number;
+  globalRiskRevision: number;
+  identity: LateEntryProbeIdentity;
+};
+
+async function captureLateEntryProbe(input: LateEntryProbeCaptureInput) {
+  const existing = await readEntryExecutionProbes({
+    since: input.slot.startTs,
+    until: input.slot.endTs + 15 * 60_000,
+    asset: input.slot.asset,
+    limit: 1_000,
+  });
+  const missingCombinations = getMissingLateEntryProbeCombinations(
+    input.identity,
+    existing.map((probe) => probe.probeKey),
+  );
+  if (missingCombinations.length === 0) {
+    return;
+  }
+
+  const kalshiBookRequests = new Map<string, ReturnType<typeof fetchKalshiOrderbook>>();
+  await Promise.all(
+    missingCombinations.map(async (combination) => {
+      const opportunity = input.snapshot.opportunities.find((candidate) => candidate.combination === combination);
+      const probeKey = buildLateEntryProbeCombinationKey(input.identity, combination);
+      if (!opportunity) {
+        await writeLateEntryProbeWithoutRest({
+          input,
+          probeKey,
+          combination,
+          opportunity: null,
+          firstRejectionStage: "signal",
+          firstRejectionCode: "opportunity_unavailable",
+        });
+        return;
+      }
+
+      const captureRejection = getLateEntryProbeCaptureRejection({
+        now: Date.now(),
+        slot: input.slot,
+        snapshot: input.snapshot,
+        opportunity,
+      });
+      if (captureRejection) {
+        await writeLateEntryProbeWithoutRest({
+          input,
+          probeKey,
+          combination,
+          opportunity,
+          firstRejectionStage: "rest",
+          firstRejectionCode: captureRejection,
+        });
+        return;
+      }
+
+      if (opportunity.grossCost === null) {
+        await writeLateEntryProbeWithoutRest({
+          input,
+          probeKey,
+          combination,
+          opportunity,
+          firstRejectionStage: "signal",
+          firstRejectionCode: "reference_economics_unavailable",
+        });
+        return;
+      }
+
+      let intent: OrderIntent;
+      try {
+        intent = createIntentFromOpportunity({
+          opportunity: { ...opportunity, eligible: true },
+          slotStartTs: input.slot.startTs,
+          slotEndTs: input.slot.endTs,
+          now: input.snapshot.capturedAt,
+          maxSlippageBps: input.settings.maxSlippageBps,
+          shadow: true,
+        });
+      } catch (error) {
+        await writeLateEntryProbeWithoutRest({
+          input,
+          probeKey,
+          combination,
+          opportunity,
+          firstRejectionStage: "signal",
+          firstRejectionCode: "intent_template_unavailable",
+          rest: toJsonRecord({ error: toErrorMessage(error) }),
+        });
+        return;
+      }
+
+      const restStartedAt = Date.now();
+      const preRestRejection = getLateEntryProbeCaptureRejection({
+        now: restStartedAt,
+        slot: input.slot,
+        snapshot: input.snapshot,
+        opportunity,
+      });
+      if (preRestRejection) {
+        await writeLateEntryProbeWithoutRest({
+          input,
+          probeKey,
+          combination,
+          opportunity,
+          firstRejectionStage: "rest",
+          firstRejectionCode: preRestRejection,
+          recordedAt: restStartedAt,
+        });
+        return;
+      }
+      const kalshiMarketRef = intent.legs.find((leg) => leg.venue === "kalshi")?.marketRef ?? null;
+      let sharedKalshiBook: ReturnType<typeof fetchKalshiOrderbook> | undefined;
+      if (kalshiMarketRef) {
+        sharedKalshiBook = kalshiBookRequests.get(kalshiMarketRef);
+        if (!sharedKalshiBook) {
+          sharedKalshiBook = fetchKalshiOrderbook(kalshiMarketRef);
+          kalshiBookRequests.set(kalshiMarketRef, sharedKalshiBook);
+        }
+      }
+      const restCapture = await captureShadowRestSnapshot(intent, input.snapshot, restStartedAt, {
+        kalshiBook: sharedKalshiBook,
+      });
+      const preflight = deriveRestPairedPreflight({
+        intent,
+        snapshot: restCapture.snapshot,
+        settings: input.settings,
+      });
+      const captureEndedAfterSlot = restCapture.capturedAt >= input.slot.endTs;
+      const disposition = captureEndedAfterSlot
+        ? {
+            decision: "rejected" as const,
+            firstRejectionStage: "rest" as const,
+            firstRejectionCode: "slot_ended_during_rest_capture",
+          }
+        : classifyLateEntryProbeDisposition(
+            restCapture.errors,
+            preflight,
+            opportunity.mismatchRiskEstimate ?? null,
+            input.globalRiskConfig,
+          );
+      await writeEntryExecutionProbe({
+        probeKey,
+        asset: input.slot.asset,
+        slotKey: input.slot.key,
+        slotStartTs: input.slot.startTs,
+        slotEndTs: input.slot.endTs,
+        combination,
+        probeKind: "late_probe",
+        targetSecondsRemaining: input.identity.targetSeconds,
+        signalCapturedAt: input.snapshot.capturedAt,
+        restStartedAt,
+        restCapturedAt: restCapture.capturedAt,
+        decision: disposition.decision,
+        firstRejectionStage: disposition.firstRejectionStage,
+        firstRejectionCode: disposition.firstRejectionCode,
+        strategyRevision: input.strategyRevision,
+        globalRiskRevision: input.globalRiskRevision,
+        signal: buildProbeSignalEvidence(input.snapshot, opportunity.combination),
+        rest: buildProbeRestEvidence(intent, restCapture, preflight),
+        risk: toJsonRecord({ estimate: opportunity.mismatchRiskEstimate ?? null }),
+        variants: captureEndedAfterSlot
+          ? []
+          : buildEntryProbeVariants(
+              intent,
+              restCapture.snapshot,
+              input.settings,
+              opportunity.mismatchRiskEstimate ?? null,
+            ),
+        recordedAt: Math.max(Date.now(), restCapture.capturedAt),
+      });
+    }),
+  );
+}
+
+async function writeLateEntryProbeWithoutRest(input: {
+  input: LateEntryProbeCaptureInput;
+  probeKey: string;
+  combination: PairCombination;
+  opportunity: LiveOpportunity | null;
+  firstRejectionStage: "signal" | "rest";
+  firstRejectionCode: string;
+  rest?: Record<string, unknown>;
+  recordedAt?: number;
+}) {
+  const recordedAt = Math.max(input.recordedAt ?? Date.now(), input.input.snapshot.capturedAt);
+  await writeEntryExecutionProbe({
+    probeKey: input.probeKey,
+    asset: input.input.slot.asset,
+    slotKey: input.input.slot.key,
+    slotStartTs: input.input.slot.startTs,
+    slotEndTs: input.input.slot.endTs,
+    combination: input.combination,
+    probeKind: "late_probe",
+    targetSecondsRemaining: input.input.identity.targetSeconds,
+    signalCapturedAt: input.input.snapshot.capturedAt,
+    restStartedAt: recordedAt,
+    restCapturedAt: recordedAt,
+    decision: "rejected",
+    firstRejectionStage: input.firstRejectionStage,
+    firstRejectionCode: input.firstRejectionCode,
+    strategyRevision: input.input.strategyRevision,
+    globalRiskRevision: input.input.globalRiskRevision,
+    signal: buildProbeSignalEvidence(input.input.snapshot, input.combination),
+    rest: input.rest ?? {},
+    risk: toJsonRecord({ estimate: input.opportunity?.mismatchRiskEstimate ?? null }),
+    variants: [],
+    recordedAt,
+  });
+}
+
+function classifyLateEntryProbeDisposition(
+  restErrors: string[],
+  preflight: RestPairedPreflightDecision,
+  estimate: MismatchRiskEstimate | null,
+  globalRiskConfig: GlobalRiskConfig,
+): {
+  decision: "eligible" | "rejected";
+  firstRejectionStage: "rest" | "risk" | null;
+  firstRejectionCode: string | null;
+} {
+  if (restErrors.length > 0) {
+    return { decision: "rejected", firstRejectionStage: "rest", firstRejectionCode: "rest_orderbook_unavailable" };
+  }
+  if (!preflight.allowed) {
+    return { decision: "rejected", firstRejectionStage: "rest", firstRejectionCode: preflight.code };
+  }
+  const readinessRejection = getEntryProbeEstimateReadinessRejection(estimate);
+  if (readinessRejection) {
+    return { decision: "rejected", firstRejectionStage: "risk", firstRejectionCode: readinessRejection };
+  }
+  const fatalProbabilityUpper95 = estimate?.pFatalUpper95;
+  if (fatalProbabilityUpper95 === null || fatalProbabilityUpper95 === undefined) {
+    return { decision: "rejected", firstRejectionStage: "risk", firstRejectionCode: "risk_unavailable" };
+  }
+  const gate = evaluateEconomicMismatchGate({
+    pairSize: preflight.quote.commonSize,
+    totalCostUsd: preflight.quote.worstFillCostUsd,
+    pFatalUpper95: fatalProbabilityUpper95,
+    safetyFractionOfBreakEven: getMismatchFatalBudgetFraction(globalRiskConfig),
+  });
+  if (!gate.eligible) {
+    return { decision: "rejected", firstRejectionStage: "risk", firstRejectionCode: gate.reason };
+  }
+  return { decision: "eligible", firstRejectionStage: null, firstRejectionCode: null };
+}
+
+function buildEntryProbeVariants(
+  intent: OrderIntent,
+  restSnapshot: OpportunitySnapshot,
+  settings: StrategyConfig,
+  estimate: MismatchRiskEstimate | null,
+) {
+  return ENTRY_PROBE_VARIANTS.map((variant) => {
+    const preflight = deriveRestPairedPreflight({
+      intent,
+      snapshot: restSnapshot,
+      settings: { ...settings, maxLegPrice: variant.maxLegPriceCap },
+    });
+    if (!preflight.allowed) {
+      return toJsonRecord({
+        ...variant,
+        diagnosticOnly: true,
+        verdictSemantics: "counterfactual_probability_economics_only",
+        eligible: false,
+        rejectionCode: preflight.code,
+        preflight: summarizeRestPairedPreflightForProbe(preflight),
+        fatalProbabilityUpper95: estimate?.pFatalUpper95 ?? null,
+        maximumAllowedFatalProbability: null,
+      });
+    }
+    if (!estimate?.available || !isProbeProbability(estimate.pFatalUpper95)) {
+      return toJsonRecord({
+        ...variant,
+        diagnosticOnly: true,
+        verdictSemantics: "counterfactual_probability_economics_only",
+        eligible: false,
+        rejectionCode: "risk_unavailable",
+        preflight: summarizeRestPairedPreflightForProbe(preflight),
+        fatalProbabilityUpper95: estimate?.pFatalUpper95 ?? null,
+        maximumAllowedFatalProbability: null,
+      });
+    }
+    const gate = evaluateEconomicMismatchGate({
+      pairSize: preflight.quote.commonSize,
+      totalCostUsd: preflight.quote.worstFillCostUsd,
+      pFatalUpper95: estimate.pFatalUpper95,
+      safetyFractionOfBreakEven: variant.safetyFraction,
+    });
+    return toJsonRecord({
+      ...variant,
+      diagnosticOnly: true,
+      verdictSemantics: "counterfactual_probability_economics_only",
+      eligible: gate.eligible,
+      rejectionCode: gate.eligible ? null : gate.reason,
+      preflight: summarizeRestPairedPreflightForProbe(preflight),
+      fatalProbabilityUpper95: estimate.pFatalUpper95,
+      maximumAllowedFatalProbability: gate.maximumAllowedFatalProbability,
+      breakEvenFatalProbability: gate.pBreakEven,
+    });
+  });
+}
+
+function buildProbeSignalEvidence(snapshot: OpportunitySnapshot, combination: PairCombination) {
+  const opportunity = snapshot.opportunities.find((candidate) => candidate.combination === combination) ?? null;
+  return toJsonRecord({
+    capturedAt: snapshot.capturedAt,
+    secondsRemaining: Math.max(0, (snapshot.slotEndTs - snapshot.capturedAt) / 1_000),
+    eligible: opportunity?.eligible ?? false,
+    reasons: opportunity?.reasons ?? ["opportunity_unavailable"],
+    grossCost: opportunity?.grossCost ?? null,
+    threshold: opportunity?.threshold ?? null,
+    projectedNetProfitUsd: opportunity?.projectedNetProfitUsd ?? null,
+    legs:
+      opportunity?.legs.map((leg) => ({
+        venue: leg.venue,
+        outcome: leg.outcome,
+        marketRef: leg.marketRef,
+        tokenId: leg.tokenId,
+        price: leg.price,
+        size: leg.size,
+        targetNotionalUsd: leg.targetNotionalUsd,
+      })) ?? [],
+  });
+}
+
+function buildProbeRestEvidence(
+  intent: OrderIntent,
+  capture: ShadowRestCapture,
+  preflight: RestPairedPreflightDecision,
+) {
+  const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
+  const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
+  const polymarketAsks =
+    polymarketLeg?.outcome === "UP"
+      ? capture.snapshot.polymarket.orderbookLevels?.upAsks
+      : capture.snapshot.polymarket.orderbookLevels?.downAsks;
+  const kalshiLevels =
+    kalshiLeg?.outcome === "YES"
+      ? deriveKalshiBuyPriceLevels(capture.snapshot.kalshi.orderbookLevels, "YES")
+      : deriveKalshiBuyPriceLevels(capture.snapshot.kalshi.orderbookLevels, "NO");
+  const polymarketBook = summarizeRawBookLevelsForProbe(polymarketAsks ?? []);
+  const kalshiBook = summarizeRawBookLevelsForProbe(kalshiLevels);
+  return toJsonRecord({
+    capturedAt: capture.capturedAt,
+    errors: capture.errors,
+    preflight: summarizeRestPairedPreflightForProbe(preflight),
+    polymarket: {
+      marketRef: polymarketLeg?.marketRef ?? null,
+      tokenId: polymarketLeg?.tokenId ?? null,
+      outcome: polymarketLeg?.outcome ?? null,
+      tickSize:
+        polymarketLeg?.outcome === "UP"
+          ? capture.snapshot.polymarket.outcomes.up.tickSize
+          : capture.snapshot.polymarket.outcomes.down.tickSize,
+      asks: polymarketBook.levels,
+      askLevelCount: polymarketBook.levelCount,
+      retainedAskLevelCount: polymarketBook.retainedLevelCount,
+      asksTruncated: polymarketBook.truncated,
+      asksSha256: polymarketBook.sha256,
+      asksRetainedRanges: polymarketBook.retainedRanges,
+    },
+    kalshi: {
+      marketRef: kalshiLeg?.marketRef ?? null,
+      outcome: kalshiLeg?.outcome ?? null,
+      priceRanges: capture.snapshot.kalshi.priceRanges,
+      asks: kalshiBook.levels,
+      askLevelCount: kalshiBook.levelCount,
+      retainedAskLevelCount: kalshiBook.retainedLevelCount,
+      asksTruncated: kalshiBook.truncated,
+      asksSha256: kalshiBook.sha256,
+      asksRetainedRanges: kalshiBook.retainedRanges,
+    },
+  });
+}
+
+function toJsonRecord(value: Record<string, unknown>): Record<string, unknown> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
+}
+
+function isProbeProbability(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
 async function admitAndExecuteShadowIntent(
   intent: OrderIntent,
   slot: MarketSlot,
@@ -3210,6 +3801,7 @@ async function admitAndExecuteShadowIntent(
   expectedConfiguration: ExecutionConfigurationSnapshot,
   primarySelection: LiveOpportunity["primarySelection"],
 ): Promise<OrderIntent | null> {
+  const signalGrossCost = intent.grossCost;
   const [openIntents, positions, balances] = await Promise.all([
     readOpenOrderIntents(),
     readPositions(),
@@ -3257,6 +3849,59 @@ async function admitAndExecuteShadowIntent(
   }
   candidate = markIntentStatus(depthPreflight.intent, "pending", finalSnapshotAt);
 
+  const finalSignalSnapshot: OpportunitySnapshot = {
+    ...snapshot,
+    capturedAt: finalSnapshotAt,
+    polymarket: marketState.polymarket.quote,
+    kalshi: marketState.kalshi.quote,
+  };
+  const restStartedAt = Date.now();
+  const preflightProbeIntent = candidate;
+  const restCapture = await captureShadowRestSnapshot(preflightProbeIntent, finalSignalSnapshot, restStartedAt);
+  const restPreflight = deriveRestPairedPreflight({
+    intent: preflightProbeIntent,
+    snapshot: restCapture.snapshot,
+    settings,
+  });
+  const restRejection = getShadowRestAdmissionRejection({
+    slotEndTs: slot.endTs,
+    restCapturedAt: restCapture.capturedAt,
+    restErrors: restCapture.errors,
+    preflight: restPreflight,
+  });
+  if (restRejection) {
+    await writeCandidateEntryProbe({
+      intent: preflightProbeIntent,
+      signalSnapshot: finalSignalSnapshot,
+      restCapture,
+      restPreflight,
+      settings,
+      expectedConfiguration,
+      riskEstimate: findMismatchEstimate(finalSignalSnapshot, candidate.combination),
+      decision: "rejected",
+      firstRejectionStage: "rest",
+      firstRejectionCode: restRejection.code,
+      restStartedAt,
+    });
+    await recordInitialEntryRejection({
+      intent: candidate,
+      stage: "final_rest_preflight",
+      code: restRejection.code,
+      reason: restRejection.reason,
+      now: restCapture.capturedAt,
+      payload: { restPreflight, restErrors: restCapture.errors },
+    });
+    return null;
+  }
+  if (!restPreflight.allowed) {
+    throw new Error("Shadow REST admission rejection classifier accepted a rejected preflight");
+  }
+  candidate = markIntentStatus(
+    applyRestPairedPreflightToIntent(candidate, restPreflight, restCapture.capturedAt),
+    "pending",
+    restCapture.capturedAt,
+  );
+
   const riskEvaluatedAt = Date.now();
   const risk = await recheckMismatchRiskForExecution({
     opportunity: buildRiskOpportunityTemplateFromIntent(candidate, settings),
@@ -3269,8 +3914,22 @@ async function admitAndExecuteShadowIntent(
     globalRiskConfig: expectedConfiguration.globalRisk.config,
     marketState,
     balances,
+    usePrecomputedWorstFillEconomics: true,
   });
   if (!risk.allowed) {
+    await writeCandidateEntryProbe({
+      intent: preflightProbeIntent,
+      signalSnapshot: finalSignalSnapshot,
+      restCapture,
+      restPreflight,
+      settings,
+      expectedConfiguration,
+      riskEstimate: risk.estimate,
+      decision: "rejected",
+      firstRejectionStage: "risk",
+      firstRejectionCode: "mismatch_risk_recheck",
+      restStartedAt,
+    });
     await recordInitialEntryRejection({
       intent: candidate,
       stage: "final_mismatch_risk",
@@ -3289,6 +3948,16 @@ async function admitAndExecuteShadowIntent(
     "pending",
     riskEvaluatedAt,
   );
+  const preparedRestExecution = buildPreparedShadowRestExecutionProof(candidate, restPreflight, restCapture.capturedAt);
+  candidate = {
+    ...candidate,
+    shadowExecution: buildScheduledShadowAudit(candidate, restStartedAt, {
+      signalGrossCost,
+      restCapturedAt: restCapture.capturedAt,
+      restErrors: restCapture.errors,
+      preparedRestExecution,
+    }),
+  };
 
   const policyEvaluatedAt = Date.now();
   candidate = markIntentStatus(candidate, "pending", policyEvaluatedAt);
@@ -3301,6 +3970,19 @@ async function admitAndExecuteShadowIntent(
     submissionBudgetMs: 0,
   });
   if (!policy.allowed) {
+    await writeCandidateEntryProbe({
+      intent: preflightProbeIntent,
+      signalSnapshot: finalSignalSnapshot,
+      restCapture,
+      restPreflight,
+      settings,
+      expectedConfiguration,
+      riskEstimate: risk.opportunity.mismatchRiskEstimate ?? null,
+      decision: "rejected",
+      firstRejectionStage: "admission",
+      firstRejectionCode: policy.code,
+      restStartedAt,
+    });
     await recordInitialEntryRejection({
       intent: candidate,
       stage: "pre_admission_policy",
@@ -3316,10 +3998,30 @@ async function admitAndExecuteShadowIntent(
     intent: candidate,
     expectedStrategyRevision: expectedConfiguration.strategyRevision,
     expectedGlobalRiskRevision: expectedConfiguration.globalRisk.revision,
+    expectedMismatchCalibrationArtifactId: expectedConfiguration.mismatchCalibration.artifactId,
+    expectedMismatchCalibrationRevision: expectedConfiguration.mismatchCalibration.revision,
     policyEvaluatedAt,
-    evidence: buildInitialEntryAdmissionEvidence("shadow", marketState, policy, null),
+    evidence: buildInitialEntryAdmissionEvidence("shadow", marketState, policy, {
+      source: "rest-paired-preflight-v1",
+      restCapturedAt: restCapture.capturedAt,
+      restFetchDurationMs: restCapture.capturedAt - restStartedAt,
+      quote: summarizeRestPairedPreflightForProbe(restPreflight, { includeConsumedLevels: true }),
+    }),
   });
   if (!admission.admitted) {
+    await writeCandidateEntryProbe({
+      intent: preflightProbeIntent,
+      signalSnapshot: finalSignalSnapshot,
+      restCapture,
+      restPreflight,
+      settings,
+      expectedConfiguration,
+      riskEstimate: risk.opportunity.mismatchRiskEstimate ?? null,
+      decision: "rejected",
+      firstRejectionStage: "admission",
+      firstRejectionCode: admission.code,
+      restStartedAt,
+    });
     await recordInitialEntryRejection({
       intent: candidate,
       stage: "atomic_admission",
@@ -3341,14 +4043,26 @@ async function admitAndExecuteShadowIntent(
     return admission.intent;
   }
 
+  try {
+    await writeCandidateEntryProbe({
+      intent: preflightProbeIntent,
+      signalSnapshot: finalSignalSnapshot,
+      restCapture,
+      restPreflight,
+      settings,
+      expectedConfiguration,
+      riskEstimate: risk.opportunity.mismatchRiskEstimate ?? null,
+      decision: "admitted",
+      firstRejectionStage: null,
+      firstRejectionCode: null,
+      restStartedAt,
+    });
+  } catch (error) {
+    console.error(`Candidate entry probe persistence failed after admission: ${toErrorMessage(error)}`);
+  }
+
   await writeAdmittedIntentCreatedEvent(admission.intent, primarySelection, policyEvaluatedAt);
-  const finalSnapshot: OpportunitySnapshot = {
-    ...snapshot,
-    capturedAt: finalSnapshotAt,
-    polymarket: marketState.polymarket.quote,
-    kalshi: marketState.kalshi.quote,
-  };
-  return executeShadowIntent(admission.intent, finalSnapshot, settings, policyEvaluatedAt);
+  return executeShadowIntent(admission.intent, restCapture.snapshot, settings, policyEvaluatedAt);
 }
 
 function buildInitialEntryAdmissionEvidence(
@@ -3707,6 +4421,8 @@ async function executeIntent(
     plannedAttempt,
     expectedStrategyRevision: expectedConfiguration.strategyRevision,
     expectedGlobalRiskRevision: expectedConfiguration.globalRisk.revision,
+    expectedMismatchCalibrationArtifactId: expectedConfiguration.mismatchCalibration.artifactId,
+    expectedMismatchCalibrationRevision: expectedConfiguration.mismatchCalibration.revision,
     policyEvaluatedAt: admissionAt,
     cutoffAt: finalPolicy.cutoffAt,
     latestSubmissionStartAt: finalPolicy.latestSubmissionStartAt,
@@ -4106,6 +4822,7 @@ export function isExpiredInitialSubmissionCapability(error: unknown) {
 const DEFINITIVE_INITIAL_SUBMISSION_REJECTION_CODES = new Set([
   "strategy_revision_changed",
   "global_risk_revision_changed",
+  "mismatch_calibration_revision_changed",
   "trading_disabled",
   "execution_mode_mismatch",
   "circuit_breaker_active",
@@ -4716,17 +5433,20 @@ async function continuePartialHedgeRecoveryAfterSubmission(
   }
 }
 
+type ShadowRestCapture = Awaited<ReturnType<typeof captureShadowRestSnapshot>>;
+
 async function executeShadowIntent(
   intent: OrderIntent,
   snapshot: OpportunitySnapshot,
   settings: StrategyConfig,
   now: number,
 ) {
-  const restStartedAt = now;
+  const restStartedAt = intent.shadowExecution?.restStartedAt ?? now;
+  const scheduledAudit = intent.shadowExecution ?? buildScheduledShadowAudit(intent, restStartedAt);
   let currentIntent = markIntentStatus(
     {
       ...intent,
-      shadowExecution: buildScheduledShadowAudit(intent, restStartedAt),
+      shadowExecution: scheduledAudit,
     },
     "executing_primary",
     now,
@@ -4754,7 +5474,7 @@ async function executeShadowIntent(
       intentId: currentIntent.id,
       slotKey: currentIntent.slotKey,
       primaryVenue: currentIntent.primaryVenue,
-      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      modelVersion: currentIntent.shadowExecution?.modelVersion ?? SHADOW_EXECUTION_MODEL_VERSION,
       restStartedAt,
       requestedPairSize: currentIntent.shadowExecution?.requestedPairSize ?? null,
     },
@@ -4767,7 +5487,17 @@ async function executeShadowIntent(
 async function resumeShadowIntents(intents: OrderIntent[], snapshot: OpportunitySnapshot, settings: StrategyConfig) {
   const resumed: OrderIntent[] = [];
   for (const intent of intents) {
-    if (!intent.shadow || intent.status !== "executing_primary") {
+    if (!intent.shadow) {
+      continue;
+    }
+
+    // Every persisted pending shadow intent was atomically admitted. Resume v3
+    // from its proof and retire legacy proof-less crash remnants fail closed.
+    if (intent.status === "pending") {
+      resumed.push(await executeShadowIntent(intent, snapshot, settings, Date.now()));
+      continue;
+    }
+    if (intent.status !== "executing_primary") {
       continue;
     }
 
@@ -4796,6 +5526,102 @@ async function completeShadowIntent(
     return persistCompletedShadowExecution(intent, intent.shadowExecution);
   }
 
+  const scheduledAudit = intent.shadowExecution ?? buildScheduledShadowAudit(intent, restStartedAt);
+  const recoveryPlan = planShadowRestRecovery(scheduledAudit);
+  if (recoveryPlan.action === "prepared_proof") {
+    const preparedProof = scheduledAudit.preparedRestExecution;
+    const evaluatedAt = Date.now();
+    let completedAudit: NonNullable<OrderIntent["shadowExecution"]>;
+    try {
+      completedAudit = buildCompletedShadowAuditFromPreparedRestExecution(intent, preparedProof, evaluatedAt);
+    } catch (error) {
+      const reason = `Durable REST execution proof is invalid: ${toErrorMessage(error)}`;
+      completedAudit = buildCompletedShadowAudit(
+        intent,
+        buildUnavailableShadowRecoveryDecision(intent, "prepared_rest_proof_invalid", reason),
+        evaluatedAt,
+        {
+          startedAt: scheduledAudit.restStartedAt,
+          capturedAt: scheduledAudit.restCapturedAt ?? evaluatedAt,
+          errors: [...scheduledAudit.restErrors, reason],
+        },
+      );
+    }
+    await writeRunEvent({
+      asset: intent.asset,
+      level: completedAudit.status === "filled" ? "info" : "warn",
+      eventType: "intent.shadow.rest_proof_replayed",
+      message:
+        completedAudit.status === "filled"
+          ? `Shadow intent ${intent.id} replayed its durable REST execution proof`
+          : `Shadow intent ${intent.id} rejected an invalid durable REST execution proof`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        modelVersion: completedAudit.modelVersion,
+        restFetchDurationMs: completedAudit.restFetchDurationMs,
+        preparedDecision: completedAudit.status,
+        restErrors: completedAudit.restErrors,
+      },
+      createdAt: evaluatedAt,
+    });
+    const currentIntent = await writeOrderIntent({ ...intent, shadowExecution: completedAudit });
+    return persistCompletedShadowExecution(currentIntent, completedAudit);
+  }
+
+  if (recoveryPlan.action === "fail_closed") {
+    const evaluatedAt = Date.now();
+    const completedAudit = buildCompletedShadowAudit(
+      intent,
+      buildUnavailableShadowRecoveryDecision(intent, recoveryPlan.reasonCode, recoveryPlan.reason),
+      evaluatedAt,
+      {
+        startedAt: scheduledAudit.restStartedAt,
+        capturedAt: scheduledAudit.restCapturedAt ?? evaluatedAt,
+        errors: [...scheduledAudit.restErrors, recoveryPlan.reason],
+      },
+    );
+    await writeRunEvent({
+      asset: intent.asset,
+      level: "warn",
+      eventType: "intent.shadow.recovery_blocked",
+      message: `Shadow intent ${intent.id} cannot recover its execution evidence`,
+      payload: {
+        intentId: intent.id,
+        slotKey: intent.slotKey,
+        modelVersion: scheduledAudit.modelVersion,
+        reasonCode: recoveryPlan.reasonCode,
+        reason: recoveryPlan.reason,
+      },
+      createdAt: evaluatedAt,
+    });
+    const currentIntent = await writeOrderIntent({ ...intent, shadowExecution: completedAudit });
+    return persistCompletedShadowExecution(currentIntent, completedAudit);
+  }
+
+  const legacySnapshotMatchesIntent =
+    signalSnapshot.asset === intent.asset &&
+    signalSnapshot.slotKey === intent.slotKey &&
+    signalSnapshot.slotStartTs === intent.slotStartTs &&
+    signalSnapshot.slotEndTs === intent.slotEndTs &&
+    Date.now() < intent.slotEndTs;
+  if (!legacySnapshotMatchesIntent) {
+    const evaluatedAt = Date.now();
+    const reason = "Legacy REST recovery requires a current snapshot for the intent's exact active slot";
+    const completedAudit = buildCompletedShadowAudit(
+      intent,
+      buildUnavailableShadowRecoveryDecision(intent, "legacy_rest_refetch_unavailable", reason),
+      evaluatedAt,
+      {
+        startedAt: scheduledAudit.restStartedAt,
+        capturedAt: evaluatedAt,
+        errors: [...scheduledAudit.restErrors, reason],
+      },
+    );
+    const currentIntent = await writeOrderIntent({ ...intent, shadowExecution: completedAudit });
+    return persistCompletedShadowExecution(currentIntent, completedAudit);
+  }
+
   const restCapture = await captureShadowRestSnapshot(intent, signalSnapshot, restStartedAt);
   const rawDecision = deriveShadowPairExecution({
     intent,
@@ -4815,7 +5641,6 @@ async function completeShadowIntent(
           realizedTotalCostUsd: null,
           projectedNetProfitUsd: null,
         };
-  const scheduledAudit = intent.shadowExecution ?? buildScheduledShadowAudit(intent, restStartedAt);
   let capturedIntent: OrderIntent = {
     ...intent,
     shadowExecution: {
@@ -4835,7 +5660,7 @@ async function completeShadowIntent(
     payload: {
       intentId: intent.id,
       slotKey: intent.slotKey,
-      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      modelVersion: scheduledAudit.modelVersion,
       restFetchDurationMs: capturedIntent.shadowExecution?.restFetchDurationMs ?? null,
       completionNotBeforeAt: capturedIntent.shadowExecution?.completionNotBeforeAt ?? null,
       preparedDecision: decision.status,
@@ -4857,6 +5682,33 @@ async function completeShadowIntent(
   });
   const currentIntent = await writeOrderIntent({ ...capturedIntent, shadowExecution: completedAudit });
   return persistCompletedShadowExecution(currentIntent, completedAudit);
+}
+
+function buildUnavailableShadowRecoveryDecision(
+  intent: OrderIntent,
+  reasonCode:
+    | "legacy_rest_refetch_unavailable"
+    | "prepared_rest_proof_invalid"
+    | "prepared_rest_proof_unavailable"
+    | "unsupported_shadow_model_version",
+  reason: string,
+): ShadowPairExecutionDecision {
+  return {
+    status: "no_fill",
+    reasonCode,
+    reason,
+    filledPairSize: 0,
+    realizedGrossCost: null,
+    realizedTotalCostUsd: null,
+    projectedNetProfitUsd: null,
+    legs: intent.legs.map((leg) => ({
+      leg,
+      limitPrice: leg.requestedPrice,
+      executableSize: 0,
+      quote: null,
+      levelsAvailable: false,
+    })) as ShadowPairExecutionDecision["legs"],
+  };
 }
 
 async function persistCompletedShadowExecution(
@@ -4898,7 +5750,7 @@ async function persistCompletedShadowExecution(
       payload: {
         intentId: currentIntent.id,
         slotKey: currentIntent.slotKey,
-        modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+        modelVersion: completedAudit.modelVersion,
         latencyMs: completedAudit.latencyMs,
         restFetchDurationMs: completedAudit.restFetchDurationMs,
         nextEligibleAt: completedAudit.nextEligibleAt,
@@ -4947,7 +5799,7 @@ async function persistCompletedShadowExecution(
     payload: {
       intentId: currentIntent.id,
       slotKey: currentIntent.slotKey,
-      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      modelVersion: completedAudit.modelVersion,
       latencyMs: completedAudit.latencyMs,
       restFetchDurationMs: completedAudit.restFetchDurationMs,
       nextEligibleAt: completedAudit.nextEligibleAt,
@@ -4969,15 +5821,19 @@ async function captureShadowRestSnapshot(
   intent: OrderIntent,
   signalSnapshot: OpportunitySnapshot,
   restStartedAt: number,
+  sharedRequests: {
+    polymarketBook?: ReturnType<typeof fetchPolymarketBook>;
+    kalshiBook?: ReturnType<typeof fetchKalshiOrderbook>;
+  } = {},
 ) {
   const polymarketLeg = intent.legs.find((leg) => leg.venue === "polymarket");
   const kalshiLeg = intent.legs.find((leg) => leg.venue === "kalshi");
   const [polymarketResult, kalshiResult] = await Promise.allSettled([
     polymarketLeg?.tokenId
-      ? fetchPolymarketBook(polymarketLeg.tokenId)
+      ? (sharedRequests.polymarketBook ?? fetchPolymarketBook(polymarketLeg.tokenId))
       : Promise.reject(new Error("référence de marché absente")),
     kalshiLeg?.marketRef
-      ? fetchKalshiOrderbook(kalshiLeg.marketRef)
+      ? (sharedRequests.kalshiBook ?? fetchKalshiOrderbook(kalshiLeg.marketRef))
       : Promise.reject(new Error("référence de marché absente")),
   ]);
   const capturedAt = Date.now();
@@ -6340,7 +7196,7 @@ async function buildKalshiPrimaryRestFailureBookTelemetry(
   }
 }
 
-async function preflightEntryDepthAndAdjustIntent(
+export async function preflightEntryDepthAndAdjustIntent(
   intent: OrderIntent,
   slot: MarketSlot,
   settings: StrategyConfig,
@@ -6680,18 +7536,6 @@ function resizeIntentFromWsBookSnapshot(
   if (!doesSizingMeetProfitThresholds(projectedNetProfitUsd, projectedNetReturn, settings)) {
     return null;
   }
-  if (settings.mismatchRiskMode === "enforce") {
-    const pFatalUpper = intent.mismatchPFatalUpper;
-    const breakEvenFatalProbability = Math.max(0, projectedNetProfitUsd / pairSize);
-    if (
-      pFatalUpper === null ||
-      pFatalUpper === undefined ||
-      pFatalUpper > 0.5 * breakEvenFatalProbability + ORDER_SIZE_TOLERANCE
-    ) {
-      return null;
-    }
-  }
-
   const legs = intent.legs.map((leg) => {
     const quote = leg.venue === "polymarket" ? polyQuote : kalshiQuote;
     return {
@@ -11601,7 +12445,7 @@ function buildPendingShadowOrder(
     updatedAt: now,
     raw: {
       shadow: true,
-      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      modelVersion: intent.shadowExecution?.modelVersion ?? SHADOW_EXECUTION_MODEL_VERSION,
       restStartedAt: intent.shadowExecution?.restStartedAt ?? null,
       completionNotBeforeAt: intent.shadowExecution?.completionNotBeforeAt ?? null,
     },
@@ -11617,20 +12461,23 @@ function buildCompletedShadowOrder(
   const suffix = leg.venue === intent.primaryVenue ? "primary" : "hedge";
   const pending = buildPendingShadowOrder(intent, leg, intent.createdAt, suffix);
   const auditLeg = audit.legs.find((candidate) => candidate.venue === leg.venue);
+  const preparedFill = audit.status === "filled" ? getPreparedShadowRestFillEconomics(intent, audit, leg.id) : null;
+  const filledSize = audit.status === "filled" ? (preparedFill?.size ?? audit.filledPairSize) : 0;
   return {
     ...pending,
-    filledSize: audit.status === "filled" ? audit.filledPairSize : 0,
-    averageFillPrice: audit.status === "filled" ? (auditLeg?.vwapPrice ?? null) : null,
-    feeUsd: audit.status === "filled" ? (auditLeg?.feeUsd ?? 0) : 0,
+    filledSize,
+    averageFillPrice: audit.status === "filled" ? (preparedFill?.price ?? auditLeg?.vwapPrice ?? null) : null,
+    feeUsd: audit.status === "filled" ? (preparedFill?.feeUsd ?? auditLeg?.feeUsd ?? 0) : 0,
     status:
       audit.status === "no_fill"
         ? "canceled"
-        : audit.filledPairSize + ORDER_SIZE_TOLERANCE >= leg.requestedSize
+        : filledSize + ORDER_SIZE_TOLERANCE >= leg.requestedSize
           ? "filled"
           : "partially_filled",
     updatedAt: now,
     raw: {
       ...pending.raw,
+      modelVersion: audit.modelVersion,
       evaluatedAt: now,
       latencyMs: audit.latencyMs,
       restFetchDurationMs: audit.restFetchDurationMs,
@@ -11655,6 +12502,10 @@ function buildShadowFill(
   if (filledAt === null || auditLeg.vwapPrice === null) {
     throw new Error(`Intent ${intent.id} is missing final shadow fill evidence for leg ${leg.id}`);
   }
+  const preparedFill = getPreparedShadowRestFillEconomics(intent, audit, leg.id);
+  if (preparedFill && Math.abs(order.filledSize - preparedFill.size) > ORDER_SIZE_TOLERANCE) {
+    throw new Error(`Intent ${intent.id} has a shadow order size that conflicts with its durable REST proof`);
+  }
   const identity = buildShadowAccountingFillIdentity(intent.id, leg.id);
   return {
     id: identity.fillId,
@@ -11668,18 +12519,20 @@ function buildShadowFill(
     tokenId: leg.tokenId,
     side: leg.side,
     outcome: leg.outcome,
-    price: auditLeg.vwapPrice,
-    size: order.filledSize,
-    feeUsd: auditLeg.feeUsd,
+    price: preparedFill?.price ?? auditLeg.vwapPrice,
+    size: preparedFill?.size ?? order.filledSize,
+    feeUsd: preparedFill?.feeUsd ?? auditLeg.feeUsd,
     liquidity: "TAKER" as const,
     filledAt,
     raw: {
       shadow: true,
-      modelVersion: SHADOW_EXECUTION_MODEL_VERSION,
+      modelVersion: audit.modelVersion,
       latencyMs: audit.latencyMs,
       limitPrice: auditLeg.limitPrice,
       requestedSize: leg.requestedSize,
       fillRatio: audit.fillRatio,
+      preparedNotionalUsd: preparedFill?.notionalUsd ?? null,
+      preparedTotalCostUsd: preparedFill?.totalCostUsd ?? null,
     },
   };
 }

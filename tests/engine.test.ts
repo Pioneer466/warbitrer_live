@@ -59,6 +59,7 @@ import {
   primaryImmediateOrderType,
   persistPostSubmissionIntentEvidence,
   persistPostSubmissionLegEvidence,
+  preflightEntryDepthAndAdjustIntent,
   mergeObservedSlotResolutionOutcomes,
   OrderSubmissionNotStartedError,
   resolvePrimaryRetryPlan,
@@ -205,6 +206,10 @@ describe("execution configuration fencing", () => {
       revision: 7,
       updatedAt: 100,
     },
+    mismatchCalibration: {
+      artifactId: "calibration-a",
+      revision: 3,
+    },
   };
   const actual = {
     strategy: {
@@ -214,9 +219,13 @@ describe("execution configuration fencing", () => {
       updatedAt: 100,
     },
     globalRisk: expected.globalRisk,
+    mismatchCalibration: {
+      ...expected.mismatchCalibration,
+      updatedAt: 100,
+    },
   };
 
-  it("accepts only the exact strategy and global-risk revisions captured by the scan", () => {
+  it("accepts only the exact strategy, global-risk, and calibration state captured by the scan", () => {
     expect(executionConfigurationMatches(expected, actual)).toBe(true);
     expect(
       executionConfigurationMatches(expected, {
@@ -228,6 +237,18 @@ describe("execution configuration fencing", () => {
       executionConfigurationMatches(expected, {
         ...actual,
         globalRisk: { ...actual.globalRisk, revision: 8 },
+      }),
+    ).toBe(false);
+    expect(
+      executionConfigurationMatches(expected, {
+        ...actual,
+        mismatchCalibration: { ...actual.mismatchCalibration, revision: 4 },
+      }),
+    ).toBe(false);
+    expect(
+      executionConfigurationMatches(expected, {
+        ...actual,
+        mismatchCalibration: { ...actual.mismatchCalibration, artifactId: "calibration-b" },
       }),
     ).toBe(false);
   });
@@ -1679,6 +1700,52 @@ describe("final WS entry snapshot", () => {
       ),
     ).toContain("executable depth coverage");
   });
+
+  it("defers mismatch policy to the authoritative final recheck after a depth resize", async () => {
+    const polymarket = buildPolymarketQuote();
+    const kalshi = buildKalshiQuote();
+    polymarket.orderbookLevels.downAsks = [[0.45, 100]];
+    kalshi.orderbookLevels.noBids = [[0.55, 10]];
+    const riskBoundIntent = buildIntent({
+      status: "pending",
+      failureReason: null,
+      slotKey: slot.key,
+      mismatchPFatalUpper: 0.07,
+    });
+
+    const result = await preflightEntryDepthAndAdjustIntent(
+      riskBoundIntent,
+      slot,
+      {
+        ...DEFAULT_STRATEGY_CONFIG,
+        mismatchRiskMode: "enforce",
+      },
+      {
+        polymarket: {
+          venue: "polymarket",
+          slotKey: slot.key,
+          marketRef: polymarket.ref.id,
+          quote: polymarket,
+          lastBootstrapAt: 1_000,
+          lastSyncAt: 1_000,
+        },
+        kalshi: {
+          venue: "kalshi",
+          slotKey: slot.key,
+          marketRef: kalshi.ref.id,
+          quote: kalshi,
+          lastBootstrapAt: 1_000,
+          lastSyncAt: 1_000,
+        },
+      },
+      1_000,
+    );
+
+    expect(result).toMatchObject({ status: "ready", resized: true });
+    if (result.status === "ready") {
+      expect(result.intent.legs[0].requestedSize).toBeLessThan(riskBoundIntent.legs[0].requestedSize);
+    }
+  });
 });
 
 function buildPosition(overrides: Partial<PositionSnapshot> = {}): PositionSnapshot {
@@ -2589,6 +2656,7 @@ describe("venue order request sizing", () => {
   it.each([
     "strategy_revision_changed",
     "global_risk_revision_changed",
+    "mismatch_calibration_revision_changed",
     "trading_disabled",
     "execution_mode_mismatch",
     "circuit_breaker_active",

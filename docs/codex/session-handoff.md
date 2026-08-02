@@ -2,14 +2,14 @@
 
 ## Current State
 
-- Date: 2026-07-23, Europe/Paris
+- Date: 2026-08-02, Europe/Paris
 - Branch: `review/global-hardening-2026-07-19`
 - Base before the current dirty review set: `e5b637f`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: seven-worker shadow topology deployed from `beb45c9`; V9 ready and all ten application services stable
+- Deployment status: production remains on the stable V9 shadow rollout; the local V10 mismatch-efficiency work described below is not committed, pushed, migrated, or deployed
 - Live authorization: keep `LIVE_EXECUTION_ALLOWED=false`; BNB/HYPE must start with `enableTrading=true` and `shadowMode=true`
 
 The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
@@ -75,6 +75,146 @@ because `pg_dump` received the URL on its command line. Do not copy that value i
 the production database password and update the protected environment file in a separately authorized maintenance
 window; no credential was changed during this rollout.
 
+## Production Capacity Incident and Recovery - 2026-07-28
+
+Production returned `connect ECONNREFUSED 127.0.0.1:5432` after the original 40 GB root volume reached 100%.
+PostgreSQL first reported write failures while the scheduled 03:15 UTC backup was creating a fourth dump, then
+panicked at 04:53 UTC because it could not write a temporary WAL file. Recovery also failed until more disk became
+available. SOL, the reconciler, and the notifier entered systemd restart loops while PostgreSQL was unavailable.
+The independent live gate remained `false`, so the outage stayed fail-closed for real execution.
+
+The database occupied about 20.5 GB. `opportunity_snapshots` alone used about 18.1 GB, including roughly 15 GB in its
+TOAST table, because seven workers persist complete JSON snapshots every second and the effective retention window
+was 72 hours. `oracle_slot_samples` used another 1.4 GB. The failed backup service left a roughly 1.0 GB dump that
+could not be trusted; the backup script only prunes old complete-name dumps after a successful new dump.
+
+The operator expanded the root volume to 59 GB. After the reboot, PostgreSQL recovered automatically. All ten
+application services were stopped before maintenance, schema V9 status and the shadow-only deployment preflight
+passed, and a fresh pre-maintenance backup was created and validated. The protected production environment now sets
+`DB_RETENTION_SNAPSHOTS_HOURS=24`; no credential or trading setting changed.
+
+The maintenance deleted 1,088,517 `opportunity_snapshots` rows older than the fixed 24-hour cutoff in batches of
+5,000, leaving 398,177 rows. A targeted `VACUUM FULL ANALYZE opportunity_snapshots` reduced the table from about
+17 GB after deletion to about 4.17 GB. The full database now reports about 6.85 GB. A second validated
+post-maintenance backup was created; the known failed partial dump was then deleted. Three validated dumps remain.
+The root volume finished at 42% usage with about 34 GB free.
+
+The post-maintenance V9 preflight again reported zero unresolved live attempts, open live venue orders, economically
+active live positions, and owned live reservations; the 39 historical legacy accounting defects remain the only
+live-admission blocker. All ten application services passed four stability rounds with zero restarts, the backup
+timer is active, health is `healthy`, and there are no active breakers. All seven assets remain shadow-only with
+60-second entry cutoffs. BNB/HYPE RTDS and CF feeds returned ready immediately; because workers restarted mid-slot,
+their opening Chainlink value and mismatch model remain unavailable only until the next 15-minute rollover.
+
+No repository code changed during this recovery. A future versioned hardening change should make backups write to a
+partial suffix and atomically rename only after success, reserve capacity before `pg_dump`, and add disk-capacity
+alerting. Do not manually alter the checksummed PostgreSQL schema to tune autovacuum; use a forward migration if
+table-specific storage settings are later required.
+
+## Mismatch History Recovery and Analysis - 2026-07-28
+
+The mismatch analysis froze a reproducible 72-hour window from 2026-07-25 16:30 UTC through 2026-07-28 16:30 UTC.
+Postgres contained 243 dual-finalized resolution slots per asset. The capacity outage and maintenance left two common
+gaps on 2026-07-28, 05:00-10:45 UTC and 11:00-16:30 UTC, with the 10:45 slot present between them. A read-only
+official-API recovery fetched 46 slots per asset across the affected range. All 322 recovered rows were dual
+finalized with no benchmark/result conflict; the seven 10:45 overlap rows exactly matched Postgres. Deduplication
+therefore added 45 slots per asset and produced 288 complete slots per asset without writing to production.
+
+The recovered 72-hour set contains 146 mismatches across 2,016 asset-slots (7.24%). Direction is exactly balanced:
+73 Poly DOWN/Kalshi YES and 73 Poly UP/Kalshi NO. Per-asset rates are BTC 5.90%, ETH 3.47%, SOL 7.64%, XRP 7.99%,
+DOGE 10.76%, BNB 8.33%, and HYPE 6.60%. A longer 489-slot common window beginning 2026-07-23 14:15 UTC has rates
+between 6.13% and 9.82%, so the recent values are broadly consistent with the retained history. Mismatches cluster
+in time: the observed cross-asset mismatch-count variance is 1.35 times the independent-asset variance, although the
+largest pairwise phi correlation is only about 0.20.
+
+The uncalibrated structural model was evaluated from persisted observations at 5m, 3m, 2m, 1m, and 30s before close.
+At 3m its mismatch AUC is 0.796 and Brier score 0.0735; at 1m these improve to 0.877 and 0.0580. The highest-risk
+decile captures 49.1% of mismatches at 1m versus 28.7% at 3m. At 30s discrimination improves again, but mean
+predicted mismatch falls below the observed rate and diagnostic log-loss worsens, so the model must remain shadow
+and `uncalibrated`. The 60-second cutoff is supported; the data do not authorize enforcement.
+
+The 21 BNB and 21 HYPE `chainlink_unavailable` 60-second observations all precede the public RTDS fix and end at
+2026-07-25 21:30 UTC. No later recurrence appears in the evaluated data. Two HYPE
+`final_minute_average_unavailable` observations occur exactly at the 60-second boundary and recover within 2-3
+seconds as the first CF final-minute samples arrive; they are not persistent feed outages. Separately, 376 of 1,625
+diagnostically available 60-second estimates were strict-execution unusable as `chainlink_stale`. Do not loosen the
+gate; instrument source age on otherwise admissible opportunities first.
+
+Artifacts are under `reports/mismatch/`, with the human report in
+`reports/mismatch/mismatch-analysis-20260728.md`. Reproducible read-only tooling is in
+`scripts/fetch-official-mismatch-history.mjs` and `scripts/analyze-mismatch-history.mjs`. The analysis scripts passed
+`node --check`; the final CSV contains 2,016 data rows, the official overlap has zero conflicts, and primary artifact
+SHA-256 hashes are recorded in the report. The external resolutions were intentionally not inserted into Postgres
+because the missing live ticks cannot be reconstructed and no production mutation was required for the analysis.
+
+## Mismatch Efficiency Hardening - 2026-08-02 (Local Only)
+
+The current local working tree implements the approved shadow-first correction after the historical review found
+1,265 shadow intents but only 179 synthetic fills over 14 days. Of the 1,086 no-fills, 1,072 were classified as
+`price_moved_beyond_limit`: the simulator anchored a 30 bps limit to the earlier WebSocket signal even though its
+decisive REST books arrived about half a second later. The apparent 15-second execution latency was only an
+artificial completion delay and did not provide later fill evidence. The 179 settled synthetic fills were also not
+strong enough to authorize live trading: actual P&L was positive in aggregate, but a conservative cap of double
+payouts at aligned payout was negative, the chronological second half was negative, and selected-fill mismatch AUC
+was close to random. Real execution remains unauthorized.
+
+Shadow candidate handling now captures complete Polymarket and Kalshi REST books before admission, uses
+authoritative ticks and absolute leg caps rather than signal-relative slippage, searches the largest common size
+that passes depth, headroom, fee, pair/leg budget, profit, return, and worst-fill checks, then recomputes mismatch
+risk on those exact worst-fill economics. A REST-rejected candidate is stored as immutable probe evidence but does
+not create a synthetic intent. An admitted synthetic fill reuses the same captured proof and is finalized
+immediately; its leg size, canonical notional, fee, total cost, and implied price are bound to the durable
+`rest-paired-preflight-proof-v2` evidence. Full books and consumed levels are bounded with counts, ranges, and
+SHA-256 digests. Only the explicit legacy `rest-orderbook-v2` model may use the old replay path; malformed proof,
+proof on a legacy-shaped audit, or any unknown model version fails before order or fill facts are written. A REST
+capture finishing at or after slot end is rejected as `slot_ended_during_rest_capture`. The durable 60-second
+re-entry cooldown is unchanged. Live execution keeps its existing WebSocket, admission, reservation, and submission
+contract and does not use this shadow rollout to authorize an order.
+
+Observation-only late-entry probes run once per asset/slot at 55, 45, 35, 25, 15, and 5 seconds while the asset is
+in shadow mode. They evaluate both combinations over a fixed matrix of absolute price caps (0.49, 0.60, 0.70,
+0.99) and mismatch safety fractions (0.50, 0.75, 1.00). They never create an intent, reservation, order, or fill.
+Probe facts are immutable, survive process restarts by stable keys, and have a fixed 45-day maintenance retention.
+The production entry cutoff remains 60 seconds until this evidence demonstrates a safer alternative.
+
+V10 `mismatch_calibration_evidence` adds immutable probe facts, immutable calibration artifacts, and a singleton
+activation state with append-only, hash-bound, monotone activation events. Direct state mutation without the
+matching event is rejected by database triggers. Admission and the one-shot live claim both bind the expected
+calibration artifact and revision, so an activation race cannot silently change the entry policy. The calibration
+core builds exactly 12 deterministic horizon/combination PAVA curves with Jeffreys posteriors and monotone upper-95
+bounds. Its conservative interval applies a cross-asset design effect of 7 for clustered slot outcomes while the
+mean still uses all observations. Activation eligibility requires minimum counts and span, a strict chronological
+holdout, bounded activation lag, complete per-curve provenance, and AUC/Brier/log-loss thresholds. The validation
+artifact is embedded and revalidated at runtime; persistence timestamps are deterministic so an identical rerun is
+idempotent. Runtime use is fail-closed: no active artifact retains the explicit `uncalibrated` model, while an
+invalid or incompatible active artifact makes the estimate execution-unusable. The read-only-by-default
+`npm run mismatch:calibrate` command uses dual official resolutions and actual observation bands; `--persist`
+stores a full-window artifact but never activates it. No artifact is currently active.
+
+The global mismatch probability limit is no longer a hidden fixed constant. The versioned global-risk payload now
+contains `mismatchFatalBudgetFractionOfAlignedMargin` with a backward-compatible default of 0.50. Signal sizing,
+execution policy, counterfactual audit, and the operator display use the same value. The UI also distinguishes the
+active risk mode from the counterfactual `block_only` audit and explains a 0% maximum when aligned margin is not
+positive. The obsolete fixed 0.50 pre-sizing and WS-resize rejections were removed, leaving one authoritative final
+policy check; tests cover a candidate accepted at 0.80 and rejected at 0.50, plus the final resize path.
+
+The V10 deployment preflight accepts a clean V9 state before migration but rejects partial V10 state. On V10 it
+validates exact column types/nullability/defaults, required PK/UNIQUE/FK/CHECK constraints, probe indexes, trigger
+placement and flags, the five critical PL/pgSQL function bodies, the activation singleton, every hash-bound event in
+the monotone activation chain, and active-artifact eligibility. A PostgreSQL integration test now creates a real V9
+admission, applies V10, and checks the backfilled null-artifact/revision-zero binding. It requires a disposable
+PostgreSQL 18 `TEST_DATABASE_URL` and has not run in this local environment.
+
+Main implementation files are `src/lib/shadow-execution.ts`, `src/lib/entry-probes.ts`,
+`src/lib/mismatch-calibration.ts`, `src/lib/engine.ts`, `src/lib/postgres-db.ts`, `src/lib/risk-settings.ts`, and
+`src/components/mismatch-risk-view.tsx`. The calibration CLI is `scripts/calibrate-mismatch-risk.ts`. No VPS,
+production setting, live gate, breaker, intent, order, position, database row, or service was changed during this
+local implementation. Before any rollout: review the diff, run full verification, commit/push only with explicit
+authorization, run the canonical stopped-service V10 migration/deploy, retain `LIVE_EXECUTION_ALLOWED=false`, and
+observe shadow probes/funnel outcomes before considering any configuration change. Residual limitation: recovery of
+a persisted V3 shadow proof currently runs through the normal scan/resume loop; it reuses durable evidence without a
+REST refetch, but there is not yet a dedicated recovery-only loop when scans repeatedly fail.
+
 ## Rollout Note - BNB/HYPE Shadow Reactivation
 
 BNB and HYPE are restored to `ACTIVE_MARKET_ASSETS` and the canonical VPS service list to collect current opportunity,
@@ -96,7 +236,7 @@ Production activation completed with both assets at configuration revision 1:
 
 ## Rollout Note - Legacy V0 Preflight
 
-The first production preflight correctly ran before any service stop, but exposed an ordering defect: the deploy script checks live state before V1 migration while the preflight previously rejected every complete legacy database lacking `schema_migrations`. The preflight now accepts only the exact uninitialized V0 state (no applied history, every V1-V8 migration pending, and no migration problems other than the missing history table and pending migrations). It still validates the required legacy table shape and durable live state before migration; initialized V0, partial schemas, history gaps, unknown migrations, and checksum mismatches remain blocked.
+The first production preflight correctly ran before any service stop, but exposed an ordering defect: the deploy script checks live state before V1 migration while the preflight previously rejected every complete legacy database lacking `schema_migrations`. The preflight now accepts only the exact uninitialized V0 state (no applied history, every registered migration, currently V1-V10, pending, and no migration problems other than the missing history table and pending migrations). It still validates the required legacy table shape and durable live state before migration; initialized V0, partial schemas, history gaps, unknown migrations, and checksum mismatches remain blocked.
 
 Coverage includes a unit-level V0 query simulation and a PostgreSQL integration case that builds a complete baseline schema without initializing migration history. The full PostgreSQL 18 suite passed before rollout.
 
@@ -152,10 +292,11 @@ The exact checksummed sequence is:
 7. V7 `accounting_ledger`
 8. V8 `accounting_evidence_hardening`
 9. V9 `inactive_legacy_slot_breaker_repair`
+10. V10 `mismatch_calibration_evidence`
 
-V1-V7 are frozen. Any later schema change requires V9. V8 is part of the current unshipped review set and its final checksum is documented in iteration 07.
+V1-V9 remain frozen. Any later schema change requires a new forward migration after V10.
 
-## Verification Completed
+## Historical Verification Baseline (Pre-V10)
 
 ```text
 Production audit       0 high, 0 moderate, 17 low
@@ -173,6 +314,30 @@ git diff --check       passed
 
 Automated tests use fixture venue messages. No live venue request was made.
 
+## Local V10 Verification - 2026-08-02
+
+```text
+Production audit       0 high, 0 moderate, 17 low
+ESLint                 passed, zero warnings
+Prettier               passed repository-wide
+TypeScript             passed
+Full test suite        71 files, 1,156 tests passed
+PostgreSQL 18.4        9 integration files passed
+Next.js build          passed
+Worker bundle          passed
+git diff --check       passed
+```
+
+All nine conditional integration files ran against a local disposable PostgreSQL 18.4 container bound only to
+loopback. They cover V9-admission-to-V10 migration, calibration persistence/activation concurrency, admission and
+claim fencing, deployment preflight, accounting, configuration, breaker, CAS, and order truth. The first real-catalog
+run exposed that `node-postgres` does not parse PostgreSQL `name[]` as a JavaScript array and that PostgreSQL shortens
+one generated FK identifier; the preflight now casts catalog names to `text[]`, attests the actual identifier, and
+has regression coverage. The final rerun passed all 1,156 tests with no skips. The V10 migration checksum remains
+`d165c2d5bf3cbd93ad4d684b90e03ea4cc77409f9d0f163ac0e98912650fa375` and its deterministic
+checksum test passed. No live venue request, production mutation, commit, push, migration, artifact activation, or
+deployment occurred during this local verification.
+
 ## Deployment Boundary
 
 Use `deploy/vps/README.md` and `docs/codex/deployment.md`. The deploy script performs:
@@ -181,7 +346,7 @@ Use `deploy/vps/README.md` and `docs/codex/deployment.md`. The deploy script per
 2. live-state preflight before shutdown
 3. stopped-service preflight and quiescent Postgres backup
 4. install, audit, lint, format, typecheck, tests, and both builds
-5. explicit V1-V9 migration and read-only schema status
+5. explicit V1-V10 migration and read-only schema status
 6. post-migration preflight
 7. split-service restart with repeated stability checks
 
@@ -201,10 +366,19 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 ## Next Actions
 
 1. Keep `LIVE_EXECUTION_ALLOWED=false`.
-2. Observe BNB/HYPE shadow results and resource/rate-limit health across several slots.
-3. Review qualified and rejected opportunities without lowering safety thresholds merely to create trades.
-4. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair.
-5. Require a separate explicit live decision after the accounting backlog is clean.
+2. Keep every production `entryCutoffSeconds` at 60 and leave the calibration activation at revision 0 with no
+   artifact until probe evidence and an independently reviewed eligible artifact justify a later decision.
+3. Publish only the fully verified commit explicitly authorized for rollout. The rollout must use the canonical
+   stopped-service V10 path and remain shadow-only.
+4. Before migration, recheck production disk capacity, quiescence, the exact 39 historical-only accounting blockers,
+   and the approved commit SHA. Treat any drift as a hard stop.
+5. After rollout, observe late probes, the preflight rejection funnel, REST request rates, worker restarts, and
+   storage growth across several days before calibrating or changing the cutoff.
+6. Add a recovery-only pass for durable V3 shadow proofs if completion during prolonged scan/feed failure becomes a
+   rollout requirement; the current normal scan/resume path is deterministic but can leave a shadow reservation
+   open until scans recover.
+7. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair, and
+   require a separate explicit live decision after that backlog is clean.
 
 ## Resume Prompt
 

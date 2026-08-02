@@ -4,7 +4,7 @@ import type {
   HybridClusterBudgetResult,
   MismatchClusterExposure,
 } from "@/lib/mismatch-risk";
-import { normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
+import { getMismatchFatalBudgetFraction, normalizeGlobalRiskConfig, type GlobalRiskConfig } from "@/lib/risk-settings";
 import type {
   LiveOpportunity,
   MismatchRiskEstimate,
@@ -160,6 +160,7 @@ export function recheckMismatchRiskCandidate(input: MismatchRiskPolicyInput): Mi
         pairSize: economics.pairSize,
         totalCostUsd: economics.totalCostUsd,
         pFatalUpper95: economics.pFatalUpper95,
+        safetyFractionOfBreakEven: getMismatchFatalBudgetFraction(input.globalRiskConfig),
       })
     : null;
 

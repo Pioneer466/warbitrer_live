@@ -70,7 +70,7 @@ Disabling the live-entry gate does not disable reconciliation, hedge, unwind, or
 
 Postgres is mandatory. Runtime processes verify the exact migration history and never apply DDL. Operators apply checksummed, forward-only migrations explicitly with `npm run db:migrate` and verify them with `npm run db:status`.
 
-The current schema history is V1-V9:
+The current schema history is V1-V10:
 
 1. legacy schema baseline
 2. order-truth revisions and immutable fill identity
@@ -81,6 +81,7 @@ The current schema history is V1-V9:
 7. versioned accounting facts, proofs, quarantine, and realized-P&L ledger
 8. accounting evidence integrity, exact terminal projections, mandatory fill ingestion, and parent/child identity guards
 9. exact repair of inactive numeric legacy slot breakers with append-only recovery and acknowledgement evidence
+10. immutable entry-execution probes, versioned mismatch-calibration artifacts with audited activation, and calibration-revision binding in entry admission
 
 See `docs/codex/architecture.md` for boundaries and `docs/codex/session-handoff.md` for the current rollout and verification state.
 

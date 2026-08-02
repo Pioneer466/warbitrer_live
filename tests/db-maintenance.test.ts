@@ -19,6 +19,7 @@ describe("database maintenance config", () => {
     expect(readDatabaseMaintenanceConfig()).toEqual(DEFAULT_DATABASE_MAINTENANCE_CONFIG);
     expect(DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.oracleSamplesMs).toBe(ORACLE_SAMPLE_RETENTION_MS);
     expect(DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.slotResolutionsMs).toBe(SLOT_RESOLUTION_RETENTION_MS);
+    expect(DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.entryExecutionProbesMs).toBe(45 * 24 * 60 * 60_000);
   });
 
   it("allows disabling specific retention windows with zero", () => {

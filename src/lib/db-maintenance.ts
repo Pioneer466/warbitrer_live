@@ -11,6 +11,7 @@ export type DatabaseMaintenanceConfig = {
     snapshotsMs: number | null;
     oracleSamplesMs: number | null;
     slotResolutionsMs: number | null;
+    entryExecutionProbesMs: number | null;
     pnlSnapshotsMs: number | null;
     runEventsMs: number | null;
     fillsMs: number | null;
@@ -27,6 +28,7 @@ export const DEFAULT_DATABASE_MAINTENANCE_CONFIG: DatabaseMaintenanceConfig = {
     snapshotsMs: 72 * HOUR_MS,
     oracleSamplesMs: ORACLE_SAMPLE_RETENTION_MS,
     slotResolutionsMs: SLOT_RESOLUTION_RETENTION_MS,
+    entryExecutionProbesMs: 45 * DAY_MS,
     pnlSnapshotsMs: 30 * DAY_MS,
     runEventsMs: 30 * DAY_MS,
     fillsMs: 180 * DAY_MS,
@@ -55,6 +57,7 @@ export function readDatabaseMaintenanceConfig(env = readEnv()): DatabaseMaintena
       ),
       oracleSamplesMs: DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.oracleSamplesMs,
       slotResolutionsMs: DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.slotResolutionsMs,
+      entryExecutionProbesMs: DEFAULT_DATABASE_MAINTENANCE_CONFIG.retention.entryExecutionProbesMs,
       pnlSnapshotsMs: parseWindowEnv(
         env.DB_RETENTION_PNL_DAYS,
         "DB_RETENTION_PNL_DAYS",

@@ -2153,6 +2153,8 @@ function buildLiveAdmission(id: string): LiveEntryAdmissionInput {
     plannedAttempt: attempt,
     expectedStrategyRevision: 0,
     expectedGlobalRiskRevision: 0,
+    expectedMismatchCalibrationArtifactId: null,
+    expectedMismatchCalibrationRevision: 0,
     policyEvaluatedAt: now,
     cutoffAt: now + 60_000,
     latestSubmissionStartAt: now + 30_000,

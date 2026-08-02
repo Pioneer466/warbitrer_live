@@ -80,6 +80,67 @@ describePostgres("Postgres migrations", () => {
     });
   }, 30_000);
 
+  it("upgrades an existing V9 entry admission to the V10 calibration binding", async () => {
+    await withIsolatedSchema(async (pool) => {
+      const v9Migrations = DATABASE_MIGRATIONS.filter((migration) => migration.version <= 9);
+      const v9Status = await runDatabaseMigrations(pool, v9Migrations);
+      const v9History = await pool.query<{ version: number }>("SELECT version FROM schema_migrations ORDER BY version");
+
+      expect(v9Status).toMatchObject({ ready: true, currentVersion: 9, requiredVersion: 9 });
+      expect(v9History.rows.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+      await pool.query(`
+        INSERT INTO order_intents (
+          id, asset, shadow, slot_key, slot_start_ts, slot_end_ts, combination, status,
+          created_at, updated_at, primary_venue, hedge_venue, gross_cost,
+          target_notional_usd, max_slippage_bps, legs_json
+        ) VALUES (
+          'v9-existing-admission-intent', 'btc', true, 'btc:v9-existing-admission',
+          1, 901000, 'POLY_UP_KALSHI_NO', 'pending', 1, 1,
+          'polymarket', 'kalshi', 0.9, 9, 30, '[]'::jsonb
+        )
+      `);
+      await pool.query(`
+        INSERT INTO entry_admissions (
+          id, intent_id, mode, asset, slot_key, combination, gross_cost,
+          strategy_revision, global_risk_revision, policy_evaluated_at,
+          evidence_json, authorized_at
+        ) VALUES (
+          'v9-existing-admission', 'v9-existing-admission-intent', 'shadow', 'btc',
+          'btc:v9-existing-admission', 'POLY_UP_KALSHI_NO', 0.9,
+          0, 0, 1, '{"source":"v9-integration"}'::jsonb, 1
+        )
+      `);
+
+      const v10Status = await migratePostgresDatabase(pool);
+      const migratedAdmission = await pool.query<{
+        id: string;
+        mismatch_calibration_artifact_id: string | null;
+        mismatch_calibration_revision: number;
+      }>(`
+        SELECT
+          id,
+          mismatch_calibration_artifact_id,
+          mismatch_calibration_revision::integer AS mismatch_calibration_revision
+        FROM entry_admissions
+        WHERE id = 'v9-existing-admission'
+      `);
+      const latestMigration = await pool.query<{ version: number; name: string }>(
+        "SELECT version, name FROM schema_migrations ORDER BY version DESC LIMIT 1",
+      );
+
+      expect(v10Status).toMatchObject({ ready: true, currentVersion: 10, requiredVersion: 10 });
+      expect(migratedAdmission.rows).toEqual([
+        {
+          id: "v9-existing-admission",
+          mismatch_calibration_artifact_id: null,
+          mismatch_calibration_revision: 0,
+        },
+      ]);
+      expect(latestMigration.rows).toEqual([{ version: 10, name: "mismatch_calibration_evidence" }]);
+    });
+  }, 30_000);
+
   it("serializes concurrent runners and applies each migration once", async () => {
     await withIsolatedSchema(async (pool, schema) => {
       const secondPool = createScopedPool(schema);

@@ -14,6 +14,7 @@ export function buildMismatchRiskAudit(input: {
   policy: MismatchRiskPolicyCheck;
   evaluatedAt: number;
   source: "scan" | "execution";
+  safetyFractionOfBreakEven?: number;
 }): MismatchRiskAudit {
   if (input.policy.mode !== "block_only") {
     throw new Error("Mismatch counterfactual audit requires block_only policy");
@@ -31,6 +32,7 @@ export function buildMismatchRiskAudit(input: {
           pairSize,
           totalCostUsd,
           pFatalUpper95: input.estimate.pFatalUpper95,
+          safetyFractionOfBreakEven: input.safetyFractionOfBreakEven,
         })
       : null;
   const economicGate = input.policy.economicGate ?? referenceGate;

@@ -29,4 +29,12 @@ describe("global mismatch-risk settings", () => {
     expect(() => normalizeGlobalRiskConfig({ balanceMaxAgeMs: 999 })).toThrow();
     expect(() => normalizeGlobalRiskConfig({ oracleMaxAgeMs: 30_001 })).toThrow();
   });
+
+  it("bounds the configurable mismatch probability budget fraction", () => {
+    expect(normalizeGlobalRiskConfig({ mismatchFatalBudgetFractionOfAlignedMargin: 0.75 })).toMatchObject({
+      mismatchFatalBudgetFractionOfAlignedMargin: 0.75,
+    });
+    expect(() => normalizeGlobalRiskConfig({ mismatchFatalBudgetFractionOfAlignedMargin: 0 })).toThrow();
+    expect(() => normalizeGlobalRiskConfig({ mismatchFatalBudgetFractionOfAlignedMargin: 1.01 })).toThrow();
+  });
 });

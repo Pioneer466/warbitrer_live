@@ -1,0 +1,1560 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-28T16:53:29.128Z",
+  "inputs": {
+    "databaseWindow": "reports/mismatch/db-resolutions-20260725T1630Z-20260728T1630Z.csv",
+    "retained": "reports/mismatch/db-resolutions-retained.csv",
+    "external": "reports/mismatch/official-gap-20260728T0500Z-1630Z.json",
+    "model": "reports/mismatch/model-horizons-20260725T1630Z-20260728T1630Z.csv"
+  },
+  "recent72h": {
+    "startUtc": "2026-07-25T16:30:00.000Z",
+    "endUtc": "2026-07-28T16:30:00.000Z",
+    "expectedSlotsPerAsset": 288,
+    "databaseRows": 1701,
+    "externallyRecoveredRows": 315,
+    "overlapValidationRows": 7,
+    "overlapConflicts": [],
+    "statsByAsset": [
+      {
+        "asset": "btc",
+        "slots": 288,
+        "mismatches": 17,
+        "mismatchRate": 0.059027777777777776,
+        "mismatchRateWilson95": {
+          "low": 0.03717718258774179,
+          "high": 0.09248725567818573
+        },
+        "polyDownKalshiYes": 10,
+        "polyUpKalshiNo": 7,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "eth",
+        "slots": 288,
+        "mismatches": 10,
+        "mismatchRate": 0.034722222222222224,
+        "mismatchRateWilson95": {
+          "low": 0.018967813439117687,
+          "high": 0.06272537339264836
+        },
+        "polyDownKalshiYes": 5,
+        "polyUpKalshiNo": 5,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "sol",
+        "slots": 288,
+        "mismatches": 22,
+        "mismatchRate": 0.0763888888888889,
+        "mismatchRateWilson95": {
+          "low": 0.05098455538305558,
+          "high": 0.11294506247870156
+        },
+        "polyDownKalshiYes": 10,
+        "polyUpKalshiNo": 12,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "xrp",
+        "slots": 288,
+        "mismatches": 23,
+        "mismatchRate": 0.0798611111111111,
+        "mismatchRateWilson95": {
+          "low": 0.05380285614968669,
+          "high": 0.11697979763123637
+        },
+        "polyDownKalshiYes": 13,
+        "polyUpKalshiNo": 10,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "doge",
+        "slots": 288,
+        "mismatches": 31,
+        "mismatchRate": 0.1076388888888889,
+        "mismatchRateWilson95": {
+          "low": 0.07687299870491648,
+          "high": 0.148733942429334
+        },
+        "polyDownKalshiYes": 13,
+        "polyUpKalshiNo": 18,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "bnb",
+        "slots": 288,
+        "mismatches": 24,
+        "mismatchRate": 0.08333333333333333,
+        "mismatchRateWilson95": {
+          "low": 0.056637514760987724,
+          "high": 0.12099817493910126
+        },
+        "polyDownKalshiYes": 11,
+        "polyUpKalshiNo": 13,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "hype",
+        "slots": 288,
+        "mismatches": 19,
+        "mismatchRate": 0.06597222222222222,
+        "mismatchRateWilson95": {
+          "low": 0.04263821199081147,
+          "high": 0.10073229811344789
+        },
+        "polyDownKalshiYes": 11,
+        "polyUpKalshiNo": 8,
+        "benchmarkConflicts": 0
+      }
+    ],
+    "clusters": {
+      "completeSlots": 288,
+      "slotsWithAnyMismatch": 100,
+      "distribution": {
+        "0": 188,
+        "1": 62,
+        "2": 31,
+        "3": 6,
+        "4": 1
+      },
+      "independentExpectedDistribution": {
+        "0": 169.85408690502675,
+        "1": 93.48169347082182,
+        "2": 21.698499567602187,
+        "3": 2.751028003937786,
+        "4": 0.20545594579273893,
+        "5": 0.009019172861968985,
+        "6": 0.0002148030175988671,
+        "7": 0.000002130939148819971
+      },
+      "mismatchCountMean": 0.5069444444444444,
+      "mismatchCountVariance": 0.6318962191358047,
+      "independentVariance": 0.4671585648148148,
+      "overdispersionRatio": 1.3526375554867396,
+      "maximumSimultaneous": 4,
+      "maximumSlots": [
+        {
+          "slotStartUtc": "2026-07-26T01:30:00.000Z",
+          "assets": [
+            "bnb",
+            "doge",
+            "hype",
+            "xrp"
+          ]
+        }
+      ]
+    },
+    "pairwiseMismatchCorrelation": [
+      {
+        "pair": "btc/doge",
+        "slots": 288,
+        "phi": 0.19823781065411697
+      },
+      {
+        "pair": "btc/sol",
+        "slots": 288,
+        "phi": 0.14983674573331013
+      },
+      {
+        "pair": "doge/hype",
+        "slots": 288,
+        "phi": 0.1333611128989981
+      },
+      {
+        "pair": "sol/doge",
+        "slots": 288,
+        "phi": 0.11101192620892039
+      },
+      {
+        "pair": "sol/bnb",
+        "slots": 288,
+        "phi": 0.10247663276194187
+      },
+      {
+        "pair": "xrp/bnb",
+        "slots": 288,
+        "phi": 0.09655100775736779
+      },
+      {
+        "pair": "eth/sol",
+        "slots": 288,
+        "phi": 0.08826234082572867
+      },
+      {
+        "pair": "xrp/hype",
+        "slots": 288,
+        "phi": 0.07650469349826249
+      },
+      {
+        "pair": "sol/hype",
+        "slots": 288,
+        "phi": -0.07643128875808279
+      },
+      {
+        "pair": "sol/xrp",
+        "slots": 288,
+        "phi": 0.05994376443811394
+      },
+      {
+        "pair": "doge/bnb",
+        "slots": 288,
+        "phi": 0.057425550902134755
+      },
+      {
+        "pair": "eth/doge",
+        "slots": 288,
+        "phi": 0.056521259387865896
+      },
+      {
+        "pair": "btc/eth",
+        "slots": 288,
+        "phi": 0.032972395705496156
+      },
+      {
+        "pair": "btc/bnb",
+        "slots": 288,
+        "phi": 0.031095145357476282
+      },
+      {
+        "pair": "eth/hype",
+        "slots": 288,
+        "phi": 0.025998646394760176
+      },
+      {
+        "pair": "xrp/doge",
+        "slots": 288,
+        "phi": 0.021669190306929383
+      },
+      {
+        "pair": "bnb/hype",
+        "slots": 288,
+        "phi": 0.021087287602726115
+      },
+      {
+        "pair": "btc/xrp",
+        "slots": 288,
+        "phi": -0.019437538366682626
+      },
+      {
+        "pair": "eth/xrp",
+        "slots": 288,
+        "phi": 0.014090251358231576
+      },
+      {
+        "pair": "eth/bnb",
+        "slots": 288,
+        "phi": 0.011436977194661807
+      },
+      {
+        "pair": "btc/hype",
+        "slots": 288,
+        "phi": -0.0072128350052184965
+      }
+    ]
+  },
+  "commonRetainedWindow": {
+    "startUtc": "2026-07-23T14:15:00.000Z",
+    "endUtc": "2026-07-28T16:30:00.000Z",
+    "slotsPerAsset": 489,
+    "statsByAsset": [
+      {
+        "asset": "btc",
+        "slots": 489,
+        "mismatches": 30,
+        "mismatchRate": 0.06134969325153374,
+        "mismatchRateWilson95": {
+          "low": 0.043308467718280515,
+          "high": 0.08622904922166705
+        },
+        "polyDownKalshiYes": 17,
+        "polyUpKalshiNo": 13,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "eth",
+        "slots": 489,
+        "mismatches": 30,
+        "mismatchRate": 0.06134969325153374,
+        "mismatchRateWilson95": {
+          "low": 0.043308467718280515,
+          "high": 0.08622904922166705
+        },
+        "polyDownKalshiYes": 16,
+        "polyUpKalshiNo": 14,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "sol",
+        "slots": 489,
+        "mismatches": 32,
+        "mismatchRate": 0.065439672801636,
+        "mismatchRateWilson95": {
+          "low": 0.046732412997532904,
+          "high": 0.09092130425066687
+        },
+        "polyDownKalshiYes": 15,
+        "polyUpKalshiNo": 17,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "xrp",
+        "slots": 489,
+        "mismatches": 45,
+        "mismatchRate": 0.09202453987730061,
+        "mismatchRateWilson95": {
+          "low": 0.06948699292476815,
+          "high": 0.12092202632707116
+        },
+        "polyDownKalshiYes": 25,
+        "polyUpKalshiNo": 20,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "doge",
+        "slots": 489,
+        "mismatches": 48,
+        "mismatchRate": 0.09815950920245399,
+        "mismatchRateWilson95": {
+          "low": 0.07483767168053912,
+          "high": 0.12774564803367855
+        },
+        "polyDownKalshiYes": 21,
+        "polyUpKalshiNo": 27,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "bnb",
+        "slots": 489,
+        "mismatches": 45,
+        "mismatchRate": 0.09202453987730061,
+        "mismatchRateWilson95": {
+          "low": 0.06948699292476815,
+          "high": 0.12092202632707116
+        },
+        "polyDownKalshiYes": 19,
+        "polyUpKalshiNo": 26,
+        "benchmarkConflicts": 0
+      },
+      {
+        "asset": "hype",
+        "slots": 489,
+        "mismatches": 30,
+        "mismatchRate": 0.06134969325153374,
+        "mismatchRateWilson95": {
+          "low": 0.043308467718280515,
+          "high": 0.08622904922166705
+        },
+        "polyDownKalshiYes": 18,
+        "polyUpKalshiNo": 12,
+        "benchmarkConflicts": 0
+      }
+    ],
+    "clusters": {
+      "completeSlots": 489,
+      "slotsWithAnyMismatch": 178,
+      "distribution": {
+        "0": 311,
+        "1": 115,
+        "2": 48,
+        "3": 11,
+        "4": 4
+      },
+      "independentExpectedDistribution": {
+        "0": 280.9995546727212,
+        "1": 162.31842424348238,
+        "2": 39.84092956947502,
+        "3": 5.386504310521539,
+        "4": 0.43329190394779116,
+        "5": 0.02074187114159214,
+        "6": 0.0005472864694724745,
+        "7": 0.000006142241000415904
+      },
+      "mismatchCountMean": 0.5316973415132924,
+      "mismatchCountVariance": 0.6784431313017258,
+      "independentVariance": 0.48955131502461097,
+      "overdispersionRatio": 1.3858468162170472,
+      "maximumSimultaneous": 4,
+      "maximumSlots": [
+        {
+          "slotStartUtc": "2026-07-23T17:00:00.000Z",
+          "assets": [
+            "bnb",
+            "btc",
+            "doge",
+            "eth"
+          ]
+        },
+        {
+          "slotStartUtc": "2026-07-24T06:45:00.000Z",
+          "assets": [
+            "bnb",
+            "hype",
+            "sol",
+            "xrp"
+          ]
+        },
+        {
+          "slotStartUtc": "2026-07-24T11:15:00.000Z",
+          "assets": [
+            "bnb",
+            "doge",
+            "eth",
+            "xrp"
+          ]
+        },
+        {
+          "slotStartUtc": "2026-07-26T01:30:00.000Z",
+          "assets": [
+            "bnb",
+            "doge",
+            "hype",
+            "xrp"
+          ]
+        }
+      ]
+    },
+    "pairwiseMismatchCorrelation": [
+      {
+        "pair": "btc/doge",
+        "slots": 489,
+        "phi": 0.20207482507363575
+      },
+      {
+        "pair": "sol/bnb",
+        "slots": 489,
+        "phi": 0.11600905339316499
+      },
+      {
+        "pair": "eth/bnb",
+        "slots": 489,
+        "phi": 0.09549716196431021
+      },
+      {
+        "pair": "btc/bnb",
+        "slots": 489,
+        "phi": 0.09549716196430989
+      },
+      {
+        "pair": "xrp/bnb",
+        "slots": 489,
+        "phi": 0.09444444444444496
+      },
+      {
+        "pair": "doge/hype",
+        "slots": 489,
+        "phi": 0.08750718511884317
+      },
+      {
+        "pair": "xrp/doge",
+        "slots": 489,
+        "phi": 0.08519153557594988
+      },
+      {
+        "pair": "sol/doge",
+        "slots": 489,
+        "phi": 0.07945736684770116
+      },
+      {
+        "pair": "btc/eth",
+        "slots": 489,
+        "phi": 0.07668845315904271
+      },
+      {
+        "pair": "btc/sol",
+        "slots": 489,
+        "phi": 0.07018742008173341
+      },
+      {
+        "pair": "xrp/hype",
+        "slots": 489,
+        "phi": 0.06601603052457021
+      },
+      {
+        "pair": "doge/bnb",
+        "slots": 489,
+        "phi": 0.061413761091566633
+      },
+      {
+        "pair": "eth/doge",
+        "slots": 489,
+        "phi": 0.05886527513014537
+      },
+      {
+        "pair": "sol/xrp",
+        "slots": 489,
+        "phi": 0.05879430088760958
+      },
+      {
+        "pair": "btc/xrp",
+        "slots": 489,
+        "phi": 0.03653489908483061
+      },
+      {
+        "pair": "eth/sol",
+        "slots": 489,
+        "phi": 0.03572793371630432
+      },
+      {
+        "pair": "sol/hype",
+        "slots": 489,
+        "phi": 0.03572793371630386
+      },
+      {
+        "pair": "eth/hype",
+        "slots": 489,
+        "phi": -0.029847494553377124
+      },
+      {
+        "pair": "btc/hype",
+        "slots": 489,
+        "phi": -0.02984749455337709
+      },
+      {
+        "pair": "bnb/hype",
+        "slots": 489,
+        "phi": 0.007053767645090998
+      },
+      {
+        "pair": "eth/xrp",
+        "slots": 489,
+        "phi": 0.007053767645090978
+      }
+    ]
+  },
+  "retainedByAsset": [
+    {
+      "asset": "btc",
+      "slots": 1111,
+      "mismatches": 68,
+      "mismatchRate": 0.0612061206120612,
+      "mismatchRateWilson95": {
+        "low": 0.04856612059480555,
+        "high": 0.07687006381891526
+      },
+      "polyDownKalshiYes": 34,
+      "polyUpKalshiNo": 34,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "eth",
+      "slots": 1110,
+      "mismatches": 67,
+      "mismatchRate": 0.06036036036036036,
+      "mismatchRateWilson95": {
+        "low": 0.04780867444450647,
+        "high": 0.07594453812367806
+      },
+      "polyDownKalshiYes": 39,
+      "polyUpKalshiNo": 28,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "sol",
+      "slots": 1111,
+      "mismatches": 78,
+      "mismatchRate": 0.0702070207020702,
+      "mismatchRateWilson95": {
+        "low": 0.056617326386858735,
+        "high": 0.08675862860299086
+      },
+      "polyDownKalshiYes": 38,
+      "polyUpKalshiNo": 40,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "xrp",
+      "slots": 1111,
+      "mismatches": 81,
+      "mismatchRate": 0.07290729072907291,
+      "mismatchRateWilson95": {
+        "low": 0.059046953829432515,
+        "high": 0.08971093233325574
+      },
+      "polyDownKalshiYes": 48,
+      "polyUpKalshiNo": 33,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "doge",
+      "slots": 1111,
+      "mismatches": 88,
+      "mismatchRate": 0.07920792079207921,
+      "mismatchRateWilson95": {
+        "low": 0.06473886938823122,
+        "high": 0.09657685617774721
+      },
+      "polyDownKalshiYes": 41,
+      "polyUpKalshiNo": 47,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "bnb",
+      "slots": 489,
+      "mismatches": 45,
+      "mismatchRate": 0.09202453987730061,
+      "mismatchRateWilson95": {
+        "low": 0.06948699292476815,
+        "high": 0.12092202632707116
+      },
+      "polyDownKalshiYes": 19,
+      "polyUpKalshiNo": 26,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "hype",
+      "slots": 489,
+      "mismatches": 30,
+      "mismatchRate": 0.06134969325153374,
+      "mismatchRateWilson95": {
+        "low": 0.043308467718280515,
+        "high": 0.08622904922166705
+      },
+      "polyDownKalshiYes": 18,
+      "polyUpKalshiNo": 12,
+      "benchmarkConflicts": 0
+    }
+  ],
+  "priorToRecentWindowByAsset": [
+    {
+      "asset": "btc",
+      "slots": 823,
+      "mismatches": 51,
+      "mismatchRate": 0.061968408262454436,
+      "mismatchRateWilson95": {
+        "low": 0.04744441948096276,
+        "high": 0.08056253722347423
+      },
+      "polyDownKalshiYes": 24,
+      "polyUpKalshiNo": 27,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "eth",
+      "slots": 822,
+      "mismatches": 57,
+      "mismatchRate": 0.06934306569343066,
+      "mismatchRateWilson95": {
+        "low": 0.053904962529538074,
+        "high": 0.08878763005230245
+      },
+      "polyDownKalshiYes": 34,
+      "polyUpKalshiNo": 23,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "sol",
+      "slots": 823,
+      "mismatches": 56,
+      "mismatchRate": 0.06804374240583232,
+      "mismatchRateWilson95": {
+        "low": 0.05276925800118327,
+        "high": 0.08733191566990509
+      },
+      "polyDownKalshiYes": 28,
+      "polyUpKalshiNo": 28,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "xrp",
+      "slots": 823,
+      "mismatches": 58,
+      "mismatchRate": 0.07047387606318348,
+      "mismatchRateWilson95": {
+        "low": 0.05491023031312436,
+        "high": 0.09002863014462453
+      },
+      "polyDownKalshiYes": 35,
+      "polyUpKalshiNo": 23,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "doge",
+      "slots": 823,
+      "mismatches": 57,
+      "mismatchRate": 0.0692588092345079,
+      "mismatchRateWilson95": {
+        "low": 0.053838994172349844,
+        "high": 0.08868102289206879
+      },
+      "polyDownKalshiYes": 28,
+      "polyUpKalshiNo": 29,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "bnb",
+      "slots": 201,
+      "mismatches": 21,
+      "mismatchRate": 0.1044776119402985,
+      "mismatchRateWilson95": {
+        "low": 0.06935538202679012,
+        "high": 0.15443456305859893
+      },
+      "polyDownKalshiYes": 8,
+      "polyUpKalshiNo": 13,
+      "benchmarkConflicts": 0
+    },
+    {
+      "asset": "hype",
+      "slots": 201,
+      "mismatches": 11,
+      "mismatchRate": 0.05472636815920398,
+      "mismatchRateWilson95": {
+        "low": 0.030829803737275743,
+        "high": 0.0953236564531937
+      },
+      "polyDownKalshiYes": 7,
+      "polyUpKalshiNo": 4,
+      "benchmarkConflicts": 0
+    }
+  ],
+  "model": {
+    "byHorizon": [
+      {
+        "asset": null,
+        "horizonSeconds": 300,
+        "resolutionRows": 1701,
+        "sampledRows": 1687,
+        "availableRows": 1628,
+        "executionUsableRows": 1289,
+        "executionUnusableReasons": {
+          "chainlink_stale": 339
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 42,
+          "chainlink_start_unavailable": 16,
+          "chainlink_stale": 1
+        },
+        "medianSampleLagMs": 5753,
+        "observedMismatchRate": 0.07063882063882064,
+        "meanPredictedMismatch": 0.16956516041342434,
+        "mismatchBrier": 0.08511859194648497,
+        "mismatchLogLoss": 0.2960896404964613,
+        "mismatchAuc": 0.7554010172706113,
+        "directionalObservedFatalRate": 0.03531941031941032,
+        "directionalMeanPredictedFatal": 0.08478258020671224,
+        "directionalBrier": 0.038985495141203995,
+        "directionalAuc": 0.7827332751962128,
+        "actualMismatchCount": 115,
+        "topDecileCount": 163,
+        "topDecileMismatchCount": 31,
+        "topDecileObservedMismatchRate": 0.1901840490797546,
+        "topDecileMeanPredictedMismatch": 0.5209833419479147,
+        "topDecileMismatchRecall": 0.26956521739130435,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 939,
+            "truePositives": 103,
+            "precision": 0.10969116080937168,
+            "recall": 0.8956521739130435
+          },
+          {
+            "threshold": 0.1,
+            "selected": 773,
+            "truePositives": 97,
+            "precision": 0.12548512289780078,
+            "recall": 0.8434782608695652
+          },
+          {
+            "threshold": 0.2,
+            "selected": 588,
+            "truePositives": 85,
+            "precision": 0.1445578231292517,
+            "recall": 0.7391304347826086
+          },
+          {
+            "threshold": 0.5,
+            "selected": 80,
+            "truePositives": 18,
+            "precision": 0.225,
+            "recall": 0.1565217391304348
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 1289,
+          "actualMismatches": 88,
+          "observedRate": 0.0682699767261443,
+          "meanPredicted": 0.16335966657775397,
+          "brier": 0.0821960045309358,
+          "logLoss": 0.2908228480363311,
+          "auc": 0.7559230943910378
+        }
+      },
+      {
+        "asset": null,
+        "horizonSeconds": 180,
+        "resolutionRows": 1701,
+        "sampledRows": 1680,
+        "availableRows": 1628,
+        "executionUsableRows": 1274,
+        "executionUnusableReasons": {
+          "chainlink_stale": 354
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 42,
+          "chainlink_start_unavailable": 9,
+          "chainlink_stale": 1
+        },
+        "medianSampleLagMs": 5583.5,
+        "observedMismatchRate": 0.07063882063882064,
+        "meanPredictedMismatch": 0.11833599874490941,
+        "mismatchBrier": 0.07346833910325962,
+        "mismatchLogLoss": 0.25599768678542145,
+        "mismatchAuc": 0.795827466306503,
+        "directionalObservedFatalRate": 0.03531941031941032,
+        "directionalMeanPredictedFatal": 0.059167999372454844,
+        "directionalBrier": 0.03578674290630583,
+        "directionalAuc": 0.8135071910081254,
+        "actualMismatchCount": 115,
+        "topDecileCount": 163,
+        "topDecileMismatchCount": 33,
+        "topDecileObservedMismatchRate": 0.20245398773006135,
+        "topDecileMeanPredictedMismatch": 0.5143542350265767,
+        "topDecileMismatchRecall": 0.28695652173913044,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 649,
+            "truePositives": 95,
+            "precision": 0.14637904468412943,
+            "recall": 0.8260869565217391
+          },
+          {
+            "threshold": 0.1,
+            "selected": 556,
+            "truePositives": 89,
+            "precision": 0.16007194244604317,
+            "recall": 0.7739130434782608
+          },
+          {
+            "threshold": 0.2,
+            "selected": 402,
+            "truePositives": 69,
+            "precision": 0.17164179104477612,
+            "recall": 0.6
+          },
+          {
+            "threshold": 0.5,
+            "selected": 60,
+            "truePositives": 16,
+            "precision": 0.26666666666666666,
+            "recall": 0.1391304347826087
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 1274,
+          "actualMismatches": 80,
+          "observedRate": 0.06279434850863422,
+          "meanPredicted": 0.11789150097552599,
+          "brier": 0.07077306308543993,
+          "logLoss": 0.25413555662435405,
+          "auc": 0.7797634003350083
+        }
+      },
+      {
+        "asset": null,
+        "horizonSeconds": 120,
+        "resolutionRows": 1701,
+        "sampledRows": 1680,
+        "availableRows": 1629,
+        "executionUsableRows": 1308,
+        "executionUnusableReasons": {
+          "chainlink_stale": 318,
+          "cf_stale": 3
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 42,
+          "chainlink_start_unavailable": 9
+        },
+        "medianSampleLagMs": 5318.5,
+        "observedMismatchRate": 0.07059545733578883,
+        "meanPredictedMismatch": 0.1027412311425759,
+        "mismatchBrier": 0.0691287707754954,
+        "mismatchLogLoss": 0.250058549950523,
+        "mismatchAuc": 0.8231577738211475,
+        "directionalObservedFatalRate": 0.035297728667894414,
+        "directionalMeanPredictedFatal": 0.051370615571287914,
+        "directionalBrier": 0.03401292091601866,
+        "directionalAuc": 0.845948899555949,
+        "actualMismatchCount": 115,
+        "topDecileCount": 163,
+        "topDecileMismatchCount": 35,
+        "topDecileObservedMismatchRate": 0.2147239263803681,
+        "topDecileMeanPredictedMismatch": 0.5105997972932372,
+        "topDecileMismatchRecall": 0.30434782608695654,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 534,
+            "truePositives": 92,
+            "precision": 0.17228464419475656,
+            "recall": 0.8
+          },
+          {
+            "threshold": 0.1,
+            "selected": 455,
+            "truePositives": 85,
+            "precision": 0.18681318681318682,
+            "recall": 0.7391304347826086
+          },
+          {
+            "threshold": 0.2,
+            "selected": 349,
+            "truePositives": 70,
+            "precision": 0.20057306590257878,
+            "recall": 0.6086956521739131
+          },
+          {
+            "threshold": 0.5,
+            "selected": 58,
+            "truePositives": 18,
+            "precision": 0.3103448275862069,
+            "recall": 0.1565217391304348
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 1308,
+          "actualMismatches": 98,
+          "observedRate": 0.07492354740061162,
+          "meanPredicted": 0.10292134236696586,
+          "brier": 0.07092739313885377,
+          "logLoss": 0.26278918426749454,
+          "auc": 0.8204503288918873
+        }
+      },
+      {
+        "asset": null,
+        "horizonSeconds": 60,
+        "resolutionRows": 1701,
+        "sampledRows": 1680,
+        "availableRows": 1625,
+        "executionUsableRows": 1249,
+        "executionUnusableReasons": {
+          "chainlink_stale": 376
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 42,
+          "chainlink_start_unavailable": 9,
+          "chainlink_stale": 2,
+          "final_minute_average_unavailable": 2
+        },
+        "medianSampleLagMs": 5167.5,
+        "observedMismatchRate": 0.07015384615384615,
+        "meanPredictedMismatch": 0.0781643529579916,
+        "mismatchBrier": 0.058035465879250785,
+        "mismatchLogLoss": 0.25809862095458247,
+        "mismatchAuc": 0.8766559847666817,
+        "directionalObservedFatalRate": 0.035076923076923075,
+        "directionalMeanPredictedFatal": 0.03908217647899573,
+        "directionalBrier": 0.029168146178582408,
+        "directionalAuc": 0.8888306144826351,
+        "actualMismatchCount": 114,
+        "topDecileCount": 163,
+        "topDecileMismatchCount": 56,
+        "topDecileObservedMismatchRate": 0.34355828220858897,
+        "topDecileMeanPredictedMismatch": 0.5455774137907335,
+        "topDecileMismatchRecall": 0.49122807017543857,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 379,
+            "truePositives": 87,
+            "precision": 0.22955145118733508,
+            "recall": 0.7631578947368421
+          },
+          {
+            "threshold": 0.1,
+            "selected": 305,
+            "truePositives": 79,
+            "precision": 0.25901639344262295,
+            "recall": 0.6929824561403509
+          },
+          {
+            "threshold": 0.2,
+            "selected": 237,
+            "truePositives": 66,
+            "precision": 0.27848101265822783,
+            "recall": 0.5789473684210527
+          },
+          {
+            "threshold": 0.5,
+            "selected": 77,
+            "truePositives": 37,
+            "precision": 0.4805194805194805,
+            "recall": 0.32456140350877194
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 1249,
+          "actualMismatches": 82,
+          "observedRate": 0.0656525220176141,
+          "meanPredicted": 0.07430182921745074,
+          "brier": 0.05715978609659504,
+          "logLoss": 0.2533453949742882,
+          "auc": 0.8739523899095032
+        }
+      },
+      {
+        "asset": null,
+        "horizonSeconds": 30,
+        "resolutionRows": 1701,
+        "sampledRows": 1680,
+        "availableRows": 1629,
+        "executionUsableRows": 1261,
+        "executionUnusableReasons": {
+          "chainlink_stale": 368
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 42,
+          "chainlink_start_unavailable": 9
+        },
+        "medianSampleLagMs": 577,
+        "observedMismatchRate": 0.07059545733578883,
+        "meanPredictedMismatch": 0.05602299721194466,
+        "mismatchBrier": 0.04158443926941935,
+        "mismatchLogLoss": 0.27521205551125977,
+        "mismatchAuc": 0.9124203090000574,
+        "directionalObservedFatalRate": 0.035297728667894414,
+        "directionalMeanPredictedFatal": 0.028011498605972317,
+        "directionalBrier": 0.02167381694912702,
+        "directionalAuc": 0.9316963853421683,
+        "actualMismatchCount": 115,
+        "topDecileCount": 163,
+        "topDecileMismatchCount": 75,
+        "topDecileObservedMismatchRate": 0.4601226993865031,
+        "topDecileMeanPredictedMismatch": 0.5044021767999014,
+        "topDecileMismatchRecall": 0.6521739130434783,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 229,
+            "truePositives": 85,
+            "precision": 0.37117903930131,
+            "recall": 0.7391304347826086
+          },
+          {
+            "threshold": 0.1,
+            "selected": 193,
+            "truePositives": 81,
+            "precision": 0.41968911917098445,
+            "recall": 0.7043478260869566
+          },
+          {
+            "threshold": 0.2,
+            "selected": 152,
+            "truePositives": 73,
+            "precision": 0.48026315789473684,
+            "recall": 0.6347826086956522
+          },
+          {
+            "threshold": 0.5,
+            "selected": 69,
+            "truePositives": 49,
+            "precision": 0.7101449275362319,
+            "recall": 0.4260869565217391
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 1261,
+          "actualMismatches": 89,
+          "observedRate": 0.07057890563045202,
+          "meanPredicted": 0.05491979570731504,
+          "brier": 0.039357525757305604,
+          "logLoss": 0.24405447429388274,
+          "auc": 0.9250201326839744
+        }
+      }
+    ],
+    "at60SecondsByAsset": [
+      {
+        "asset": "btc",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 239,
+        "executionUsableRows": 191,
+        "executionUnusableReasons": {
+          "chainlink_stale": 48
+        },
+        "unavailableReasons": {
+          "chainlink_start_unavailable": 1
+        },
+        "medianSampleLagMs": 4658.5,
+        "observedMismatchRate": 0.06276150627615062,
+        "meanPredictedMismatch": 0.06996817646407992,
+        "mismatchBrier": 0.04812186959006363,
+        "mismatchLogLoss": 0.20457850126144775,
+        "mismatchAuc": 0.8901785714285714,
+        "directionalObservedFatalRate": 0.03138075313807531,
+        "directionalMeanPredictedFatal": 0.03498408823203993,
+        "directionalBrier": 0.02352146185162838,
+        "directionalAuc": 0.9110151187904968,
+        "actualMismatchCount": 15,
+        "topDecileCount": 24,
+        "topDecileMismatchCount": 8,
+        "topDecileObservedMismatchRate": 0.3333333333333333,
+        "topDecileMeanPredictedMismatch": 0.5272397766019069,
+        "topDecileMismatchRecall": 0.5333333333333333,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 51,
+            "truePositives": 10,
+            "precision": 0.19607843137254902,
+            "recall": 0.6666666666666666
+          },
+          {
+            "threshold": 0.1,
+            "selected": 40,
+            "truePositives": 10,
+            "precision": 0.25,
+            "recall": 0.6666666666666666
+          },
+          {
+            "threshold": 0.2,
+            "selected": 29,
+            "truePositives": 8,
+            "precision": 0.27586206896551724,
+            "recall": 0.5333333333333333
+          },
+          {
+            "threshold": 0.5,
+            "selected": 8,
+            "truePositives": 6,
+            "precision": 0.75,
+            "recall": 0.4
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 191,
+          "actualMismatches": 11,
+          "observedRate": 0.05759162303664921,
+          "meanPredicted": 0.06584396058320369,
+          "brier": 0.04450913698949081,
+          "logLoss": 0.19259108696418176,
+          "auc": 0.8909090909090909
+        }
+      },
+      {
+        "asset": "eth",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 237,
+        "executionUsableRows": 177,
+        "executionUnusableReasons": {
+          "chainlink_stale": 60
+        },
+        "unavailableReasons": {
+          "chainlink_start_unavailable": 2,
+          "chainlink_stale": 1
+        },
+        "medianSampleLagMs": 4879.5,
+        "observedMismatchRate": 0.02531645569620253,
+        "meanPredictedMismatch": 0.06377332134717167,
+        "mismatchBrier": 0.03279816930535255,
+        "mismatchLogLoss": 0.11204506237842919,
+        "mismatchAuc": 0.9365079365079365,
+        "directionalObservedFatalRate": 0.012658227848101266,
+        "directionalMeanPredictedFatal": 0.03188666067358582,
+        "directionalBrier": 0.014836106974040069,
+        "directionalAuc": 0.9604700854700855,
+        "actualMismatchCount": 6,
+        "topDecileCount": 24,
+        "topDecileMismatchCount": 4,
+        "topDecileObservedMismatchRate": 0.16666666666666666,
+        "topDecileMeanPredictedMismatch": 0.4839142155031541,
+        "topDecileMismatchRecall": 0.6666666666666666,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 44,
+            "truePositives": 6,
+            "precision": 0.13636363636363635,
+            "recall": 1
+          },
+          {
+            "threshold": 0.1,
+            "selected": 39,
+            "truePositives": 5,
+            "precision": 0.1282051282051282,
+            "recall": 0.8333333333333334
+          },
+          {
+            "threshold": 0.2,
+            "selected": 32,
+            "truePositives": 5,
+            "precision": 0.15625,
+            "recall": 0.8333333333333334
+          },
+          {
+            "threshold": 0.5,
+            "selected": 8,
+            "truePositives": 1,
+            "precision": 0.125,
+            "recall": 0.16666666666666666
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 177,
+          "actualMismatches": 5,
+          "observedRate": 0.02824858757062147,
+          "meanPredicted": 0.0583914220246035,
+          "brier": 0.032049235398516195,
+          "logLoss": 0.11344412040355135,
+          "auc": 0.9418604651162791
+        }
+      },
+      {
+        "asset": "sol",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 238,
+        "executionUsableRows": 184,
+        "executionUnusableReasons": {
+          "chainlink_stale": 54
+        },
+        "unavailableReasons": {
+          "chainlink_start_unavailable": 2
+        },
+        "medianSampleLagMs": 5120,
+        "observedMismatchRate": 0.07142857142857142,
+        "meanPredictedMismatch": 0.06066828899162776,
+        "mismatchBrier": 0.056861178349610894,
+        "mismatchLogLoss": 0.21307718950718213,
+        "mismatchAuc": 0.9177535267500665,
+        "directionalObservedFatalRate": 0.03571428571428571,
+        "directionalMeanPredictedFatal": 0.030334144495813873,
+        "directionalBrier": 0.028534136714900606,
+        "directionalAuc": 0.9395104447007561,
+        "actualMismatchCount": 17,
+        "topDecileCount": 24,
+        "topDecileMismatchCount": 8,
+        "topDecileObservedMismatchRate": 0.3333333333333333,
+        "topDecileMeanPredictedMismatch": 0.5064947494557617,
+        "topDecileMismatchRecall": 0.47058823529411764,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 39,
+            "truePositives": 13,
+            "precision": 0.3333333333333333,
+            "recall": 0.7647058823529411
+          },
+          {
+            "threshold": 0.1,
+            "selected": 34,
+            "truePositives": 12,
+            "precision": 0.35294117647058826,
+            "recall": 0.7058823529411765
+          },
+          {
+            "threshold": 0.2,
+            "selected": 26,
+            "truePositives": 8,
+            "precision": 0.3076923076923077,
+            "recall": 0.47058823529411764
+          },
+          {
+            "threshold": 0.5,
+            "selected": 11,
+            "truePositives": 6,
+            "precision": 0.5454545454545454,
+            "recall": 0.35294117647058826
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 184,
+          "actualMismatches": 11,
+          "observedRate": 0.059782608695652176,
+          "meanPredicted": 0.0544921075817752,
+          "brier": 0.046823339387014815,
+          "logLoss": 0.19323555956624075,
+          "auc": 0.9253809774040987
+        }
+      },
+      {
+        "asset": "xrp",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 238,
+        "executionUsableRows": 179,
+        "executionUnusableReasons": {
+          "chainlink_stale": 59
+        },
+        "unavailableReasons": {
+          "chainlink_start_unavailable": 1,
+          "chainlink_stale": 1
+        },
+        "medianSampleLagMs": 5137.5,
+        "observedMismatchRate": 0.07142857142857142,
+        "meanPredictedMismatch": 0.0875982666534372,
+        "mismatchBrier": 0.06337305969819645,
+        "mismatchLogLoss": 0.244248239591238,
+        "mismatchAuc": 0.8903380356667554,
+        "directionalObservedFatalRate": 0.03571428571428571,
+        "directionalMeanPredictedFatal": 0.04379913332671859,
+        "directionalBrier": 0.03219039360530299,
+        "directionalAuc": 0.8603101371267461,
+        "actualMismatchCount": 17,
+        "topDecileCount": 24,
+        "topDecileMismatchCount": 9,
+        "topDecileObservedMismatchRate": 0.375,
+        "topDecileMeanPredictedMismatch": 0.5797103209421777,
+        "topDecileMismatchRecall": 0.5294117647058824,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 55,
+            "truePositives": 13,
+            "precision": 0.23636363636363636,
+            "recall": 0.7647058823529411
+          },
+          {
+            "threshold": 0.1,
+            "selected": 48,
+            "truePositives": 13,
+            "precision": 0.2708333333333333,
+            "recall": 0.7647058823529411
+          },
+          {
+            "threshold": 0.2,
+            "selected": 39,
+            "truePositives": 11,
+            "precision": 0.28205128205128205,
+            "recall": 0.6470588235294118
+          },
+          {
+            "threshold": 0.5,
+            "selected": 14,
+            "truePositives": 5,
+            "precision": 0.35714285714285715,
+            "recall": 0.29411764705882354
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 179,
+          "actualMismatches": 10,
+          "observedRate": 0.055865921787709494,
+          "meanPredicted": 0.07827038363921508,
+          "brier": 0.06827947619136633,
+          "logLoss": 0.27949231753672965,
+          "auc": 0.8378698224852071
+        }
+      },
+      {
+        "asset": "doge",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 239,
+        "executionUsableRows": 184,
+        "executionUnusableReasons": {
+          "chainlink_stale": 55
+        },
+        "unavailableReasons": {
+          "chainlink_start_unavailable": 1
+        },
+        "medianSampleLagMs": 4819.5,
+        "observedMismatchRate": 0.1087866108786611,
+        "meanPredictedMismatch": 0.0843838973363263,
+        "mismatchBrier": 0.07411650200891629,
+        "mismatchLogLoss": 0.4070011305376662,
+        "mismatchAuc": 0.8674611773203322,
+        "directionalObservedFatalRate": 0.05439330543933055,
+        "directionalMeanPredictedFatal": 0.04219194866816313,
+        "directionalBrier": 0.03719656061791528,
+        "directionalAuc": 0.875212729748128,
+        "actualMismatchCount": 26,
+        "topDecileCount": 24,
+        "topDecileMismatchCount": 13,
+        "topDecileObservedMismatchRate": 0.5416666666666666,
+        "topDecileMeanPredictedMismatch": 0.5697659487656885,
+        "topDecileMismatchRecall": 0.5,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 59,
+            "truePositives": 19,
+            "precision": 0.3220338983050847,
+            "recall": 0.7307692307692307
+          },
+          {
+            "threshold": 0.1,
+            "selected": 49,
+            "truePositives": 18,
+            "precision": 0.3673469387755102,
+            "recall": 0.6923076923076923
+          },
+          {
+            "threshold": 0.2,
+            "selected": 36,
+            "truePositives": 14,
+            "precision": 0.3888888888888889,
+            "recall": 0.5384615384615384
+          },
+          {
+            "threshold": 0.5,
+            "selected": 13,
+            "truePositives": 10,
+            "precision": 0.7692307692307693,
+            "recall": 0.38461538461538464
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 184,
+          "actualMismatches": 18,
+          "observedRate": 0.09782608695652174,
+          "meanPredicted": 0.0805868342659687,
+          "brier": 0.069783562863757,
+          "logLoss": 0.2978629995643135,
+          "auc": 0.893908969210174
+        }
+      },
+      {
+        "asset": "bnb",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 218,
+        "executionUsableRows": 165,
+        "executionUnusableReasons": {
+          "chainlink_stale": 53
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 21,
+          "chainlink_start_unavailable": 1
+        },
+        "medianSampleLagMs": 5006,
+        "observedMismatchRate": 0.09174311926605505,
+        "meanPredictedMismatch": 0.08571945779028561,
+        "mismatchBrier": 0.08096382040982554,
+        "mismatchLogLoss": 0.40005927285420867,
+        "mismatchAuc": 0.8449494949494949,
+        "directionalObservedFatalRate": 0.045871559633027525,
+        "directionalMeanPredictedFatal": 0.04285972889514283,
+        "directionalBrier": 0.04215761589211786,
+        "directionalAuc": 0.8432692307692308,
+        "actualMismatchCount": 20,
+        "topDecileCount": 22,
+        "topDecileMismatchCount": 7,
+        "topDecileObservedMismatchRate": 0.3181818181818182,
+        "topDecileMeanPredictedMismatch": 0.607857736325062,
+        "topDecileMismatchRecall": 0.35,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 55,
+            "truePositives": 15,
+            "precision": 0.2727272727272727,
+            "recall": 0.75
+          },
+          {
+            "threshold": 0.1,
+            "selected": 40,
+            "truePositives": 12,
+            "precision": 0.3,
+            "recall": 0.6
+          },
+          {
+            "threshold": 0.2,
+            "selected": 32,
+            "truePositives": 11,
+            "precision": 0.34375,
+            "recall": 0.55
+          },
+          {
+            "threshold": 0.5,
+            "selected": 14,
+            "truePositives": 5,
+            "precision": 0.35714285714285715,
+            "recall": 0.25
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 165,
+          "actualMismatches": 17,
+          "observedRate": 0.10303030303030303,
+          "meanPredicted": 0.08909117783410178,
+          "brier": 0.0913496473188298,
+          "logLoss": 0.4671299293431575,
+          "auc": 0.8350556438791733
+        }
+      },
+      {
+        "asset": "hype",
+        "horizonSeconds": 60,
+        "resolutionRows": 243,
+        "sampledRows": 240,
+        "availableRows": 216,
+        "executionUsableRows": 169,
+        "executionUnusableReasons": {
+          "chainlink_stale": 47
+        },
+        "unavailableReasons": {
+          "chainlink_unavailable": 21,
+          "final_minute_average_unavailable": 2,
+          "chainlink_start_unavailable": 1
+        },
+        "medianSampleLagMs": 8051.5,
+        "observedMismatchRate": 0.06018518518518518,
+        "meanPredictedMismatch": 0.09739985517292443,
+        "mismatchBrier": 0.05117422968304445,
+        "mismatchLogLoss": 0.2344058965735001,
+        "mismatchAuc": 0.8488063660477454,
+        "directionalObservedFatalRate": 0.03009259259259259,
+        "directionalMeanPredictedFatal": 0.04869992758646222,
+        "directionalBrier": 0.026517010816841765,
+        "directionalAuc": 0.8891132733614834,
+        "actualMismatchCount": 13,
+        "topDecileCount": 22,
+        "topDecileMismatchCount": 7,
+        "topDecileObservedMismatchRate": 0.3181818181818182,
+        "topDecileMeanPredictedMismatch": 0.5038123027102256,
+        "topDecileMismatchRecall": 0.5384615384615384,
+        "thresholdPerformance": [
+          {
+            "threshold": 0.05,
+            "selected": 76,
+            "truePositives": 11,
+            "precision": 0.14473684210526316,
+            "recall": 0.8461538461538461
+          },
+          {
+            "threshold": 0.1,
+            "selected": 55,
+            "truePositives": 9,
+            "precision": 0.16363636363636364,
+            "recall": 0.6923076923076923
+          },
+          {
+            "threshold": 0.2,
+            "selected": 43,
+            "truePositives": 9,
+            "precision": 0.20930232558139536,
+            "recall": 0.6923076923076923
+          },
+          {
+            "threshold": 0.5,
+            "selected": 9,
+            "truePositives": 4,
+            "precision": 0.4444444444444444,
+            "recall": 0.3076923076923077
+          }
+        ],
+        "executionUsablePerformance": {
+          "rows": 169,
+          "actualMismatches": 10,
+          "observedRate": 0.05917159763313609,
+          "meanPredicted": 0.09660673496341947,
+          "brier": 0.05010783990599742,
+          "logLoss": 0.24908990142355691,
+          "auc": 0.8421383647798742
+        }
+      }
+    ]
+  }
+}

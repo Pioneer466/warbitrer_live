@@ -87,6 +87,12 @@ describe("database migration status", () => {
     expect(migrationSourceChecksum(source, 9)).toBe(migration?.checksum);
   });
 
+  it("binds the mismatch calibration evidence checksum to its exact source payload", () => {
+    const source = readFileSync(new URL("../src/lib/postgres-db.ts", import.meta.url), "utf8");
+    const migration = DATABASE_MIGRATIONS.find((candidate) => candidate.version === 10);
+    expect(migrationSourceChecksum(source, 10)).toBe(migration?.checksum);
+  });
+
   it("reports an uninitialized database as pending and incompatible", async () => {
     const db = {
       query: vi.fn().mockResolvedValue(queryResult([{ table_name: null }])),

@@ -68,7 +68,13 @@ export function AssetMismatchRiskOverview({
             value={formatRiskProbability(estimate?.pFatalUpper95)}
             tone={probabilityTone(estimate?.pFatalUpper95, estimate?.maximumAllowedFatalProbability, modelState)}
           />
-          <RiskMetric label="Limite modèle" value={formatRiskProbability(estimate?.maximumAllowedFatalProbability)} />
+          <RiskMetric
+            label="maximumAllowed · limite"
+            value={formatRiskProbability(estimate?.maximumAllowedFatalProbability)}
+          />
+          <RiskMetric label="pairSize · payout" value={formatPairSize(estimate?.economicsPairSize)} />
+          <RiskMetric label="totalCost" value={formatV2Usd(estimate?.economicsTotalCostUsd)} />
+          <RiskMetric label="breakEven" value={formatRiskProbability(estimate?.breakEvenFatalProbability)} />
           <RiskMetric
             label="P&L conservateur"
             value={formatSignedUsd(estimate?.conservativePnlUsd)}
@@ -80,6 +86,12 @@ export function AssetMismatchRiskOverview({
             tone={pnlTone(estimate?.fatalPnlUsd)}
           />
         </div>
+        <MismatchLimitExplanation
+          pairSize={estimate?.economicsPairSize}
+          totalCostUsd={estimate?.economicsTotalCostUsd}
+          breakEven={estimate?.breakEvenFatalProbability}
+          maximumAllowed={estimate?.maximumAllowedFatalProbability}
+        />
         <RiskEstimateFooter estimate={estimate} />
       </Surface>
 
@@ -89,13 +101,13 @@ export function AssetMismatchRiskOverview({
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
           <div>
             <div className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.45)]">
-              Audit contre-factuel des deux combinaisons
+              Audit contrefactuel block_only des deux combinaisons
             </div>
             <div className="mt-1 text-xs text-[var(--wa-mist)]">
-              Verdict observé uniquement, sans modifier l’éligibilité live
+              Politique active : {mode}. Ces verdicts d’audit n’ont aucun effet sur son éligibilité.
             </div>
           </div>
-          <Chip tone="amber">block_only</Chip>
+          <Chip tone="amber">audit uniquement · block_only</Chip>
         </div>
         {MISMATCH_COMBINATIONS.map(({ combination, label }, index) => (
           <OpportunityAuditRow
@@ -135,12 +147,16 @@ export function GlobalRiskBudgetPanel({
         </Chip>
       </div>
       <div
-        className={`grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] ${compact ? "md:grid-cols-3" : "md:grid-cols-3 xl:grid-cols-6"}`}
+        className={`grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] ${compact ? "md:grid-cols-3" : "md:grid-cols-3 xl:grid-cols-7"}`}
       >
         <RiskMetric label="Part attendue" value={formatRiskProbability(config?.clusterExpectedFatalLossShare)} />
         <RiskMetric label="Cap attendu" value={formatV2Usd(config?.clusterExpectedFatalLossCapUsd)} />
         <RiskMetric label="Part absolue" value={formatRiskProbability(config?.clusterAbsoluteFatalLossShare)} />
         <RiskMetric label="Cap absolu" value={formatV2Usd(config?.clusterAbsoluteFatalLossCapUsd)} />
+        <RiskMetric
+          label="Fraction limite mismatch"
+          value={formatRiskProbability(config ? (config.mismatchFatalBudgetFractionOfAlignedMargin ?? 0.5) : null)}
+        />
         <RiskMetric label="Âge balance max" value={formatRiskAge(config?.balanceMaxAgeMs)} />
         <RiskMetric label="Âge oracle max" value={formatRiskAge(config?.oracleMaxAgeMs)} />
       </div>
@@ -175,13 +191,13 @@ export function OpportunityMismatchRiskDetails({ opportunity }: { opportunity: L
         <div className="flex flex-wrap gap-2">
           {audit ? (
             <Chip tone={auditDecisionTone(audit.decision)}>
-              block_only · {formatMismatchAuditDecision(audit.decision)}
+              audit contrefactuel · block_only · {formatMismatchAuditDecision(audit.decision)}
             </Chip>
           ) : null}
           {economics ? (
             <Chip tone={economicsBasisTone(economics.basis)}>{formatMismatchEconomicsBasis(economics.basis)}</Chip>
           ) : null}
-          <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
+          <Chip tone={modelStateTone(modelState)}>{formatModelState(modelState)}</Chip>
           {estimate?.available ? (
             <Chip tone={estimate.executionUsable === false ? "amber" : "emerald"}>
               {estimate.executionUsable === false ? "diagnostic" : "exec fresh"}
@@ -198,13 +214,24 @@ export function OpportunityMismatchRiskDetails({ opportunity }: { opportunity: L
         />
         <RiskMetric label="P alignée" value={formatRiskProbability(estimate?.pAligned)} />
         <RiskMetric label="P double payout" value={formatRiskProbability(estimate?.pDouble)} />
-        <RiskMetric label="P seuil rentabilité" value={formatRiskProbability(breakEven)} />
-        <RiskMetric label="P limite" value={formatRiskProbability(limit)} />
+        <RiskMetric label="breakEven" value={formatRiskProbability(breakEven)} />
+        <RiskMetric label="maximumAllowed · limite" value={formatRiskProbability(limit)} />
         <RiskMetric label="P&L conservateur" value={formatSignedUsd(conservativePnl)} tone={pnlTone(conservativePnl)} />
         <RiskMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
-        <RiskMetric label="Taille économique" value={formatPairSize(economics?.pairSize)} />
-        <RiskMetric label="Coût économique" value={formatV2Usd(economics?.totalCostUsd)} />
+        <RiskMetric label="pairSize · payout" value={formatPairSize(economics?.pairSize)} />
+        <RiskMetric label="totalCost" value={formatV2Usd(economics?.totalCostUsd)} />
       </div>
+      {audit ? (
+        <CounterfactualAuditNotice>
+          Ce verdict block_only est un audit contrefactuel ; il ne remplace pas la décision de la politique active.
+        </CounterfactualAuditNotice>
+      ) : null}
+      <MismatchLimitExplanation
+        pairSize={economics?.pairSize}
+        totalCostUsd={economics?.totalCostUsd}
+        breakEven={breakEven}
+        maximumAllowed={limit}
+      />
       {audit ? <MismatchAuditReasons audit={audit} /> : null}
       <RiskEstimateFooter estimate={estimate} />
     </div>
@@ -243,7 +270,9 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
             {audit ? (
               <>
                 <Chip tone={auditDecisionTone(audit.decision)}>
-                  {audit.source === "reconstructed" ? "approx. reconstruit · " : "block_only · "}
+                  {audit.source === "reconstructed"
+                    ? "audit contrefactuel historique · approx. reconstruit · "
+                    : "audit contrefactuel · block_only · "}
                   {formatMismatchAuditDecision(audit.decision)}
                 </Chip>
                 <Chip tone={economicsBasisTone(audit.economicsBasis)}>
@@ -251,6 +280,9 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
                 </Chip>
                 <Chip tone={audit.enforceReady ? "emerald" : "amber"}>
                   risk enforce {audit.enforceReady ? "prêt" : "non prêt"}
+                </Chip>
+                <Chip tone={modelStateTone(getAuditModelState(audit, "unavailable"))}>
+                  {formatModelState(getAuditModelState(audit, "unavailable"))}
                 </Chip>
               </>
             ) : (
@@ -270,13 +302,29 @@ export function IntentMismatchRiskDetails({ intent }: { intent: OrderIntent }) {
       <div className="grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] sm:grid-cols-4">
         <RiskMetric label="P fatal" value={formatRiskProbability(pFatal)} />
         <RiskMetric label="P fatal 95%" value={formatRiskProbability(pFatalUpper95)} />
-        <RiskMetric label="P limite" value={formatRiskProbability(audit?.maximumAllowedFatalProbability)} />
+        <RiskMetric label="breakEven" value={formatRiskProbability(audit?.breakEvenFatalProbability)} />
+        <RiskMetric
+          label="maximumAllowed · limite"
+          value={formatRiskProbability(audit?.maximumAllowedFatalProbability)}
+        />
         <RiskMetric label="P&L conservateur" value={formatSignedUsd(conservativePnl)} tone={pnlTone(conservativePnl)} />
         <RiskMetric label="Exposition fatale" value={formatV2Usd(intent.fatalLossExposureUsd)} tone="rose" />
-        <RiskMetric label="Taille économique" value={formatPairSize(audit?.pairSize)} />
-        <RiskMetric label="Coût économique" value={formatV2Usd(audit?.totalCostUsd)} />
+        <RiskMetric label="pairSize · payout" value={formatPairSize(audit?.pairSize)} />
+        <RiskMetric label="totalCost" value={formatV2Usd(audit?.totalCostUsd)} />
         <RiskMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
       </div>
+      {audit ? (
+        <CounterfactualAuditNotice>
+          Ce verdict est un audit contrefactuel ; il décrit ce que block_only aurait décidé, sans réécrire la décision
+          active enregistrée.
+        </CounterfactualAuditNotice>
+      ) : null}
+      <MismatchLimitExplanation
+        pairSize={audit?.pairSize}
+        totalCostUsd={audit?.totalCostUsd}
+        breakEven={audit?.breakEvenFatalProbability}
+        maximumAllowed={audit?.maximumAllowedFatalProbability}
+      />
       {audit ? <MismatchAuditReasons audit={audit} /> : null}
       {audit?.modelVersion || intent.mismatchModelVersion ? (
         <div className="bg-[var(--wa-bg0)] px-3 py-2 font-mono text-[9px] text-[var(--wa-dim)]">
@@ -300,6 +348,7 @@ function OpportunityAuditRow({
   const estimate = opportunity?.mismatchRiskEstimate ?? null;
   const economics = opportunity ? readOpportunityMismatchEconomics(opportunity) : null;
   const pFatalUpper95 = audit ? audit.pFatalUpper95 : estimate?.pFatalUpper95;
+  const breakEven = audit ? audit.breakEvenFatalProbability : estimate?.breakEvenFatalProbability;
   const limit = audit ? audit.maximumAllowedFatalProbability : estimate?.maximumAllowedFatalProbability;
   const conservativePnl = audit ? audit.conservativePnlUsd : estimate?.conservativePnlUsd;
   const fatalPnl = audit ? audit.fatalPnlUsd : estimate?.fatalPnlUsd;
@@ -312,7 +361,9 @@ function OpportunityAuditRow({
           <div className="font-mono text-xs text-[var(--wa-ivory)]">{label}</div>
           <div className="mt-2 flex flex-wrap gap-2">
             {audit ? (
-              <Chip tone={auditDecisionTone(audit.decision)}>{formatMismatchAuditDecision(audit.decision)}</Chip>
+              <Chip tone={auditDecisionTone(audit.decision)}>
+                audit block_only · {formatMismatchAuditDecision(audit.decision)}
+              </Chip>
             ) : (
               <Chip tone="mist">audit absent</Chip>
             )}
@@ -320,21 +371,25 @@ function OpportunityAuditRow({
               <Chip tone={economicsBasisTone(economics.basis)}>{formatMismatchEconomicsBasis(economics.basis)}</Chip>
             ) : null}
             {audit ? (
-              <Chip tone={audit.enforceReady ? "emerald" : "amber"}>
-                risk enforce {audit.enforceReady ? "prêt" : "non prêt"}
-              </Chip>
+              <>
+                <Chip tone={audit.enforceReady ? "emerald" : "amber"}>
+                  risk enforce {audit.enforceReady ? "prêt" : "non prêt"}
+                </Chip>
+                <Chip tone={modelStateTone(modelState)}>{formatModelState(modelState)}</Chip>
+              </>
             ) : null}
           </div>
         </div>
-        <div className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-2 sm:grid-cols-3 xl:grid-cols-6">
+        <div className="grid min-w-0 grid-cols-2 gap-x-5 gap-y-2 sm:grid-cols-3 xl:grid-cols-7">
           <AuditInlineMetric
             label="P fatal 95%"
             value={formatRiskProbability(pFatalUpper95)}
             tone={probabilityTone(pFatalUpper95, limit, modelState)}
           />
-          <AuditInlineMetric label="Limite" value={formatRiskProbability(limit)} />
-          <AuditInlineMetric label="Taille" value={formatPairSize(economics?.pairSize)} />
-          <AuditInlineMetric label="Coût" value={formatV2Usd(economics?.totalCostUsd)} />
+          <AuditInlineMetric label="maximumAllowed" value={formatRiskProbability(limit)} />
+          <AuditInlineMetric label="breakEven" value={formatRiskProbability(breakEven)} />
+          <AuditInlineMetric label="pairSize" value={formatPairSize(economics?.pairSize)} />
+          <AuditInlineMetric label="totalCost" value={formatV2Usd(economics?.totalCostUsd)} />
           <AuditInlineMetric
             label="P&L conservateur"
             value={formatSignedUsd(conservativePnl)}
@@ -343,6 +398,18 @@ function OpportunityAuditRow({
           <AuditInlineMetric label="P&L fatal" value={formatSignedUsd(fatalPnl)} tone={pnlTone(fatalPnl)} />
         </div>
       </div>
+      {audit ? (
+        <CounterfactualAuditNotice compact>
+          Audit contrefactuel uniquement : ce verdict block_only ne modifie pas la politique active.
+        </CounterfactualAuditNotice>
+      ) : null}
+      <MismatchLimitExplanation
+        pairSize={economics?.pairSize}
+        totalCostUsd={economics?.totalCostUsd}
+        breakEven={breakEven}
+        maximumAllowed={limit}
+        compact
+      />
       {audit ? (
         <MismatchAuditReasons audit={audit} compact />
       ) : (
@@ -400,6 +467,81 @@ function AuditInlineMetric({ label, value, tone = "mist" }: { label: string; val
   );
 }
 
+function CounterfactualAuditNotice({ children, compact = false }: { children: React.ReactNode; compact?: boolean }) {
+  return (
+    <div
+      className={`border-t border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.05)] text-[10px] leading-5 text-[var(--wa-amber)] ${compact ? "px-5 py-2" : "px-3 py-2"}`}
+    >
+      {children}
+    </div>
+  );
+}
+
+function MismatchLimitExplanation({
+  pairSize,
+  totalCostUsd,
+  breakEven,
+  maximumAllowed,
+  compact = false,
+}: {
+  pairSize: number | null | undefined;
+  totalCostUsd: number | null | undefined;
+  breakEven: number | null | undefined;
+  maximumAllowed: number | null | undefined;
+  compact?: boolean;
+}) {
+  const derivedBreakEven =
+    isPositiveFinite(pairSize) && isFiniteNumber(totalCostUsd) ? 1 - totalCostUsd / pairSize : null;
+  const effectiveBreakEven = isFiniteNumber(breakEven) ? breakEven : derivedBreakEven;
+  const hasLimitInputs =
+    isFiniteNumber(pairSize) ||
+    isFiniteNumber(totalCostUsd) ||
+    isFiniteNumber(effectiveBreakEven) ||
+    isFiniteNumber(maximumAllowed);
+
+  if (!hasLimitInputs) {
+    return null;
+  }
+
+  const zeroFromNonPositiveMargin =
+    isFiniteNumber(maximumAllowed) &&
+    Math.abs(maximumAllowed) <= Number.EPSILON &&
+    isFiniteNumber(effectiveBreakEven) &&
+    effectiveBreakEven <= 0;
+  const positiveLimitRoundedToZero =
+    !zeroFromNonPositiveMargin &&
+    isPositiveFinite(maximumAllowed) &&
+    formatRiskProbability(maximumAllowed) === formatRiskProbability(0);
+
+  return (
+    <div
+      className={`border-t border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] text-[10px] leading-5 ${compact ? "px-5 py-2" : "px-3 py-2"}`}
+    >
+      {zeroFromNonPositiveMargin ? (
+        <div className={V2_TONE_TEXT.rose}>
+          <span className="font-semibold">Limite 0 % expliquée :</span> marge alignée non positive ; totalCost est
+          supérieur ou égal à pairSize, donc le payout aligné ne couvre pas le coût.
+        </div>
+      ) : null}
+      {positiveLimitRoundedToZero ? (
+        <div className={V2_TONE_TEXT.amber}>
+          <span className="font-semibold">Limite 0,00 % par arrondi :</span> la limite calculée est strictement
+          positive, mais l’affichage à deux décimales l’arrondit à zéro ; ce n’est pas une limite mathématiquement
+          nulle.
+        </div>
+      ) : null}
+      <div
+        className={
+          zeroFromNonPositiveMargin || positiveLimitRoundedToZero ? `mt-1 ${V2_TONE_TEXT.mist}` : V2_TONE_TEXT.mist
+        }
+      >
+        Calcul observé : breakEven = 1 − totalCost / pairSize ; maximumAllowed = fraction de sécurité × max(0,
+        breakEven).
+      </div>
+    </div>
+  );
+}
+
 function RiskPanelHeader({
   title,
   mode,
@@ -415,11 +557,11 @@ function RiskPanelHeader({
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--wa-gold-border)] px-5 py-4">
       <div>
         <div className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.45)]">{title}</div>
-        <div className="mt-1 font-mono text-[10px] text-[var(--wa-dim)]">guard {mode}</div>
+        <div className="mt-1 font-mono text-[10px] text-[var(--wa-dim)]">Politique active : {mode}</div>
       </div>
       <div className="flex flex-wrap gap-2">
-        <Chip tone={modeTone(mode)}>{mode}</Chip>
-        <Chip tone={modelStateTone(modelState)}>{modelState}</Chip>
+        <Chip tone={modeTone(mode)}>active · {mode}</Chip>
+        <Chip tone={modelStateTone(modelState)}>{formatModelState(modelState)}</Chip>
         {modelState !== "unavailable" ? (
           <Chip tone={executionUsable === false ? "amber" : "emerald"}>
             {executionUsable === false ? "diagnostic" : "exec fresh"}
@@ -447,6 +589,11 @@ function RiskEstimateFooter({ estimate }: { estimate: MismatchRiskEstimate | nul
           {formatRiskReason(estimate.reason)}
         </div>
       ) : null}
+      {modelState === "uncalibrated" ? (
+        <div className={`mt-2 text-[10px] ${V2_TONE_TEXT.amber}`}>
+          Modèle non calibré : le statut risk enforce reste non prêt.
+        </div>
+      ) : null}
       {estimate?.executionUsable === false && estimate.executionReason ? (
         <div className={`mt-2 text-[10px] ${V2_TONE_TEXT.amber}`}>
           Diagnostic disponible, exécution stricte bloquée : {formatRiskReason(estimate.executionReason)}
@@ -467,6 +614,14 @@ function RiskMetric({ label, value, tone = "mist" }: { label: string; value: str
 
 function modelStateTone(state: MismatchModelDisplayState): V2Tone {
   return state === "calibrated" ? "emerald" : state === "uncalibrated" ? "amber" : "rose";
+}
+
+function formatModelState(state: MismatchModelDisplayState) {
+  return state === "calibrated"
+    ? "modèle calibré"
+    : state === "uncalibrated"
+      ? "modèle non calibré"
+      : "modèle indisponible";
 }
 
 function modeTone(mode: MismatchRiskMode): V2Tone {
@@ -517,6 +672,9 @@ function getAuditModelState(
   if (audit.modelVersion.toLowerCase().includes("uncalibrated")) {
     return "uncalibrated";
   }
+  if (audit.modelVersion.toLowerCase().includes("unknown")) {
+    return "unavailable";
+  }
   return audit.estimateAvailable ? "calibrated" : "unavailable";
 }
 
@@ -559,6 +717,14 @@ function formatPairSize(value: number | null | undefined) {
     return "--";
   }
   return Number.isInteger(value) ? String(value) : value.toFixed(4);
+}
+
+function isFiniteNumber(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isPositiveFinite(value: number | null | undefined): value is number {
+  return isFiniteNumber(value) && value > 0;
 }
 
 function formatAuditSource(source: MismatchRiskAudit["source"]) {

@@ -40,7 +40,7 @@ docs/codex/
 - Next.js operator cockpit and long-running TypeScript workers.
 - Postgres is mandatory; Docker is not used.
 - Production uses per-asset `systemd` workers plus reconciler and notifier services.
-- Database changes are checksummed forward-only migrations V1-V9; runtime services verify schema compatibility and never apply DDL.
+- Database changes are checksummed forward-only migrations V1-V10; runtime services verify schema compatibility and never apply DDL.
 - Real execution is fail-closed behind effective live settings, `LIVE_EXECUTION_ALLOWED=true`, and Polygon mainnet receipt access for exact Polymarket accounting.
 - Production application access requires Basic Auth; mutation routes authenticate independently and reject cross-site browser requests. Caddy remains a separate external defense.
 - The global code and trading-safety review is complete locally; its final repository score and evidence are recorded in `docs/reviews/global-2026-07/iteration-07-final.md`. No deployment is implied by review or test work, and live trading stays disabled until the reviewed commit, feeds, reconciled venue truth, and operational state are verified.

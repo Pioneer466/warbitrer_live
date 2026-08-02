@@ -109,16 +109,18 @@ Every process has its own bounded Postgres pool. Schema changes are checksummed,
 
 The migration sequence is:
 
-| Version | Name                                | Contract                                                         |
-| ------- | ----------------------------------- | ---------------------------------------------------------------- |
-| V1      | `legacy_schema_baseline`            | Additive baseline and catalog seeds                              |
-| V2      | `order_truth_revision`              | Monotone revisions and order-scoped fill identity                |
-| V3      | `configuration_revision_audit`      | CAS configuration writes and append-only audit                   |
-| V4      | `entry_admission`                   | Durable admission evidence and live/shadow reservations          |
-| V5      | `circuit_breaker_incidents`         | Multi-cause append-only incidents and scope coordination         |
-| V6      | `order_attempt_submission_deadline` | Submission capabilities, deadlines, and stage/parent guards      |
-| V7      | `accounting_ledger`                 | Immutable facts, versioned proofs, quarantine, and P&L delta     |
-| V8      | `accounting_evidence_hardening`     | Finality, exact parent projections, and mandatory fill ingestion |
+| Version | Name                                  | Contract                                                                         |
+| ------- | ------------------------------------- | -------------------------------------------------------------------------------- |
+| V1      | `legacy_schema_baseline`              | Additive baseline and catalog seeds                                              |
+| V2      | `order_truth_revision`                | Monotone revisions and order-scoped fill identity                                |
+| V3      | `configuration_revision_audit`        | CAS configuration writes and append-only audit                                   |
+| V4      | `entry_admission`                     | Durable admission evidence and live/shadow reservations                          |
+| V5      | `circuit_breaker_incidents`           | Multi-cause append-only incidents and scope coordination                         |
+| V6      | `order_attempt_submission_deadline`   | Submission capabilities, deadlines, and stage/parent guards                      |
+| V7      | `accounting_ledger`                   | Immutable facts, versioned proofs, quarantine, and P&L delta                     |
+| V8      | `accounting_evidence_hardening`       | Finality, exact parent projections, and mandatory fill ingestion                 |
+| V9      | `inactive_legacy_slot_breaker_repair` | Audited repair of inactive numeric legacy slot breakers                          |
+| V10     | `mismatch_calibration_evidence`       | Immutable probes, audited calibration activation, and admission revision binding |
 
 Applied migration source is immutable. Any schema change requires a new version.
 
@@ -137,7 +139,7 @@ Applied migration source is immutable. Any schema change requires a new version.
 11. The reconciler refreshes orders, fills, positions, resolutions, incidents, and financial state from venue evidence.
 12. APIs read Postgres projections for the operator UI.
 
-Shadow execution uses a separate per-asset/slot advisory lock, while shadow admission uses a durable per-asset reservation. It never consumes the global live reservation or submits a venue order.
+Shadow execution uses a separate per-asset/slot advisory lock, while shadow admission uses a durable per-asset reservation. It never consumes the global live reservation or submits a venue order. Candidate admission now follows a REST paired preflight: complete books and authoritative ticks determine an executable quote first, mismatch risk is recomputed on worst-fill economics second, and only then may the shadow intent be admitted. Diagnostic probes at 55, 45, 35, 25, 15, and 5 seconds remain observation-only.
 
 ## Core invariants
 

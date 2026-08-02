@@ -44,6 +44,7 @@
     "backtest:export-command": "node --import tsx ./scripts/backtest-export-command.ts",
     "backtest:import": "node --import tsx ./scripts/backtest-import.ts",
     "backtest:strategies": "node --import tsx ./scripts/backtest-strategies.ts",
+    "mismatch:calibrate": "node --import tsx ./scripts/calibrate-mismatch-risk.ts",
     "worker": "tsx src/worker/index.ts",
     "worker:dev": "tsx watch src/worker/index.ts",
     "dev:all": "concurrently -n web,worker -c cyan,magenta \"npm run dev\" \"npm run worker:dev\""

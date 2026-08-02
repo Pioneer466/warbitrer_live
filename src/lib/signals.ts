@@ -34,6 +34,7 @@ type SignalContext = {
   riskBudget?: {
     remainingExpectedFatalLossUsd: number;
     remainingAbsoluteFatalLossUsd: number;
+    fatalProbabilityBudgetFractionOfAlignedMargin?: number;
   } | null;
 };
 
@@ -290,7 +291,7 @@ function buildSignal({
         minProjectedNetReturn: settings.minProjectedNetReturn,
         minConservativeNetProfitUsd: settings.minWorstCaseProfitUsd,
         fatalMismatchProbabilityUpper: sizingFatalProbability,
-        maxFatalProbabilityShareOfBreakEven: 0.5,
+        maxFatalProbabilityShareOfBreakEven: riskBudget?.fatalProbabilityBudgetFractionOfAlignedMargin ?? 0.5,
         maxProbabilityWeightedFatalLossUsd: enforceMismatchRisk
           ? (riskBudget?.remainingExpectedFatalLossUsd ?? 0)
           : null,
@@ -444,17 +445,11 @@ function buildSignal({
       `Modèle mismatch indisponible (${mismatchRiskEstimate?.modelVersion.toLowerCase().includes("uncalibrated") ? "non calibré" : (mismatchRiskEstimate?.reason ?? "non initialisé")})`,
     );
   }
-  if (
-    settings.mismatchRiskMode !== "shadow" &&
-    usableMismatchRisk &&
-    mismatchRiskEstimate.maximumAllowedFatalProbability !== null &&
-    (mismatchRiskEstimate.pFatalUpper95 ?? 1) >
-      mismatchRiskEstimate.maximumAllowedFatalProbability + ORDER_SIZE_TOLERANCE
-  ) {
-    reasons.push(
-      `Risque mismatch non économique (${((mismatchRiskEstimate.pFatalUpper95 ?? 0) * 100).toFixed(2)}% > ${(mismatchRiskEstimate.maximumAllowedFatalProbability * 100).toFixed(2)}%)`,
-    );
-  }
+  // The estimate is produced from the first-pass candidate economics. Do not gate on its
+  // embedded limit here: sizing can change the executable pair cost, and the configured
+  // global safety fraction may differ from the runtime estimator default. The engine
+  // rescales the estimate against the final candidate and applies the single authoritative
+  // mismatch policy immediately after this sizing pass.
   if (
     settings.mismatchRiskMode === "enforce" &&
     useMultiLevelSizing &&
