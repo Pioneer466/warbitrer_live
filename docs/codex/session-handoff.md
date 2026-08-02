@@ -3,16 +3,19 @@
 ## Current State
 
 - Date: 2026-08-02, Europe/Paris
-- Branch: `review/global-hardening-2026-07-19`
-- Base before the current dirty review set: `e5b637f`
+- Production branch: `main`
+- Production runtime commit: `27f121aef0c06c3dba45f880a8ebbbec233f1ed5`
+- Local review branch: `review/global-hardening-2026-07-19`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: production remains on the stable V9 shadow rollout; the local V10 mismatch-efficiency work described below is not committed, pushed, migrated, or deployed
-- Live authorization: keep `LIVE_EXECUTION_ALLOWED=false`; BNB/HYPE must start with `enableTrading=true` and `shadowMode=true`
+- Deployment status: V10 mismatch-efficiency hardening is committed, pushed to `main`, migrated, and deployed; all seven assets are stable in shadow mode
+- Live authorization: `LIVE_EXECUTION_ALLOWED=false`; every asset has `enableTrading=true` and `shadowMode=true`
 
-The global hardening review is committed and pushed. The rollout keeps real execution disabled and must complete the canonical preflight, backup, migration, build, and stability sequence before the new runtime is considered deployed.
+The global hardening review and V10 mismatch-efficiency work are committed, pushed, and deployed. The rollout keeps
+real execution disabled. Calibration activation remains at revision 0 with no artifact, and the 39 historical
+`legacy_pending` accounting heads continue to block runtime live admission.
 
 ## Production Configuration Change - 2026-07-25
 
@@ -147,10 +150,10 @@ Artifacts are under `reports/mismatch/`, with the human report in
 SHA-256 hashes are recorded in the report. The external resolutions were intentionally not inserted into Postgres
 because the missing live ticks cannot be reconstructed and no production mutation was required for the analysis.
 
-## Mismatch Efficiency Hardening - 2026-08-02 (Local Only)
+## Mismatch Efficiency Hardening - 2026-08-02 (Deployed Shadow-Only)
 
-The current local working tree implements the approved shadow-first correction after the historical review found
-1,265 shadow intents but only 179 synthetic fills over 14 days. Of the 1,086 no-fills, 1,072 were classified as
+Commit `27f121aef0c06c3dba45f880a8ebbbec233f1ed5` implements the approved shadow-first correction after the historical
+review found 1,265 shadow intents but only 179 synthetic fills over 14 days. Of the 1,086 no-fills, 1,072 were classified as
 `price_moved_beyond_limit`: the simulator anchored a 30 bps limit to the earlier WebSocket signal even though its
 decisive REST books arrived about half a second later. The apparent 15-second execution latency was only an
 artificial completion delay and did not provide later fill evidence. The 179 settled synthetic fills were also not
@@ -201,19 +204,18 @@ policy check; tests cover a candidate accepted at 0.80 and rejected at 0.50, plu
 The V10 deployment preflight accepts a clean V9 state before migration but rejects partial V10 state. On V10 it
 validates exact column types/nullability/defaults, required PK/UNIQUE/FK/CHECK constraints, probe indexes, trigger
 placement and flags, the five critical PL/pgSQL function bodies, the activation singleton, every hash-bound event in
-the monotone activation chain, and active-artifact eligibility. A PostgreSQL integration test now creates a real V9
-admission, applies V10, and checks the backfilled null-artifact/revision-zero binding. It requires a disposable
-PostgreSQL 18 `TEST_DATABASE_URL` and has not run in this local environment.
+the monotone activation chain, and active-artifact eligibility. A PostgreSQL integration test creates a real V9
+admission, applies V10, and checks the backfilled null-artifact/revision-zero binding. It passed as part of the
+complete 1,156-test suite against disposable PostgreSQL 18.4 before rollout.
 
 Main implementation files are `src/lib/shadow-execution.ts`, `src/lib/entry-probes.ts`,
 `src/lib/mismatch-calibration.ts`, `src/lib/engine.ts`, `src/lib/postgres-db.ts`, `src/lib/risk-settings.ts`, and
-`src/components/mismatch-risk-view.tsx`. The calibration CLI is `scripts/calibrate-mismatch-risk.ts`. No VPS,
-production setting, live gate, breaker, intent, order, position, database row, or service was changed during this
-local implementation. Before any rollout: review the diff, run full verification, commit/push only with explicit
-authorization, run the canonical stopped-service V10 migration/deploy, retain `LIVE_EXECUTION_ALLOWED=false`, and
-observe shadow probes/funnel outcomes before considering any configuration change. Residual limitation: recovery of
-a persisted V3 shadow proof currently runs through the normal scan/resume loop; it reuses durable evidence without a
-REST refetch, but there is not yet a dedicated recovery-only loop when scans repeatedly fail.
+`src/components/mismatch-risk-view.tsx`. The calibration CLI is `scripts/calibrate-mismatch-risk.ts`. Production was
+rolled out through the canonical stopped-service migration path with `LIVE_EXECUTION_ALLOWED=false`; no calibration
+artifact was persisted or activated and no live order, position, reservation, breaker, or accounting state was
+mutated. Residual limitation: recovery of a persisted V3 shadow proof currently runs through the normal scan/resume
+loop; it reuses durable evidence without a REST refetch, but there is not yet a dedicated recovery-only loop when
+scans repeatedly fail.
 
 ## Rollout Note - BNB/HYPE Shadow Reactivation
 
@@ -294,7 +296,7 @@ The exact checksummed sequence is:
 9. V9 `inactive_legacy_slot_breaker_repair`
 10. V10 `mismatch_calibration_evidence`
 
-V1-V9 remain frozen. Any later schema change requires a new forward migration after V10.
+V1-V10 remain frozen. Any later schema change requires a new forward migration after V10.
 
 ## Historical Verification Baseline (Pre-V10)
 
@@ -335,8 +337,46 @@ run exposed that `node-postgres` does not parse PostgreSQL `name[]` as a JavaScr
 one generated FK identifier; the preflight now casts catalog names to `text[]`, attests the actual identifier, and
 has regression coverage. The final rerun passed all 1,156 tests with no skips. The V10 migration checksum remains
 `d165c2d5bf3cbd93ad4d684b90e03ea4cc77409f9d0f163ac0e98912650fa375` and its deterministic
-checksum test passed. No live venue request, production mutation, commit, push, migration, artifact activation, or
-deployment occurred during this local verification.
+checksum test passed. No live venue request or production mutation occurred during this local verification.
+
+## Production V10 Rollout - 2026-08-02
+
+The verified implementation was committed as `27f121aef0c06c3dba45f880a8ebbbec233f1ed5`, pushed explicitly to
+`main`, pulled onto the clean production `main` worktree, and deployed with `deploy/vps/deploy.sh`. Before shutdown,
+all seven assets were atomically changed to scan-only while retaining `shadowMode=true` and the 60-second cutoff.
+Under the transient `ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true` shadow-only override, the V9 preflight then
+confirmed that the only blockers were the known 39 historical `legacy_pending` accounting heads: unresolved live
+attempts, open live venue orders, economically active live positions, and owned live entry reservations were all
+zero. The live environment gate remained disabled.
+
+The canonical deployment stopped all ten application services, repeated the preflight, created a quiescent backup,
+installed dependencies, ran the production audit, lint, repository formatting check, typecheck, tests, the Next.js
+build, and the worker build, then applied V10 and validated its exact checksum. The VPS unit/runtime suite passed
+1,025 tests; its 131 PostgreSQL integration tests were skipped because production intentionally has no
+`TEST_DATABASE_URL`. Those same integration tests had already passed against disposable PostgreSQL 18.4 locally.
+The post-migration V10 preflight re-attested the schema and the same zero counts for unresolved live attempts, open
+live venue orders, economically active live positions, and owned live reservations, with the 39 historical heads
+retained as a runtime live-entry block.
+
+After restart, all ten services were active with zero restarts, the backup timer was waiting, liveness returned 200,
+and authenticated readiness was healthy. Every Polymarket and Kalshi feed was `ready` from WebSocket data, including
+BNB and HYPE; there were no active breakers or warning-or-higher application log lines in the initial post-restart
+observation window. The root filesystem was 43% used with about 33 GB free. Three backup files occupied about
+2.3 GB, including the fresh rollout backup.
+
+The seven configurations were then restored atomically to shadow execution. BTC, ETH, SOL, XRP, and DOGE are at
+revision 3; BNB and HYPE are at revision 4. Every configuration has `enableTrading=true`, `shadowMode=true`, and
+`entryCutoffSeconds=60`. Four consecutive post-activation samples reported HTTP 200 health, seven ready workers,
+fourteen ready WebSocket feeds, no breaker, and `liveExecutionAllowed=false`. Mismatch calibration remains inactive
+at revision 0 with no persisted artifact or activation event. Password-based SSH access was not modified.
+
+The first complete late-probe window then wrote 84 immutable observations: 12 per asset, covering both combinations
+at each of 55, 45, 35, 25, 15, and 5 seconds. All were diagnostic rejections at the signal, REST, or risk stage; the
+probe path created no live attempt, open venue order, economically active live position, or owned reservation. A
+fresh V10 preflight confirmed those four zero counts after capture. At the next slot rollover, BNB and HYPE both
+reported ready WebSocket feeds and two available, execution-fresh mismatch estimates with `reason=null`; the model
+correctly remains `structural-ewma-gaussian-v1-uncalibrated` until independently reviewed evidence supports an
+activation.
 
 ## Deployment Boundary
 
@@ -368,22 +408,18 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 1. Keep `LIVE_EXECUTION_ALLOWED=false`.
 2. Keep every production `entryCutoffSeconds` at 60 and leave the calibration activation at revision 0 with no
    artifact until probe evidence and an independently reviewed eligible artifact justify a later decision.
-3. Publish only the fully verified commit explicitly authorized for rollout. The rollout must use the canonical
-   stopped-service V10 path and remain shadow-only.
-4. Before migration, recheck production disk capacity, quiescence, the exact 39 historical-only accounting blockers,
-   and the approved commit SHA. Treat any drift as a hard stop.
-5. After rollout, observe late probes, the preflight rejection funnel, REST request rates, worker restarts, and
+3. Observe late probes, the preflight rejection funnel, REST request rates, worker restarts, and
    storage growth across several days before calibrating or changing the cutoff.
-6. Add a recovery-only pass for durable V3 shadow proofs if completion during prolonged scan/feed failure becomes a
+4. Add a recovery-only pass for durable V3 shadow proofs if completion during prolonged scan/feed failure becomes a
    rollout requirement; the current normal scan/resume path is deterministic but can leave a shadow reservation
    open until scans recover.
-7. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair, and
+5. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair, and
    require a separate explicit live decision after that backlog is clean.
 
 ## Resume Prompt
 
 ```text
-Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Preserve password-based VPS SSH access. Do not deploy or enable live trading without explicit approval. Continue from the current review branch and verify the complete diff before committing.
+Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Production is on main at the documented V10 shadow-only rollout. Preserve password-based VPS SSH access. Do not deploy or enable live trading without explicit approval. Observe the production probes and funnel before proposing a calibration or cutoff change.
 ```
 
 ## Shadow Admission Verification - 2026-07-23
