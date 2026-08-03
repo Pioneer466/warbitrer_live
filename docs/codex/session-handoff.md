@@ -4,29 +4,30 @@
 
 - Date: 2026-08-03, Europe/Paris
 - Production branch: `main`
-- Production runtime commit: `20072480febf23ddf4ab61605565d38fa87003ef`
+- Production runtime commit: `f141656df9cfa9a46a33952096804a63c8622b40`
 - Local review branch: `review/global-hardening-2026-07-19`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: V10 is deployed, but three V3 shadow intents are stuck in accounting replay; a tested code fix is pending rollout
+- Deployment status: V3 shadow fill replay is fixed and deployed; all seven assets are healthy in shadow mode
 - Live authorization: `LIVE_EXECUTION_ALLOWED=false`; every asset has `enableTrading=true` and `shadowMode=true`
 
-The global hardening review and V10 mismatch-efficiency work are committed, pushed, and deployed. The rollout keeps
-real execution disabled. Calibration activation remains at revision 0 with no artifact, and the 39 historical
-`legacy_pending` accounting heads continue to block runtime live admission.
+The global hardening review, V10 mismatch-efficiency work, and V3 shadow fill replay correction are committed,
+pushed, and deployed. Real execution remains disabled. Calibration activation remains at revision 0 with no
+artifact, and the 39 historical `legacy_pending` accounting heads continue to block runtime live admission.
 
-## V3 Shadow Fill Replay Incident - 2026-08-03 (Fix Pending Rollout)
+## V3 Shadow Fill Replay Incident - 2026-08-03 (Deployed and Recovered)
 
-Three shadow intents are durably stuck in `executing_primary`: BTC
+Three shadow intents became durably stuck in `executing_primary`: BTC
 `e2c79b25-5d7a-4ee1-8e37-749b53a79de6`, BNB `1b719f87-a792-4f3e-b051-6c3df93fc329`, and ETH
-`1fac9eab-db42-41f0-ac67-2dcc960367e5`. Each has a valid filled `rest-paired-preflight-v3` audit and two filled
-synthetic venue-order projections, but zero durable fills. Their asset workers repeatedly fail accounting ingestion
-with `fill price has more than 8 decimal places`, leaving authenticated readiness at HTTP 503 for BTC, ETH, and BNB.
-SOL, XRP, DOGE, and HYPE remain healthy. Every intent is shadow-only, the independent live gate is false, and a V10
-preflight found no unresolved live attempt, open live venue order, economically active live position, owned live
-reservation, or active breaker. The 39 historical `legacy_pending` heads remain the only known live blocker.
+`1fac9eab-db42-41f0-ac67-2dcc960367e5`. Each had a valid filled `rest-paired-preflight-v3` audit and two filled
+synthetic venue-order projections, but zero durable fills. Their asset workers repeatedly failed accounting
+ingestion with `fill price has more than 8 decimal places`, leaving authenticated readiness at HTTP 503 for BTC,
+ETH, and BNB. SOL, XRP, DOGE, and HYPE remained healthy. Every affected intent was shadow-only, the independent live
+gate was false, and a V10 preflight found no unresolved live attempt, open live venue order, economically active
+live position, owned live reservation, or active breaker. The 39 historical `legacy_pending` heads remained the
+only known live blocker.
 
 The durable proof stores a canonical leg notional, but replay previously reconstructed its fill price with raw
 JavaScript division. Production values such as `4.9 / 10`, `4.352 / 10`, `8.8 / 20`, and `9.4 / 20` become binary
@@ -40,9 +41,35 @@ JSON persistence round trip and verifies canonical `0.44` and `0.49` fills while
 error. Focused shadow, REST-preflight, engine, and accounting-runtime coverage passed 214 tests. Full local
 verification passed the production audit, lint, format, typecheck, 1,026 non-Postgres tests, Next.js build, and
 worker build. The 131 conditional PostgreSQL tests were skipped because no local test database was available; the
-local Docker daemon was non-responsive and was not force-restarted. Rollout must atomically switch all assets to
-scan-only, use the canonical stopped-service deployment, allow proof replay to complete without manual database
-editing, verify accounting/readiness, then restore shadow mode only if the platform is clean.
+local Docker daemon was non-responsive and was not force-restarted. The rollout therefore used scan-only and the
+canonical stopped-service path, then treated successful production proof replay and accounting/readiness checks as
+mandatory gates before restoring shadow mode.
+
+The fix was committed as `f141656df9cfa9a46a33952096804a63c8622b40`, pushed explicitly to `main`, and pulled
+onto the clean production worktree. Before deployment, all seven assets were atomically switched to scan-only while
+retaining `shadowMode=true` and `entryCutoffSeconds=60`. The V10 deployment preflight confirmed the live gate was
+disabled and that unresolved live attempts, open live venue orders, economically active live positions, and owned
+live reservations were all zero. The known 39 historical heads remained the only live-admission blocker.
+
+The canonical deploy stopped all ten application services, repeated the preflight, created the quiescent
+`warbitrer_live_20260803T203400Z.dump` backup, ran audit, lint, formatting, typecheck, 1,026 tests, both builds,
+schema migration/status checks, and the final preflight, then passed four service-stability rounds. Schema V10 and
+all migration checksums were unchanged. Backup retention left three dumps; the 59 GB root filesystem finished at
+49% usage with about 29 GB free.
+
+On restart, the ordinary durable-proof resume path completed all three intents without a REST refetch or manual
+database edit. BNB, BTC, and ETH are now `settled`; each has two filled venue orders, two durable fills, two final
+accounting fill facts, and a `stable` accounting head at revision 1. The recovered prices are exactly representable
+at scale 1e-8: BNB `0.4352`/`0.49`, BTC `0.44591`/`0.47`, and ETH `0.49`/`0.44`. No
+`AccountingPersistenceError` or excessive-decimal message recurred after deployment.
+
+After a clean post-recovery preflight, all seven assets were restored atomically to `enableTrading=true` and
+`shadowMode=true`, retaining the 60-second cutoff. BTC, ETH, SOL, XRP, and DOGE are at configuration revision 5;
+BNB and HYPE are at revision 6. Four consecutive authenticated readiness samples returned HTTP 200 with all seven
+assets healthy, all fourteen venue feeds ready, fresh scan/execute/snapshot timestamps, no active breaker, and
+`liveExecutionAllowed=false`. All ten application services remained active with zero restarts, and the final
+preflight again reported zero unresolved live attempt, open live venue order, economically active live position, or
+owned live reservation. Password-based SSH access and protected credentials were not modified.
 
 ## Production Configuration Change - 2026-07-25
 
