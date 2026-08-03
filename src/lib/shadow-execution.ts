@@ -5,6 +5,7 @@ import {
   type ExecutableBookLevel,
   type MultiLevelLegQuote,
 } from "@/lib/fees";
+import { ACCOUNTING_LEDGER_SCALE } from "@/lib/accounting-ledger";
 import { SHADOW_REENTRY_COOLDOWN_MS } from "@/lib/entry-admission-policy";
 import { deriveKalshiBuyPriceLevels } from "@/lib/kalshi";
 import { isKalshiOutcomePriceValid, normalizeKalshiOutcomePrice, parseKalshiPriceGrid } from "@/lib/kalshi-price-grid";
@@ -413,7 +414,7 @@ export function getPreparedShadowRestFillEconomics(
   }
 
   return {
-    price: proofLeg.notionalUsd / proofLeg.executableSize,
+    price: canonicalizePreparedShadowFillPrice(proofLeg.notionalUsd, proofLeg.executableSize),
     size: proofLeg.executableSize,
     notionalUsd: proofLeg.notionalUsd,
     feeUsd: proofLeg.feeUsd,
@@ -1409,6 +1410,16 @@ function isNonNegativeFinite(value: unknown): value is number {
 
 function isTradablePrice(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1;
+}
+
+function canonicalizePreparedShadowFillPrice(notionalUsd: number, executableSize: number) {
+  // The proof keeps its canonical notional. Only its derived price is quantized so
+  // binary division artifacts cannot cross the exact 1e-8 accounting boundary.
+  const price = Math.round((notionalUsd / executableSize) * ACCOUNTING_LEDGER_SCALE) / ACCOUNTING_LEDGER_SCALE;
+  if (!isTradablePrice(price)) {
+    throw new Error(`Prepared shadow fill price ${price} is outside the tradable range`);
+  }
+  return price;
 }
 
 function numbersClose(left: number, right: number, tolerance = 1e-6) {

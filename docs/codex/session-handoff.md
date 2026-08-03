@@ -2,20 +2,47 @@
 
 ## Current State
 
-- Date: 2026-08-02, Europe/Paris
+- Date: 2026-08-03, Europe/Paris
 - Production branch: `main`
-- Production runtime commit: `27f121aef0c06c3dba45f880a8ebbbec233f1ed5`
+- Production runtime commit: `20072480febf23ddf4ab61605565d38fa87003ef`
 - Local review branch: `review/global-hardening-2026-07-19`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: V10 mismatch-efficiency hardening is committed, pushed to `main`, migrated, and deployed; all seven assets are stable in shadow mode
+- Deployment status: V10 is deployed, but three V3 shadow intents are stuck in accounting replay; a tested code fix is pending rollout
 - Live authorization: `LIVE_EXECUTION_ALLOWED=false`; every asset has `enableTrading=true` and `shadowMode=true`
 
 The global hardening review and V10 mismatch-efficiency work are committed, pushed, and deployed. The rollout keeps
 real execution disabled. Calibration activation remains at revision 0 with no artifact, and the 39 historical
 `legacy_pending` accounting heads continue to block runtime live admission.
+
+## V3 Shadow Fill Replay Incident - 2026-08-03 (Fix Pending Rollout)
+
+Three shadow intents are durably stuck in `executing_primary`: BTC
+`e2c79b25-5d7a-4ee1-8e37-749b53a79de6`, BNB `1b719f87-a792-4f3e-b051-6c3df93fc329`, and ETH
+`1fac9eab-db42-41f0-ac67-2dcc960367e5`. Each has a valid filled `rest-paired-preflight-v3` audit and two filled
+synthetic venue-order projections, but zero durable fills. Their asset workers repeatedly fail accounting ingestion
+with `fill price has more than 8 decimal places`, leaving authenticated readiness at HTTP 503 for BTC, ETH, and BNB.
+SOL, XRP, DOGE, and HYPE remain healthy. Every intent is shadow-only, the independent live gate is false, and a V10
+preflight found no unresolved live attempt, open live venue order, economically active live position, owned live
+reservation, or active breaker. The 39 historical `legacy_pending` heads remain the only known live blocker.
+
+The durable proof stores a canonical leg notional, but replay previously reconstructed its fill price with raw
+JavaScript division. Production values such as `4.9 / 10`, `4.352 / 10`, `8.8 / 20`, and `9.4 / 20` become binary
+artifacts such as `0.49000000000000005`; exact accounting correctly rejects those inputs beyond its 1e-8 scale.
+`getPreparedShadowRestFillEconomics` now quantizes only the derived price to the exported accounting scale. It does
+not weaken accounting validation, mutate the durable proof, change the proof schema/model, or refetch venue data.
+Existing V3 proofs can therefore replay deterministically through the normal resume path.
+
+Regression coverage reproduces the production-style `0.44000000000000006` and `0.49000000000000005` values after a
+JSON persistence round trip and verifies canonical `0.44` and `0.49` fills while bounding the notional rounding
+error. Focused shadow, REST-preflight, engine, and accounting-runtime coverage passed 214 tests. Full local
+verification passed the production audit, lint, format, typecheck, 1,026 non-Postgres tests, Next.js build, and
+worker build. The 131 conditional PostgreSQL tests were skipped because no local test database was available; the
+local Docker daemon was non-responsive and was not force-restarted. Rollout must atomically switch all assets to
+scan-only, use the canonical stopped-service deployment, allow proof replay to complete without manual database
+editing, verify accounting/readiness, then restore shadow mode only if the platform is clean.
 
 ## Production Configuration Change - 2026-07-25
 

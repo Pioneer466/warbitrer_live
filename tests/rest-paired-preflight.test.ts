@@ -1,4 +1,5 @@
 import { DEFAULT_STRATEGY_CONFIG } from "@/lib/constants";
+import { ACCOUNTING_LEDGER_SCALE } from "@/lib/accounting-ledger";
 import {
   PERSISTED_CONSUMED_LEVEL_LIMIT_PER_LEG,
   PERSISTED_RAW_BOOK_LEVEL_LIMIT_PER_VENUE,
@@ -359,7 +360,7 @@ describe("REST paired preflight", () => {
       expect(leg.totalCostUsd).toBeCloseTo(leg.notionalUsd + leg.feeUsd, 5);
       const fill = getPreparedShadowRestFillEconomics(persistedIntent, completed, leg.legId);
       expect(fill).toMatchObject({
-        price: leg.notionalUsd / leg.executableSize,
+        price: Math.round((leg.notionalUsd / leg.executableSize) * ACCOUNTING_LEDGER_SCALE) / ACCOUNTING_LEDGER_SCALE,
         size: leg.executableSize,
         notionalUsd: leg.notionalUsd,
         feeUsd: leg.feeUsd,
@@ -417,9 +418,55 @@ describe("REST paired preflight", () => {
       }),
     };
     const completed = buildCompletedShadowAuditFromPreparedRestExecution(persistedIntent, proof, 21_000);
-    expect(getPreparedShadowRestFillEconomics(persistedIntent, completed, polymarketProof.legId)?.price).toBe(
-      polymarketProof.notionalUsd / polymarketProof.executableSize,
+    const rawPrice = polymarketProof.notionalUsd / polymarketProof.executableSize;
+    const fill = getPreparedShadowRestFillEconomics(persistedIntent, completed, polymarketProof.legId);
+    expect(fill?.price).toBe(Math.round(rawPrice * ACCOUNTING_LEDGER_SCALE) / ACCOUNTING_LEDGER_SCALE);
+    expect(
+      Math.abs((fill?.price ?? 0) * polymarketProof.executableSize - polymarketProof.notionalUsd),
+    ).toBeLessThanOrEqual(polymarketProof.executableSize / (2 * ACCOUNTING_LEDGER_SCALE) + Number.EPSILON);
+  });
+
+  it("canonicalizes production-style floating point artifacts before durable fill replay", () => {
+    const signalIntent = buildIntent({ polyPrice: 0.4, kalshiPrice: 0.48, pairSize: 10 });
+    const decision = deriveRestPairedPreflight({
+      intent: signalIntent,
+      snapshot: buildSnapshot({
+        polyAsks: [[0.44, 20]],
+        kalshiYesBids: [[0.51, 20]],
+      }),
+      settings: settings({
+        polymarketHedgeDepthSafetyFactor: 1,
+        polymarketHedgeHeadroomShares: 0,
+        kalshiPrimaryDepthSafetyFactor: 1,
+        kalshiDepthHeadroomContracts: 0,
+      }),
+    });
+    if (!decision.allowed) {
+      throw new Error(`expected eligible preflight: ${decision.code}`);
+    }
+
+    const capturedAt = 20_125;
+    const admittedIntent = applyRestPairedPreflightToIntent(signalIntent, decision, capturedAt);
+    const proof = buildPreparedShadowRestExecutionProof(admittedIntent, decision, capturedAt);
+    const persistedIntent: OrderIntent = JSON.parse(
+      JSON.stringify({
+        ...admittedIntent,
+        shadowExecution: buildScheduledShadowAudit(admittedIntent, 20_000, {
+          restCapturedAt: capturedAt,
+          preparedRestExecution: proof,
+        }),
+      }),
     );
+    const completed = buildCompletedShadowAuditFromPreparedRestExecution(
+      persistedIntent,
+      persistedIntent.shadowExecution?.preparedRestExecution,
+      21_000,
+    );
+    const prices = proof.legs.map((leg) => leg.notionalUsd / leg.executableSize);
+    expect(prices).toEqual([0.44000000000000006, 0.49000000000000005]);
+    expect(
+      proof.legs.map((leg) => getPreparedShadowRestFillEconomics(persistedIntent, completed, leg.legId)?.price),
+    ).toEqual([0.44, 0.49]);
   });
 
   it("rejects proofs that conflict with admitted limits, reservations, schema, or audit model", () => {
