@@ -7,6 +7,7 @@ import {
   chronologicalCalibrationSplit,
   normalizeCalibrationRows,
   parseCalibrationCliArgs,
+  summarizeCalibrationObservations,
   type CalibrationObservation,
 } from "../scripts/calibrate-mismatch-risk";
 import { buildMismatchCalibrationArtifact } from "@/lib/mismatch-calibration";
@@ -212,6 +213,38 @@ describe("mismatch calibration CLI policy", () => {
       trainingStartedAt: 55,
       trainingEndedAt: 155,
       createdAt: 155,
+    });
+  });
+
+  it("summarizes production-scale observation arrays without spreading them onto the call stack", () => {
+    const artifact = buildMismatchCalibrationArtifact({
+      baseModelVersion: BASE_MODEL,
+      minimumPreBinCount: 1,
+      labels: [
+        {
+          rawProbability: 0.1,
+          fatal: false,
+          horizonBand: "seconds_over_30_to_60",
+          combination: "POLY_UP_KALSHI_NO",
+        },
+      ],
+    });
+    const observations = Array.from({ length: 150_000 }, (_, index) => ({
+      ...observation("btc", index < 120_000 ? 100 : 200, "POLY_UP_KALSHI_NO"),
+      sampleId: index + 1,
+    }));
+    const split = chronologicalCalibrationSplit(observations, 0.8);
+
+    expect(summarizeCalibrationObservations(observations, split)).toMatchObject({
+      labelCount: 150_000,
+      firstCapturedAt: 55,
+      lastCapturedAt: 155,
+      trainingLabelCount: 120_000,
+      testLabelCount: 30_000,
+    });
+    expect(buildCalibrationArtifactPersistenceRecord({ artifact, metrics: {}, observations })).toMatchObject({
+      trainingStartedAt: 55,
+      trainingEndedAt: 155,
     });
   });
 });

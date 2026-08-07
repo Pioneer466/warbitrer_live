@@ -129,7 +129,7 @@ describe("settings API revision contract and live gate", () => {
     expect(response.status).toBe(409);
     expect(await response.json()).toMatchObject({
       error: "live_execution_blocked",
-      reasons: ["environment_gate_disabled"],
+      reasons: ["environment_gate_disabled", "mismatch_risk_not_enforced"],
     });
     expect(storageMocks.writeSettings).not.toHaveBeenCalled();
   });
@@ -147,11 +147,28 @@ describe("settings API revision contract and live gate", () => {
     );
   });
 
-  it("allows an active asset live only with the gate and Kalshi production", async () => {
+  it("rejects live settings when mismatch risk is only diagnostic", async () => {
     process.env.LIVE_EXECUTION_ALLOWED = "true";
     const response = await putAssetSettings(request(assetUpdate({ enableTrading: true, shadowMode: false })), {
       params: Promise.resolve({ asset: "btc" }),
     });
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      error: "live_execution_blocked",
+      reasons: ["mismatch_risk_not_enforced"],
+    });
+    expect(storageMocks.writeSettings).not.toHaveBeenCalled();
+  });
+
+  it("allows an active asset live only with the gate, production venues, and enforced mismatch risk", async () => {
+    process.env.LIVE_EXECUTION_ALLOWED = "true";
+    const response = await putAssetSettings(
+      request(assetUpdate({ enableTrading: true, shadowMode: false, mismatchRiskMode: "enforce" })),
+      {
+        params: Promise.resolve({ asset: "btc" }),
+      },
+    );
 
     expect(response.status).toBe(200);
     expect(storageMocks.writeSettings).toHaveBeenCalledOnce();
@@ -159,14 +176,17 @@ describe("settings API revision contract and live gate", () => {
 
   it("recognizes the restored BNB worker as active", async () => {
     process.env.LIVE_EXECUTION_ALLOWED = "true";
-    const response = await putAssetSettings(request(assetUpdate({ enableTrading: true, shadowMode: false })), {
-      params: Promise.resolve({ asset: "bnb" }),
-    });
+    const response = await putAssetSettings(
+      request(assetUpdate({ enableTrading: true, shadowMode: false, mismatchRiskMode: "enforce" })),
+      {
+        params: Promise.resolve({ asset: "bnb" }),
+      },
+    );
 
     expect(response.status).toBe(200);
     expect(storageMocks.writeSettings).toHaveBeenCalledWith(
       "bnb",
-      assetUpdate({ enableTrading: true, shadowMode: false }),
+      assetUpdate({ enableTrading: true, shadowMode: false, mismatchRiskMode: "enforce" }),
       expect.objectContaining({ actor: "local-dev", requestId: expect.any(String) }),
     );
   });

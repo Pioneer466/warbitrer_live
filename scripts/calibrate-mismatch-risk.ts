@@ -9,6 +9,7 @@ import {
   applyMismatchCalibration,
   buildMismatchCalibrationArtifact,
   DEFAULT_MISMATCH_CALIBRATION_MINIMUM_PRE_BIN_COUNT,
+  evaluateMismatchCalibrationActivationEligibility,
   resolveMismatchCalibrationHorizonBand,
   type MismatchCalibrationArtifact,
   type MismatchCalibrationHorizonBand,
@@ -161,6 +162,16 @@ export async function runMismatchCalibrationCli(argv: readonly string[], nowMs =
 
     const artifactRecord = buildCalibrationArtifactPersistenceRecord({ artifact, metrics, observations });
     const artifactId = artifactRecord.id;
+    const activationEligibility = evaluateMismatchCalibrationActivationEligibility({
+      artifact: artifactRecord.artifact,
+      schemaVersion: artifactRecord.schemaVersion,
+      baseModelVersion: artifactRecord.baseModelVersion,
+      trainingStartedAt: artifactRecord.trainingStartedAt,
+      trainingEndedAt: artifactRecord.trainingEndedAt,
+      createdAt: artifactRecord.createdAt,
+      metrics: artifactRecord.metrics,
+      activationAt: nowMs,
+    });
     let persistence:
       | { requested: false; persisted: false }
       | { requested: true; persisted: true; id: string; artifactSha256: string } = {
@@ -194,6 +205,7 @@ export async function runMismatchCalibrationCli(argv: readonly string[], nowMs =
         curveCount: artifact.curves.length,
         minimumPreBinCount: artifact.minimumPreBinCount,
       },
+      activationEligibility,
       metrics,
       persistence,
     };
@@ -212,12 +224,13 @@ export function buildCalibrationArtifactPersistenceRecord(input: {
   if (input.observations.length === 0) {
     throw new RangeError("observations must not be empty");
   }
-  const capturedAtValues = input.observations.map((observation) => observation.capturedAt);
-  if (capturedAtValues.some((capturedAt) => !Number.isSafeInteger(capturedAt) || capturedAt < 0)) {
-    throw new RangeError("observation capturedAt values must be non-negative safe integers");
-  }
-  const trainingStartedAt = Math.min(...capturedAtValues);
-  const trainingEndedAt = Math.max(...capturedAtValues);
+  const capturedAtRange = summarizeSafeIntegerRange(
+    input.observations,
+    (observation) => observation.capturedAt,
+    "observation capturedAt values",
+  );
+  const trainingStartedAt = capturedAtRange.minimum;
+  const trainingEndedAt = capturedAtRange.maximum;
   return {
     id: `mismatch-calibration:${input.artifact.payloadSha256}`,
     schemaVersion: input.artifact.schemaVersion,
@@ -424,7 +437,7 @@ export function buildCalibrationEvidenceMetadata(
       uniqueSamplePerCombinationAcrossHorizons: true,
       sampleSelection: "nearest-lag-captured-at-desc-id-desc-v1",
     },
-    observations: summarizeObservations(observations, split),
+    observations: summarizeCalibrationObservations(observations, split),
   };
 }
 
@@ -478,19 +491,21 @@ export function evaluateCalibration(
     };
   });
 
-  const curveKeys = [
-    ...new Set(evaluated.map((observation) => `${observation.horizonBand}/${observation.combination}`)),
-  ].sort();
+  const curveGroups = new Map<string, Array<(typeof evaluated)[number]>>();
+  const assetGroups = new Map<string, Array<(typeof evaluated)[number]>>();
+  for (const observation of evaluated) {
+    appendGroup(curveGroups, `${observation.horizonBand}/${observation.combination}`, observation);
+    appendGroup(assetGroups, observation.asset, observation);
+  }
   const byCurve = Object.fromEntries(
-    curveKeys.map((key) => {
-      const group = evaluated.filter((observation) => `${observation.horizonBand}/${observation.combination}` === key);
-      return [key, summarizeEvaluatedGroup(group)];
-    }),
+    [...curveGroups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, group]) => [key, summarizeEvaluatedGroup(group)]),
   );
   const byAsset = Object.fromEntries(
-    [...new Set(evaluated.map((observation) => observation.asset))]
-      .sort()
-      .map((asset) => [asset, summarizeEvaluatedGroup(evaluated.filter((observation) => observation.asset === asset))]),
+    [...assetGroups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([asset, group]) => [asset, summarizeEvaluatedGroup(group)]),
   );
 
   const fatalCount = evaluated.filter((observation) => observation.fatal).length;
@@ -700,7 +715,7 @@ function toCalibrationLabel(observation: CalibrationObservation): MismatchCalibr
   };
 }
 
-function summarizeObservations(
+export function summarizeCalibrationObservations(
   observations: readonly CalibrationObservation[],
   split: ReturnType<typeof chronologicalCalibrationSplit>,
 ) {
@@ -708,24 +723,71 @@ function summarizeObservations(
   const uniqueSlots = new Set(observations.map((observation) => `${observation.asset}:${observation.slotKey}`));
   const uniqueSlotEnds = new Set(observations.map((observation) => observation.slotEndTs));
   const uniqueOracleSamples = new Set(observations.map((observation) => observation.sampleId));
+  const capturedAtRange = summarizeSafeIntegerRange(
+    observations,
+    (observation) => observation.capturedAt,
+    "capturedAt",
+  );
+  const slotEndRange = summarizeSafeIntegerRange(observations, (observation) => observation.slotEndTs, "slotEndTs");
+  const trainingSlotEndRange = summarizeSafeIntegerRange(
+    split.training,
+    (observation) => observation.slotEndTs,
+    "training slotEndTs",
+  );
+  const testSlotEndRange = summarizeSafeIntegerRange(
+    split.test,
+    (observation) => observation.slotEndTs,
+    "test slotEndTs",
+  );
+  const sampleLagRange = summarizeSafeIntegerRange(
+    observations,
+    (observation) => observation.sampleLagMs,
+    "sampleLagMs",
+  );
   return {
     labelCount: observations.length,
     uniqueOracleSampleCount: uniqueOracleSamples.size,
     assetSlotCount: uniqueSlots.size,
     chronologicalSlotCount: uniqueSlotEnds.size,
     assets: uniqueAssets,
-    firstCapturedAt: Math.min(...observations.map((observation) => observation.capturedAt)),
-    lastCapturedAt: Math.max(...observations.map((observation) => observation.capturedAt)),
-    firstSlotEndTs: Math.min(...observations.map((observation) => observation.slotEndTs)),
-    lastSlotEndTs: Math.max(...observations.map((observation) => observation.slotEndTs)),
-    trainingLastSlotEndTs: Math.max(...split.training.map((observation) => observation.slotEndTs)),
-    testFirstSlotEndTs: Math.min(...split.test.map((observation) => observation.slotEndTs)),
-    maximumSampleLagMs: Math.max(...observations.map((observation) => observation.sampleLagMs)),
+    firstCapturedAt: capturedAtRange.minimum,
+    lastCapturedAt: capturedAtRange.maximum,
+    firstSlotEndTs: slotEndRange.minimum,
+    lastSlotEndTs: slotEndRange.maximum,
+    trainingLastSlotEndTs: trainingSlotEndRange.maximum,
+    testFirstSlotEndTs: testSlotEndRange.minimum,
+    maximumSampleLagMs: sampleLagRange.maximum,
     trainingLabelCount: split.training.length,
     testLabelCount: split.test.length,
     trainingChronologicalSlotCount: split.trainingSlotCount,
     testChronologicalSlotCount: split.testSlotCount,
   };
+}
+
+function appendGroup<T>(groups: Map<string, T[]>, key: string, value: T) {
+  const group = groups.get(key);
+  if (group) {
+    group.push(value);
+  } else {
+    groups.set(key, [value]);
+  }
+}
+
+function summarizeSafeIntegerRange<T>(values: readonly T[], select: (value: T) => number, field: string) {
+  if (values.length === 0) {
+    throw new RangeError(`${field} must not be empty`);
+  }
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    const selected = select(value);
+    if (!Number.isSafeInteger(selected) || selected < 0) {
+      throw new RangeError(`${field} must be non-negative safe integers`);
+    }
+    minimum = Math.min(minimum, selected);
+    maximum = Math.max(maximum, selected);
+  }
+  return { minimum, maximum };
 }
 
 function calculateAuc(observations: readonly ProbabilityObservation[]): number | null {

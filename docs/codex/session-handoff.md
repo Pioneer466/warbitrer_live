@@ -4,7 +4,7 @@
 
 - Date: 2026-08-07, Asia/Jerusalem
 - Production branch: `main`
-- Production runtime commit: `e5cc002b19c06a2cea9b0fbf2e91038d67498f5d`
+- Production runtime branch: `main` (verify the exact immutable revision with `git rev-parse HEAD` on the VPS)
 - Local review branch: `review/global-hardening-2026-07-19`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
@@ -17,9 +17,9 @@ The global hardening review, V10 mismatch-efficiency work, and V3 shadow fill re
 pushed, and deployed. Real execution remains disabled. Calibration activation remains at revision 0 with no
 artifact, and the 39 historical `legacy_pending` accounting heads continue to block runtime live admission.
 
-## Weighted Leg Price Opening - 2026-08-07 (Local, Not Deployed)
+## Weighted Leg Price Opening - 2026-08-07 (Deployed Shadow-Only)
 
-The local review branch changes the default absolute per-leg entry cap from `0.49` to `0.70`. The existing
+The deployed strategy changes the default absolute per-leg entry cap from `0.49` to `0.70`. The existing
 fee-aware balanced-payout sizing remains authoritative: gross pair cost must stay at or below the configured
 threshold, total pair cost must fit `maxPairNotionalUsd`, and each venue cost must fit
 `maxLegCapitalShare` (currently `0.70`). Depth haircuts/headroom, minimum sizes, net profit/return floors,
@@ -32,10 +32,12 @@ default at settings normalization, exact multi-level signal sizing, REST paired 
 validation. Local verification passed typecheck, lint, format check, 1,029 tests (131 conditional PostgreSQL tests
 skipped without `TEST_DATABASE_URL`), the Next.js production build, the worker build, and `git diff --check`.
 
-Production still stores `maxLegPrice=0.49` in its versioned Postgres strategy configurations. Deployment of the code
-alone must not silently rewrite that high-risk setting. A later explicitly authorized rollout must update the seven
-asset configurations through the authenticated audited bulk-settings transaction, initially while every asset
-remains shadow-only and `LIVE_EXECUTION_ALLOWED=false`.
+Commit `cd235e4e7f436ebe7dcb94421e3cdbec603a22c9` was pushed to `main` and deployed through the canonical VPS
+workflow. The deploy preflight proved zero unresolved live attempts, venue orders, economically active positions,
+or owned reservations; the 39 historical `legacy_pending` accounting heads remain a runtime live-entry block. The
+seven versioned strategy configurations were moved to scan-only before deployment and then restored by one audited
+bulk mutation with `enableTrading=true`, `shadowMode=true`, `maxLegPrice=0.70`, `entryCutoffSeconds=60`, and
+`mismatchRiskMode=shadow`. `LIVE_EXECUTION_ALLOWED=false` was preserved.
 
 The same read-only production review found that calibration data volume is no longer the limiting factor: a
 chronological SQL reconstruction produced 138,846 labels and a 31,526-label holdout with raw AUC `0.8467`; every
@@ -45,6 +47,29 @@ observation arrays. No artifact was persisted or activated. The next calibration
 streaming/reducer-based, add a production-scale deterministic fixture, complete calibrated holdout metrics, and
 evaluate a candidate-conditioned layer by horizon, asset, combination, and leg-price asymmetry before any live
 decision.
+
+## Calibration Exit Hardening - 2026-08-07
+
+The calibration CLI now uses streaming safe-integer extrema instead of spreading production-sized observation
+arrays onto the JavaScript call stack. Evaluation grouping is single-pass by curve and asset, and a deterministic
+150,000-observation regression proves that evidence summaries and persistence records no longer overflow the stack.
+The JSON report also computes activation eligibility explicitly; the command remains read-only unless `--persist`
+is supplied and never activates an artifact.
+
+`npm run mismatch:candidates` is a new read-only report over immutable `entry_execution_probes` joined only to
+dual-finalized official venue resolutions. It deduplicates the earliest counterfactual-eligible REST observation per
+asset, slot, combination, probe horizon, max-leg cap, and safety fraction, then reports fatal rate and exact resolved
+P&L overall and by asset, horizon, combination, policy, and policy/horizon. This is the evidence needed to compare
+`0.49`, `0.60`, and `0.70` openings without treating repeated probes as independent trades.
+
+Live configuration now requires `mismatchRiskMode=enforce`; both single-asset and atomic bulk settings mutations
+reject diagnostic-only live configurations. A second fail-closed check immediately before real execution rejects
+any configuration that bypassed the API. This does not authorize or enable live execution, and an unavailable or
+uncalibrated active model remains blocked by the existing enforce policy. No artifact was persisted or activated by
+this work.
+
+Local verification passed lint, format check, typecheck, 1,035 tests (131 conditional PostgreSQL integration tests
+skipped without `TEST_DATABASE_URL`), the Next.js production build, the worker build, and `git diff --check`.
 
 ## V3 Shadow Fill Replay Incident - 2026-08-03 (Deployed and Recovered)
 

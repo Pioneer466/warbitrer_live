@@ -30,7 +30,11 @@ import type {
   CircuitBreakerScopeAggregate,
 } from "@/lib/circuit-breaker-policy";
 import { hasKalshiCredentials, hasPolymarketCredentials } from "@/lib/env";
-import { assertNewLiveExecutionAllowed, isLiveExecutionAllowed } from "@/lib/execution-safety";
+import {
+  assertNewLiveExecutionAllowed,
+  isLiveExecutionAllowed,
+  isLiveMismatchRiskEnforced,
+} from "@/lib/execution-safety";
 import {
   applyKalshiPrimaryDepthSafetyFactor,
   applySlippage,
@@ -4241,6 +4245,16 @@ async function executeIntent(
   expectedConfiguration: ExecutionConfigurationSnapshot,
   primarySelection: LiveOpportunity["primarySelection"],
 ): Promise<OrderIntent | null> {
+  if (!isLiveMismatchRiskEnforced(settings)) {
+    await recordInitialEntryRejection({
+      intent,
+      stage: "mismatch_risk_mode",
+      code: "mismatch_risk_not_enforced",
+      reason: "Live execution requires the calibrated mismatch-risk policy in enforce mode",
+      now: Date.now(),
+    });
+    return null;
+  }
   let primaryLeg = intent.legs.find((leg) => leg.venue === intent.primaryVenue);
   let hedgeLeg = intent.legs.find((leg) => leg.venue === intent.hedgeVenue);
   if (!primaryLeg || !hedgeLeg) {

@@ -3,6 +3,7 @@ import {
   assertNewLiveExecutionAllowed,
   getLiveExecutionSafety,
   getLiveSettingsBlockReasons,
+  isLiveMismatchRiskEnforced,
   LiveExecutionBlockedError,
   requestsLiveExecution,
 } from "@/lib/execution-safety";
@@ -59,6 +60,9 @@ describe("live execution safety", () => {
     expect(requestsLiveExecution({ enableTrading: false, shadowMode: true })).toBe(false);
     expect(requestsLiveExecution({ enableTrading: true, shadowMode: true })).toBe(false);
     expect(requestsLiveExecution({ enableTrading: true, shadowMode: false })).toBe(true);
+    expect(isLiveMismatchRiskEnforced({ mismatchRiskMode: "shadow" })).toBe(false);
+    expect(isLiveMismatchRiskEnforced({ mismatchRiskMode: "block_only" })).toBe(false);
+    expect(isLiveMismatchRiskEnforced({ mismatchRiskMode: "enforce" })).toBe(true);
   });
 
   it("allows every active asset and blocks unknown worker identities", () => {
@@ -67,16 +71,25 @@ describe("live execution safety", () => {
       KALSHI_ENV: "prod",
       POLYGON_RPC_URL: "https://polygon.example",
     };
-    expect(getLiveSettingsBlockReasons("btc", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
-    expect(getLiveSettingsBlockReasons("bnb", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
-    expect(getLiveSettingsBlockReasons("hype", { enableTrading: true, shadowMode: false }, env)).toEqual([]);
+    const enforced = { enableTrading: true, shadowMode: false, mismatchRiskMode: "enforce" as const };
+    expect(getLiveSettingsBlockReasons("btc", enforced, env)).toEqual([]);
+    expect(getLiveSettingsBlockReasons("bnb", enforced, env)).toEqual([]);
+    expect(getLiveSettingsBlockReasons("hype", enforced, env)).toEqual([]);
     expect(
-      getLiveSettingsBlockReasons(
-        "inactive" as Parameters<typeof getLiveSettingsBlockReasons>[0],
-        { enableTrading: true, shadowMode: false },
-        env,
-      ),
+      getLiveSettingsBlockReasons("inactive" as Parameters<typeof getLiveSettingsBlockReasons>[0], enforced, env),
     ).toEqual(["asset_worker_inactive"]);
+  });
+
+  it("blocks live settings unless mismatch risk is fail-closed in enforce mode", () => {
+    const env = {
+      LIVE_EXECUTION_ALLOWED: "true",
+      KALSHI_ENV: "prod",
+      POLYGON_RPC_URL: "https://polygon.example",
+    };
+
+    expect(
+      getLiveSettingsBlockReasons("btc", { enableTrading: true, shadowMode: false, mismatchRiskMode: "shadow" }, env),
+    ).toEqual(["mismatch_risk_not_enforced"]);
   });
 
   it("throws a typed error when a new live entry is not authorized", () => {

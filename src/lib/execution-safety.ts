@@ -60,20 +60,27 @@ export function requestsLiveExecution(settings: Pick<StrategyConfig, "enableTrad
   return settings.enableTrading && !settings.shadowMode;
 }
 
+export function isLiveMismatchRiskEnforced(settings: Pick<StrategyConfig, "mismatchRiskMode">) {
+  return settings.mismatchRiskMode === "enforce";
+}
+
 export function getLiveSettingsBlockReasons(
   asset: MarketAsset,
-  settings: Pick<StrategyConfig, "enableTrading" | "shadowMode">,
+  settings: Pick<StrategyConfig, "enableTrading" | "shadowMode" | "mismatchRiskMode">,
   env: ExecutionEnvironment = readExecutionEnvironment(),
 ) {
   if (!requestsLiveExecution(settings)) {
     return [];
   }
 
-  const reasons: Array<LiveExecutionSafety["reasons"][number] | "asset_worker_inactive"> = [
-    ...getLiveExecutionSafety(env).reasons,
-  ];
+  const reasons: Array<
+    LiveExecutionSafety["reasons"][number] | "asset_worker_inactive" | "mismatch_risk_not_enforced"
+  > = [...getLiveExecutionSafety(env).reasons];
   if (!ACTIVE_MARKET_ASSETS.includes(asset)) {
     reasons.push("asset_worker_inactive");
+  }
+  if (!isLiveMismatchRiskEnforced(settings)) {
+    reasons.push("mismatch_risk_not_enforced");
   }
   return reasons;
 }
