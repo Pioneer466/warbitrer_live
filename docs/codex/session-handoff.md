@@ -2,9 +2,9 @@
 
 ## Current State
 
-- Date: 2026-08-03, Europe/Paris
+- Date: 2026-08-07, Asia/Jerusalem
 - Production branch: `main`
-- Production runtime commit: `f141656df9cfa9a46a33952096804a63c8622b40`
+- Production runtime commit: `e5cc002b19c06a2cea9b0fbf2e91038d67498f5d`
 - Local review branch: `review/global-hardening-2026-07-19`
 - Target runtime: Node 22, Next.js 15.5.21, PostgreSQL 18
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
@@ -16,6 +16,35 @@
 The global hardening review, V10 mismatch-efficiency work, and V3 shadow fill replay correction are committed,
 pushed, and deployed. Real execution remains disabled. Calibration activation remains at revision 0 with no
 artifact, and the 39 historical `legacy_pending` accounting heads continue to block runtime live admission.
+
+## Weighted Leg Price Opening - 2026-08-07 (Local, Not Deployed)
+
+The local review branch changes the default absolute per-leg entry cap from `0.49` to `0.70`. The existing
+fee-aware balanced-payout sizing remains authoritative: gross pair cost must stay at or below the configured
+threshold, total pair cost must fit `maxPairNotionalUsd`, and each venue cost must fit
+`maxLegCapitalShare` (currently `0.70`). Depth haircuts/headroom, minimum sizes, net profit/return floors,
+worst-fill profit, balances, exposure, mismatch policy, and execution buffers are unchanged. This admits the
+intended `0.60 + 0.30` shape while retaining an absolute wall against extreme pairs such as `0.71 + 0.19`.
+
+The weighted-leg implementation originally introduced by `983c8b2` was already present; the blocking behavior came
+from the later absolute `0.49` wall and its REST/worst-fill enforcement. Regression coverage now proves the new
+default at settings normalization, exact multi-level signal sizing, REST paired preflight, and final worst-fill
+validation. Local verification passed typecheck, lint, format check, 1,029 tests (131 conditional PostgreSQL tests
+skipped without `TEST_DATABASE_URL`), the Next.js production build, the worker build, and `git diff --check`.
+
+Production still stores `maxLegPrice=0.49` in its versioned Postgres strategy configurations. Deployment of the code
+alone must not silently rewrite that high-risk setting. A later explicitly authorized rollout must update the seven
+asset configurations through the authenticated audited bulk-settings transaction, initially while every asset
+remains shadow-only and `LIVE_EXECUTION_ALLOWED=false`.
+
+The same read-only production review found that calibration data volume is no longer the limiting factor: a
+chronological SQL reconstruction produced 138,846 labels and a 31,526-label holdout with raw AUC `0.8467`; every
+curve exceeded the required raw AUC floor. The standard calibration CLI instead fails at current volume with
+`Maximum call stack size exceeded`, consistent with its use of spread-based `Math.min`/`Math.max` over the full
+observation arrays. No artifact was persisted or activated. The next calibration change should make extrema
+streaming/reducer-based, add a production-scale deterministic fixture, complete calibrated holdout metrics, and
+evaluate a candidate-conditioned layer by horizon, asset, combination, and leg-price asymmetry before any live
+decision.
 
 ## V3 Shadow Fill Replay Incident - 2026-08-03 (Deployed and Recovered)
 

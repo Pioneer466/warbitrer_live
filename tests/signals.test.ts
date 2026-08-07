@@ -414,46 +414,61 @@ describe("live signal engine", () => {
   });
 
   it("sizes an asymmetric balanced payout pair under the total pair budget", () => {
-    const [signal] = buildSignals({
+    const asymmetricPolymarket: PolymarketQuote = {
+      ...polymarket,
+      outcomes: {
+        ...polymarket.outcomes,
+        up: withOutcomeQuote(polymarket.outcomes.up, {
+          buyPrice: 0.3,
+          depth: 300,
+        }),
+      },
+      orderbookLevels: {
+        upBids: [],
+        upAsks: [[0.3, 300]],
+        downBids: [],
+        downAsks: [],
+      },
+    };
+    const asymmetricKalshi: KalshiQuote = {
+      ...kalshi,
+      outcomes: {
+        ...kalshi.outcomes,
+        no: withOutcomeQuote(kalshi.outcomes.no, {
+          buyPrice: 0.6,
+          depth: 300,
+        }),
+      },
+      orderbookLevels: {
+        yesBids: [[0.4, 300]],
+        noBids: [],
+      },
+    };
+    const input = {
       slotKey: SLOT_KEY,
       now: 1774899060000,
-      polymarket: {
-        ...polymarket,
-        outcomes: {
-          ...polymarket.outcomes,
-          up: withOutcomeQuote(polymarket.outcomes.up, {
-            buyPrice: 0.35,
-            depth: 300,
-          }),
-        },
-      },
-      kalshi: {
-        ...kalshi,
-        outcomes: {
-          ...kalshi.outcomes,
-          no: withOutcomeQuote(kalshi.outcomes.no, {
-            buyPrice: 0.58,
-            depth: 300,
-          }),
-        },
-      },
+      polymarket: asymmetricPolymarket,
+      kalshi: asymmetricKalshi,
       settings: {
         ...settings,
         maxPairNotionalUsd: 20,
+        maxLegPrice: 0.7,
         kalshiDepthHeadroomContracts: 0,
         kalshiPrimaryDepthSafetyFactor: 1,
       },
       balances,
       lastEntryCosts: {},
       secondsRemaining: 180,
-    });
+    };
+    const [signal] = buildSignals(input);
 
     const polyCost = signal.legs[0].targetNotionalUsd + signal.legs[0].feeEstimateUsd;
     const kalshiCost = signal.legs[1].targetNotionalUsd + signal.legs[1].feeEstimateUsd;
 
     expect(signal.combination).toBe("POLY_UP_KALSHI_NO");
-    expect(signal.grossCost).toBe(0.93);
+    expect(signal.grossCost).toBe(0.9);
     expect(signal.eligible).toBe(true);
+    expect(signal.legs.map((leg) => leg.price)).toEqual([0.3, 0.6]);
     expect(signal.legs[0].size).toBeGreaterThan(0);
     expect(signal.legs[0].size).toBe(signal.legs[1].size);
     expect(signal.legs[1].targetNotionalUsd).toBeGreaterThan(signal.legs[0].targetNotionalUsd);
@@ -461,6 +476,15 @@ describe("live signal engine", () => {
     expect(polyCost).toBeLessThanOrEqual(14);
     expect(kalshiCost).toBeLessThanOrEqual(14);
     expect(signal.projectedNetProfitUsd).toBeGreaterThan(0);
+
+    const [legacyWall] = buildSignals({
+      ...input,
+      settings: {
+        ...input.settings,
+        maxLegPrice: 0.49,
+      },
+    });
+    expect(legacyWall.eligible).toBe(false);
   });
 
   it("blocks otherwise valid signals when configured net profit floors are not met", () => {

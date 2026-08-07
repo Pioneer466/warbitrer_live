@@ -70,8 +70,8 @@ describe("REST paired preflight", () => {
       requestedPairSize: 10,
       maxExecutablePairSize: 10,
       priceLimits: {
-        polymarket: 0.49,
-        kalshi: 0.49,
+        polymarket: 0.7,
+        kalshi: 0.7,
       },
       quote: {
         commonSize: 10,
@@ -84,6 +84,62 @@ describe("REST paired preflight", () => {
           limitPrice: 0.48,
           vwapPrice: 0.48,
         },
+      },
+    });
+  });
+
+  it("admits a 0.60/0.30 weighted pair under the gross and leg-capital limits", () => {
+    const decision = deriveRestPairedPreflight({
+      intent: buildIntent({ polyPrice: 0.6, kalshiPrice: 0.3 }),
+      snapshot: buildSnapshot({
+        polyAsks: [[0.6, 50]],
+        kalshiYesBids: [[0.7, 50]],
+      }),
+      settings: settings(),
+    });
+
+    expect(decision).toMatchObject({
+      allowed: true,
+      status: "eligible",
+      priceLimits: {
+        polymarket: 0.7,
+        kalshi: 0.7,
+      },
+      quote: {
+        commonSize: 10,
+        grossCost: 0.9,
+        polymarket: {
+          limitPrice: 0.6,
+          vwapPrice: 0.6,
+        },
+        kalshi: {
+          limitPrice: 0.3,
+          vwapPrice: 0.3,
+        },
+      },
+    });
+    expect(decision.quote?.worstFillCostUsd).toBeLessThanOrEqual(DEFAULT_STRATEGY_CONFIG.maxPairNotionalUsd);
+    expect(decision.quote?.polymarket.worstFillCostUsd).toBeLessThanOrEqual(
+      DEFAULT_STRATEGY_CONFIG.maxPairNotionalUsd * DEFAULT_STRATEGY_CONFIG.maxLegCapitalShare,
+    );
+  });
+
+  it("keeps the new absolute wall at 0.70 for extreme asymmetric pairs", () => {
+    const decision = deriveRestPairedPreflight({
+      intent: buildIntent({ polyPrice: 0.71, kalshiPrice: 0.19 }),
+      snapshot: buildSnapshot({
+        polyAsks: [[0.71, 50]],
+        kalshiYesBids: [[0.81, 50]],
+      }),
+      settings: settings(),
+    });
+
+    expect(decision).toMatchObject({
+      allowed: false,
+      code: "price_above_absolute_cap",
+      priceLimits: {
+        polymarket: 0.7,
+        kalshi: 0.7,
       },
     });
   });

@@ -1403,9 +1403,34 @@ describe("worst-fill execution caps", () => {
     expect(validate()).toBeNull();
   });
 
+  it("accepts asymmetric 0.60/0.30 worst-fill economics inside the pair and leg-capital budgets", () => {
+    const opportunity = buildWorstFillOpportunity({
+      grossCost: 0.9,
+      worstCaseProfitUsd: 0.8,
+      fatalMismatchPnlUsd: -9.2,
+      conservativeExpectedPnlUsd: 0.8,
+      projectedNetProfitUsd: 0.8,
+      projectedNetReturn: 0.087,
+      legs: [
+        {
+          ...buildWorstFillOpportunity().legs[0],
+          price: 0.6,
+          targetNotionalUsd: 6,
+        },
+        {
+          ...buildWorstFillOpportunity().legs[1],
+          price: 0.3,
+          targetNotionalUsd: 3,
+        },
+      ],
+    });
+
+    expect(validate({ opportunity })).toBeNull();
+  });
+
   it("blocks an actual order limit above the configured leg-price cap", () => {
     const opportunity = buildWorstFillOpportunity();
-    opportunity.legs[0] = { ...opportunity.legs[0], price: 0.5 };
+    opportunity.legs[0] = { ...opportunity.legs[0], price: 0.71 };
 
     expect(validate({ opportunity })).toContain("exceeds max leg price");
   });

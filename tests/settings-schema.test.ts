@@ -7,6 +7,7 @@ describe("settings schema", () => {
     expect(settings.immediateOrderConfirmationTimeoutMs).toBe(8000);
     expect(settings.executionPriceBuffer).toBe(0.01);
     expect(settings.maxLegCapitalShare).toBe(0.7);
+    expect(settings.maxLegPrice).toBe(0.7);
     expect(settings.maxSignalAgeMs).toBe(1000);
     expect(settings.minProjectedNetProfitUsd).toBe(0.25);
     expect(settings.minProjectedNetReturn).toBe(0.02);
