@@ -23,6 +23,7 @@ import { insertMismatchCalibrationArtifact, type MismatchCalibrationArtifactReco
 export const CALIBRATION_HORIZONS_SECONDS = [600, 240, 150, 90, 45, 15] as const;
 export const DEFAULT_CALIBRATION_TRAIN_FRACTION = 0.8;
 export const DEFAULT_CALIBRATION_SAMPLE_TOLERANCE_SECONDS = 20;
+export const CALIBRATION_QUERY_STATEMENT_TIMEOUT_MS = 300_000;
 
 const COMBINATIONS = ["POLY_UP_KALSHI_NO", "POLY_DOWN_KALSHI_YES"] as const satisfies readonly MismatchCombination[];
 const LOG_LOSS_EPSILON = 1e-15;
@@ -590,7 +591,9 @@ async function queryCalibrationRowsReadOnly(pool: Pool, options: CalibrationCliO
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     transactionOpen = true;
-    await client.query("SET LOCAL statement_timeout = '120s'");
+    await client.query("SELECT set_config('statement_timeout', $1, true)", [
+      String(CALIBRATION_QUERY_STATEMENT_TIMEOUT_MS),
+    ]);
     const result = await client.query<CalibrationQueryRow>(
       `
         WITH requested_horizons(horizon_seconds) AS (

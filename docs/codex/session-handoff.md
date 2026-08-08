@@ -54,7 +54,9 @@ The calibration CLI now uses streaming safe-integer extrema instead of spreading
 arrays onto the JavaScript call stack. Evaluation grouping is single-pass by curve and asset, and a deterministic
 150,000-observation regression proves that evidence summaries and persistence records no longer overflow the stack.
 The JSON report also computes activation eligibility explicitly; the command remains read-only unless `--persist`
-is supplied and never activates an artifact.
+is supplied and never activates an artifact. The retained-window production query remains bounded, with a 300-second
+statement timeout; the former 120-second bound became lower than the observed read-only selection time as the
+oracle history grew.
 
 `npm run mismatch:candidates` is a new read-only report over immutable `entry_execution_probes` joined only to
 dual-finalized official venue resolutions. It deduplicates the earliest counterfactual-eligible REST observation per

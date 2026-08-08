@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   buildCalibrationArtifactPersistenceRecord,
   buildCalibrationEvidenceMetadata,
+  CALIBRATION_QUERY_STATEMENT_TIMEOUT_MS,
   calculateBinaryMetrics,
   chronologicalCalibrationSplit,
   normalizeCalibrationRows,
@@ -15,6 +16,10 @@ import { buildMismatchCalibrationArtifact } from "@/lib/mismatch-calibration";
 const BASE_MODEL = "structural-ewma-gaussian-v1-uncalibrated";
 
 describe("mismatch calibration CLI policy", () => {
+  it("keeps the production query bounded while allowing the retained dataset to complete", () => {
+    expect(CALIBRATION_QUERY_STATEMENT_TIMEOUT_MS).toBe(300_000);
+  });
+
   it("remains read-only unless --persist is explicit", () => {
     const dryRun = parseCalibrationCliArgs([], 2_000_000_000_000);
     const persisted = parseCalibrationCliArgs(
