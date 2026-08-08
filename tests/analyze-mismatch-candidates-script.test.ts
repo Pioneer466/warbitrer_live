@@ -6,6 +6,13 @@ import {
 } from "../scripts/analyze-mismatch-candidates";
 
 describe("mismatch candidate analysis CLI", () => {
+  it("qualifies joined coverage columns and serializes queries on one PostgreSQL client", () => {
+    const source = readFileSync(new URL("../scripts/analyze-mismatch-candidates.ts", import.meta.url), "utf8");
+
+    expect(source).toContain("count(DISTINCT (probe.asset, probe.slot_key))");
+    expect(source).not.toContain("Promise.all([\n      client.query");
+  });
+
   it("defaults to a read-only retained window and accepts explicit timestamps", () => {
     const now = Date.parse("2026-08-07T12:00:00Z");
     const defaults = parseCandidateAnalysisArgs([], now);
@@ -107,3 +114,4 @@ function candidate(overrides: Partial<ResolvedCandidateVariantRow> = {}): Resolv
     ...overrides,
   };
 }
+import { readFileSync } from "node:fs";

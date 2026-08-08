@@ -75,17 +75,18 @@ export async function runMismatchCandidateAnalysisCli(argv: readonly string[], n
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
     transactionOpen = true;
     await client.query("SET LOCAL statement_timeout = '120s'");
-    const [candidateResult, funnelResult, coverageResult] = await Promise.all([
-      client.query<CandidateQueryRow>(CANDIDATE_VARIANT_QUERY, [options.fromMs, options.toMs]),
-      client.query<FunnelQueryRow>(FUNNEL_QUERY, [options.fromMs, options.toMs]),
-      client.query<{
-        probe_count: unknown;
-        asset_slot_count: unknown;
-        resolved_probe_count: unknown;
-        first_captured_at: unknown;
-        last_captured_at: unknown;
-      }>(COVERAGE_QUERY, [options.fromMs, options.toMs]),
+    const candidateResult = await client.query<CandidateQueryRow>(CANDIDATE_VARIANT_QUERY, [
+      options.fromMs,
+      options.toMs,
     ]);
+    const funnelResult = await client.query<FunnelQueryRow>(FUNNEL_QUERY, [options.fromMs, options.toMs]);
+    const coverageResult = await client.query<{
+      probe_count: unknown;
+      asset_slot_count: unknown;
+      resolved_probe_count: unknown;
+      first_captured_at: unknown;
+      last_captured_at: unknown;
+    }>(COVERAGE_QUERY, [options.fromMs, options.toMs]);
     await client.query("COMMIT");
     transactionOpen = false;
 
@@ -338,7 +339,7 @@ function asNullableNonNegativeInteger(value: unknown, field: string) {
 const COVERAGE_QUERY = `
   SELECT
     count(*)::integer AS probe_count,
-    count(DISTINCT (asset, slot_key))::integer AS asset_slot_count,
+    count(DISTINCT (probe.asset, probe.slot_key))::integer AS asset_slot_count,
     count(*) FILTER (WHERE resolution.slot_key IS NOT NULL)::integer AS resolved_probe_count,
     min(probe.rest_captured_at) AS first_captured_at,
     max(probe.rest_captured_at) AS last_captured_at
