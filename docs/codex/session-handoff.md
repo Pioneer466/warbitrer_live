@@ -71,6 +71,13 @@ this work.
 Local verification passed lint, format check, typecheck, 1,035 tests (131 conditional PostgreSQL integration tests
 skipped without `TEST_DATABASE_URL`), the Next.js production build, the worker build, and `git diff --check`.
 
+During the final VPS rollout, the live npm advisory feed newly classified `nanoid<3.3.17` as high severity and the
+production audit correctly stopped before service startup. `nanoid` is a compatible transitive dependency of
+PostCSS, so the root override now pins `3.3.18`; the lockfile was regenerated without broad dependency upgrades.
+The production audit returned to zero high-severity runtime findings and the full local suite passed with 1,036
+tests. The canonical deploy required a full rerun after this supply-chain commit because the failed attempt
+intentionally left application services stopped.
+
 ## V3 Shadow Fill Replay Incident - 2026-08-03 (Deployed and Recovered)
 
 Three shadow intents became durably stuck in `executing_primary`: BTC
