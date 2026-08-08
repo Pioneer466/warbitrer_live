@@ -84,8 +84,10 @@ The final deployed runtime lineage is `694ec2ea1da69c86ff2bad99bb2e09bfb7291f52`
 `4bdab054ef972dea41f0fbd09a6cebca94a56c64` operator-script/docs commit was pulled without restarting the stable
 web/worker processes because it does not change their source or bundles. All ten application services reported
 active/running with zero restarts, `/api/liveness` returned OK, `/api/health` was healthy, and every asset reported
-fresh ready Polymarket, Kalshi, and reference feeds. The seven configs are shadow-only at revisions 9 (BTC, ETH,
-SOL, XRP, DOGE) and 10 (BNB, HYPE), with cutoff 60 seconds and max-leg price 0.70.
+fresh ready Polymarket, Kalshi, and reference feeds. After the evidence review, one audited bulk mutation moved the
+seven shadow-only configs to revisions 10 (BTC, ETH, SOL, XRP, DOGE) and 11 (BNB, HYPE), with cutoff 35 seconds and
+max-leg price 0.70. This opens the observed t-55/t-45 band in shadow while retaining a hard boundary before the
+strongly negative t-35/t-25/t-15 bands; it is an evidence-collection experiment, not live authorization.
 
 The production candidate report completed over 58,470 immutable probes / 4,067 asset-slots, of which 57,531 probes
 had dual-official resolutions. The funnel contained 135 nominally eligible candidate-preflight probes over 116
