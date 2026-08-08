@@ -80,6 +80,29 @@ The production audit returned to zero high-severity runtime findings and the ful
 tests. The canonical deploy required a full rerun after this supply-chain commit because the failed attempt
 intentionally left application services stopped.
 
+The final deployed runtime lineage is `694ec2ea1da69c86ff2bad99bb2e09bfb7291f52`; the later
+`4bdab054ef972dea41f0fbd09a6cebca94a56c64` operator-script/docs commit was pulled without restarting the stable
+web/worker processes because it does not change their source or bundles. All ten application services reported
+active/running with zero restarts, `/api/liveness` returned OK, `/api/health` was healthy, and every asset reported
+fresh ready Polymarket, Kalshi, and reference feeds. The seven configs are shadow-only at revisions 9 (BTC, ETH,
+SOL, XRP, DOGE) and 10 (BNB, HYPE), with cutoff 60 seconds and max-leg price 0.70.
+
+The production candidate report completed over 58,470 immutable probes / 4,067 asset-slots, of which 57,531 probes
+had dual-official resolutions. The funnel contained 135 nominally eligible candidate-preflight probes over 116
+asset-slots, while the old absolute cap was the repeated first rejection for 9,002 candidate probes over 263
+asset-slots. Counterfactual policy cohorts remained negative at every max-leg cap: at safety 0.50, cap 0.49 had 69
+deduplicated cohorts, 63.8% fatal, and -$129.53 total resolved P&L; cap 0.70 had 81 cohorts, 59.3% fatal, and -$135.23.
+The horizon aggregate was positive at t-55 (+$229.40, 39.1% fatal) and t-45 (+$570.41, 31.9% fatal), but sharply
+negative at t-35, t-25, and t-15. These aggregates repeat the same resolution across separate policy variants and
+must be used for policy comparison, not interpreted as independent realized trades. They support retaining a late
+entry boundary near 45-55 seconds and reject removing the cutoff entirely.
+
+The full calibration dry-run no longer throws a JavaScript stack overflow, but its current lateral SQL sample
+selection still failed to complete within an operator-bounded five-minute run on the grown production history. The
+transient read-only unit was stopped, every application service remained active with zero restarts, and no artifact
+was persisted or activated. The next calibration code change should optimize the query plan (or add a forward-only
+covering/index migration with an `EXPLAIN (ANALYZE, BUFFERS)` proof) rather than raising the timeout again.
+
 ## V3 Shadow Fill Replay Incident - 2026-08-03 (Deployed and Recovered)
 
 Three shadow intents became durably stuck in `executing_primary`: BTC
