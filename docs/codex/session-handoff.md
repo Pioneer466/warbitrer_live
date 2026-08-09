@@ -10,17 +10,20 @@
 - Production topology: web, seven asset workers, reconciler, notifier, Postgres, and Caddy
 - Active production assets expected by the service topology: BTC, ETH, SOL, XRP, DOGE, BNB, HYPE
 - Review status: repository rubric completed at 5/5 in `docs/reviews/global-2026-07/iteration-07-final.md`
-- Deployment status: V3 shadow fill replay is fixed and deployed; all seven assets are healthy in shadow mode
+- Deployment status: calibration query/batch optimization deployed; all seven assets are healthy in calibrated shadow mode
 - Live authorization: `LIVE_EXECUTION_ALLOWED=false`; every asset has `enableTrading=true` and `shadowMode=true`
 
 The global hardening review, V10 mismatch-efficiency work, and V3 shadow fill replay correction are committed,
-pushed, and deployed. Real execution remains disabled. Calibration activation remains at revision 0 with no
-artifact, and the 39 historical `legacy_pending` accounting heads continue to block runtime live admission.
+pushed, and deployed. The calibration optimization runtime lineage is
+`f5f93995f41cb71f465e48adff7c6ada4d80ba2b`; an eligible mismatch artifact is persisted and active at revision 1.
+Real execution remains disabled, and the 39 historical `legacy_pending` accounting heads continue to block runtime
+live admission.
 
-The local review branch additionally contains an uncommitted calibration-query and batch-evaluation optimization
-described below. It has not been committed, pushed, deployed, persisted, or activated in production.
+All seven strategy configurations use `enableTrading=true`, `shadowMode=true`, `mismatchRiskMode=shadow`,
+`entryCutoffSeconds=35`, and `maxLegPrice=0.70`. BTC, ETH, SOL, XRP, and DOGE are at configuration revision 12;
+BNB and HYPE are at revision 13.
 
-## Calibration Query and Batch Evaluation Optimization - 2026-08-09 (Local, Not Deployed)
+## Calibrated Shadow Rollout - 2026-08-09 (Deployed)
 
 The calibration selector used the correct existing
 `oracle_slot_samples(asset, slot_key, captured_at DESC)` B-tree, but expressed the horizon tolerance only as
@@ -44,24 +47,43 @@ payload, and reuses that trusted snapshot during the batch. The ordinary runtime
 artifact application and retains all unavailable/incompatible fail-closed outcomes. A mutation regression proves
 that altering the caller's artifact after preparation cannot change the prepared results.
 
-A bundled copy of the local implementation was then run on the VPS in a bounded transient unit, with the calibration
-CLI's repeatable-read `READ ONLY` transaction and without `--persist`. It completed the retained production window
-in about one minute and produced 153,180 labels, 76,590 unique oracle samples, all seven assets, 13,136 asset-slots,
-2,116 chronological slot times, and all 12 curves. The strict chronological holdout contained 34,020 labels and 754
-fatals. Raw holdout AUC/Brier/log-loss were 0.8470/0.02728/0.14205; calibrated values improved to
-0.8579/0.01973/0.08434. The generated artifact passed the code's activation-eligibility policy with no reasons, but
-this is evidence only and does not authorize activation or live trading. The report confirmed
-`requested=false`, `persisted=false`, and `never-performed-by-this-command`; calibration activation therefore remains
-at revision 0 with no persisted artifact. Temporary diagnostic files and the transient unit were removed. Postgres
-and all ten application services remained active with zero restarts.
+The implementation was committed as `f5f93995f41cb71f465e48adff7c6ada4d80ba2b`, pushed to `main`, and deployed
+through the canonical stopped-service workflow. Before deployment, all seven configurations were atomically moved
+to scan-only. Each V10 preflight proved the independent live gate disabled, zero unresolved live attempts, zero open
+live venue orders, zero economically active live positions, and zero owned live reservations. The transient
+`ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true` override permitted only the known shadow-only deployment around the
+39 historical accounting heads; it did not authorize live trading. The deploy created a quiescent backup, ran the
+accepted production audit, lint, formatting, typecheck, 1,038 tests, both builds, schema status, and four service
+stability rounds. Schema V10 and its checksum were unchanged.
 
-Modified local files are `scripts/calibrate-mismatch-risk.ts`, `src/lib/mismatch-calibration.ts`,
-`tests/calibrate-mismatch-risk-script.test.ts`, `tests/mismatch-calibration.test.ts`, and this handoff. Focused
-calibration coverage and TypeScript checking pass. Full local verification also passed the accepted production audit
-(zero high, two moderate, 17 low), lint, repository formatting, 1,038 tests with 131 conditional PostgreSQL tests
-skipped because `TEST_DATABASE_URL` is not configured, coverage (46.45% lines, 76.57% branches, 59.11% functions;
-92.10% lines for `mismatch-calibration.ts`), the Next.js production build, the worker build, and `git diff --check`.
-Deployment and any artifact persistence/activation require separate explicit operator approval.
+The deployed calibration CLI was then run with explicit persistence in a bounded transient unit. It produced and
+persisted artifact
+`mismatch-calibration:6d3c761c4c807c19f42a6c5018b63757241c563ef0bcc785fab4380105c93e3f`, with the same
+SHA-256, schema v1, method `pava-jeffreys-cluster-conservative-v2`, and all 12 curves. Its evidence contains 153,264
+labels, 76,632 unique oracle samples, all seven assets, 13,143 asset-slots, and 2,117 chronological slot times. The
+strict chronological holdout contains 34,026 labels and 748 fatals (2.1983%). Raw holdout
+AUC/Brier/log-loss were 0.84612/0.02726/0.14202; calibrated values improved to
+0.85719/0.01966/0.08415. Activation eligibility passed with no reasons.
+
+Activation was a separate explicit compare-and-swap operation from revision 0 to revision 1, recorded once with
+request ID `82768ace-7508-41a7-bb31-abbc710e6dad`. Database truth verifies the exact artifact ID and SHA on the
+singleton activation row and immutable event. The seven configurations were then restored atomically to shadow.
+Authenticated health returned HTTP 200 with no active breaker, every asset and venue feed healthy/ready, and
+`liveExecutionAllowed=false`; all ten services were active/running with zero restarts.
+
+Fresh post-activation samples for both combinations and all seven assets contain calibration revision 1, the exact
+artifact SHA, `calibrationReason=null`, and model version
+`structural-ewma-gaussian-v1-pava-jeffreys-cluster-conservative-v2-calibrated-6d3c761c4c80`. The top-level sample
+version deliberately remains the raw base-model selector; the calibrated model/version lives in the immutable risk
+payload. In `mismatchRiskMode=shadow`, calibration changes displayed risk and the counterfactual enforce verdict but
+does not block shadow executions. It must remain under observation before any separate live-enforcement decision.
+
+Local verification passed the accepted production audit (zero high, two moderate, 17 low), lint, repository
+formatting, TypeScript, 1,038 tests with 131 conditional PostgreSQL tests skipped because `TEST_DATABASE_URL` is not
+configured, coverage (46.45% lines, 76.57% branches, 59.11% functions; 92.10% lines for
+`mismatch-calibration.ts`), the Next.js production build, the worker build, and `git diff --check`. Temporary
+activation, settings, health, and report helpers were removed locally and from the VPS. Password-based SSH access
+was not modified.
 
 ## Weighted Leg Price Opening - 2026-08-07 (Deployed Shadow-Only)
 
@@ -594,20 +616,22 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 ## Next Actions
 
 1. Keep `LIVE_EXECUTION_ALLOWED=false`.
-2. Keep every production `entryCutoffSeconds` at 60 and leave the calibration activation at revision 0 with no
-   artifact until probe evidence and an independently reviewed eligible artifact justify a later decision.
-3. Observe late probes, the preflight rejection funnel, REST request rates, worker restarts, and
-   storage growth across several days before calibrating or changing the cutoff.
+2. Keep calibration revision 1 in `mismatchRiskMode=shadow` and the 35-second cutoff while collecting several days
+   of counterfactual allow/block decisions and dual-official outcomes across every asset, combination, and horizon.
+3. Compare calibrated central probability and conservative upper-95 probability against the economic limit, fatal
+   loss budgets, candidate/fill funnel, resolved P&L, REST request rates, worker restarts, and storage growth. Do not
+   infer live readiness from aggregate calibration metrics alone.
 4. Add a recovery-only pass for durable V3 shadow proofs if completion during prolonged scan/feed failure becomes a
    rollout requirement; the current normal scan/resume path is deterministic but can leave a shadow reservation
    open until scans recover.
 5. Keep the 39 historical live-accounting blockers visible until exact evidence permits deterministic repair, and
-   require a separate explicit live decision after that backlog is clean.
+   require a separate explicit enforce/live decision after that backlog is clean and calibrated shadow evidence is
+   favorable.
 
 ## Resume Prompt
 
 ```text
-Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Production is on main at the documented V10 shadow-only rollout. Preserve password-based VPS SSH access. Do not deploy or enable live trading without explicit approval. Observe the production probes and funnel before proposing a calibration or cutoff change.
+Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Production is on main with calibration revision 1 active in shadow-only mode, a 35-second cutoff, and LIVE_EXECUTION_ALLOWED=false. Preserve password-based VPS SSH access. Do not enable live trading without explicit approval. Observe calibrated counterfactual verdicts, outcomes, and the execution funnel before proposing enforce/live mode.
 ```
 
 ## Shadow Admission Verification - 2026-07-23
