@@ -650,3 +650,52 @@ The fix normalizes tradable Polymarket reference times from the canonical slot w
 end-time validation. Unit coverage exercises the real shifted `startDate` shape and verifies final feed references.
 The focused unit suite and isolated PostgreSQL proof pass. Deployment must keep the live gate false; no accounting row
 or trading threshold needs to change.
+
+## Local Mismatch Guard Policy Split - 2026-08-09
+
+The legacy low/medium/high mismatch heuristic is now separated from the calibrated probabilistic model. The new
+strategy field `mismatchGuardMode` supports `audit`, `hard_only`, and `legacy_enforce`. New configurations default to
+`hard_only`; persisted configurations that predate the field resolve conservatively from `mismatchGuardEnabled`
+(`true` remains `legacy_enforce`, `false` remains `audit`) so a code deployment cannot silently relax an existing
+configuration. No database migration was needed because strategy configurations and observation evidence are JSON.
+V1-V10 were not modified.
+
+`hard_only` blocks only structural conditions: missing, stale, future-dated, or desynchronized official references;
+the exact cross-reference dead zone; and venue disagreement above the configured extreme threshold. It never applies
+the legacy 0.5 size reduction or the early/proximity heuristic blocks. `audit` records the same decisions without
+enforcement, while `legacy_enforce` preserves the prior behavior. The old low/medium/high classification remains
+diagnostic in every mode.
+
+Every new mismatch audit records three counterfactual outcomes: calibrated model only, calibrated model plus hard
+invariants, and full legacy guard. The same evidence is persisted in oracle samples and entry probes, and the operator
+UI displays the three verdicts. The final execution-risk recheck recomputes the active guard from fresh venue and
+oracle state. Live configuration is fail-closed when the guard is `audit`; live still also requires calibrated
+`mismatchRiskMode=enforce` and the independent environment gate.
+
+Files changed include `src/lib/signals.ts`, `src/lib/mismatch-guard-mode.ts`, strategy types/defaults/normalization,
+execution safety, mismatch audit and persistence paths, the trading controls and mismatch view, backtest mode
+selection, and focused tests. Verification completed locally:
+
+The per-asset dashboard was also reduced to the operator's active scan path. It now keeps the slot controls, worker
+and feed status, side-by-side venue charts, the two candidate combinations, executable leg price/size/depth, projected
+P&L, calibrated P95 versus its economic limit, the model/hard/legacy counterfactuals, rejection reasons, non-terminal
+intents, and operational anomalies. It removes duplicated portfolio equity/cash/P&L, global mismatch budgets, healthy
+readiness rows, informational logs, balances, and repeated full mismatch dossiers; those remain available on the
+portfolio, trades, and dedicated operational surfaces. A static render regression test protects this information
+boundary. The in-app browser was unavailable in the implementation session, so visual verification used the
+production Next.js build and deterministic server rendering rather than an interactive browser session.
+
+```text
+Production audit       0 high, 2 moderate, 17 low
+ESLint                 passed, zero warnings
+TypeScript             passed
+Full unit/runtime test 64 files, 1,045 tests passed; 9 integration files / 131 tests skipped without TEST_DATABASE_URL
+Next.js build          passed
+Worker bundle          passed
+git diff --check       passed
+```
+
+No production mutation, commit, push, deploy, live venue request, breaker action, or configuration change was made.
+After a future explicitly authorized deployment, keep all assets shadow-only and explicitly choose `hard_only` per
+asset to start the comparison window; existing production rows will otherwise intentionally remain
+`legacy_enforce`. Do not select `audit` for live and do not enable `LIVE_EXECUTION_ALLOWED` during this evaluation.

@@ -41,6 +41,14 @@ describe("local backtest helpers", () => {
     expect(variants.find((variant) => variant.name === "theoretical_bruteforce")?.settingsByAsset.btc.maxLegPrice).toBe(
       0.99,
     );
+    expect(variants.find((variant) => variant.name === "mismatch_off_depth_safe")?.settingsByAsset.btc).toMatchObject({
+      mismatchGuardMode: "audit",
+      mismatchGuardEnabled: false,
+    });
+    expect(variants.find((variant) => variant.name === "mismatch_soft")?.settingsByAsset.btc).toMatchObject({
+      mismatchGuardMode: "legacy_enforce",
+      mismatchGuardEnabled: true,
+    });
   });
 
   it("turns insufficient exact-size depth into a simulated no-fill", () => {

@@ -3,9 +3,11 @@
 import { useState } from "react";
 
 import { usePollingJson } from "@/components/use-polling-json";
+import { resolveMismatchGuardMode } from "@/lib/mismatch-guard-mode";
 import type {
   HealthResponse,
   MarketAsset,
+  MismatchGuardMode,
   MismatchRiskMode,
   StrategyConfig,
   VersionedStrategyConfig,
@@ -32,6 +34,7 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
   const currentRevision = settings.data.revision;
   const { enableTrading, shadowMode } = currentSettings;
   const mode = !enableTrading ? "off" : shadowMode ? "shadow" : "live";
+  const mismatchGuardMode = resolveMismatchGuardMode(currentSettings);
   const liveExecutionAllowed =
     health.error === null && health.data?.status === "healthy" && health.data.liveExecutionAllowed === true;
 
@@ -111,7 +114,7 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
     if (
       nextMode === "enforce" &&
       !window.confirm(
-        "Activer risk enforce ? Le modèle actuel est non calibré et les nouvelles entrées seront bloquées tant qu'il le restera.",
+        "Activer risk enforce ? Les nouvelles entrées seront bloquées si la calibration, les références ou les budgets de risque ne sont pas prêts.",
       )
     ) {
       return;
@@ -123,20 +126,35 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
     });
   }
 
+  function updateMismatchGuardMode(nextMode: MismatchGuardMode) {
+    if (busy || nextMode === mismatchGuardMode) {
+      return;
+    }
+
+    if (
+      nextMode === "audit" &&
+      !window.confirm(
+        "Passer le garde-fou mismatch en audit ? Les invariants structurels ne bloqueront plus les entrées et le live restera interdit.",
+      )
+    ) {
+      return;
+    }
+
+    void writeSettings({
+      ...currentSettings,
+      mismatchGuardMode: nextMode,
+      mismatchGuardEnabled: nextMode !== "audit",
+    });
+  }
+
   return (
-    <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto">
+    <div className="flex w-full min-w-0 flex-col gap-1 sm:w-auto xl:flex-row">
       <div className="grid grid-cols-3 overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)]">
-        <ModeButton
-          active={mode === "off"}
-          busy={busy}
-          label={`${asset.toUpperCase()} Off`}
-          tone="amber"
-          onClick={() => updateTrading("off")}
-        />
+        <ModeButton active={mode === "off"} busy={busy} label="Off" tone="amber" onClick={() => updateTrading("off")} />
         <ModeButton
           active={mode === "shadow"}
           busy={busy}
-          label={`${asset.toUpperCase()} Shadow`}
+          label="Shadow"
           tone="indigo"
           onClick={() => updateTrading("shadow")}
           bordered
@@ -144,10 +162,35 @@ export function TradingToggle({ asset }: { asset: MarketAsset }) {
         <ModeButton
           active={mode === "live"}
           busy={busy}
-          label={`${asset.toUpperCase()} Live`}
+          label="Live"
           tone="emerald"
           onClick={() => updateTrading("live")}
           disabled={!liveExecutionAllowed}
+        />
+      </div>
+
+      <div className="grid grid-cols-3 overflow-hidden rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)]">
+        <ModeButton
+          active={mismatchGuardMode === "audit"}
+          busy={busy}
+          label="Guard Audit"
+          tone="indigo"
+          onClick={() => updateMismatchGuardMode("audit")}
+        />
+        <ModeButton
+          active={mismatchGuardMode === "hard_only"}
+          busy={busy}
+          label="Guard Hard"
+          tone="emerald"
+          onClick={() => updateMismatchGuardMode("hard_only")}
+          bordered
+        />
+        <ModeButton
+          active={mismatchGuardMode === "legacy_enforce"}
+          busy={busy}
+          label="Guard Legacy"
+          tone="amber"
+          onClick={() => updateMismatchGuardMode("legacy_enforce")}
         />
       </div>
 

@@ -3,11 +3,6 @@
 import { TradingToggle } from "@/components/trading-toggle";
 import { usePollingJson } from "@/components/use-polling-json";
 import {
-  AssetMismatchRiskOverview,
-  IntentMismatchRiskDetails,
-  OpportunityMismatchRiskDetails,
-} from "@/components/mismatch-risk-view";
-import {
   Chip,
   formatV2Countdown,
   formatV2Usd,
@@ -21,23 +16,27 @@ import {
   type V2Tone,
 } from "@/components/v2-ui";
 import { formatDateTime, formatPrice } from "@/lib/format";
-import type { GlobalRiskConfig } from "@/lib/risk-settings";
+import { resolveMismatchGuardMode } from "@/lib/mismatch-guard-mode";
+import {
+  formatMismatchAuditDecision,
+  formatRiskProbability,
+  getMismatchModelDisplayState,
+} from "@/lib/mismatch-risk-display";
 import type {
   DashboardResponse,
   HistoryResponse,
   LiveOpportunity,
   MarketAsset,
   MarketSlot,
+  MismatchGuardMode,
+  MismatchRiskCounterfactualDecision,
   OrderIntent,
-  VenueBalance,
   VenueFeedHealth,
-  VersionedConfiguration,
 } from "@/lib/types";
 
 export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const dashboard = usePollingJson<DashboardResponse>(`/api/dashboard/${asset}`, 2_000);
   const history = usePollingJson<HistoryResponse>(`/api/history/current-slot?asset=${asset}`, 2_000);
-  const globalRisk = usePollingJson<VersionedConfiguration<GlobalRiskConfig>>("/api/settings/risk", 5_000);
 
   if (dashboard.loading && !dashboard.data) {
     return <PanelMessage title="Chargement" message="Connexion au moteur live." />;
@@ -53,10 +52,8 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
     latestSnapshot,
     feedHealth,
     slot,
-    venueBalances,
     opportunities,
     openIntents,
-    pnl,
     circuitBreakers,
     runEvents,
   } = dashboard.data;
@@ -67,12 +64,22 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
   const kalshiFeed =
     historyFeedHealth.find((item) => item.venue === "kalshi") ?? latestSnapshot?.kalshi.feedHealth ?? null;
   const activeBreakers = circuitBreakers.filter((breaker) => breaker.active);
-  const accountDeltaUsd = pnl?.accountDeltaUsd ?? (pnl ? pnl.realizedPnlUsd + pnl.unrealizedPnlUsd : null);
-  const drawdownUsd = pnl?.drawdownUsd ?? null;
   const openIntentNotionalUsd = openIntents.reduce((sum, intent) => sum + deriveIntentCapitalUsd(intent), 0);
-  const mismatchAuditCount = new Set(
-    opportunities.filter((opportunity) => opportunity.mismatchRiskAudit).map((opportunity) => opportunity.combination),
-  ).size;
+  const readyFeedCount = [polyFeed, kalshiFeed].filter((feed) => feed?.feedStatus === "ready").length;
+  const eligibleCount = opportunities.filter((opportunity) => opportunity.eligible).length;
+  const bestGrossCost = opportunities.reduce<number | null>(
+    (best, opportunity) =>
+      opportunity.grossCost === null
+        ? best
+        : best === null
+          ? opportunity.grossCost
+          : Math.min(best, opportunity.grossCost),
+    null,
+  );
+  const operationalChecks = workerState.readiness.filter((check) => check.status !== "ready");
+  const operationalEvents = runEvents.filter((event) => event.level !== "info").slice(0, 4);
+  const guardMode = resolveMismatchGuardMode(config);
+  const tradingMode = !config.enableTrading ? "off" : config.shadowMode ? "shadow" : "live";
 
   return (
     <div className="flex flex-col gap-7">
@@ -91,19 +98,29 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
             <SlotModeBar slot={slot} />
           </div>
           <div className="grid md:grid-cols-2 xl:grid-cols-4">
-            <MetricCell label="Equity" value={formatV2Usd(pnl?.equityUsd, true)} tone="gold" />
-            <MetricCell label="Cash" value={formatV2Usd(pnl?.cashUsd, true)} tone="gold" />
             <MetricCell
-              label="Intents"
-              value={openIntents.length > 0 ? "ouverts" : "aucun"}
-              tone={openIntents.length > 0 ? "amber" : "mist"}
-              meta={`Notionnel ${formatV2Usd(openIntentNotionalUsd)}`}
+              label="Moteur"
+              value={workerState.readinessStatus}
+              tone={workerState.readinessStatus === "ready" ? "emerald" : "rose"}
+              meta={`phase ${workerState.phase}`}
             />
             <MetricCell
-              label="Delta Compte"
-              value={formatSignedUsd(drawdownUsd)}
-              tone={drawdownUsd !== null && drawdownUsd >= 0 ? "emerald" : "rose"}
-              meta={pnl ? `Drawdown · Delta ${formatSignedUsd(accountDeltaUsd)}` : undefined}
+              label="Flux"
+              value={`${readyFeedCount}/2 prêts`}
+              tone={readyFeedCount === 2 ? "emerald" : "rose"}
+              meta={`Poly ${formatFeedMeta(polyFeed)} · Kalshi ${formatFeedMeta(kalshiFeed)}`}
+            />
+            <MetricCell
+              label="Scan"
+              value={`${eligibleCount}/${opportunities.length || 2} passent`}
+              tone={eligibleCount > 0 ? "emerald" : "mist"}
+              meta={`Meilleur brut ${bestGrossCost === null ? "--" : bestGrossCost.toFixed(3)}`}
+            />
+            <MetricCell
+              label="Intents"
+              value={openIntents.length > 0 ? String(openIntents.length) : "aucun"}
+              tone={openIntents.length > 0 ? "amber" : "mist"}
+              meta={`Notionnel ${formatV2Usd(openIntentNotionalUsd)}`}
             />
           </div>
           <div className="flex flex-wrap gap-2 border-t border-[var(--wa-gold-border)] px-5 py-3 sm:px-6">
@@ -121,6 +138,12 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
             >
               risk {config.mismatchRiskMode}
             </Chip>
+            <Chip tone={guardMode === "audit" ? "indigo" : guardMode === "hard_only" ? "emerald" : "amber"}>
+              guard {formatGuardMode(guardMode)}
+            </Chip>
+            <Chip tone={tradingMode === "live" ? "rose" : tradingMode === "shadow" ? "indigo" : "mist"}>
+              {tradingMode}
+            </Chip>
             {activeBreakers.map((breaker) => (
               <Chip key={breaker.key} tone="rose">
                 {breaker.key}
@@ -134,7 +157,7 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
         <SectionLabel right={`poly ${formatFeedMeta(polyFeed)} · kalshi ${formatFeedMeta(kalshiFeed)}`}>
           Flux de Prix
         </SectionLabel>
-        <div className="grid gap-3">
+        <div className="grid gap-3 xl:grid-cols-2">
           <Surface>
             <ChartHeader
               title="Polymarket — UP / DOWN"
@@ -182,21 +205,6 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
 
       <section>
         <SectionLabel
-          right={`mode ${config.mismatchRiskMode}${mismatchAuditCount > 0 ? ` · audit block_only ${mismatchAuditCount}/2` : ""}`}
-        >
-          Risque Mismatch
-        </SectionLabel>
-        <AssetMismatchRiskOverview
-          mode={config.mismatchRiskMode}
-          opportunities={opportunities}
-          globalConfig={globalRisk.data?.config ?? null}
-          globalConfigError={globalRisk.error}
-          globalConfigLoading={globalRisk.loading}
-        />
-      </section>
-
-      <section>
-        <SectionLabel
           right={`seuil ≤ ${formatPrice(config.grossEntryThreshold, 3)} · budget ${formatV2Usd(config.maxPairNotionalUsd)}`}
         >
           Opportunités
@@ -214,41 +222,26 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
         )}
       </section>
 
-      <section>
-        <SectionLabel right={`${openIntents.length} actifs`}>Intents Ouverts</SectionLabel>
-        <Surface>
-          {openIntents.length === 0 ? (
-            <V2EmptyState message="Aucun intent live ouvert" />
-          ) : (
-            openIntents.map((intent, index) => (
-              <IntentRow key={intent.id} intent={intent} last={index === openIntents.length - 1} />
-            ))
-          )}
-        </Surface>
-      </section>
-
-      <section className="grid gap-3 xl:grid-cols-2">
-        <div>
-          <SectionLabel right={workerState.readinessStatus}>Readiness</SectionLabel>
+      {openIntents.length > 0 ? (
+        <section>
+          <SectionLabel right={`${openIntents.length} actifs · ${formatV2Usd(openIntentNotionalUsd)}`}>
+            Intents Ouverts
+          </SectionLabel>
           <Surface>
-            {workerState.readiness.map((check, index) => (
-              <div
-                key={check.key}
-                className={`px-5 py-3 ${index < workerState.readiness.length - 1 ? "border-b border-[var(--wa-gold-border)]" : ""}`}
-              >
-                <div className="mb-1 flex items-center justify-between gap-3">
-                  <span className="text-sm text-[var(--wa-ivory)]">{check.label}</span>
-                  <Chip tone={check.status === "ready" ? "emerald" : check.status === "blocked" ? "rose" : "amber"}>
-                    {check.status}
-                  </Chip>
-                </div>
-                <div className="text-[11px] text-[var(--wa-mist)]">{check.details}</div>
-              </div>
+            {openIntents.map((intent, index) => (
+              <IntentRow key={intent.id} intent={intent} last={index === openIntents.length - 1} />
             ))}
           </Surface>
-        </div>
-        <div>
-          <SectionLabel right={`${activeBreakers.length} breakers · ${runEvents.length} events`}>Logs</SectionLabel>
+        </section>
+      ) : null}
+
+      {activeBreakers.length > 0 || operationalChecks.length > 0 || operationalEvents.length > 0 ? (
+        <section>
+          <SectionLabel
+            right={`${activeBreakers.length} breakers · ${operationalChecks.length} checks · ${operationalEvents.length} events`}
+          >
+            Alertes Opérationnelles
+          </SectionLabel>
           <Surface>
             {activeBreakers.map((breaker) => (
               <div
@@ -258,10 +251,19 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
                 {breaker.key} — {breaker.reason}
               </div>
             ))}
-            {runEvents.slice(0, 6).map((event, index) => (
+            {operationalChecks.map((check) => (
+              <div key={check.key} className="border-b border-[var(--wa-gold-border)] px-5 py-3">
+                <div className="mb-1 flex items-center justify-between gap-3">
+                  <span className="text-sm text-[var(--wa-ivory)]">{check.label}</span>
+                  <Chip tone={check.status === "blocked" ? "rose" : "amber"}>{check.status}</Chip>
+                </div>
+                <div className="text-[11px] text-[var(--wa-mist)]">{check.details}</div>
+              </div>
+            ))}
+            {operationalEvents.map((event) => (
               <div
                 key={`${event.id}-${event.createdAt}`}
-                className={`px-5 py-3 ${index < Math.min(runEvents.length - 1, 5) ? "border-b border-[var(--wa-gold-border)]" : ""}`}
+                className="border-b border-[var(--wa-gold-border)] px-5 py-3 last:border-b-0"
               >
                 <div className="mb-1 flex items-center justify-between gap-3">
                   <span className="font-mono text-[11px] text-[var(--wa-ivory)]">{event.eventType}</span>
@@ -271,17 +273,8 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
               </div>
             ))}
           </Surface>
-        </div>
-      </section>
-
-      <section>
-        <SectionLabel right="liquidités venues">Balances</SectionLabel>
-        <div className="grid gap-px overflow-hidden rounded-lg border border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)] xl:grid-cols-2">
-          {venueBalances.map((balance) => (
-            <VenueBalanceRow key={balance.venue} balance={balance} />
-          ))}
-        </div>
-      </section>
+        </section>
+      ) : null}
 
       {dashboard.error ? <PanelMessage title="Erreur" message={dashboard.error} tone="rose" /> : null}
       {history.error ? <PanelMessage title="Erreur" message={history.error} tone="rose" /> : null}
@@ -290,51 +283,116 @@ export function DashboardClient({ asset }: { asset: MarketAsset }) {
 }
 
 function OpportunityCard({ opportunity }: { opportunity: LiveOpportunity }) {
+  const estimate = opportunity.mismatchRiskEstimate ?? null;
+  const audit = opportunity.mismatchRiskAudit ?? null;
+  const modelState = getMismatchModelDisplayState(estimate);
+  const pFatalUpper95 = audit?.pFatalUpper95 ?? estimate?.pFatalUpper95 ?? null;
+  const maximumAllowed = audit?.maximumAllowedFatalProbability ?? estimate?.maximumAllowedFatalProbability ?? null;
+
   return (
     <Surface>
       <div className="border-b border-[var(--wa-gold-border)] px-5 py-4">
         <div className="mb-2 flex items-start justify-between gap-3">
           <div className="font-mono text-sm text-[var(--wa-ivory)]">{opportunity.label}</div>
-          <Chip tone={opportunity.eligible ? "emerald" : "amber"}>{opportunity.eligible ? "eligible" : "watch"}</Chip>
+          <Chip tone={opportunity.eligible ? "emerald" : "amber"}>{opportunity.eligible ? "eligible" : "bloquée"}</Chip>
         </div>
-        <div className="text-[11px] text-[var(--wa-mist)]">
-          primaire <span className="text-[var(--wa-ivory)]">{opportunity.primaryVenue ?? "--"}</span> · coût brut{" "}
-          <span className={opportunity.eligible ? V2_TONE_TEXT.emerald : V2_TONE_TEXT.mist}>
-            {opportunity.grossCost === null ? "--" : opportunity.grossCost.toFixed(3)}
-          </span>
+        <div className="flex flex-wrap items-center gap-2 text-[10px] text-[var(--wa-mist)]">
+          <Chip tone={modelState === "calibrated" ? "emerald" : modelState === "uncalibrated" ? "amber" : "mist"}>
+            modèle {modelState}
+          </Chip>
+          <Chip tone={!estimate ? "mist" : estimate.executionUsable === false ? "amber" : "emerald"}>
+            {!estimate
+              ? "références --"
+              : estimate.executionUsable === false
+                ? "références non exécutables"
+                : "références fraîches"}
+          </Chip>
+          <Chip tone={getMismatchActionTone(opportunity)}>{formatMismatchAction(opportunity)}</Chip>
         </div>
       </div>
-      {opportunity.legs.map((leg) => (
-        <div
-          key={`${leg.venue}-${leg.outcome}`}
-          className="grid grid-cols-[1fr_auto] gap-3 border-b border-[var(--wa-gold-border)] px-5 py-3"
-        >
-          <div>
-            <div className="mb-1 font-mono text-[11px] text-[var(--wa-ivory)]">
-              {leg.venue} · {leg.outcome}
-            </div>
-            <div className="text-[10px] text-[var(--wa-mist)]">
-              {formatV2Usd(leg.targetNotionalUsd)} · fee {formatV2Usd(leg.feeEstimateUsd)}
-            </div>
-          </div>
-          <div className="font-mono text-xl text-[var(--wa-gold)]">{formatPrice(leg.price, 4)}</div>
-        </div>
-      ))}
       <div className="grid grid-cols-2 gap-px bg-[var(--wa-gold-border)] text-[10px] sm:grid-cols-4">
         <ProxyMetric
-          label="mismatch"
-          value={opportunity.mismatchRisk ?? "n/a"}
-          tone={getMismatchRiskTone(opportunity.mismatchRisk)}
+          label="coût brut / seuil"
+          value={`${opportunity.grossCost === null ? "--" : opportunity.grossCost.toFixed(3)} / ${opportunity.threshold.toFixed(3)}`}
+          tone={opportunity.thresholdMet ? "emerald" : "amber"}
         />
-        <ProxyMetric label="action" value={formatMismatchAction(opportunity)} />
-        <ProxyMetric label="désaccord" value={formatNullablePct(opportunity.venueDisagreementPct)} />
-        <ProxyMetric label="zone" value={formatNullableBps(opportunity.deadZoneDistanceBps)} />
+        <ProxyMetric
+          label="P&L net projeté"
+          value={formatSignedUsd(opportunity.projectedNetProfitUsd)}
+          tone={
+            opportunity.projectedNetProfitUsd !== null && opportunity.projectedNetProfitUsd >= 0 ? "emerald" : "rose"
+          }
+        />
+        <ProxyMetric
+          label="P fatal 95%"
+          value={formatRiskProbability(pFatalUpper95)}
+          tone={riskLimitTone(pFatalUpper95, maximumAllowed)}
+        />
+        <ProxyMetric label="limite modèle" value={formatRiskProbability(maximumAllowed)} />
       </div>
-      <OpportunityMismatchRiskDetails opportunity={opportunity} />
+      <div className="grid gap-px bg-[var(--wa-gold-border)] sm:grid-cols-2">
+        {opportunity.legs.map((leg) => (
+          <div key={`${leg.venue}-${leg.outcome}`} className="bg-[var(--wa-bg0)] px-5 py-3">
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <div className="font-mono text-[11px] text-[var(--wa-ivory)]">
+                {leg.venue} · {leg.outcome}
+              </div>
+              <div className="font-mono text-lg text-[var(--wa-gold)]">{formatPrice(leg.price, 4)}</div>
+            </div>
+            <div className="text-[10px] text-[var(--wa-mist)]">
+              taille {formatPrice(leg.size, 2)} · profondeur {formatPrice(leg.depth, 2)} · coût{" "}
+              {formatV2Usd(leg.targetNotionalUsd)}
+            </div>
+          </div>
+        ))}
+      </div>
+      <MismatchPolicySummary opportunity={opportunity} />
       {opportunity.reasons.length > 0 ? (
-        <div className="px-5 py-3 text-[11px] text-[var(--wa-amber)]">{opportunity.reasons.join(" · ")}</div>
+        <div className="border-t border-[var(--wa-gold-border)] px-5 py-3">
+          <div className="mb-1 text-[8px] uppercase tracking-[0.16em] text-[var(--wa-dim)]">Pourquoi ça bloque</div>
+          <div className="text-[11px] leading-5 text-[var(--wa-amber)]">{opportunity.reasons.join(" · ")}</div>
+        </div>
       ) : null}
     </Surface>
+  );
+}
+
+function MismatchPolicySummary({ opportunity }: { opportunity: LiveOpportunity }) {
+  const comparisons = opportunity.mismatchRiskAudit?.policyComparisons;
+  const guardAudit = opportunity.mismatchGuardAudit;
+  if (!comparisons && !guardAudit) {
+    return null;
+  }
+
+  return (
+    <div className="grid grid-cols-2 gap-px border-t border-[var(--wa-gold-border)] bg-[var(--wa-gold-border)] text-[10px] sm:grid-cols-4">
+      <ProxyMetric
+        label="modèle calibré"
+        value={comparisons ? formatPolicyShort(comparisons.calibratedModel) : "--"}
+        tone={comparisons ? policyTone(comparisons.calibratedModel) : "mist"}
+      />
+      <ProxyMetric
+        label="modèle + hard"
+        value={comparisons ? formatPolicyShort(comparisons.calibratedModelPlusHardInvariants) : "--"}
+        tone={comparisons ? policyTone(comparisons.calibratedModelPlusHardInvariants) : "mist"}
+      />
+      <ProxyMetric
+        label="legacy"
+        value={comparisons ? formatLegacyPolicyShort(comparisons.legacyGuard) : "--"}
+        tone={
+          comparisons?.legacyGuard === "would_block"
+            ? "rose"
+            : comparisons?.legacyGuard === "would_reduce_size"
+              ? "amber"
+              : "emerald"
+        }
+      />
+      <ProxyMetric
+        label="signal structurel"
+        value={`${opportunity.mismatchRisk ?? "n/a"} · ${formatNullablePct(opportunity.venueDisagreementPct)} · ${formatNullableBps(opportunity.deadZoneDistanceBps)}`}
+        tone={getMismatchRiskTone(opportunity.mismatchRisk)}
+      />
+    </div>
   );
 }
 
@@ -369,6 +427,7 @@ function SlotModeBar({ slot }: { slot: MarketSlot }) {
 }
 
 function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
+  const audit = intent.mismatchRiskAudit ?? null;
   return (
     <div className={`px-5 py-4 text-sm ${last ? "" : "border-b border-[var(--wa-gold-border)]"}`}>
       <div className="mb-2 flex items-start justify-between gap-3">
@@ -394,7 +453,14 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
           </div>
         ))}
       </div>
-      <IntentMismatchRiskDetails intent={intent} />
+      {audit ? (
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 rounded border border-[var(--wa-gold-border)] bg-[var(--wa-bg0)] px-3 py-2 font-mono text-[10px] text-[var(--wa-mist)]">
+          <span>audit {formatMismatchAuditDecision(audit.decision)}</span>
+          <span>P95 {formatRiskProbability(audit.pFatalUpper95)}</span>
+          <span>limite {formatRiskProbability(audit.maximumAllowedFatalProbability)}</span>
+          <span>P&L conservateur {formatSignedUsd(audit.conservativePnlUsd)}</span>
+        </div>
+      ) : null}
       {intent.entrySizingReason ? (
         <div className="mt-2 rounded border border-[rgba(245,184,74,0.18)] bg-[rgba(245,184,74,0.06)] px-3 py-2 text-[10px] text-[var(--wa-amber)]">
           {intent.entrySizingReason}
@@ -405,33 +471,6 @@ function IntentRow({ intent, last }: { intent: OrderIntent; last: boolean }) {
           {intent.failureReason}
         </div>
       ) : null}
-    </div>
-  );
-}
-
-function VenueBalanceRow({ balance }: { balance: VenueBalance }) {
-  const allowance =
-    balance.raw["allowanceUnlimited"] === true
-      ? "Illimitée"
-      : balance.allowanceUsd === null
-        ? "--"
-        : formatV2Usd(balance.allowanceUsd);
-  return (
-    <div className="bg-[var(--wa-bg1)] p-4">
-      <div className="mb-3 flex items-center justify-between gap-3">
-        <div>
-          <div className="text-[9px] uppercase tracking-[0.22em] text-[rgba(201,168,100,0.5)]">{balance.venue}</div>
-          <div className="mt-1 text-sm text-[var(--wa-ivory)]">{balance.currency}</div>
-        </div>
-        <Chip tone={balance.status === "ready" ? "emerald" : balance.status === "degraded" ? "amber" : "rose"}>
-          {balance.status}
-        </Chip>
-      </div>
-      <div className="grid grid-cols-3 gap-3">
-        <BalanceMetric label="Disponible" value={formatV2Usd(balance.availableBalanceUsd)} tone="gold" />
-        <BalanceMetric label="Portfolio" value={formatV2Usd(balance.portfolioValueUsd)} />
-        <BalanceMetric label="Allowance" value={allowance} />
-      </div>
     </div>
   );
 }
@@ -479,15 +518,6 @@ function ProxyMetric({ label, value, tone = "mist" }: { label: string; value: st
   );
 }
 
-function BalanceMetric({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {
-  return (
-    <div>
-      <div className="mb-1 text-[8px] uppercase tracking-[0.16em] text-[var(--wa-dim)]">{label}</div>
-      <div className={`font-mono text-xs ${V2_TONE_TEXT[tone]}`}>{value}</div>
-    </div>
-  );
-}
-
 function PanelMessage({
   title,
   message,
@@ -518,11 +548,52 @@ function formatFeedMeta(feed: VenueFeedHealth | null) {
   return `${feed.stalenessMs ?? "--"}ms`;
 }
 
+function formatGuardMode(mode: MismatchGuardMode) {
+  if (mode === "hard_only") return "hard";
+  if (mode === "legacy_enforce") return "legacy";
+  return "audit";
+}
+
 function formatMismatchAction(opportunity: LiveOpportunity) {
   if (opportunity.mismatchGuardAction === "reduce_size") {
     return `x${opportunity.mismatchSizeMultiplier.toFixed(2)}`;
   }
   return opportunity.mismatchGuardAction;
+}
+
+function getMismatchActionTone(opportunity: LiveOpportunity): V2Tone {
+  return opportunity.mismatchGuardAction === "block"
+    ? "rose"
+    : opportunity.mismatchGuardAction === "reduce_size"
+      ? "amber"
+      : "emerald";
+}
+
+function riskLimitTone(value: number | null, limit: number | null): V2Tone {
+  if (value === null || limit === null) return "mist";
+  return value <= limit ? "emerald" : "rose";
+}
+
+function formatPolicyShort(decision: MismatchRiskCounterfactualDecision) {
+  if (decision === "would_allow") return "autorise";
+  if (decision === "would_block") return "bloque";
+  if (decision === "would_allow_fail_open") return "diagnostic";
+  if (decision === "reference_allow") return "réf. autorise";
+  if (decision === "reference_block") return "réf. bloque";
+  return "indisponible";
+}
+
+function policyTone(decision: MismatchRiskCounterfactualDecision): V2Tone {
+  if (decision === "would_block" || decision === "reference_block") return "rose";
+  if (decision === "would_allow") return "emerald";
+  if (decision === "would_allow_fail_open" || decision === "reference_allow") return "amber";
+  return "mist";
+}
+
+function formatLegacyPolicyShort(decision: "would_allow" | "would_reduce_size" | "would_block") {
+  if (decision === "would_allow") return "autorise";
+  if (decision === "would_reduce_size") return "réduit x0.5";
+  return "bloque";
 }
 
 function formatNullablePct(value: number | null) {

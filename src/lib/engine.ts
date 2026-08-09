@@ -133,7 +133,7 @@ import {
   summarizeRestPairedPreflightForProbe,
   type LateEntryProbeIdentity,
 } from "@/lib/entry-probes";
-import { buildSignals } from "@/lib/signals";
+import { buildSignals, evaluateMismatchGuardForQuotes } from "@/lib/signals";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
 import { fetchVenueSettlementResolutions } from "@/lib/settlement-finality";
 import {
@@ -1417,9 +1417,36 @@ async function recheckMismatchRiskForExecution(input: {
   const estimate =
     rescaleMismatchEstimate(candidateOpportunity, calibratedEstimate, getMismatchFatalBudgetFraction(config)) ??
     calibratedEstimate;
+  const freshGuard = evaluateMismatchGuardForQuotes({
+    now: input.now,
+    slotStartTs: input.slot.startTs,
+    secondsRemaining: Math.max(0, (input.slot.endTs - input.now) / 1_000),
+    polymarket: polymarket.quote,
+    kalshi: kalshi.quote,
+    settings: input.settings,
+    combination: candidateOpportunity.combination,
+    mismatchRiskEstimate: estimate,
+  });
+  const guardedOpportunity: LiveOpportunity = {
+    ...riskBoundedOpportunity,
+    mismatchGuardAction: freshGuard.mismatchGuardAction,
+    mismatchSizeMultiplier: freshGuard.mismatchSizeMultiplier,
+    mismatchGuardAudit: freshGuard.mismatchGuardAudit,
+    referencePayoutCount: freshGuard.referencePayoutCount,
+    deadZoneDistanceBps: freshGuard.deadZoneDistanceBps,
+    deadZoneWidthBps: freshGuard.deadZoneWidthBps,
+    mismatchRisk: freshGuard.mismatchRisk,
+    venueDisagreementPct: freshGuard.venueDisagreementPct,
+    secondsElapsedInSlot: freshGuard.secondsElapsedInSlot,
+    chainlinkMoveBps: freshGuard.chainlinkMoveBps,
+    openDriftBps: freshGuard.openDriftBps,
+    chainlinkLivePriceUsd: freshGuard.chainlinkLivePriceUsd,
+    observedSlotOpenPriceUsd: freshGuard.observedSlotOpenPriceUsd,
+    kalshiTargetPriceUsd: freshGuard.kalshiTargetPriceUsd,
+  };
 
   const policyInput = {
-    opportunity: riskBoundedOpportunity,
+    opportunity: guardedOpportunity,
     estimate,
     slotEndTs: input.slot.endTs,
     openIntents: input.openIntents,
@@ -1432,13 +1459,25 @@ async function recheckMismatchRiskForExecution(input: {
     mode: "block_only",
   });
   const mismatchRiskAudit = buildMismatchRiskAudit({
-    opportunity: riskBoundedOpportunity,
+    opportunity: guardedOpportunity,
     estimate,
     policy: blockOnlyPolicy,
     evaluatedAt: input.now,
     source: "execution",
     safetyFractionOfBreakEven: getMismatchFatalBudgetFraction(config),
   });
+  if (freshGuard.mismatchGuardAction === "block") {
+    return {
+      allowed: false,
+      reason: freshGuard.mismatchGuardAudit.active.reasons.join(" | ") || "Invariant mismatch bloquant",
+      estimate,
+      opportunity: {
+        ...guardedOpportunity,
+        mismatchRiskEstimate: estimate,
+        mismatchRiskAudit,
+      },
+    };
+  }
   const policy = applyMismatchRiskPolicy({
     ...policyInput,
     mode: input.settings.mismatchRiskMode,
@@ -2607,7 +2646,11 @@ async function persistOracleObservation(snapshot: OpportunitySnapshot) {
           {
             model: opportunity.mismatchRiskEstimate ?? null,
             heuristicRisk: opportunity.mismatchRisk,
-            guardAction: opportunity.mismatchGuardAction,
+            guardAction: opportunity.mismatchGuardAudit?.legacyEnforce.action ?? opportunity.mismatchGuardAction,
+            activeGuardAction: opportunity.mismatchGuardAction,
+            guardMode: opportunity.mismatchGuardAudit?.configuredMode ?? null,
+            guardPolicyAudit: opportunity.mismatchGuardAudit ?? null,
+            policyComparisons: opportunity.mismatchRiskAudit?.policyComparisons ?? null,
             deadZoneDistanceBps: opportunity.deadZoneDistanceBps,
             venueDisagreementPct: opportunity.venueDisagreementPct,
           },
@@ -3363,7 +3406,7 @@ async function writeCandidateEntryProbe(input: {
     globalRiskRevision: input.expectedConfiguration.globalRisk.revision,
     signal: buildProbeSignalEvidence(input.signalSnapshot, input.intent.combination),
     rest: buildProbeRestEvidence(input.intent, input.restCapture, input.restPreflight),
-    risk: toJsonRecord({ estimate: input.riskEstimate }),
+    risk: buildProbeRiskEvidence(input.signalSnapshot, input.intent.combination, input.riskEstimate),
     variants: buildEntryProbeVariants(input.intent, input.restCapture.snapshot, input.settings, input.riskEstimate),
     recordedAt: Math.max(Date.now(), input.restCapture.capturedAt),
   });
@@ -3573,7 +3616,7 @@ async function captureLateEntryProbe(input: LateEntryProbeCaptureInput) {
         globalRiskRevision: input.globalRiskRevision,
         signal: buildProbeSignalEvidence(input.snapshot, opportunity.combination),
         rest: buildProbeRestEvidence(intent, restCapture, preflight),
-        risk: toJsonRecord({ estimate: opportunity.mismatchRiskEstimate ?? null }),
+        risk: buildProbeRiskEvidence(input.snapshot, opportunity.combination, opportunity.mismatchRiskEstimate ?? null),
         variants: captureEndedAfterSlot
           ? []
           : buildEntryProbeVariants(
@@ -3618,7 +3661,11 @@ async function writeLateEntryProbeWithoutRest(input: {
     globalRiskRevision: input.input.globalRiskRevision,
     signal: buildProbeSignalEvidence(input.input.snapshot, input.combination),
     rest: input.rest ?? {},
-    risk: toJsonRecord({ estimate: input.opportunity?.mismatchRiskEstimate ?? null }),
+    risk: buildProbeRiskEvidence(
+      input.input.snapshot,
+      input.combination,
+      input.opportunity?.mismatchRiskEstimate ?? null,
+    ),
     variants: [],
     recordedAt,
   });
@@ -3726,6 +3773,8 @@ function buildProbeSignalEvidence(snapshot: OpportunitySnapshot, combination: Pa
     grossCost: opportunity?.grossCost ?? null,
     threshold: opportunity?.threshold ?? null,
     projectedNetProfitUsd: opportunity?.projectedNetProfitUsd ?? null,
+    mismatchGuardAudit: opportunity?.mismatchGuardAudit ?? null,
+    mismatchPolicyComparisons: opportunity?.mismatchRiskAudit?.policyComparisons ?? null,
     legs:
       opportunity?.legs.map((leg) => ({
         venue: leg.venue,
@@ -3736,6 +3785,19 @@ function buildProbeSignalEvidence(snapshot: OpportunitySnapshot, combination: Pa
         size: leg.size,
         targetNotionalUsd: leg.targetNotionalUsd,
       })) ?? [],
+  });
+}
+
+function buildProbeRiskEvidence(
+  snapshot: OpportunitySnapshot,
+  combination: PairCombination,
+  estimate: MismatchRiskEstimate | null,
+) {
+  const opportunity = snapshot.opportunities.find((candidate) => candidate.combination === combination) ?? null;
+  return toJsonRecord({
+    estimate,
+    guardPolicyAudit: opportunity?.mismatchGuardAudit ?? null,
+    policyComparisons: opportunity?.mismatchRiskAudit?.policyComparisons ?? null,
   });
 }
 

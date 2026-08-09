@@ -177,6 +177,7 @@ export function buildBacktestVariants(baseSettings: StrategyConfigMap): Backtest
       settingsByAsset: mapSettings(baseSettings, (settings) => ({
         ...settings,
         mismatchGuardEnabled: false,
+        mismatchGuardMode: "audit",
       })),
       allowDepthBypass: false,
     },
@@ -186,6 +187,7 @@ export function buildBacktestVariants(baseSettings: StrategyConfigMap): Backtest
       settingsByAsset: mapSettings(baseSettings, (settings) => ({
         ...settings,
         mismatchGuardEnabled: true,
+        mismatchGuardMode: "legacy_enforce",
         mismatchGuardMinElapsedSeconds: Math.max(0, Math.min(settings.mismatchGuardMinElapsedSeconds, 30)),
         mismatchGuardMinMoveBps: Math.max(0, Math.min(settings.mismatchGuardMinMoveBps, 2)),
         mismatchGuardPhase2MinMoveBps: Math.max(0, Math.min(settings.mismatchGuardPhase2MinMoveBps, 5)),
@@ -226,6 +228,7 @@ export function buildBacktestVariants(baseSettings: StrategyConfigMap): Backtest
         maxLegPrice: 0.99,
         minimumEntryDepthCoverageRatio: 0.01,
         mismatchGuardEnabled: false,
+        mismatchGuardMode: "audit",
         primarySelectionMode: "dynamic",
       })),
       allowDepthBypass: true,

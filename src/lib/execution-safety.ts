@@ -1,5 +1,6 @@
 import { isTruthyEnv } from "@/lib/env";
 import { ACTIVE_MARKET_ASSETS } from "@/lib/market-catalog";
+import { resolveMismatchGuardMode } from "@/lib/mismatch-guard-mode";
 import type { MarketAsset, StrategyConfig } from "@/lib/types";
 
 export const LIVE_EXECUTION_ENV_KEY = "LIVE_EXECUTION_ALLOWED";
@@ -66,7 +67,8 @@ export function isLiveMismatchRiskEnforced(settings: Pick<StrategyConfig, "misma
 
 export function getLiveSettingsBlockReasons(
   asset: MarketAsset,
-  settings: Pick<StrategyConfig, "enableTrading" | "shadowMode" | "mismatchRiskMode">,
+  settings: Pick<StrategyConfig, "enableTrading" | "shadowMode" | "mismatchRiskMode"> &
+    Partial<Pick<StrategyConfig, "mismatchGuardEnabled" | "mismatchGuardMode">>,
   env: ExecutionEnvironment = readExecutionEnvironment(),
 ) {
   if (!requestsLiveExecution(settings)) {
@@ -74,13 +76,19 @@ export function getLiveSettingsBlockReasons(
   }
 
   const reasons: Array<
-    LiveExecutionSafety["reasons"][number] | "asset_worker_inactive" | "mismatch_risk_not_enforced"
+    | LiveExecutionSafety["reasons"][number]
+    | "asset_worker_inactive"
+    | "mismatch_risk_not_enforced"
+    | "mismatch_guard_hard_invariants_required"
   > = [...getLiveExecutionSafety(env).reasons];
   if (!ACTIVE_MARKET_ASSETS.includes(asset)) {
     reasons.push("asset_worker_inactive");
   }
   if (!isLiveMismatchRiskEnforced(settings)) {
     reasons.push("mismatch_risk_not_enforced");
+  }
+  if (resolveMismatchGuardMode(settings) === "audit") {
+    reasons.push("mismatch_guard_hard_invariants_required");
   }
   return reasons;
 }

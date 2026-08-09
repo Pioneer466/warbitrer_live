@@ -41,16 +41,20 @@ export function buildMismatchRiskAudit(input: {
     .filter((code) => economicsBasis !== "reference" || code !== "estimate_invalid");
   const enforceReasons = deriveEnforceReasons(input.estimate, diagnosticReasonCodes, economicsBasis);
   const blockingReasons = readAuditBlockingReasons(economicsBasis, input.policy, referenceGate);
+  const modelDecision = deriveDecision({
+    basis: economicsBasis,
+    estimate: input.estimate,
+    policy: input.policy,
+    referenceGate,
+  });
+  const guardAudit = input.opportunity.mismatchGuardAudit ?? null;
+  const legacyGuardAction = guardAudit?.legacyEnforce.action ?? input.opportunity.mismatchGuardAction;
+  const legacySizeMultiplier = guardAudit?.legacyEnforce.sizeMultiplier ?? input.opportunity.mismatchSizeMultiplier;
 
   return {
     evaluatedAt: input.evaluatedAt,
     policyMode: "block_only",
-    decision: deriveDecision({
-      basis: economicsBasis,
-      estimate: input.estimate,
-      policy: input.policy,
-      referenceGate,
-    }),
+    decision: modelDecision,
     source: input.source,
     baseEligible: input.opportunity.eligible,
     baseReasons: [...input.opportunity.reasons],
@@ -79,8 +83,21 @@ export function buildMismatchRiskAudit(input: {
     modelVersion: input.estimate.modelVersion,
     enforceReady: enforceReasons.length === 0,
     enforceReasons,
-    legacyGuardAction: input.opportunity.mismatchGuardAction,
-    legacySizeMultiplier: input.opportunity.mismatchSizeMultiplier,
+    guardMode: guardAudit?.configuredMode,
+    hardInvariantReasonCodes: guardAudit?.hardOnly.reasonCodes ?? [],
+    legacyGuardReasonCodes: guardAudit?.legacyEnforce.reasonCodes ?? [],
+    policyComparisons: {
+      calibratedModel: modelDecision,
+      calibratedModelPlusHardInvariants: guardAudit?.hardOnly.action === "block" ? "would_block" : modelDecision,
+      legacyGuard:
+        legacyGuardAction === "block"
+          ? "would_block"
+          : legacyGuardAction === "reduce_size"
+            ? "would_reduce_size"
+            : "would_allow",
+    },
+    legacyGuardAction,
+    legacySizeMultiplier,
   };
 }
 

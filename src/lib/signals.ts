@@ -8,10 +8,14 @@ import {
 import { computeKalshiBuyDepthWithinPriceRange, deriveKalshiBuyPriceLevels } from "@/lib/kalshi";
 import { moveKalshiOutcomePriceByTicks } from "@/lib/kalshi-price-grid";
 import { POLYMARKET_MIN_MARKET_BUY_AMOUNT_USD } from "@/lib/constants";
+import { resolveMismatchGuardMode } from "@/lib/mismatch-guard-mode";
 import { choosePrimaryVenueForOpportunity } from "@/lib/primary-selection";
 import type {
   KalshiQuote,
   LiveOpportunity,
+  MismatchGuardDecision,
+  MismatchGuardPolicyAudit,
+  MismatchGuardReasonCode,
   OutcomeQuote,
   PairCombination,
   PolymarketQuote,
@@ -53,7 +57,10 @@ type MismatchGuardMetrics = {
   observedSlotOpenPriceUsd: number | null;
   kalshiTargetPriceUsd: number | null;
   mismatchGuardReason: string | null;
+  mismatchGuardAudit: MismatchGuardPolicyAudit;
 };
+
+export type MismatchGuardEvaluation = MismatchGuardMetrics;
 
 type MismatchGuardBaseMetrics = Omit<
   MismatchGuardMetrics,
@@ -64,6 +71,7 @@ type MismatchGuardBaseMetrics = Omit<
   | "deadZoneWidthBps"
   | "mismatchRisk"
   | "mismatchGuardReason"
+  | "mismatchGuardAudit"
 > & {
   activeMinMoveBps: number;
   mismatchPhase: MismatchGuardPhase;
@@ -130,7 +138,12 @@ export function buildSignals({
       balances,
       lastEntryCosts,
       marketAlignmentReason,
-      mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_UP_KALSHI_NO", settings),
+      mismatchGuard: computeMismatchGuard(
+        mismatchGuardBase,
+        "POLY_UP_KALSHI_NO",
+        settings,
+        mismatchRiskEstimates?.POLY_UP_KALSHI_NO ?? null,
+      ),
       mismatchRiskEstimate: mismatchRiskEstimates?.POLY_UP_KALSHI_NO ?? null,
       riskBudget,
     }),
@@ -157,11 +170,36 @@ export function buildSignals({
       balances,
       lastEntryCosts,
       marketAlignmentReason,
-      mismatchGuard: computeMismatchGuard(mismatchGuardBase, "POLY_DOWN_KALSHI_YES", settings),
+      mismatchGuard: computeMismatchGuard(
+        mismatchGuardBase,
+        "POLY_DOWN_KALSHI_YES",
+        settings,
+        mismatchRiskEstimates?.POLY_DOWN_KALSHI_YES ?? null,
+      ),
       mismatchRiskEstimate: mismatchRiskEstimates?.POLY_DOWN_KALSHI_YES ?? null,
       riskBudget,
     }),
   ];
+}
+
+export function evaluateMismatchGuardForQuotes(input: {
+  now: number;
+  slotStartTs?: number;
+  secondsRemaining?: number;
+  polymarket: PolymarketQuote;
+  kalshi: KalshiQuote;
+  settings: StrategyConfig;
+  combination: PairCombination;
+  mismatchRiskEstimate: MismatchRiskEstimate | null;
+}): MismatchGuardEvaluation {
+  const secondsElapsed =
+    input.slotStartTs != null
+      ? Math.max(0, (input.now - input.slotStartTs) / 1_000)
+      : input.secondsRemaining != null
+        ? Math.max(0, 900 - input.secondsRemaining)
+        : null;
+  const base = computeMismatchGuardBase(input.polymarket, input.kalshi, input.settings, secondsElapsed);
+  return computeMismatchGuard(base, input.combination, input.settings, input.mismatchRiskEstimate);
 }
 
 function buildSignal({
@@ -528,6 +566,7 @@ function buildSignal({
     reasons,
     mismatchGuardAction: mismatchGuard.mismatchGuardAction,
     mismatchSizeMultiplier: mismatchGuard.mismatchSizeMultiplier,
+    mismatchGuardAudit: mismatchGuard.mismatchGuardAudit,
     referencePayoutCount: mismatchGuard.referencePayoutCount,
     deadZoneDistanceBps: mismatchGuard.deadZoneDistanceBps,
     deadZoneWidthBps: mismatchGuard.deadZoneWidthBps,
@@ -636,6 +675,7 @@ function computeMismatchGuard(
   base: MismatchGuardBaseMetrics,
   combination: PairCombination,
   settings: StrategyConfig,
+  mismatchRiskEstimate: MismatchRiskEstimate | null,
 ): MismatchGuardMetrics {
   const deadZone = computeDeadZoneMetrics({
     combination,
@@ -643,44 +683,44 @@ function computeMismatchGuard(
     observedSlotOpenPrice: base.observedSlotOpenPriceUsd,
     kalshiTargetPrice: base.kalshiTargetPriceUsd,
   });
-  const { mismatchGuardEnabled, mismatchGuardMaxVenueDisagreementPct } = settings;
+  const hardOnly = computeHardMismatchGuardDecision({
+    base,
+    deadZone,
+    combination,
+    mismatchRiskEstimate,
+    maxVenueDisagreementPct: settings.mismatchGuardMaxVenueDisagreementPct,
+  });
+  const legacyEnforce = computeLegacyMismatchGuardDecision(base, deadZone.deadZoneDistanceBps, hardOnly);
+  const configuredMode = resolveMismatchGuardMode(settings);
+  const active =
+    configuredMode === "audit"
+      ? allowMismatchGuardDecision()
+      : configuredMode === "hard_only"
+        ? hardOnly
+        : legacyEnforce;
+  const mismatchGuardAudit: MismatchGuardPolicyAudit = {
+    configuredMode,
+    active,
+    hardOnly,
+    legacyEnforce,
+  };
 
-  let action: LiveOpportunity["mismatchGuardAction"] = "allow";
-  let sizeMultiplier = 1;
-  let mismatchGuardReason: string | null = null;
-
-  if (base.missingReferenceSignal) {
-    action = "block";
-    mismatchGuardReason = "Garde discordance: données de référence indisponibles";
-  } else if (base.disagreementHigh && base.venueDisagreementPct !== null) {
-    action = "block";
-    mismatchGuardReason = `Garde discordance: désaccord venues élevé (${(base.venueDisagreementPct * 100).toFixed(1)}% > ${(mismatchGuardMaxVenueDisagreementPct * 100).toFixed(1)}%)`;
-  } else if (deadZone.insideDeadZone) {
-    action = "block";
-    mismatchGuardReason = `Garde discordance: zone morte ${formatCombinationForReason(combination)} (${deadZone.referencePayoutCount} paiements proxy)`;
-  } else {
-    const multiplierCap = computeMismatchSizeMultiplierCap(base, deadZone.deadZoneDistanceBps);
-    if (multiplierCap <= 0.25 + ORDER_SIZE_TOLERANCE) {
-      action = "block";
-      mismatchGuardReason = "Garde discordance: risque medium trop proche (taille x0.25 désactivée)";
-    } else if (multiplierCap < 1) {
-      action = "reduce_size";
-      sizeMultiplier = multiplierCap;
-    }
-  }
-
-  if (!mismatchGuardEnabled) {
-    action = "allow";
-    sizeMultiplier = 1;
-    mismatchGuardReason = null;
-  }
-
+  // Preserve the old low/medium/high series as telemetry even when it is no
+  // longer the active authority. This keeps shadow comparisons meaningful.
   const mismatchRisk: LiveOpportunity["mismatchRisk"] =
-    action === "block" ? "high" : action === "reduce_size" ? "medium" : base.hasAnyMismatchSignal ? "low" : null;
+    legacyEnforce.action === "block"
+      ? "high"
+      : legacyEnforce.action === "reduce_size"
+        ? "medium"
+        : base.hasAnyMismatchSignal
+          ? "low"
+          : null;
+  const mismatchGuardReason = active.action === "block" ? (active.reasons[0] ?? "Garde discordance bloquante") : null;
 
   return {
-    mismatchGuardAction: action,
-    mismatchSizeMultiplier: sizeMultiplier,
+    mismatchGuardAction: active.action,
+    mismatchSizeMultiplier: active.sizeMultiplier,
+    mismatchGuardAudit,
     referencePayoutCount: deadZone.referencePayoutCount,
     deadZoneDistanceBps: deadZone.deadZoneDistanceBps,
     deadZoneWidthBps: deadZone.deadZoneWidthBps,
@@ -693,6 +733,115 @@ function computeMismatchGuard(
     observedSlotOpenPriceUsd: base.observedSlotOpenPriceUsd,
     kalshiTargetPriceUsd: base.kalshiTargetPriceUsd,
     mismatchGuardReason,
+  };
+}
+
+function computeHardMismatchGuardDecision(input: {
+  base: MismatchGuardBaseMetrics;
+  deadZone: ReturnType<typeof computeDeadZoneMetrics>;
+  combination: PairCombination;
+  mismatchRiskEstimate: MismatchRiskEstimate | null;
+  maxVenueDisagreementPct: number;
+}): MismatchGuardDecision {
+  const referenceFailure = readReferenceQualityFailure(input.base, input.mismatchRiskEstimate);
+  if (referenceFailure) {
+    return blockMismatchGuardDecision(referenceFailure.code, referenceFailure.reason);
+  }
+  if (input.base.disagreementHigh && input.base.venueDisagreementPct !== null) {
+    return blockMismatchGuardDecision(
+      "extreme_venue_disagreement",
+      `Garde discordance: désaccord venues élevé (${(input.base.venueDisagreementPct * 100).toFixed(1)}% > ${(input.maxVenueDisagreementPct * 100).toFixed(1)}%)`,
+    );
+  }
+  if (input.deadZone.insideDeadZone) {
+    return blockMismatchGuardDecision(
+      "dead_zone",
+      `Garde discordance: zone morte ${formatCombinationForReason(input.combination)} (${input.deadZone.referencePayoutCount} paiements proxy)`,
+    );
+  }
+  return allowMismatchGuardDecision();
+}
+
+function computeLegacyMismatchGuardDecision(
+  base: MismatchGuardBaseMetrics,
+  deadZoneDistanceBps: number | null,
+  hardOnly: MismatchGuardDecision,
+): MismatchGuardDecision {
+  if (hardOnly.action === "block") {
+    return cloneMismatchGuardDecision(hardOnly);
+  }
+
+  const multiplierCap = computeMismatchSizeMultiplierCap(base, deadZoneDistanceBps);
+  if (multiplierCap <= 0.25 + ORDER_SIZE_TOLERANCE) {
+    const reason = base.tooEarly
+      ? {
+          code: "too_early" as const,
+          message: "Garde discordance: risque medium trop proche (taille x0.25 désactivée)",
+        }
+      : {
+          code: "near_dead_zone" as const,
+          message: "Garde discordance: risque medium trop proche (taille x0.25 désactivée)",
+        };
+    return blockMismatchGuardDecision(reason.code, reason.message);
+  }
+  if (multiplierCap < 1) {
+    const reasonCode: MismatchGuardReasonCode = base.disagreementMedium
+      ? "moderate_venue_disagreement"
+      : "near_dead_zone";
+    const reason =
+      reasonCode === "moderate_venue_disagreement"
+        ? "Garde discordance legacy: désaccord venues modéré"
+        : "Garde discordance legacy: proximité de la zone morte";
+    return {
+      action: "reduce_size",
+      sizeMultiplier: multiplierCap,
+      reasonCodes: [reasonCode],
+      reasons: [reason],
+    };
+  }
+  return allowMismatchGuardDecision();
+}
+
+function readReferenceQualityFailure(
+  base: MismatchGuardBaseMetrics,
+  estimate: MismatchRiskEstimate | null,
+): { code: MismatchGuardReasonCode; reason: string } | null {
+  const reason = estimate?.executionReason ?? estimate?.reason ?? null;
+  if (reason === "chainlink_stale") {
+    return { code: "reference_chainlink_stale", reason: "Garde discordance: prix Chainlink trop ancien" };
+  }
+  if (reason === "cf_stale") {
+    return { code: "reference_cf_stale", reason: "Garde discordance: prix CF Benchmarks trop ancien" };
+  }
+  if (reason === "oracle_timestamp_skew") {
+    return { code: "reference_timestamp_skew", reason: "Garde discordance: références oracle désynchronisées" };
+  }
+  if (
+    base.missingReferenceSignal ||
+    reason === "chainlink_unavailable" ||
+    reason === "cf_unavailable" ||
+    reason === "chainlink_timestamp_in_future" ||
+    reason === "cf_timestamp_in_future"
+  ) {
+    return { code: "missing_reference_data", reason: "Garde discordance: données de référence indisponibles" };
+  }
+  return null;
+}
+
+function allowMismatchGuardDecision(): MismatchGuardDecision {
+  return { action: "allow", sizeMultiplier: 1, reasonCodes: [], reasons: [] };
+}
+
+function blockMismatchGuardDecision(code: MismatchGuardReasonCode, reason: string): MismatchGuardDecision {
+  return { action: "block", sizeMultiplier: 1, reasonCodes: [code], reasons: [reason] };
+}
+
+function cloneMismatchGuardDecision(decision: MismatchGuardDecision): MismatchGuardDecision {
+  return {
+    action: decision.action,
+    sizeMultiplier: decision.sizeMultiplier,
+    reasonCodes: [...decision.reasonCodes],
+    reasons: [...decision.reasons],
   };
 }
 

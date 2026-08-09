@@ -425,6 +425,17 @@ function OpportunityAuditRow({
 
 function MismatchAuditReasons({ audit, compact = false }: { audit: MismatchRiskAudit; compact?: boolean }) {
   const rows: Array<{ label: string; values: string[]; tone: V2Tone }> = [];
+  if (audit.policyComparisons) {
+    rows.push({
+      label: "Politiques shadow",
+      values: [
+        `modèle calibré: ${formatPolicyDecision(audit.policyComparisons.calibratedModel)}`,
+        `modèle + invariants durs: ${formatPolicyDecision(audit.policyComparisons.calibratedModelPlusHardInvariants)}`,
+        `garde legacy: ${formatLegacyPolicyDecision(audit.policyComparisons.legacyGuard)}`,
+      ],
+      tone: "mist",
+    });
+  }
   if (audit.blockingReasons.length > 0) {
     rows.push({ label: "Blocage", values: audit.blockingReasons, tone: "rose" });
   }
@@ -456,6 +467,21 @@ function MismatchAuditReasons({ audit, compact = false }: { audit: MismatchRiskA
       )}
     </div>
   );
+}
+
+function formatPolicyDecision(decision: MismatchRiskCounterfactualDecision) {
+  if (decision === "would_allow") return "autoriserait";
+  if (decision === "would_block") return "bloquerait";
+  if (decision === "would_allow_fail_open") return "autoriserait en diagnostic";
+  if (decision === "reference_allow") return "référence autoriserait";
+  if (decision === "reference_block") return "référence bloquerait";
+  return "indisponible";
+}
+
+function formatLegacyPolicyDecision(decision: "would_allow" | "would_reduce_size" | "would_block") {
+  if (decision === "would_allow") return "autoriserait";
+  if (decision === "would_reduce_size") return "réduirait la taille";
+  return "bloquerait";
 }
 
 function AuditInlineMetric({ label, value, tone = "mist" }: { label: string; value: string; tone?: V2Tone }) {

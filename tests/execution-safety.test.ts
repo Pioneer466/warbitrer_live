@@ -92,6 +92,28 @@ describe("live execution safety", () => {
     ).toEqual(["mismatch_risk_not_enforced"]);
   });
 
+  it("blocks live settings when structural mismatch invariants are audit-only", () => {
+    const env = {
+      LIVE_EXECUTION_ALLOWED: "true",
+      KALSHI_ENV: "prod",
+      POLYGON_RPC_URL: "https://polygon.example",
+    };
+
+    expect(
+      getLiveSettingsBlockReasons(
+        "btc",
+        {
+          enableTrading: true,
+          shadowMode: false,
+          mismatchRiskMode: "enforce",
+          mismatchGuardMode: "audit",
+          mismatchGuardEnabled: false,
+        },
+        env,
+      ),
+    ).toEqual(["mismatch_guard_hard_invariants_required"]);
+  });
+
   it("throws a typed error when a new live entry is not authorized", () => {
     expect(() =>
       assertNewLiveExecutionAllowed({

@@ -129,6 +129,47 @@ describe("mismatch risk counterfactual audit", () => {
     });
   });
 
+  it("records model-only, hard-invariant, and legacy counterfactual policies", () => {
+    const audit = buildMismatchRiskAudit({
+      opportunity: opportunity({
+        mismatchGuardAction: "allow",
+        mismatchSizeMultiplier: 1,
+        mismatchGuardAudit: {
+          configuredMode: "hard_only",
+          active: { action: "allow", sizeMultiplier: 1, reasonCodes: [], reasons: [] },
+          hardOnly: {
+            action: "block",
+            sizeMultiplier: 1,
+            reasonCodes: ["extreme_venue_disagreement"],
+            reasons: ["Désaccord extrême"],
+          },
+          legacyEnforce: {
+            action: "block",
+            sizeMultiplier: 1,
+            reasonCodes: ["extreme_venue_disagreement"],
+            reasons: ["Désaccord extrême"],
+          },
+        },
+      }),
+      estimate: estimate({ modelVersion: "calibrated-v1" }),
+      policy: policy({ allowed: true, economicGate: { ...policy().economicGate!, eligible: true } }),
+      evaluatedAt: 123_000,
+      source: "scan",
+    });
+
+    expect(audit).toMatchObject({
+      guardMode: "hard_only",
+      hardInvariantReasonCodes: ["extreme_venue_disagreement"],
+      legacyGuardReasonCodes: ["extreme_venue_disagreement"],
+      policyComparisons: {
+        calibratedModel: "would_allow",
+        calibratedModelPlusHardInvariants: "would_block",
+        legacyGuard: "would_block",
+      },
+      legacyGuardAction: "block",
+    });
+  });
+
   it("reconstructs older intents and preserves the legacy size reduction", () => {
     const audit = reconstructMismatchRiskAudit({
       createdAt: 456_000,

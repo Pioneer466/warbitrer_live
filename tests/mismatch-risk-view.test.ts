@@ -33,6 +33,10 @@ describe("mismatch risk view", () => {
     expect(markup).toContain("maximumAllowed · limite");
     expect(markup).toContain("Limite 0 % expliquée");
     expect(markup).toContain("marge alignée non positive");
+    expect(markup).toContain("Politiques shadow");
+    expect(markup).toContain("modèle calibré: référence bloquerait");
+    expect(markup).toContain("modèle + invariants durs: bloquerait");
+    expect(markup).toContain("garde legacy: réduirait la taille");
   });
 
   it("does not display the default mismatch fraction while the global config is unavailable", () => {
@@ -153,6 +157,14 @@ function buildOpportunity(): LiveOpportunity {
     modelVersion: "structural-ewma-gaussian-v1-uncalibrated",
     enforceReady: false,
     enforceReasons: ["reference_economics_only", "model_uncalibrated"],
+    guardMode: "hard_only",
+    hardInvariantReasonCodes: ["dead_zone"],
+    legacyGuardReasonCodes: ["moderate_venue_disagreement"],
+    policyComparisons: {
+      calibratedModel: "reference_block",
+      calibratedModelPlusHardInvariants: "would_block",
+      legacyGuard: "would_reduce_size",
+    },
     legacyGuardAction: "allow",
     legacySizeMultiplier: 1,
   };

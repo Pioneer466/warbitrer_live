@@ -1,4 +1,4 @@
-import { normalizeSettings, normalizeSettingsMap } from "@/lib/settings-schema";
+import { normalizeSettings, normalizeSettingsMap, settingsSchema } from "@/lib/settings-schema";
 
 describe("settings schema", () => {
   it("applies execution defaults for confirmation timeout and price buffer", () => {
@@ -46,9 +46,36 @@ describe("settings schema", () => {
     expect(settings.forcedUnwindHoldSecondsToSettlement).toBe(45);
     expect(settings.entryCutoffSeconds).toBe(180);
     expect(settings.mismatchGuardEnabled).toBe(true);
+    expect(settings.mismatchGuardMode).toBe("hard_only");
     expect(settings.mismatchGuardMinMoveBps).toBe(5);
     expect(settings.mismatchGuardPhase2StartSeconds).toBe(480);
     expect(settings.mismatchGuardPhase2MinMoveBps).toBe(10);
+  });
+
+  it("maps legacy guard booleans without silently changing persisted behaviour", () => {
+    expect(normalizeSettings({ mismatchGuardEnabled: true }).mismatchGuardMode).toBe("legacy_enforce");
+    expect(normalizeSettings({ mismatchGuardEnabled: false }).mismatchGuardMode).toBe("audit");
+
+    const { mismatchGuardMode: _removedMode, ...legacyConfig } = normalizeSettings(null);
+    expect(settingsSchema.parse({ ...legacyConfig, mismatchGuardEnabled: true }).mismatchGuardMode).toBe(
+      "legacy_enforce",
+    );
+    expect(settingsSchema.parse({ ...legacyConfig, mismatchGuardEnabled: false }).mismatchGuardMode).toBe("audit");
+  });
+
+  it("normalizes explicit guard modes and their compatibility boolean", () => {
+    expect(normalizeSettings({ mismatchGuardMode: "audit" })).toMatchObject({
+      mismatchGuardMode: "audit",
+      mismatchGuardEnabled: false,
+    });
+    expect(normalizeSettings({ mismatchGuardMode: "hard_only", mismatchGuardEnabled: false })).toMatchObject({
+      mismatchGuardMode: "hard_only",
+      mismatchGuardEnabled: true,
+    });
+    expect(normalizeSettings({ mismatchGuardMode: "legacy_enforce" })).toMatchObject({
+      mismatchGuardMode: "legacy_enforce",
+      mismatchGuardEnabled: true,
+    });
   });
 
   it("accepts explicit execution buffer overrides", () => {

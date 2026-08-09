@@ -1499,6 +1499,7 @@ describe("live signal engine", () => {
       }),
       settings: buildV3Settings({
         mismatchGuardEnabled: false,
+        mismatchGuardMode: "audit",
       }),
       balances,
       lastEntryCosts: {},
@@ -1508,8 +1509,99 @@ describe("live signal engine", () => {
     expect(signal.deadZoneDistanceBps).toBe(0);
     expect(signal.mismatchGuardAction).toBe("allow");
     expect(signal.mismatchSizeMultiplier).toBe(1);
-    expect(signal.mismatchRisk).toBe("low");
+    expect(signal.mismatchRisk).toBe("high");
     expect(signal.eligible).toBe(true);
+    expect(signal.mismatchGuardAudit).toMatchObject({
+      configuredMode: "audit",
+      active: { action: "allow" },
+      hardOnly: { action: "block", reasonCodes: ["dead_zone"] },
+      legacyEnforce: { action: "block", reasonCodes: ["dead_zone"] },
+    });
+  });
+
+  it("keeps legacy medium risk as telemetry without reducing size in hard_only mode", () => {
+    const baseKalshi = tradableKalshi({ targetPriceUsd: 99950 });
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket({
+        chainlinkLivePriceUsd: 99800,
+        observedSlotOpenPriceUsd: 100000,
+      }),
+      kalshi: {
+        ...baseKalshi,
+        outcomes: {
+          ...baseKalshi.outcomes,
+          yes: withOutcomeQuote(baseKalshi.outcomes.yes, {
+            buyPrice: 0.34,
+            sellPrice: 0.33,
+            midPrice: 0.335,
+            bestBid: 0.33,
+            bestAsk: 0.34,
+          }),
+        },
+      },
+      settings: buildV3Settings({ mismatchGuardMode: "hard_only" }),
+      balances,
+      lastEntryCosts: {},
+    });
+
+    expect(signal.mismatchGuardAction).toBe("allow");
+    expect(signal.mismatchSizeMultiplier).toBe(1);
+    expect(signal.mismatchRisk).toBe("medium");
+    expect(signal.eligible).toBe(true);
+    expect(signal.mismatchGuardAudit).toMatchObject({
+      configuredMode: "hard_only",
+      active: { action: "allow", sizeMultiplier: 1 },
+      hardOnly: { action: "allow" },
+      legacyEnforce: {
+        action: "reduce_size",
+        sizeMultiplier: 0.5,
+        reasonCodes: ["moderate_venue_disagreement"],
+      },
+    });
+  });
+
+  it("keeps hard structural reference failures fail-closed in hard_only mode", () => {
+    const staleEstimate = {
+      available: true,
+      executionUsable: false,
+      executionReason: "chainlink_stale",
+      modelVersion: "structural-ewma-gaussian-v1-calibrated",
+      reason: null,
+      pFatal: 0.01,
+      pFatalUpper95: 0.02,
+      pAligned: 0.97,
+      pDouble: 0.02,
+      expectedPnlUsd: null,
+      conservativePnlUsd: null,
+      fatalPnlUsd: null,
+      breakEvenFatalProbability: null,
+      maximumAllowedFatalProbability: null,
+      chainlinkAgeMs: 5_000,
+      cfAgeMs: 100,
+      observationCount: 1_000,
+    };
+    const [signal] = buildSignals({
+      slotKey: SLOT_KEY,
+      now: 1774899120000,
+      slotStartTs: 1774899000000,
+      polymarket: tradablePolymarket(),
+      kalshi: tradableKalshi(),
+      settings: buildV3Settings({ mismatchGuardMode: "hard_only" }),
+      balances,
+      lastEntryCosts: {},
+      mismatchRiskEstimates: {
+        POLY_UP_KALSHI_NO: staleEstimate,
+        POLY_DOWN_KALSHI_YES: staleEstimate,
+      },
+    });
+
+    expect(signal.mismatchGuardAction).toBe("block");
+    expect(signal.eligible).toBe(false);
+    expect(signal.mismatchGuardAudit?.hardOnly.reasonCodes).toEqual(["reference_chainlink_stale"]);
+    expect(signal.reasons.join(" | ")).toContain("Chainlink trop ancien");
   });
 
   it("blocks at 720s because the entry cutoff window starts", () => {

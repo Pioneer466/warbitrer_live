@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   DEFAULT_MISMATCH_GUARD_ENABLED,
+  DEFAULT_MISMATCH_GUARD_MODE,
   DEFAULT_MISMATCH_GUARD_MAX_VENUE_DISAGREEMENT_PCT,
   DEFAULT_MISMATCH_GUARD_MIN_ELAPSED_SECONDS,
   DEFAULT_MISMATCH_GUARD_MIN_MOVE_BPS,
@@ -42,7 +43,8 @@ import {
   DEFAULT_STRATEGY_CONFIG,
   DEFAULT_STRATEGY_CONFIGS,
 } from "@/lib/constants";
-import type { StrategyConfig, StrategyConfigMap } from "@/lib/types";
+import { isMismatchGuardEnabled } from "@/lib/mismatch-guard-mode";
+import type { MismatchGuardMode, StrategyConfig, StrategyConfigMap } from "@/lib/types";
 
 const SLOT_DURATION_SECONDS = 15 * 60;
 
@@ -137,6 +139,7 @@ export const settingsSchema = z
     maxVenueExposureUsd: z.number().positive().max(1_000_000),
     polyBridgeLowWaterUsdc: z.number().nonnegative().max(1_000_000),
     mismatchGuardEnabled: z.boolean().default(DEFAULT_MISMATCH_GUARD_ENABLED),
+    mismatchGuardMode: z.enum(["audit", "hard_only", "legacy_enforce"]).optional(),
     mismatchGuardMinElapsedSeconds: z
       .number()
       .int()
@@ -198,6 +201,15 @@ export const settingsSchema = z
         message: "Phase 2 mismatch guard must start before the entry cutoff window",
       });
     }
+  })
+  .transform((settings) => {
+    const mismatchGuardMode =
+      settings.mismatchGuardMode ?? (settings.mismatchGuardEnabled ? "legacy_enforce" : "audit");
+    return {
+      ...settings,
+      mismatchGuardMode,
+      mismatchGuardEnabled: isMismatchGuardEnabled(mismatchGuardMode),
+    };
   });
 
 export type SettingsInput = z.infer<typeof settingsSchema>;
@@ -238,41 +250,42 @@ export const strategyConfigMapUpdateSchema = z
 export type SettingsMapInput = z.infer<typeof settingsMapSchema>;
 
 export function normalizeSettings(input: Partial<StrategyConfig> | null | undefined): StrategyConfig {
-  return settingsSchema.parse({
+  return normalizeOneSettings(DEFAULT_STRATEGY_CONFIG, input);
+}
+
+function normalizeOneSettings(
+  defaults: StrategyConfig,
+  input: Partial<StrategyConfig> | null | undefined,
+): StrategyConfig {
+  const mode = resolveInputMismatchGuardMode(input);
+  const parsed = settingsSchema.parse({
     ...DEFAULT_STRATEGY_CONFIG,
+    ...defaults,
     ...(input ?? {}),
+    mismatchGuardMode: mode,
+    mismatchGuardEnabled: isMismatchGuardEnabled(mode),
   });
+  return parsed;
 }
 
 export function normalizeSettingsMap(input: Partial<StrategyConfigMap> | null | undefined): StrategyConfigMap {
   return settingsMapSchema.parse({
-    btc: {
-      ...DEFAULT_STRATEGY_CONFIGS.btc,
-      ...(input?.btc ?? {}),
-    },
-    eth: {
-      ...DEFAULT_STRATEGY_CONFIGS.eth,
-      ...(input?.eth ?? {}),
-    },
-    sol: {
-      ...DEFAULT_STRATEGY_CONFIGS.sol,
-      ...(input?.sol ?? {}),
-    },
-    xrp: {
-      ...DEFAULT_STRATEGY_CONFIGS.xrp,
-      ...(input?.xrp ?? {}),
-    },
-    doge: {
-      ...DEFAULT_STRATEGY_CONFIGS.doge,
-      ...(input?.doge ?? {}),
-    },
-    bnb: {
-      ...DEFAULT_STRATEGY_CONFIGS.bnb,
-      ...(input?.bnb ?? {}),
-    },
-    hype: {
-      ...DEFAULT_STRATEGY_CONFIGS.hype,
-      ...(input?.hype ?? {}),
-    },
+    btc: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.btc, input?.btc),
+    eth: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.eth, input?.eth),
+    sol: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.sol, input?.sol),
+    xrp: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.xrp, input?.xrp),
+    doge: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.doge, input?.doge),
+    bnb: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.bnb, input?.bnb),
+    hype: normalizeOneSettings(DEFAULT_STRATEGY_CONFIGS.hype, input?.hype),
   });
+}
+
+function resolveInputMismatchGuardMode(input: Partial<StrategyConfig> | null | undefined): MismatchGuardMode {
+  if (input?.mismatchGuardMode) {
+    return input.mismatchGuardMode;
+  }
+  if (input && "mismatchGuardEnabled" in input) {
+    return input.mismatchGuardEnabled ? "legacy_enforce" : "audit";
+  }
+  return DEFAULT_MISMATCH_GUARD_MODE;
 }

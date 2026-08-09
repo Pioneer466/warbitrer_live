@@ -41,6 +41,30 @@ export type CircuitBreakerReason =
   | "rpc_unhealthy";
 export type PrimarySelectionMode = "kalshi_only" | "shadow" | "dynamic";
 export type MismatchRiskMode = "shadow" | "block_only" | "enforce";
+export type MismatchGuardMode = "audit" | "hard_only" | "legacy_enforce";
+export type MismatchGuardAction = "allow" | "reduce_size" | "block";
+export type MismatchGuardReasonCode =
+  | "missing_reference_data"
+  | "reference_chainlink_stale"
+  | "reference_cf_stale"
+  | "reference_timestamp_skew"
+  | "extreme_venue_disagreement"
+  | "dead_zone"
+  | "too_early"
+  | "near_dead_zone"
+  | "moderate_venue_disagreement";
+export type MismatchGuardDecision = {
+  action: MismatchGuardAction;
+  sizeMultiplier: number;
+  reasonCodes: MismatchGuardReasonCode[];
+  reasons: string[];
+};
+export type MismatchGuardPolicyAudit = {
+  configuredMode: MismatchGuardMode;
+  active: MismatchGuardDecision;
+  hardOnly: MismatchGuardDecision;
+  legacyEnforce: MismatchGuardDecision;
+};
 export type BridgeTransferStatus = "idle" | "quoted" | "pending" | "completed" | "failed";
 export type RunEventLevel = "info" | "warn" | "error";
 export type NotificationKind = "trade_live" | "manual_intervention" | "incident";
@@ -274,6 +298,8 @@ export type StrategyConfig = {
   maxVenueExposureUsd: number;
   polyBridgeLowWaterUsdc: number;
   mismatchGuardEnabled: boolean;
+  /** Optional for backwards compatibility with configurations persisted before guard modes existed. */
+  mismatchGuardMode?: MismatchGuardMode;
   mismatchGuardMinElapsedSeconds: number;
   mismatchGuardMinMoveBps: number;
   mismatchGuardPhase2StartSeconds: number;
@@ -374,8 +400,9 @@ export type LiveOpportunity = {
   projectedNetReturn: number | null;
   reasons: string[];
   legs: [OpportunityLeg, OpportunityLeg];
-  mismatchGuardAction: "allow" | "reduce_size" | "block";
+  mismatchGuardAction: MismatchGuardAction;
   mismatchSizeMultiplier: number;
+  mismatchGuardAudit?: MismatchGuardPolicyAudit | null;
   referencePayoutCount: number | null;
   deadZoneDistanceBps: number | null;
   deadZoneWidthBps: number | null;
@@ -393,6 +420,12 @@ export type MismatchEconomicsBasis = "executable" | "reference" | "unavailable";
 
 export type MismatchRiskCounterfactualDecision =
   "would_allow" | "would_block" | "would_allow_fail_open" | "reference_allow" | "reference_block" | "unavailable";
+
+export type MismatchRiskPolicyComparisons = {
+  calibratedModel: MismatchRiskCounterfactualDecision;
+  calibratedModelPlusHardInvariants: MismatchRiskCounterfactualDecision;
+  legacyGuard: "would_allow" | "would_reduce_size" | "would_block";
+};
 
 export type MismatchRiskAudit = {
   evaluatedAt: number;
@@ -419,7 +452,11 @@ export type MismatchRiskAudit = {
   modelVersion: string;
   enforceReady: boolean;
   enforceReasons: string[];
-  legacyGuardAction: "allow" | "reduce_size" | "block";
+  guardMode?: MismatchGuardMode;
+  hardInvariantReasonCodes?: MismatchGuardReasonCode[];
+  legacyGuardReasonCodes?: MismatchGuardReasonCode[];
+  policyComparisons?: MismatchRiskPolicyComparisons;
+  legacyGuardAction: MismatchGuardAction;
   legacySizeMultiplier: number;
 };
 
