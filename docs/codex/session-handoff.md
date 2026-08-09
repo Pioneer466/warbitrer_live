@@ -631,7 +631,7 @@ Password-based VPS SSH access must remain available. Do not edit `sshd`, `Passwo
 ## Resume Prompt
 
 ```text
-Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Production is on main with calibration revision 1 active in shadow-only mode, a 35-second cutoff, and LIVE_EXECUTION_ALLOWED=false. Preserve password-based VPS SSH access. Do not enable live trading without explicit approval. Observe calibrated counterfactual verdicts, outcomes, and the execution funnel before proposing enforce/live mode.
+Read AGENTS.md, README.md, docs/codex/session-handoff.md, docs/codex/trading-safety.md, and docs/reviews/global-2026-07/iteration-07-final.md. Production is on main at d2bdbc2 with calibration revision 1, mismatchRiskMode=shadow, mismatchGuardMode=hard_only, a 35-second cutoff, and LIVE_EXECUTION_ALLOWED=false across all seven assets. Preserve password-based VPS SSH access. Do not enable live trading without explicit approval. Compare model-only, model-plus-hard, and legacy verdicts against outcomes and the execution funnel before proposing enforce/live mode.
 ```
 
 ## Shadow Admission Verification - 2026-07-23
@@ -695,7 +695,35 @@ Worker bundle          passed
 git diff --check       passed
 ```
 
-No production mutation, commit, push, deploy, live venue request, breaker action, or configuration change was made.
-After a future explicitly authorized deployment, keep all assets shadow-only and explicitly choose `hard_only` per
-asset to start the comparison window; existing production rows will otherwise intentionally remain
-`legacy_enforce`. Do not select `audit` for live and do not enable `LIVE_EXECUTION_ALLOWED` during this evaluation.
+The implementation was subsequently authorized for commit, push, shadow-only deployment, and an explicit
+`hard_only` strategy update. The completed production state is recorded below. Do not select `audit` for live and do
+not enable `LIVE_EXECUTION_ALLOWED` during this evaluation.
+
+## Production Mismatch Guard Rollout - 2026-08-09
+
+Commit `d2bdbc27fd60b05700d4808f86b8d8e0d23fde05` was pushed directly to `origin/main`, pulled as a clean fast-forward
+onto `/opt/warbitrer-live/app`, and deployed with the canonical split-service script. The first invocation stopped
+before service shutdown because this VPS sudo implementation ignored `-E`, so the audited historical-accounting
+override did not reach the preflight. The second invocation passed the single explicit
+`ALLOW_HISTORICAL_LEGACY_ACCOUNTING_DEPLOY=true` environment value directly to the root-owned deploy script; no other
+environment value was preserved or changed.
+
+Both running and stopped-service preflights, the quiescent backup, and the post-build preflight confirmed schema V10,
+`LIVE_EXECUTION_ALLOWED=false`, zero unresolved live order attempts, zero open live venue orders, zero economically
+active live positions, and zero owned live entry reservations. The 39 exact historical `legacy_pending` accounting
+defects remain untouched and continue to block runtime live entry. Production verification passed the audit, lint,
+formatting, TypeScript, 1,045 tests, Next.js build, worker bundle, migration checksum status, liveness check, and four
+systemd stability rounds.
+
+All ten application services are active/running with zero restarts, the backup timer is active, the authenticated
+health response is HTTP 200 `healthy`, all seven workers are ready, all fourteen venue feeds are fresh WebSocket
+feeds, and there are no active breakers. The VPS worktree is clean at `d2bdbc2` and the live environment gate remains
+disabled.
+
+The seven versioned strategy configurations were then updated atomically through the authenticated application API,
+not Postgres. BTC, ETH, SOL, XRP, and DOGE are at revision 13; BNB and HYPE are at revision 14. Every asset remains
+`enableTrading=true`, `shadowMode=true`, `mismatchRiskMode=shadow`, and cutoff 35 seconds, with
+`mismatchGuardMode=hard_only`. Fresh dashboards persist the model-only, model-plus-hard-invariants, and legacy
+counterfactual outcomes. An immediate XRP observation already showed the intended measurable divergence: the active
+hard guard allowed a combination that the full legacy guard would have blocked, while the calibrated economic audit
+remained independently visible.
