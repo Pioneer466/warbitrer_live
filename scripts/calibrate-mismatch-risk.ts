@@ -6,10 +6,10 @@ import path from "node:path";
 import { Pool } from "pg";
 
 import {
-  applyMismatchCalibration,
   buildMismatchCalibrationArtifact,
   DEFAULT_MISMATCH_CALIBRATION_MINIMUM_PRE_BIN_COUNT,
   evaluateMismatchCalibrationActivationEligibility,
+  prepareMismatchCalibrationEvaluator,
   resolveMismatchCalibrationHorizonBand,
   type MismatchCalibrationArtifact,
   type MismatchCalibrationHorizonBand,
@@ -472,10 +472,18 @@ export function evaluateCalibration(
     throw new RangeError("evaluation observations must not be empty");
   }
 
+  const prepared = prepareMismatchCalibrationEvaluator({ artifact, baseModelVersion: artifact.baseModelVersion });
+  if (!prepared.available) {
+    throw new Error(`calibration unavailable before evaluation: ${prepared.reason}`);
+  }
+
   const evaluated = observations.map((observation) => {
-    const calibrated = applyMismatchCalibration({
-      artifact,
-      baseModelVersion: observation.modelVersion,
+    if (observation.modelVersion !== artifact.baseModelVersion) {
+      throw new Error(
+        `calibration unavailable for ${observation.horizonBand}/${observation.combination}: base_model_version_mismatch`,
+      );
+    }
+    const calibrated = prepared.evaluate({
       horizonBand: observation.horizonBand,
       combination: observation.combination,
       rawProbability: observation.rawProbability,
@@ -643,16 +651,16 @@ async function queryCalibrationRowsReadOnly(pool: Pool, options: CalibrationCliO
             AND oracle.slot_key = resolution.slot_key
             AND oracle.captured_at >= resolution.slot_start_ts
             AND oracle.captured_at < resolution.slot_end_ts
+            AND oracle.captured_at >=
+              resolution.slot_end_ts - horizon.horizon_seconds::bigint * 1000 - $4::bigint
+            AND oracle.captured_at <=
+              resolution.slot_end_ts - horizon.horizon_seconds::bigint * 1000 + $4::bigint
             AND oracle.model_version = $5
             AND COALESCE(
               jsonb_typeof(oracle.risk_json -> combination.combination -> 'model' -> 'rawPFatal'),
               jsonb_typeof(oracle.risk_json -> combination.combination -> 'model' -> 'pFatal')
             ) = 'number'
             AND oracle.risk_json -> combination.combination -> 'model' -> 'executionUsable' = 'true'::jsonb
-            AND abs(
-              (resolution.slot_end_ts - oracle.captured_at) -
-              horizon.horizon_seconds::bigint * 1000
-            ) <= $4::bigint
             AND CASE horizon.horizon_seconds
               WHEN 600 THEN resolution.slot_end_ts - oracle.captured_at > 300000
               WHEN 240 THEN resolution.slot_end_ts - oracle.captured_at > 180000

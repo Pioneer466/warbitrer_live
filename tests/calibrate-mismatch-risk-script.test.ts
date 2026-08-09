@@ -119,6 +119,12 @@ describe("mismatch calibration CLI policy", () => {
     const source = readFileSync(new URL("../scripts/calibrate-mismatch-risk.ts", import.meta.url), "utf8");
 
     expect(source).toContain("-> 'executionUsable' = 'true'::jsonb");
+    expect(source).toContain(
+      "oracle.captured_at >=\n              resolution.slot_end_ts - horizon.horizon_seconds::bigint * 1000 - $4::bigint",
+    );
+    expect(source).toContain(
+      "oracle.captured_at <=\n              resolution.slot_end_ts - horizon.horizon_seconds::bigint * 1000 + $4::bigint",
+    );
     expect(source).toContain("WHEN 15 THEN resolution.slot_end_ts - oracle.captured_at >= 5000");
     expect(source).toContain("oracle.captured_at DESC,\n            oracle.id DESC");
   });

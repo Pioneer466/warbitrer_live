@@ -181,6 +181,13 @@ export type ApplyMismatchCalibrationInput = {
   rawProbability: number;
 };
 
+export type PreparedMismatchCalibrationInput = Pick<ApplyMismatchCalibrationInput, "artifact" | "baseModelVersion">;
+
+export type PreparedMismatchCalibrationEvaluationInput = Pick<
+  ApplyMismatchCalibrationInput,
+  "horizonBand" | "combination" | "rawProbability"
+>;
+
 export type ApplyMismatchCalibrationResult =
   | {
       available: true;
@@ -191,6 +198,16 @@ export type ApplyMismatchCalibrationResult =
       fatalCount: number;
       artifactSha256: string;
       block: MismatchCalibrationBlock;
+    }
+  | {
+      available: false;
+      reason: MismatchCalibrationUnavailableReason;
+    };
+
+export type PreparedMismatchCalibrationEvaluator =
+  | {
+      available: true;
+      evaluate: (input: PreparedMismatchCalibrationEvaluationInput) => ApplyMismatchCalibrationResult;
     }
   | {
       available: false;
@@ -322,6 +339,40 @@ export function verifyMismatchCalibrationArtifact(
 }
 
 export function applyMismatchCalibration(input: ApplyMismatchCalibrationInput): ApplyMismatchCalibrationResult {
+  const verified = verifyMismatchCalibrationForBaseModel(input);
+  if (!verified.available) {
+    return verified;
+  }
+  return evaluateVerifiedMismatchCalibration(verified.artifact, input);
+}
+
+export function prepareMismatchCalibrationEvaluator(
+  input: PreparedMismatchCalibrationInput,
+): PreparedMismatchCalibrationEvaluator {
+  const verified = verifyMismatchCalibrationForBaseModel(input);
+  if (!verified.available) {
+    return verified;
+  }
+  // Own the verified evaluation payload so later caller mutation cannot bypass
+  // the one-time checksum verification performed for this batch.
+  const artifact = {
+    ...verified.artifact,
+    curves: verified.artifact.curves.map((curve) => ({
+      ...curve,
+      blocks: curve.blocks.map((block) => ({ ...block })),
+    })),
+  };
+  return {
+    available: true,
+    evaluate: (evaluationInput) => evaluateVerifiedMismatchCalibration(artifact, evaluationInput),
+  };
+}
+
+function verifyMismatchCalibrationForBaseModel(
+  input: PreparedMismatchCalibrationInput,
+):
+  | { available: true; artifact: MismatchCalibrationArtifactV1 }
+  | Extract<ApplyMismatchCalibrationResult, { available: false }> {
   if (input.artifact === null || input.artifact === undefined) {
     return unavailable("artifact_unavailable");
   }
@@ -332,6 +383,17 @@ export function applyMismatchCalibration(input: ApplyMismatchCalibrationInput): 
   }
   const artifact = verification.artifact;
 
+  if (input.baseModelVersion !== artifact.baseModelVersion) {
+    return unavailable("base_model_version_mismatch");
+  }
+
+  return { available: true, artifact };
+}
+
+function evaluateVerifiedMismatchCalibration(
+  artifact: MismatchCalibrationArtifactV1,
+  input: PreparedMismatchCalibrationEvaluationInput,
+): ApplyMismatchCalibrationResult {
   if (!isProbability(input.rawProbability)) {
     return unavailable("invalid_raw_probability");
   }
@@ -341,10 +403,6 @@ export function applyMismatchCalibration(input: ApplyMismatchCalibrationInput): 
   if (!isCombination(input.combination)) {
     return unavailable("unsupported_combination");
   }
-  if (input.baseModelVersion !== artifact.baseModelVersion) {
-    return unavailable("base_model_version_mismatch");
-  }
-
   const horizonCurves = artifact.curves.filter((curve) => curve.horizonBand === input.horizonBand);
   if (horizonCurves.length === 0) {
     return unavailable("horizon_band_not_calibrated");
@@ -1335,7 +1393,9 @@ function canonicalizeJson(value: unknown): string {
   throw new RangeError("canonical JSON contains an unsupported value");
 }
 
-function unavailable(reason: MismatchCalibrationUnavailableReason): ApplyMismatchCalibrationResult {
+function unavailable(
+  reason: MismatchCalibrationUnavailableReason,
+): Extract<ApplyMismatchCalibrationResult, { available: false }> {
   return { available: false, reason };
 }
 

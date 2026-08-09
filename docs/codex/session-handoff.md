@@ -2,7 +2,7 @@
 
 ## Current State
 
-- Date: 2026-08-07, Asia/Jerusalem
+- Date: 2026-08-09, Asia/Jerusalem
 - Production branch: `main`
 - Production runtime branch: `main` (verify the exact immutable revision with `git rev-parse HEAD` on the VPS)
 - Local review branch: `review/global-hardening-2026-07-19`
@@ -16,6 +16,52 @@
 The global hardening review, V10 mismatch-efficiency work, and V3 shadow fill replay correction are committed,
 pushed, and deployed. Real execution remains disabled. Calibration activation remains at revision 0 with no
 artifact, and the 39 historical `legacy_pending` accounting heads continue to block runtime live admission.
+
+The local review branch additionally contains an uncommitted calibration-query and batch-evaluation optimization
+described below. It has not been committed, pushed, deployed, persisted, or activated in production.
+
+## Calibration Query and Batch Evaluation Optimization - 2026-08-09 (Local, Not Deployed)
+
+The calibration selector used the correct existing
+`oracle_slot_samples(asset, slot_key, captured_at DESC)` B-tree, but expressed the horizon tolerance only as
+`abs(target - captured_at) <= tolerance`. PostgreSQL could not turn that expression into an index range and scanned
+the whole slot for each of 12 horizon/combination lookups. The query now expresses the mathematically equivalent
+inclusive lower and upper `captured_at` bounds around each target horizon. The exact nearest-lag ordering, slot and
+horizon-band checks, model/version constraints, execution-usability requirement, and JSON probability checks are
+unchanged. No V11 migration or additional index is justified: the existing composite index now receives the target
+range directly.
+
+On a repeatable-read, read-only 12-hour production sample, the old and optimized selectors each returned 3,802
+samples with zero differing sample IDs. `EXPLAIN (ANALYZE, BUFFERS, TIMING OFF)` reduced execution time from
+3,198 ms to 392 ms and shared buffer accesses from 417,560 to 59,105. The old scan removed about 116 rows per index
+search after inspecting them; the optimized range reduced that to about five while returning the same average
+7.91 qualifying rows.
+
+The first full dry-run exposed a separate CPU bottleneck after SQL completion: `evaluateCalibration` called the
+public fail-closed application function for every label, re-verifying and hashing the entire artifact hundreds of
+thousands of times. A prepared batch evaluator now verifies once, owns a deep copy of the verified curve/block
+payload, and reuses that trusted snapshot during the batch. The ordinary runtime API still verifies every standalone
+artifact application and retains all unavailable/incompatible fail-closed outcomes. A mutation regression proves
+that altering the caller's artifact after preparation cannot change the prepared results.
+
+A bundled copy of the local implementation was then run on the VPS in a bounded transient unit, with the calibration
+CLI's repeatable-read `READ ONLY` transaction and without `--persist`. It completed the retained production window
+in about one minute and produced 153,180 labels, 76,590 unique oracle samples, all seven assets, 13,136 asset-slots,
+2,116 chronological slot times, and all 12 curves. The strict chronological holdout contained 34,020 labels and 754
+fatals. Raw holdout AUC/Brier/log-loss were 0.8470/0.02728/0.14205; calibrated values improved to
+0.8579/0.01973/0.08434. The generated artifact passed the code's activation-eligibility policy with no reasons, but
+this is evidence only and does not authorize activation or live trading. The report confirmed
+`requested=false`, `persisted=false`, and `never-performed-by-this-command`; calibration activation therefore remains
+at revision 0 with no persisted artifact. Temporary diagnostic files and the transient unit were removed. Postgres
+and all ten application services remained active with zero restarts.
+
+Modified local files are `scripts/calibrate-mismatch-risk.ts`, `src/lib/mismatch-calibration.ts`,
+`tests/calibrate-mismatch-risk-script.test.ts`, `tests/mismatch-calibration.test.ts`, and this handoff. Focused
+calibration coverage and TypeScript checking pass. Full local verification also passed the accepted production audit
+(zero high, two moderate, 17 low), lint, repository formatting, 1,038 tests with 131 conditional PostgreSQL tests
+skipped because `TEST_DATABASE_URL` is not configured, coverage (46.45% lines, 76.57% branches, 59.11% functions;
+92.10% lines for `mismatch-calibration.ts`), the Next.js production build, the worker build, and `git diff --check`.
+Deployment and any artifact persistence/activation require separate explicit operator approval.
 
 ## Weighted Leg Price Opening - 2026-08-07 (Deployed Shadow-Only)
 

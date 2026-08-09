@@ -3,6 +3,7 @@ import {
   applyMismatchCalibration,
   buildMismatchCalibrationArtifact,
   evaluateMismatchCalibrationActivationEligibility,
+  prepareMismatchCalibrationEvaluator,
   resolveMismatchCalibrationHorizonBand,
   verifyMismatchCalibrationArtifact,
   type MismatchCalibrationHorizonBand,
@@ -321,6 +322,39 @@ describe("mismatch calibration runtime application", () => {
     expect(down.calibratedProbability).toBeCloseTo(5 / 6, 12);
     expect(late.calibratedProbability).toBeCloseTo(1 / 10, 12);
     expect(up.artifactSha256).toBe(artifact.payloadSha256);
+  });
+
+  it("verifies a batch evaluator once and isolates it from later input mutation", () => {
+    const mutableArtifact = structuredClone(artifact);
+    const prepared = prepareMismatchCalibrationEvaluator({
+      artifact: mutableArtifact,
+      baseModelVersion: BASE_MODEL_VERSION,
+    });
+    expect(prepared.available).toBe(true);
+    if (!prepared.available) {
+      throw new Error("expected a prepared calibration evaluator");
+    }
+    const input = {
+      horizonBand: BAND,
+      combination: COMBINATION,
+      rawProbability: 0.1,
+    } as const;
+    const beforeMutation = prepared.evaluate(input);
+
+    for (const curve of mutableArtifact.curves) {
+      for (const block of curve.blocks) {
+        block.calibratedProbability = 0.999;
+      }
+    }
+
+    expect(prepared.evaluate(input)).toEqual(beforeMutation);
+    expect(
+      applyMismatchCalibration({
+        artifact: mutableArtifact,
+        baseModelVersion: BASE_MODEL_VERSION,
+        ...input,
+      }),
+    ).toEqual({ available: false, reason: "artifact_invalid" });
   });
 
   it("fails closed for missing, altered, or incompatible artifacts and inputs", () => {
