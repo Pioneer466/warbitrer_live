@@ -1,192 +1,192 @@
 # Warbitrer Live Multi-Asset 15m
 
-Cockpit et worker live pour la stratégie d’arbitrage crypto 15 minutes entre Polymarket et Kalshi.
+Live cockpit and worker for a 15-minute crypto arbitrage strategy between Polymarket and Kalshi.
 
-## Ce que fait le système
+## What the system does
 
-- market data live `WS-first` avec resync REST de secours sur Polymarket et Kalshi
-- scan des créneaux BTC, ETH, SOL, XRP, DOGE, BNB et HYPE 15m courants sur Polymarket et Kalshi
-- calcul des opportunités `Poly Up + Kalshi No` et `Poly Down + Kalshi Yes`
-- exécution live `taker-only` avec jambe primaire puis hedge immédiat
-- reconciliation des ordres, fills, positions, P&L et settlements
-- suivi du funding Polymarket via le bridge officiel
-- circuit breakers stockés en base et exposés par API
+* `WS-first` live market data with fallback REST resync for Polymarket and Kalshi
+* scans the current BTC, ETH, SOL, XRP, DOGE, BNB, and HYPE 15m markets on Polymarket and Kalshi
+* computes `Poly Up + Kalshi No` and `Poly Down + Kalshi Yes` arbitrage opportunities
+* live `taker-only` execution with a primary leg followed by an immediate hedge
+* reconciliation of orders, fills, positions, P&L, and settlements
+* Polymarket funding monitoring through the official bridge
+* database-backed circuit breakers exposed through the API
 
-## Pré-requis
+## Requirements
 
-- Node 22+
-- Postgres obligatoire
-- credentials Kalshi
-- wallet Polymarket déjà prêt, approvisionné et autorisé
+* Node 22+
+* Postgres required
+* Kalshi credentials
+* a Polymarket wallet that is already set up, funded, and authorized
 
-## Variables d’environnement
+## Environment variables
 
-Voir `.env.example`.
+See `.env.example`.
 
-Variables principales:
+Main variables:
 
-- `DATABASE_URL`
-- `APP_BASIC_AUTH_USER`
-- `APP_BASIC_AUTH_PASSWORD`
-- `LIVE_EXECUTION_ALLOWED=false|true`
-- `TELEGRAM_ENABLED`
-- `TELEGRAM_BOT_TOKEN`
-- `TELEGRAM_CHAT_ID`
-- `KALSHI_API_KEY_ID`
-- `KALSHI_PRIVATE_KEY_PEM`
-- `KALSHI_PRIVATE_KEY_PATH`
-- `KALSHI_ENV=demo|prod`
-- `POLY_PRIVATE_KEY`
-- `POLY_PRIVATE_KEY_PATH`
-- `POLY_API_KEY`
-- `POLY_API_SECRET`
-- `POLY_API_PASSPHRASE`
-- `POLY_RELAYER_API_KEY`
-- `POLY_RELAYER_URL`
-- `POLY_FUNDER_ADDRESS`
-- `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
-- `POLY_AUTO_CONVERT`
-- `POLY_BRIDGE_LOW_WATER_USDC`
+* `DATABASE_URL`
+* `APP_BASIC_AUTH_USER`
+* `APP_BASIC_AUTH_PASSWORD`
+* `LIVE_EXECUTION_ALLOWED=false|true`
+* `TELEGRAM_ENABLED`
+* `TELEGRAM_BOT_TOKEN`
+* `TELEGRAM_CHAT_ID`
+* `KALSHI_API_KEY_ID`
+* `KALSHI_PRIVATE_KEY_PEM`
+* `KALSHI_PRIVATE_KEY_PATH`
+* `KALSHI_ENV=demo|prod`
+* `POLY_PRIVATE_KEY`
+* `POLY_PRIVATE_KEY_PATH`
+* `POLY_API_KEY`
+* `POLY_API_SECRET`
+* `POLY_API_PASSPHRASE`
+* `POLY_RELAYER_API_KEY`
+* `POLY_RELAYER_URL`
+* `POLY_FUNDER_ADDRESS`
+* `POLY_SIGNATURE_TYPE=EOA|POLY_PROXY|POLY_GNOSIS_SAFE`
+* `POLY_AUTO_CONVERT`
+* `POLY_BRIDGE_LOW_WATER_USDC`
 
-Pour Polymarket:
+For Polymarket:
 
-- `POLY_PRIVATE_KEY_PATH` contient la private key du signer `0x...`
-- `POLY_API_KEY`, `POLY_API_SECRET`, `POLY_API_PASSPHRASE` sont dérivés via `npm run poly:derive-api-key`
-- en `POLY_PROXY`, `POLY_FUNDER_ADDRESS` est l’adresse du wallet proxy affiche sur Polymarket, et `POLY_RELAYER_API_KEY` active la conversion gasless `redeem + merge`
-- en `EOA`, `POLY_FUNDER_ADDRESS` doit être exactement l’adresse publique du signer
-- `POLY_RELAYER_URL` peut rester sur `https://relayer-v2.polymarket.com`
+* `POLY_PRIVATE_KEY_PATH` contains the signer private key `0x...`
+* `POLY_API_KEY`, `POLY_API_SECRET`, and `POLY_API_PASSPHRASE` are derived using `npm run poly:derive-api-key`
+* in `POLY_PROXY` mode, `POLY_FUNDER_ADDRESS` is the proxy wallet address displayed on Polymarket, and `POLY_RELAYER_API_KEY` enables gasless `redeem + merge` conversion
+* in `EOA` mode, `POLY_FUNDER_ADDRESS` must exactly match the signer's public address
+* `POLY_RELAYER_URL` can remain set to `https://relayer-v2.polymarket.com`
 
-La config de stratégie est stockée en base via `strategy_configs`, pas dans les variables d’environnement.
-Tu la pilotes via `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/[asset]` et `PUT /api/settings/[asset]`.
+Strategy configuration is stored in the database through `strategy_configs`, not in environment variables.
+It can be managed through `GET /api/settings`, `PUT /api/settings`, `GET /api/settings/[asset]`, and `PUT /api/settings/[asset]`.
 
-En production, `APP_BASIC_AUTH_USER` et `APP_BASIC_AUTH_PASSWORD` sont obligatoires pour l’application. Les mutations API les vérifient explicitement et refusent aussi les requêtes navigateur cross-site. `LIVE_EXECUTION_ALLOWED` est une autorisation indépendante et fail-closed pour les nouvelles entrées réelles; laisse-la à `false` pour le scan et le shadow.
+In production, `APP_BASIC_AUTH_USER` and `APP_BASIC_AUTH_PASSWORD` are required for the application. API mutations explicitly verify them and also reject cross-site browser requests. `LIVE_EXECUTION_ALLOWED` is an independent, fail-closed authorization layer for new live entries; leave it set to `false` for scanning and shadow mode.
 
-Champs importants:
+Important fields:
 
-- `enableTrading`
-- `shadowMode`
-- `maxPairNotionalUsd`
-- `maxSlippageBps`
-- `maxOpenIntentsPerSlot`
+* `enableTrading`
+* `shadowMode`
+* `maxPairNotionalUsd`
+* `maxSlippageBps`
+* `maxOpenIntentsPerSlot`
 
-## Local
+## Local setup
 
 1. `npm install`
-2. créer `.env.local`
-3. démarrer Postgres
+2. create `.env.local`
+3. start Postgres
 4. `node --env-file=.env.local --import tsx scripts/db-migrate.ts`
 5. `npm run dev:all`
-6. ouvrir `http://localhost:3000`
+6. open `http://localhost:3000`
 
-Le web et le worker tournent ensemble. Le runtime vérifie le schéma Postgres en lecture seule et refuse de démarrer si `db:migrate` n'a pas appliqué la version attendue.
+The web app and worker run together. At startup, the runtime performs a read-only validation of the Postgres schema and refuses to start if `db:migrate` has not applied the expected version.
 
-## Vérification
+## Verification
 
-- `npm run typecheck`
-- `npm test`
-- `npm run build`
-- `npm run build:worker`
-- `npm run db:status`
+* `npm run typecheck`
+* `npm test`
+* `npm run build`
+* `npm run build:worker`
+* `npm run db:status`
 
-## Endpoints utiles
+## Useful endpoints
 
-- `GET /api/dashboard`
-- `GET /api/dashboard/[asset]`
-- `GET /api/trades`
-- `GET /api/trades?asset=btc|eth|sol|xrp|doge|bnb|hype|all`
-- `GET /api/history/current-slot?asset=btc|eth|sol|xrp|doge|bnb|hype`
-- `GET /api/health`
-- `GET /api/recovery`
-- `GET /api/settings`
-- `GET /api/settings/[asset]`
-- `PUT /api/settings`
-- `PUT /api/settings/[asset]`
-- `GET /api/circuit-breakers`
-- `PUT /api/circuit-breakers`
+* `GET /api/dashboard`
+* `GET /api/dashboard/[asset]`
+* `GET /api/trades`
+* `GET /api/trades?asset=btc|eth|sol|xrp|doge|bnb|hype|all`
+* `GET /api/history/current-slot?asset=btc|eth|sol|xrp|doge|bnb|hype`
+* `GET /api/health`
+* `GET /api/recovery`
+* `GET /api/settings`
+* `GET /api/settings/[asset]`
+* `PUT /api/settings`
+* `PUT /api/settings/[asset]`
+* `GET /api/circuit-breakers`
+* `PUT /api/circuit-breakers`
 
 ## Shadow vs live
 
-- `enableTrading=false` : aucune exécution
-- `enableTrading=true` et `shadowMode=true` : simulation `rest-paired-preflight-v3`, sans soumission aux venues. Avant toute admission, les carnets REST Polymarket et Kalshi sont demandés en parallèle. La plus grande paire commune admissible est recherchée sous les plafonds absolus de prix, ticks autoritatifs, haircuts, headrooms, frais, budgets et seuils économiques. Le risque mismatch est ensuite recalculé sur le coût de pire remplissage. Un candidat REST non exécutable est observé comme probe mais ne crée plus d'intent artificiellement non rempli.
-- `enableTrading=true` et `shadowMode=false` : exécution live réelle uniquement si `LIVE_EXECUTION_ALLOWED=true` et les autres contrôles live sont prêts
+* `enableTrading=false`: no execution
+* `enableTrading=true` and `shadowMode=true`: `rest-paired-preflight-v3` simulation, with no orders submitted to either venue. Before admission, Polymarket and Kalshi REST order books are requested in parallel. The largest admissible common pair is identified subject to absolute price caps, authoritative ticks, haircuts, headroom, fees, budgets, and economic thresholds. Mismatch risk is then recalculated using worst-case fill cost. A REST candidate that cannot be executed is recorded as a probe but no longer creates an artificially unfilled intent.
+* `enableTrading=true` and `shadowMode=false`: real live execution only if `LIVE_EXECUTION_ALLOWED=true` and all other live controls are ready
 
-En shadow, `maxOpenIntentsPerSlot` ne limite plus tout le créneau. Un seul intent peut être en cours sur un actif, puis un cooldown durable de 60 secondes après sa finalisation autorise une nouvelle tentative si l'opportunité existe encore ou si une autre apparaît. Le fill synthétique déterministe est finalisé dès la preuve REST, sans délai artificiel de 15 secondes. La durée REST, la latence totale, le prochain instant éligible et les raisons de rejet sont conservés.
+In shadow mode, `maxOpenIntentsPerSlot` no longer limits the entire slot. Only one intent may be active per asset at a time, followed by a persistent 60-second cooldown after finalization. A new attempt is then allowed if the opportunity still exists or another one appears. The deterministic synthetic fill is finalized immediately once REST proof is available, with no artificial 15-second delay. REST duration, total latency, the next eligible timestamp, and rejection reasons are persisted.
 
-Le dashboard `/` agrège le portefeuille global, `/btc`, `/eth`, `/sol`, `/xrp`, `/doge`, `/bnb` et `/hype` exposent les dashboards opérateur par actif, et `/trades` reste la vue transversale.
-La page `/recovery` sert au kill switch global, à la récupération Polymarket, et à la validation wallet.
+The `/` dashboard aggregates the global portfolio, while `/btc`, `/eth`, `/sol`, `/xrp`, `/doge`, `/bnb`, and `/hype` expose per-asset operator dashboards. `/trades` remains the cross-asset view.
+The `/recovery` page provides the global kill switch, Polymarket recovery tools, and wallet validation.
 
-## Déploiement VPS
+## VPS deployment
 
-Si tu pars sur un VPS en Israël, le repo n’a plus besoin de Railway. Il te faudra côté infra:
+If you deploy to a VPS in Israel, the repository no longer depends on Railway. The infrastructure requires:
 
-- Postgres persistant
-- `systemd` avec un service web, un worker par actif, un reconciler et un notifier
-- un reverse proxy type Nginx ou Caddy pour HTTPS
-- NTP/horloge fiable
-- firewall restrictif; l’accès SSH par mot de passe reste disponible, avec une clé SSH optionnelle en complément
-- variables d’environnement injectées au niveau du service système, pas dans le repo
+* persistent Postgres
+* `systemd` with one web service, one worker per asset, a reconciler, and a notifier
+* a reverse proxy such as Nginx or Caddy for HTTPS
+* reliable NTP / system clock synchronization
+* a restrictive firewall; password-based SSH access remains available, with an optional SSH key as an additional authentication method
+* environment variables injected at the system service level rather than stored in the repository
 
-Les fichiers et scripts de ce dépôt ne modifient pas `sshd`, `PasswordAuthentication`, les mots de passe système ni les clés SSH, et n’imposent pas un accès key-only.
+The files and scripts in this repository do not modify `sshd`, `PasswordAuthentication`, system passwords, or SSH keys, and do not enforce key-only access.
 
-Concrètement, mets les secrets soit:
+Store secrets either:
 
-- dans `/etc/warbitrer/warbitrer.env` chargé par `systemd`
-- ou dans les variables d’environnement du conteneur si tu dockerises
+* in `/etc/warbitrer/warbitrer.env`, loaded by `systemd`
+* or in container environment variables if using Docker
 
-Évite de conserver les vraies clés dans `.env.local` sur le serveur.
+Avoid storing real keys in `.env.local` on the server.
 
-Le pack de déploiement prêt à copier est dans [`deploy/vps`](./deploy/vps).
+The ready-to-copy deployment package is available in [`deploy/vps`](./deploy/vps).
 
-Pour un VPS public, le mode recommandé est:
+For a public VPS, the recommended setup is:
 
-- `Caddy` devant `127.0.0.1:3000`
-- `BasicAuth` applicative obligatoire en production
-- `BasicAuth` côté Caddy comme défense externe indépendante
-- exposition seulement de `80/443`
+* `Caddy` in front of `127.0.0.1:3000`
+* mandatory application-level `BasicAuth` in production
+* Caddy-level `BasicAuth` as an independent external defense layer
+* expose only ports `80/443`
 
-Le template est dans [`deploy/vps/Caddyfile`](./deploy/vps/Caddyfile).
+The template is available in [`deploy/vps/Caddyfile`](./deploy/vps/Caddyfile).
 
-## Preview gratuit en ligne
+## Free online preview
 
-Si tu veux surtout ouvrir le cockpit depuis n'importe où pour vérifier l'état, le repo inclut maintenant un blueprint [`render.yaml`](./render.yaml) pour Render.
+If you mainly want to access the cockpit remotely to check its status, the repository includes a [`render.yaml`](./render.yaml) blueprint for Render.
 
-Ce mode lance:
+This setup runs:
 
-- le web public Next.js
-- le worker live dans le même service
-- un Postgres managé séparé
+* the public Next.js web app
+* the live worker in the same service
+* a separate managed Postgres instance
 
-Points importants:
+Important points:
 
-- c'est adapté à une preview distante, pas à une exploitation live fiable
-- un service web `free` Render se met en veille sans trafic entrant, donc le worker s'arrête aussi
-- le Postgres `free` Render est limité par le plan du provider; l'app n'implémente aucune purge automatique d'historique
-- garde `APP_BASIC_AUTH_USER` et `APP_BASIC_AUTH_PASSWORD` renseignés avant exposition publique
+* this is suitable for a remote preview, not for reliable live operation
+* a Render `free` web service goes to sleep without incoming traffic, which also stops the worker
+* Render's `free` Postgres offering is subject to the provider's plan limits; the application does not implement automatic history cleanup
+* make sure `APP_BASIC_AUTH_USER` and `APP_BASIC_AUTH_PASSWORD` are configured before exposing the application publicly
 
-Déploiement:
+Deployment:
 
-1. pousser le repo
-2. créer un nouveau Blueprint Render depuis ce repo
-3. laisser Render créer le service web `warbitrer-live-preview` et la base `warbitrer-live-db`
-4. remplir les variables sensibles dans l'UI Render
-5. ouvrir l'URL Render générée
+1. push the repository
+2. create a new Render Blueprint from the repository
+3. let Render create the `warbitrer-live-preview` web service and the `warbitrer-live-db` database
+4. configure sensitive environment variables in the Render UI
+5. open the generated Render URL
 
-Pour ce mode, le démarrage passe par `npm run start:render`.
+For this mode, the application starts through `npm run start:render`.
 
-Pourquoi pas Vercel seul:
+Why not Vercel alone:
 
-- le site dépend d'un worker Node long-running qui tourne en continu
-- Vercel convient au web Next.js, mais pas comme hébergement unique de ce worker live
-- si tu veux du vrai live accessible partout, il faut soit un petit VPS, soit un provider qui héberge web + worker + Postgres ensemble
+* the application depends on a long-running Node worker that runs continuously
+* Vercel is suitable for the Next.js web app, but not as the sole host for this live worker
+* for true live operation accessible from anywhere, you need either a small VPS or a provider capable of hosting the web app, worker, and Postgres together
 
-## Notes d’exploitation
+## Operational notes
 
-- le trading live reste désactivé tant que `enableTrading` est `false` dans la config
-- une configuration live ne suffit pas: `LIVE_EXECUTION_ALLOWED=true` et un `POLYGON_RPC_URL` Polygon mainnet fonctionnel doivent aussi être présents dans l’environnement du runtime
-- le mode recommandé pour la montée en charge est d’abord `enableTrading=true` avec `shadowMode=true`
-- si une venue est non prête ou si un circuit breaker est actif, le worker refuse d’ouvrir de nouveaux intents
-- un fill Polymarket n’est comptabilisé comme final qu’après validation de son reçu Polygon et de l’événement V2 `OrderFilled`, frais exacts inclus
-- tout fill inséré après V8, même sur un intent legacy, doit passer par la transaction comptable atomique; un fill tardif met l’intent en quarantaine avant tout recalcul
-- ne jamais déployer tant qu’un intent live, une tentative d’ordre live ou une exposition en capital est non terminale; réconcilier d’abord la vérité venue, surtout lors d’un changement de génération des client order IDs
-- si Telegram est configuré, le worker n’envoie que 2 types de notifications: `trade_live` quand un intent live engage réellement du capital, et `manual_intervention_required` quand une action humaine est requise
-- le rebalance automatique entre cash Kalshi et USDC Polygon n’est pas implémenté; le périmètre treasury est limité au bridge officiel Polymarket
+* live trading remains disabled as long as `enableTrading` is `false` in the configuration
+* a live configuration alone is not enough: `LIVE_EXECUTION_ALLOWED=true` and a working Polygon mainnet `POLYGON_RPC_URL` must also be present in the runtime environment
+* the recommended rollout path is to first use `enableTrading=true` with `shadowMode=true`
+* if a venue is not ready or a circuit breaker is active, the worker refuses to open new intents
+* a Polymarket fill is only considered final after validation of its Polygon receipt and the V2 `OrderFilled` event, including exact fees
+* every fill inserted after V8, including fills on legacy intents, must go through the atomic accounting transaction; a late fill quarantines the intent before any recalculation
+* never deploy while a live intent, live order attempt, or capital exposure is non-terminal; reconcile venue truth first, especially when changing client order ID generations
+* if Telegram is configured, the worker sends only two types of notifications: `trade_live` when a live intent actually commits capital, and `manual_intervention_required` when human action is required
+* automatic rebalancing between Kalshi cash and Polygon USDC is not implemented; treasury management is limited to the official Polymarket bridge
